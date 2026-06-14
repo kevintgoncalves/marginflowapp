@@ -28,9 +28,9 @@ body {
   background: var(--bg);
 }
 
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 
-button, input, select {
+button, input, select, textarea {
   border: 1px solid var(--line);
   border-radius: 10px;
 }
@@ -72,12 +72,19 @@ button.icon.danger {
   color: var(--danger);
 }
 
-input, select {
+input, select, textarea {
   width: 100%;
   min-height: 38px;
   padding: 0 11px;
   background: #111c31;
   color: var(--text);
+}
+
+textarea {
+  min-height: 132px;
+  padding: 11px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 input[readonly] {
@@ -308,6 +315,9 @@ nav button.active {
   padding: 0 18px 18px;
 }
 .form-grid.six { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.invoice-text {
+  padding: 0 18px 18px;
+}
 label {
   display: grid;
   gap: 7px;
@@ -339,8 +349,27 @@ label {
   border-radius: 999px;
   background: #29384f;
 }
+.invoice-status {
+  margin: 0 18px 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #111c31;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.invoice-status.success {
+  border-color: rgba(16, 185, 129, 0.38);
+  color: #86efac;
+}
+.invoice-status.error {
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
+}
 .button-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: center;
   padding: 0 18px 18px;
@@ -367,7 +396,7 @@ label {
 .table-wrap { overflow: auto; }
 table {
   width: 100%;
-  min-width: 780px;
+  min-width: 1120px;
   border-collapse: collapse;
 }
 th, td {
@@ -383,7 +412,7 @@ th {
   text-transform: uppercase;
 }
 td { color: #dbeafe; font-weight: 700; }
-td input, td select { min-width: 130px; }
+td input, td select { min-width: 110px; }
 .sort-button {
   justify-content: flex-start;
   min-height: 0;

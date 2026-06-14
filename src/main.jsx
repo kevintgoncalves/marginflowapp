@@ -102,6 +102,9 @@ function percent(value) {
 }
 
 function lineTotal(item) {
+  if (item.lineTotal !== undefined && item.lineTotal !== "" && Number.isFinite(Number(item.lineTotal))) {
+    return Number(item.lineTotal);
+  }
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
@@ -152,6 +155,29 @@ function mockExtractLines(file, supplier) {
   }));
 }
 
+function asDraftNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function departmentForProduct(name = "") {
+  const lower = name.toLowerCase();
+  if (lower.includes("juice") || lower.includes("wine") || lower.includes("beer")) return "Bar";
+  if (lower.includes("blue roll") || lower.includes("napkin") || lower.includes("clean")) return "Non-food";
+  if (lower.includes("croissant") || lower.includes("cake") || lower.includes("bread")) return "Bought In";
+  return "Kitchen Made";
+}
+
+function canReadFileAsText(file) {
+  return file.type.startsWith("text/") || /\.(csv|txt|tsv)$/i.test(file.name);
+}
+
+async function textFromInvoiceFiles(files) {
+  const readableFiles = Array.from(files || []).filter(canReadFileAsText);
+  const textChunks = await Promise.all(readableFiles.map((file) => file.text()));
+  return textChunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
+}
+
 function App() {
   const [active, setActive] = useState("dashboard");
   const [department, setDepartment] = useState("Kitchen Made");
@@ -159,7 +185,7 @@ function App() {
   const [suppliers, setSuppliers] = useState(initialSuppliers);
   const [invoices, setInvoices] = useState(initialInvoices);
   const [sales, setSales] = useState(initialSales);
-  const [draft, setDraft] = useState({ files: [], items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+  const [draft, setDraft] = useState({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
 
   const metrics = useMemo(() => calculateMetrics(invoices, sales, department), [invoices, sales, department]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers), [invoices, suppliers]);
@@ -179,7 +205,7 @@ function App() {
     setInvoices((current) => [invoice, ...current]);
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, draft.items, invoice.date));
-    setDraft({ files: [], items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
   };
 
   return (
@@ -358,31 +384,89 @@ function Dashboard({ metrics, supplierSpend, invoices }) {
 
 function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInvoices }) {
   const [dragging, setDragging] = useState(false);
+  const isReading = draft.status === "Reading invoice with AI...";
+  const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
 
-  const addFiles = (files) => {
+  const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded` }));
+    const uploadedText = await textFromInvoiceFiles(uploaded);
+    if (uploadedText) {
+      setDraft((current) => ({
+        ...current,
+        invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
+        status: `${uploaded.length} file(s) uploaded`,
+      }));
+    }
   };
 
-  const readInvoice = () => {
-    if (!draft.files.length) return;
-    const file = draft.files[0];
-    const supplier = draft.supplier || supplierFromFile(file.name);
-    setDraft((current) => ({
-      ...current,
-      supplier,
-      invoiceNumber: current.invoiceNumber || file.name.replace(/\.[^.]+$/, "").slice(0, 20),
-      date: current.date || today(),
-      items: mockExtractLines(file, supplier),
-      status: "Review extracted items",
-    }));
+  const readInvoiceWithAi = async () => {
+    const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
+    const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
+
+    if (!invoiceText) {
+      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
+      return;
+    }
+
+    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
+
+    try {
+      const response = await fetch("/.netlify/functions/read-invoice-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceText }),
+      });
+      const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
+      if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
+
+      const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
+      const items = (payload.lines || []).map((line) => {
+        const quantity = asDraftNumber(line.quantity, 1);
+        const unitCost = asDraftNumber(line.unitCost, 0);
+        return {
+          id: uid(),
+          productName: line.productName || "Unknown product",
+          packSize: line.packSize || "",
+          quantity,
+          unit: line.unit || "",
+          unitCost,
+          vat: asDraftNumber(line.vat, 0),
+          lineTotal: asDraftNumber(line.lineTotal, quantity * unitCost),
+          confidence: asDraftNumber(line.confidence, 0.5),
+          supplier,
+          department: departmentForProduct(line.productName),
+          source: "OpenAI",
+        };
+      });
+
+      setDraft((current) => ({
+        ...current,
+        supplier,
+        invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
+        date: payload.invoiceDate || current.date || today(),
+        items,
+        status: `AI extracted ${items.length} lines. Please review before approving.`,
+      }));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
+    }
   };
 
   const updateDraftItem = (id, field, value) => {
+    const numericFields = ["quantity", "unitCost", "vat", "lineTotal", "confidence"];
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => (item.id === id ? { ...item, [field]: field === "quantity" || field === "unitCost" ? Number(value) : value } : item)),
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const nextValue = numericFields.includes(field) ? Number(value) : value;
+        const updated = { ...item, [field]: nextValue };
+        if (field === "quantity" || field === "unitCost") {
+          updated.lineTotal = (Number(updated.quantity) || 0) * (Number(updated.unitCost) || 0);
+        }
+        return updated;
+      }),
     }));
   };
 
@@ -393,7 +477,7 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
       supplier,
       items: [
         ...current.items,
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: "Kitchen Made" },
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unit: "", unitCost: 0, vat: 0, lineTotal: 0, confidence: 1, supplier, department: "Kitchen Made" },
       ],
       status: "Manual review",
     }));
@@ -420,7 +504,7 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           <label className="file-button">
             Choose invoice
-            <input accept="image/*,.pdf" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
+            <input accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
           </label>
         </div>
         <div className="invoice-meta">
@@ -431,15 +515,17 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
           <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
           <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
         </div>
+        <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
         <div className="file-list">
           {draft.files.map((file, index) => (
-            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDraft({ ...draft, files: draft.files.filter((_, itemIndex) => itemIndex !== index) })} type="button"><X size={14} /></button></span>
+            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) }))} type="button"><X size={14} /></button></span>
           ))}
         </div>
+        {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
-          <button onClick={readInvoice} type="button">Read Invoice</button>
+          <button disabled={isReading} onClick={readInvoiceWithAi} type="button"><Sparkles size={16} />Read with AI</button>
           <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
-          <button disabled={!draft.items.length} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
+          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
         </div>
       </Panel>
 
@@ -448,7 +534,7 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
           <table>
             <thead>
               <tr>
-                {["Product", "Pack size", "Quantity", "Unit cost", "Supplier", "Department", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
+                {["Product", "Pack size", "Quantity", "Unit", "Unit cost", "VAT", "Supplier", "Department", "Line total", "Confidence", ""].map((header) => <th key={header}>{header}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -457,11 +543,14 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
                   <td><input value={item.productName} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} /></td>
                   <td><input value={item.packSize} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
+                  <td><input value={item.unit || ""} onChange={(event) => updateDraftItem(item.id, "unit", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={item.vat || 0} onChange={(event) => updateDraftItem(item.id, "vat", event.target.value)} /></td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
                   <td><select value={item.department} onChange={(event) => updateDraftItem(item.id, "department", event.target.value)}>{departments.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
-                  <td>{money(lineTotal(item))}</td>
-                  <td><button className="icon danger" onClick={() => setDraft({ ...draft, items: draft.items.filter((line) => line.id !== item.id) })} type="button"><Trash2 size={15} /></button></td>
+                  <td><input min="0" step="0.01" type="number" value={item.lineTotal ?? lineTotal(item)} onChange={(event) => updateDraftItem(item.id, "lineTotal", event.target.value)} /></td>
+                  <td><input max="1" min="0" step="0.01" type="number" value={item.confidence ?? 1} onChange={(event) => updateDraftItem(item.id, "confidence", event.target.value)} /></td>
+                  <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
             </tbody>
