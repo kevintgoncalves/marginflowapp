@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   AlertTriangle,
   ArrowDownUp,
@@ -25,6 +27,8 @@ import {
   X,
 } from "lucide-react";
 import "./styles.css";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -411,9 +415,47 @@ function canReadFileAsText(file) {
   return file.type.startsWith("text/") || /\.(csv|txt|tsv)$/i.test(file.name);
 }
 
+function canReadFileAsPdf(file) {
+  return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+}
+
+async function extractTextFromPdf(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+  const pages = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const pageText = content.items
+      .map((item) => item.str || "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (pageText) pages.push(pageText);
+  }
+
+  return pages.join("\n");
+}
+
 async function textFromInvoiceFiles(files) {
-  const readableFiles = Array.from(files || []).filter(canReadFileAsText);
-  const textChunks = await Promise.all(readableFiles.map((file) => file.text()));
+  const textChunks = [];
+
+  for (const file of Array.from(files || [])) {
+    try {
+      if (canReadFileAsPdf(file)) {
+        const pdfText = await extractTextFromPdf(file);
+        if (pdfText) textChunks.push(pdfText);
+      } else if (canReadFileAsText(file)) {
+        const text = await file.text();
+        if (text) textChunks.push(text);
+      }
+    } catch (error) {
+      console.error(`Could not extract text from ${file.name}`, error);
+    }
+  }
+
   return textChunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
@@ -993,7 +1035,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
     if (!invoiceText) {
-      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
+      setDraft((current) => ({ ...current, status: "AI failed. Could not extract text from this file. Try a text-based PDF or paste OCR text manually." }));
       return;
     }
 
