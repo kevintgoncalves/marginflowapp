@@ -272,7 +272,7 @@ export async function handler(event) {
           },
         ],
         text: {
-          verbosity: "low",
+          verbosity: "medium",
           format: {
             type: "json_schema",
             name: "invoice_extraction",
