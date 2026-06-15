@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
-import { createRoot } from "react-dom/client";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
   ArrowDownUp,
@@ -412,14 +412,16 @@ function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
 }
 
 function canReadFileAsText(file) {
-  return file.type.startsWith("text/") || /\.(csv|txt|tsv)$/i.test(file.name);
+  const name = file.name.toLowerCase();
+  return (
+    file.type.startsWith("text/") ||
+    file.type.includes("json") ||
+    file.type.includes("csv") ||
+    /\.(csv|txt|tsv|json)$/i.test(name)
+  );
 }
 
-function canReadFileAsPdf(file) {
-  return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
-}
-
-async function extractTextFromPdf(file) {
+async function extractPdfText(file) {
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
   const pages = [];
@@ -427,36 +429,25 @@ async function extractTextFromPdf(file) {
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
     const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item) => item.str || "")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (pageText) pages.push(pageText);
+    pages.push(content.items.map((item) => item.str).join(" "));
   }
 
   return pages.join("\n");
 }
 
 async function textFromInvoiceFiles(files) {
-  const textChunks = [];
+  const chunks = [];
 
   for (const file of Array.from(files || [])) {
-    try {
-      if (canReadFileAsPdf(file)) {
-        const pdfText = await extractTextFromPdf(file);
-        if (pdfText) textChunks.push(pdfText);
-      } else if (canReadFileAsText(file)) {
-        const text = await file.text();
-        if (text) textChunks.push(text);
-      }
-    } catch (error) {
-      console.error(`Could not extract text from ${file.name}`, error);
+    const name = file.name.toLowerCase();
+    if (file.type === "application/pdf" || name.endsWith(".pdf")) {
+      chunks.push(await extractPdfText(file));
+    } else if (canReadFileAsText(file)) {
+      chunks.push(await file.text());
     }
   }
 
-  return textChunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
+  return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
 function cheapestOffer(product, products) {
@@ -1035,7 +1026,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
     if (!invoiceText) {
-      setDraft((current) => ({ ...current, status: "AI failed. Could not extract text from this file. Try a text-based PDF or paste OCR text manually." }));
+      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
       return;
     }
 
@@ -1045,7 +1036,16 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       const response = await fetch("/.netlify/functions/read-invoice-ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceText }),
+        body: JSON.stringify({
+          invoiceText,
+          suppliers,
+          products: products.map((product) => ({
+            name: product.productName,
+            supplier: product.supplier,
+            packSize: product.packSize,
+            aliases: product.aliases || [],
+          })),
+        }),
       });
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
       if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
@@ -1062,7 +1062,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             quantity,
             unitCost,
             supplier,
-            department: departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+            department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
             source: "OpenAI",
           },
           products,
