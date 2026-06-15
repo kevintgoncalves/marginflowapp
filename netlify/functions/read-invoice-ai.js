@@ -1,6 +1,6 @@
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
-const FUNCTION_VERSION = "read-invoice-ai-no-verbosity-2026-06-15";
+const FUNCTION_VERSION = "read-invoice-ai-table-repair-2026-06-15";
 
 const invoiceSchema = {
   type: "object",
@@ -144,9 +144,173 @@ function parseStructuredPayload(payload) {
   }
 }
 
+function almostEqual(a, b) {
+  const tolerance = Math.max(0.03, Math.abs(b) * 0.015);
+  return Math.abs(a - b) <= tolerance;
+}
+
+function dateTokenPattern() {
+  return "\\b(?:\\d{1,2}[-/][A-Z]{3}|\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?|20\\d{2}-\\d{2}-\\d{2})\\b";
+}
+
+function numberMatches(text) {
+  const matches = [];
+  const numberPattern = /(^|\s)(-?\d+(?:[.,]\d{1,2})?)(?=\s|$)/g;
+  let match;
+  while ((match = numberPattern.exec(text))) {
+    matches.push({
+      raw: match[2],
+      value: asNumber(match[2]),
+      index: match.index + match[1].length,
+    });
+  }
+  return matches;
+}
+
+function findBestNumericColumns(numbers) {
+  const usable = numbers.filter((number) => Number.isFinite(number.value));
+  let best = null;
+
+  for (let qIndex = 0; qIndex < usable.length; qIndex += 1) {
+    for (let unitIndex = 0; unitIndex < usable.length; unitIndex += 1) {
+      for (let totalIndex = 0; totalIndex < usable.length; totalIndex += 1) {
+        if (qIndex === unitIndex || qIndex === totalIndex || unitIndex === totalIndex) continue;
+        const quantity = usable[qIndex].value;
+        const unitCost = usable[unitIndex].value;
+        const lineTotal = usable[totalIndex].value;
+        if (quantity <= 0 || unitCost <= 0 || lineTotal <= 0) continue;
+        if (!almostEqual(quantity * unitCost, lineTotal)) continue;
+
+        const ordered = qIndex < unitIndex && unitIndex < totalIndex ? 0 : 1;
+        const totalRightBias = usable.length - totalIndex - 1;
+        const nonZeroVatBias = usable.some((number, index) => index !== qIndex && index !== unitIndex && index !== totalIndex && number.value === 0) ? 0 : 0.25;
+        const score = ordered + totalRightBias * 0.2 + nonZeroVatBias;
+        if (!best || score < best.score) {
+          const vatCandidate = usable.find((number, index) => index !== qIndex && index !== unitIndex && index !== totalIndex && number.value >= 0);
+          best = { quantity, unitCost, vat: vatCandidate?.value || 0, lineTotal, score };
+        }
+      }
+    }
+  }
+
+  if (best) return best;
+
+  if (usable.length >= 4) {
+    const [quantity, unitCost, vat, lineTotal] = usable.slice(-4).map((number) => number.value);
+    if (quantity > 0 && unitCost > 0 && lineTotal > 0) return { quantity, unitCost, vat, lineTotal, score: 3 };
+  }
+
+  return null;
+}
+
+function splitProductAndPack(description) {
+  const cleaned = description.replace(/\s+/g, " ").trim();
+  const packPattern = /\b(?:X?\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
+  const match = cleaned.match(packPattern);
+  if (!match || match.index < 2) return { productName: cleaned, packSize: "" };
+  return {
+    productName: cleaned.slice(0, match.index).trim(),
+    packSize: cleaned.slice(match.index).trim(),
+  };
+}
+
+function parseTableRow(rowText) {
+  const withoutDate = rowText.replace(new RegExp(`^\\s*${dateTokenPattern()}\\s*`, "i"), "").trim();
+  const numbers = numberMatches(withoutDate);
+  const columns = findBestNumericColumns(numbers);
+  if (!columns) return null;
+
+  const firstNumberIndex = Math.min(...numbers.map((number) => number.index));
+  const description = withoutDate.slice(0, firstNumberIndex).trim();
+  if (!/[A-Za-z]{2}/.test(description)) return null;
+
+  const { productName, packSize } = splitProductAndPack(description);
+  if (!productName || /^(invoice|ticket|account|customer|date|total|handling)$/i.test(productName)) return null;
+
+  return {
+    raw: rowText,
+    productName,
+    packSize,
+    quantity: columns.quantity,
+    unitCost: columns.unitCost,
+    vat: columns.vat,
+    lineTotal: columns.lineTotal,
+  };
+}
+
+function extractInvoiceTableRows(sourceText) {
+  const normalizedText = sourceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
+  const candidates = new Set();
+
+  sourceText.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed) candidates.add(trimmed);
+  });
+
+  const datePattern = new RegExp(dateTokenPattern(), "gi");
+  const dateMatches = [...normalizedText.matchAll(datePattern)];
+  dateMatches.forEach((match, index) => {
+    const start = match.index;
+    const end = dateMatches[index + 1]?.index ?? normalizedText.length;
+    const candidate = normalizedText.slice(start, end).trim();
+    if (candidate) candidates.add(candidate);
+  });
+
+  const rows = [...candidates].map(parseTableRow).filter(Boolean);
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function productTokenScore(productName, row) {
+  const tokens = productName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
+  if (!tokens.length) return 0;
+  const rowText = `${row.productName} ${row.packSize}`.toLowerCase();
+  const hits = tokens.filter((token) => rowText.includes(token)).length;
+  return hits / tokens.length;
+}
+
+function repairLineFromRows(line, rows) {
+  if (!rows.length) return line;
+  const matched = rows
+    .map((row) => ({ row, score: productTokenScore(line.productName, row) }))
+    .filter((candidate) => candidate.score >= 0.5)
+    .sort((a, b) => b.score - a.score)[0]?.row;
+
+  if (!matched) return line;
+
+  const looksMisread =
+    line.quantity <= 0 ||
+    line.unitCost <= 0 ||
+    line.lineTotal <= 0 ||
+    almostEqual(line.unitCost, matched.lineTotal) ||
+    !almostEqual(line.quantity * line.unitCost, line.lineTotal);
+
+  if (!looksMisread) return line;
+
+  return {
+    ...line,
+    packSize: line.packSize || matched.packSize,
+    quantity: matched.quantity,
+    unitCost: matched.unitCost,
+    vat: matched.vat,
+    lineTotal: matched.lineTotal,
+    confidence: Math.max(line.confidence, 0.82),
+  };
+}
+
 function normalizeInvoice(invoice, sourceText) {
   const supplier = asString(invoice.supplier, inferSupplier(sourceText));
   const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
+  const tableRows = extractInvoiceTableRows(sourceText);
 
   const normalizedLines = lines
     .map((line) => {
@@ -167,14 +331,29 @@ function normalizeInvoice(invoice, sourceText) {
         confidence: clampConfidence(line.confidence),
       };
     })
+    .map((line) => repairLineFromRows(line, tableRows))
     .filter((line) => line.productName && (line.lineTotal || line.unitCost));
+
+  const repairedLines = normalizedLines.length
+    ? normalizedLines
+    : tableRows.map((row) => ({
+      productName: row.productName,
+      packSize: row.packSize,
+      quantity: row.quantity,
+      unit: "",
+      unitCost: row.unitCost,
+      vat: row.vat,
+      lineTotal: row.lineTotal,
+      department: "Kitchen Made",
+      confidence: 0.78,
+    }));
 
   return {
     supplier,
     invoiceDate: asString(invoice.invoiceDate || invoice.date, inferInvoiceDate(sourceText)),
     invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
     confidence: clampConfidence(invoice.confidence),
-    lines: normalizedLines,
+    lines: repairedLines,
   };
 }
 
@@ -204,6 +383,10 @@ Rules:
 - Keep product names exactly as close as possible to the supplier invoice text.
 - If the text is messy and columns are merged, still extract the likely product rows.
 - For each item, identify pack size, quantity, unit cost, VAT and line total where possible.
+- If an invoice has columns like QTY, Price, VAT, Total: quantity must be QTY, unitCost must be Price, vat must be VAT, lineTotal must be Total.
+- Never put the line Total into unitCost when a separate Price or Unit Price exists.
+- Validate the numeric columns: quantity × unitCost should equal lineTotal, allowing small rounding differences.
+- If PDF/OCR extraction reverses numeric columns, infer the correct quantity, unitCost and lineTotal by the multiplication relationship.
 - If a field is unknown, use "" or 0.
 - Unit cost should be the cost per pack/unit on the invoice, not the total unless only total is available.
 - Line total should be quantity × unit cost when possible.
