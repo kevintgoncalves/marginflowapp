@@ -1,5 +1,6 @@
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
+const FUNCTION_VERSION = "read-invoice-ai-no-verbosity-2026-06-15";
 
 const invoiceSchema = {
   type: "object",
@@ -45,8 +46,12 @@ const invoiceSchema = {
 function json(statusCode, payload) {
   return {
     statusCode,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "X-MarginFlow-Function-Version": FUNCTION_VERSION,
+    },
+    body: JSON.stringify({ ...payload, functionVersion: FUNCTION_VERSION }),
   };
 }
 
