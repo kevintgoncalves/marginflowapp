@@ -28,20 +28,138 @@ import "./styles.css";
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
-const departments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
+const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
+const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
+const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
+const rangePresets = ["Today", "This week", "Last week", "This month", "Last month", "Custom range"];
+
+const defaultDepartmentSettings = [
+  { id: uid(), name: "Kitchen Made", type: "Food", targetGp: 75, active: true },
+  { id: uid(), name: "Bought In", type: "Bought In", targetGp: 72, active: true },
+  { id: uid(), name: "Bar", type: "Bar", targetGp: 78, active: true },
+  { id: uid(), name: "Non-food", type: "Non-food", targetGp: 0, active: true },
+];
+
+const defaultCompanySettings = {
+  companyName: "Reading Room",
+  tradingName: "Reading Room",
+  address: "1 Market Street, London",
+  postcode: "W1A 1AA",
+  country: "United Kingdom",
+  vatNumber: "GB123456789",
+  email: "hello@readingroom.example",
+  phone: "020 7000 0000",
+  website: "https://readingroom.example",
+};
+
+const defaultFinancialSettings = {
+  currency: "GBP",
+  weekStartsOn: "Monday",
+  targetGp: 75,
+  defaultVat: 20,
+  fiscalYearStartMonth: "April",
+  timezone: "Europe/London",
+};
+
+const defaultMenuSettings = {
+  defaultMenuTargetGp: 75,
+  allowMenuTargetOverride: true,
+  allowSubcategoryTargetOverride: true,
+  allowDishTargetOverride: true,
+};
+
+const defaultInvoiceSettings = {
+  requireApprovalBeforeGp: true,
+  defaultInvoiceDepartment: "Kitchen Made",
+  defaultVat: 20,
+  allowUnknownSuppliers: true,
+  autoCreateProductsAfterApproval: true,
+};
+
+const defaultAiSettings = {
+  enableAiInvoiceReading: true,
+  enableAiProductMatching: true,
+  autoMatchConfidenceThreshold: 90,
+  requireManualApprovalBelowThreshold: true,
+  productMatchingSensitivity: "Medium",
+};
 
 const initialSuppliers = [
-  { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "", active: true },
-  { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "", phone: "", active: true },
-  { id: uid(), name: "Woods", category: "Wholesale", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "BNFS", category: "Fish", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "020 7000 0101", active: true },
+  { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "sales@tgfruits.example", phone: "020 7000 0202", active: true },
+  { id: uid(), name: "Woods", category: "Wholesale", contact: "Account manager", email: "orders@woods.example", phone: "020 7000 0303", active: true },
+  { id: uid(), name: "BNFS", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
+  { id: uid(), name: "Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Coburn & Baker", category: "Bakery", contact: "", email: "", phone: "", active: true },
 ];
 
 const initialProducts = [
-  { id: uid(), name: "Eggs Box x180 Large", supplier: "Cheese Man", packSize: "180 each", quantity: 1, unitCost: 45, department: "Kitchen Made", priceHistory: [{ date: "2026-06-01", price: 45 }] },
-  { id: uid(), name: "Chestnut Mushrooms", supplier: "TG Fruits", packSize: "2.25kg", quantity: 1, unitCost: 8.9, department: "Kitchen Made", priceHistory: [{ date: "2026-06-04", price: 8.9 }] },
-  { id: uid(), name: "Squish Orange Juice", supplier: "Albion Fine Foods", packSize: "1ltr", quantity: 1, unitCost: 4.69, department: "Bar", priceHistory: [{ date: "2026-06-07", price: 4.69 }] },
-  { id: uid(), name: "Croissant", supplier: "Coburn & Baker", packSize: "each", quantity: 1, unitCost: 1.16, department: "Bought In", priceHistory: [{ date: "2026-06-08", price: 1.16 }] },
+  {
+    id: uid(),
+    name: "Eggs Box x180 Large",
+    supplier: "Cheese Man",
+    packSize: "180 each",
+    quantity: 1,
+    unitCost: 45,
+    department: "Kitchen Made",
+    aliases: ["Large Eggs Box", "Eggs Large"],
+    supplierPrices: [{ supplier: "Cheese Man", price: 45, date: "2026-06-01" }],
+    priceHistory: [{ date: "2026-06-01", supplier: "Cheese Man", price: 45 }],
+  },
+  {
+    id: uid(),
+    name: "Chestnut Mushrooms",
+    supplier: "Woods",
+    packSize: "2.25kg",
+    quantity: 1,
+    unitCost: 9.4,
+    department: "Kitchen Made",
+    aliases: ["Chestnut Mushroom", "Mushroom Chestnut", "Chestnuts Mushrooms"],
+    supplierPrices: [
+      { supplier: "TG Fruits", price: 8.9, date: "2026-06-04" },
+      { supplier: "Woods", price: 9.4, date: "2026-06-10" },
+    ],
+    priceHistory: [
+      { date: "2026-06-04", supplier: "TG Fruits", price: 8.9 },
+      { date: "2026-06-10", supplier: "Woods", price: 9.4 },
+    ],
+  },
+  {
+    id: uid(),
+    name: "Squish Orange Juice",
+    supplier: "Albion Fine Foods",
+    packSize: "1ltr",
+    quantity: 1,
+    unitCost: 4.69,
+    department: "Bar",
+    aliases: ["Orange Juice Squish", "Squish OJ"],
+    supplierPrices: [{ supplier: "Albion Fine Foods", price: 4.69, date: "2026-06-07" }],
+    priceHistory: [{ date: "2026-06-07", supplier: "Albion Fine Foods", price: 4.69 }],
+  },
+  {
+    id: uid(),
+    name: "Croissant",
+    supplier: "Coburn & Baker",
+    packSize: "each",
+    quantity: 1,
+    unitCost: 1.16,
+    department: "Bought In",
+    aliases: ["Butter Croissant"],
+    supplierPrices: [{ supplier: "Coburn & Baker", price: 1.16, date: "2026-06-08" }],
+    priceHistory: [{ date: "2026-06-08", supplier: "Coburn & Baker", price: 1.16 }],
+  },
+  {
+    id: uid(),
+    name: "Cherry Tomatoes",
+    supplier: "TG Fruits",
+    packSize: "6x1kg",
+    quantity: 1,
+    unitCost: 11.8,
+    department: "Kitchen Made",
+    aliases: ["Tomatoes 6x1kg", "Tomato Box"],
+    supplierPrices: [{ supplier: "TG Fruits", price: 11.8, date: "2026-06-09" }],
+    priceHistory: [{ date: "2026-06-09", supplier: "TG Fruits", price: 11.8 }],
+  },
 ];
 
 const initialInvoices = [
@@ -79,6 +197,69 @@ const initialSales = [
   { day: "Sun", date: "2026-06-07", sales: 1035.79 },
 ];
 
+const initialOpeningStock = {
+  "Kitchen Made": 3796.31,
+  "Bought In": 410,
+  Bar: 625,
+  "Non-food": 260,
+};
+
+const initialStocktakes = [
+  {
+    id: uid(),
+    date: "2026-06-09",
+    department: "Kitchen Made",
+    lines: [
+      { id: uid(), productName: "Chestnut Mushrooms", quantity: 6, unitCost: 8.9, stockValue: 53.4 },
+      { id: uid(), productName: "Eggs Box x180 Large", quantity: 2, unitCost: 45, stockValue: 90 },
+      { id: uid(), productName: "Cherry Tomatoes", quantity: 4, unitCost: 11.8, stockValue: 47.2 },
+    ],
+    totalValue: 4000,
+  },
+];
+
+const initialWaste = [
+  { id: uid(), date: "2026-06-08", department: "Kitchen Made", productName: "Hake garnish", quantity: 1, unitCost: 18.4, reason: "Overproduction", notes: "", cost: 18.4 },
+  { id: uid(), date: "2026-06-08", department: "Bar", productName: "Squish Orange Juice", quantity: 2, unitCost: 4.69, reason: "FOH mistake", notes: "", cost: 9.38 },
+  { id: uid(), date: "2026-06-07", department: "Bought In", productName: "Croissant", quantity: 6, unitCost: 1.16, reason: "Spoiled", notes: "", cost: 6.96 },
+];
+
+const initialRecipes = [
+  {
+    id: uid(),
+    name: "Mushrooms on Toast Base",
+    yieldQuantity: 4,
+    yieldUnit: "portions",
+    ingredients: [
+      { id: uid(), productId: "", productName: "Chestnut Mushrooms", supplier: "TG Fruits", quantity: 1, unitCost: 8.9 },
+      { id: uid(), productId: "", productName: "Croissant", supplier: "Coburn & Baker", quantity: 2, unitCost: 1.16 },
+    ],
+  },
+];
+
+const initialMenus = [
+  {
+    id: uid(),
+    name: "Summer Menu",
+    season: "Summer",
+    startDate: "2026-06-01",
+    endDate: "2026-08-31",
+    targetGp: 75,
+    status: "Active",
+    subcategories: [
+      {
+        id: uid(),
+        name: "Breakfast",
+        targetGp: 75,
+        dishes: [
+          { id: uid(), name: "Bacon & Egg Muffin", sellingPrice: 9.9, recipeIds: [], manualCost: 1.98, targetGp: 75, status: "Active" },
+          { id: uid(), name: "Mushrooms on Toast", sellingPrice: 11.5, recipeIds: [], manualCost: 1.72, targetGp: 75, status: "Draft" },
+        ],
+      },
+    ],
+  },
+];
+
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: Home },
   { id: "invoices", label: "Invoices", icon: ReceiptText },
@@ -101,10 +282,12 @@ function percent(value) {
   return `${(Number(value) || 0).toFixed(1)}%`;
 }
 
+function numberValue(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function lineTotal(item) {
-  if (item.lineTotal !== undefined && item.lineTotal !== "" && Number.isFinite(Number(item.lineTotal))) {
-    return Number(item.lineTotal);
-  }
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
@@ -112,60 +295,116 @@ function invoiceTotal(invoice) {
   return (invoice.items || []).reduce((sum, item) => sum + lineTotal(item), 0);
 }
 
-function supplierFromFile(name) {
-  const lower = name.toLowerCase();
-  if (lower.includes("albion")) return "Albion Fine Foods";
-  if (lower.includes("tg") || lower.includes("fruit")) return "TG Fruits";
-  if (lower.includes("woods")) return "Woods";
-  if (lower.includes("bnfs") || lower.includes("fish")) return "BNFS";
-  if (lower.includes("coburn")) return "Coburn & Baker";
-  return "Unknown Supplier";
+function departmentMatches(rowDepartment, selectedDepartment) {
+  return selectedDepartment === "All departments" || rowDepartment === selectedDepartment;
 }
 
-function mockExtractLines(file, supplier) {
-  const presets = {
-    "Albion Fine Foods": [
-      ["Oat Milk Barista", "1ltr", 6, 2.83, "Bar"],
-      ["Squish Orange Juice", "1ltr", 3, 4.69, "Bar"],
-      ["Semi-Skimmed Milk", "2ltr", 2, 1.29, "Kitchen Made"],
-    ],
-    "TG Fruits": [
-      ["Chestnut Mushrooms", "2.25kg", 4, 8.9, "Kitchen Made"],
-      ["Lemons", "per kg", 3, 1.96, "Kitchen Made"],
-      ["Portobello Mushrooms", "1.5kg", 2, 6.9, "Kitchen Made"],
-    ],
-    Woods: [
-      ["Mixed Chilli Nuts Luxury", "1kg", 1, 13.02, "Bought In"],
-      ["Blue Roll", "case", 1, 17.2, "Non-food"],
-    ],
-    BNFS: [
-      ["Smoked Salmon Side", "kg", 2.91, 26.04, "Kitchen Made"],
-      ["Cod Fillet", "kg", 2, 17.85, "Kitchen Made"],
-    ],
+function selectedOpeningStock(openingStockByDept, selectedDepartment) {
+  if (selectedDepartment === "All departments") return Object.values(openingStockByDept).reduce((sum, value) => sum + numberValue(value), 0);
+  return numberValue(openingStockByDept[selectedDepartment]);
+}
+
+function compactPlural(token) {
+  if (token.endsWith("ies") && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith("s") && !token.endsWith("ss") && token.length > 3) return token.slice(0, -1);
+  return token;
+}
+
+function productTokens(value = "") {
+  return value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(compactPlural);
+}
+
+function orderedProductKey(value = "") {
+  return productTokens(value).join("");
+}
+
+function unorderedProductKey(value = "") {
+  return [...productTokens(value)].sort().join("");
+}
+
+function productAliases(product) {
+  return [product.name, ...(product.aliases || [])].filter(Boolean);
+}
+
+function productSimilarity(a, b) {
+  const aTokens = new Set(productTokens(a));
+  const bTokens = new Set(productTokens(b));
+  if (!aTokens.size || !bTokens.size) return 0;
+  const intersection = [...aTokens].filter((token) => bTokens.has(token)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  const jaccard = intersection / union;
+  const orderedMatch = orderedProductKey(a).includes(orderedProductKey(b)) || orderedProductKey(b).includes(orderedProductKey(a));
+  return Math.max(jaccard, orderedMatch ? 0.72 : 0);
+}
+
+function matchProduct(productName, products) {
+  const lower = productName.trim().toLowerCase();
+  if (!lower) return null;
+
+  for (const product of products) {
+    if (productAliases(product).some((alias) => alias.toLowerCase() === lower)) {
+      return { product, confidence: 1, method: "Exact match" };
+    }
+  }
+
+  const ordered = orderedProductKey(productName);
+  const unordered = unorderedProductKey(productName);
+  for (const product of products) {
+    if (productAliases(product).some((alias) => orderedProductKey(alias) === ordered || unorderedProductKey(alias) === unordered)) {
+      return { product, confidence: 0.94, method: "Normalized match" };
+    }
+  }
+
+  let best = null;
+  products.forEach((product) => {
+    productAliases(product).forEach((alias) => {
+      const score = productSimilarity(productName, alias);
+      if (!best || score > best.score) best = { product, score };
+    });
+  });
+
+  if (!best || best.score < 0.45) return null;
+  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "AI similarity" };
+}
+
+function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
+  if (!aiSettings.enableAiProductMatching) {
+    return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
+  }
+  const match = matchProduct(line.productName, products);
+  if (!match) {
+    return { ...line, matchConfidence: 0, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
+  }
+  const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(aiSettings.autoMatchConfidenceThreshold, 90) / 100));
+  if (match.confidence >= autoMatchThreshold) {
+    return {
+      ...line,
+      productName: match.product.name,
+      matchedProductId: match.product.id,
+      matchConfidence: match.confidence,
+      matchStatus: `${match.method} - auto matched`,
+      suggestedProductId: "",
+      suggestedProductName: "",
+    };
+  }
+  if (match.confidence < 0.6 || !aiSettings.requireManualApprovalBelowThreshold) {
+    return { ...line, matchConfidence: match.confidence, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
+  }
+  return {
+    ...line,
+    matchedProductId: "",
+    suggestedProductId: match.product.id,
+    suggestedProductName: match.product.name,
+    matchConfidence: match.confidence,
+    matchStatus: "Needs confirmation",
   };
-  return (presets[supplier] || [["New Product", "", 1, 0, "Kitchen Made"]]).map(([productName, packSize, quantity, unitCost, department]) => ({
-    id: uid(),
-    productName,
-    packSize,
-    quantity,
-    unitCost,
-    supplier,
-    department,
-    source: file.name,
-  }));
-}
-
-function asDraftNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function departmentForProduct(name = "") {
-  const lower = name.toLowerCase();
-  if (lower.includes("juice") || lower.includes("wine") || lower.includes("beer")) return "Bar";
-  if (lower.includes("blue roll") || lower.includes("napkin") || lower.includes("clean")) return "Non-food";
-  if (lower.includes("croissant") || lower.includes("cake") || lower.includes("bread")) return "Bought In";
-  return "Kitchen Made";
 }
 
 function canReadFileAsText(file) {
@@ -178,33 +417,376 @@ async function textFromInvoiceFiles(files) {
   return textChunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
+function cheapestOffer(product, products) {
+  const prices = collectSupplierPrices(product, products);
+  return prices.sort((a, b) => a.price - b.price)[0] || { supplier: product.supplier, price: numberValue(product.unitCost) };
+}
+
+function productGroupMatches(a, b) {
+  const aKeys = new Set(productAliases(a).map(unorderedProductKey));
+  return productAliases(b).some((alias) => aKeys.has(unorderedProductKey(alias)));
+}
+
+function collectSupplierPrices(product, products) {
+  const prices = [];
+  const addPrice = (supplier, price, date = today()) => {
+    const numeric = numberValue(price);
+    if (!supplier || !numeric) return;
+    const existing = prices.find((entry) => entry.supplier === supplier);
+    if (!existing || existing.date <= date) {
+      if (existing) existing.price = numeric;
+      else prices.push({ supplier, price: numeric, date });
+    }
+  };
+
+  products.filter((candidate) => productGroupMatches(product, candidate)).forEach((candidate) => {
+    addPrice(candidate.supplier, candidate.unitCost, candidate.priceHistory?.at(-1)?.date);
+    (candidate.supplierPrices || []).forEach((entry) => addPrice(entry.supplier, entry.price, entry.date));
+  });
+
+  return prices;
+}
+
+function buildProductRows(products) {
+  return products.map((product) => {
+    const cheapest = cheapestOffer(product, products);
+    const difference = cheapest.price ? ((numberValue(product.unitCost) - cheapest.price) / cheapest.price) * 100 : 0;
+    return {
+      ...product,
+      cheapestSupplier: `${cheapest.supplier} ${money(cheapest.price)}`,
+      priceDifference: difference,
+      aliasesLabel: (product.aliases || []).join(", "),
+    };
+  });
+}
+
+function supplierExists(suppliers, name) {
+  return suppliers.some((supplier) => supplier.name.toLowerCase() === name.trim().toLowerCase());
+}
+
+function ensureSupplierList(suppliers, name) {
+  if (!name.trim() || supplierExists(suppliers, name)) return suppliers;
+  return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
+}
+
+function mergeInvoiceProducts(products, items, invoiceDate) {
+  const next = [...products];
+
+  items.forEach((item) => {
+    const match = item.matchedProductId
+      ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
+      : matchProduct(item.productName, next);
+    const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
+    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: numberValue(item.unitCost) };
+    const supplierEntry = { supplier: item.supplier, price: numberValue(item.unitCost), date: invoiceDate };
+
+    if (index >= 0 && match.confidence > 0.9) {
+      const aliases = new Set([...(next[index].aliases || [])]);
+      if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
+      const supplierPrices = [...(next[index].supplierPrices || []).filter((entry) => entry.supplier !== item.supplier), supplierEntry];
+      next[index] = {
+        ...next[index],
+        supplier: item.supplier,
+        packSize: item.packSize,
+        quantity: numberValue(item.quantity, 1),
+        unitCost: numberValue(item.unitCost),
+        department: item.department,
+        aliases: [...aliases],
+        supplierPrices,
+        priceHistory: [...(next[index].priceHistory || []), historyEntry],
+      };
+      return;
+    }
+
+    next.push({
+      id: uid(),
+      name: item.productName,
+      supplier: item.supplier,
+      packSize: item.packSize,
+      quantity: numberValue(item.quantity, 1),
+      unitCost: numberValue(item.unitCost),
+      department: item.department,
+      aliases: [],
+      supplierPrices: [supplierEntry],
+      priceHistory: [historyEntry],
+    });
+  });
+
+  return next;
+}
+
+function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
+  return suppliers.map((supplier) => {
+    const spend = invoices
+      .filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange))
+      .reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+    return { ...supplier, spend };
+  });
+}
+
+function wasteCost(row) {
+  return numberValue(row.quantity) * numberValue(row.unitCost);
+}
+
+function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
+  const relevant = stocktakes
+    .filter((stocktake) => departmentMatches(stocktake.department, selectedDepartment) && stocktake.date <= dateRange.end)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  if (selectedDepartment === "All departments") {
+    const latestByDepartment = departmentNames.map((department) => relevant.find((stocktake) => stocktake.department === department)).filter(Boolean);
+    return latestByDepartment.reduce((sum, stocktake) => sum + numberValue(stocktake.totalValue), 0);
+  }
+  return numberValue(relevant[0]?.totalValue);
+}
+
+function calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames) {
+  const salesRows = sales.filter((row) => dateInRange(row.date, dateRange));
+  const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
+  const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
+  const salesTotal = salesRows.reduce((sum, row) => sum + row.sales, 0);
+  const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []).filter((item) => departmentMatches(item.department, department));
+  const purchases = invoiceItems.reduce((sum, item) => sum + lineTotal(item), 0);
+  const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const openingStock = selectedOpeningStock(openingStockByDept, department);
+  const closingStock = latestStocktakeValue(stocktakes, department, departmentNames, dateRange);
+  const waste = filteredWaste.filter((item) => departmentMatches(item.department, department)).reduce((sum, item) => sum + wasteCost(item), 0);
+  const stocktakeCost = Math.max(0, openingStock + purchases - closingStock);
+  const realCostIncludingWaste = stocktakeCost + waste;
+
+  return {
+    sales: salesTotal,
+    purchases,
+    allPurchases,
+    openingStock,
+    closingStock,
+    stocktakeCost,
+    realCostIncludingWaste,
+    invoiceGp: salesTotal ? ((salesTotal - purchases) / salesTotal) * 100 : 0,
+    stocktakeGp: salesTotal ? ((salesTotal - stocktakeCost) / salesTotal) * 100 : 0,
+    realGp: salesTotal ? ((salesTotal - realCostIncludingWaste) / salesTotal) * 100 : 0,
+    waste,
+    wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
+    stockVariance: closingStock - openingStock,
+    salesRows,
+    invoiceItems,
+    invoices: filteredInvoices,
+  };
+}
+
+function recipeBatchCost(recipe) {
+  return (recipe.ingredients || []).reduce((sum, ingredient) => sum + numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost), 0);
+}
+
+function recipeUnitCost(recipe) {
+  return numberValue(recipe.yieldQuantity) ? recipeBatchCost(recipe) / numberValue(recipe.yieldQuantity) : 0;
+}
+
+function dishCost(dish, recipes) {
+  const linkedRecipeCost = (dish.recipeIds || []).reduce((sum, recipeId) => {
+    const recipe = recipes.find((item) => item.id === recipeId);
+    return sum + (recipe ? recipeUnitCost(recipe) : 0);
+  }, 0);
+  return linkedRecipeCost + numberValue(dish.manualCost);
+}
+
+function gpFor(cost, price) {
+  const sellingPrice = numberValue(price);
+  return sellingPrice ? ((sellingPrice - numberValue(cost)) / sellingPrice) * 100 : 0;
+}
+
+function average(values) {
+  const filtered = values.filter((value) => Number.isFinite(value));
+  return filtered.length ? filtered.reduce((sum, value) => sum + value, 0) / filtered.length : 0;
+}
+
+function safeReadLocalStorage(key, fallback) {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? { ...fallback, ...JSON.parse(stored) } : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeReadLocalStorageArray(key, fallback) {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveLocalStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Local storage can be unavailable in private or embedded preview contexts.
+  }
+}
+
+function parseDate(value) {
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? new Date(`${today()}T00:00:00`) : date;
+}
+
+function toIsoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function startOfWeek(date, weekStartsOn = "Monday") {
+  const next = new Date(date);
+  const day = next.getDay();
+  const startDay = weekStartsOn === "Sunday" ? 0 : 1;
+  const diff = (day - startDay + 7) % 7;
+  next.setDate(next.getDate() - diff);
+  return next;
+}
+
+function resolveDateRange(range, weekStartsOn = "Monday") {
+  if (range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
+
+  const current = parseDate(today());
+  if (range.preset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
+
+  if (range.preset === "This week") {
+    const start = startOfWeek(current, weekStartsOn);
+    return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
+  }
+
+  if (range.preset === "Last week") {
+    const thisStart = startOfWeek(current, weekStartsOn);
+    const start = addDays(thisStart, -7);
+    return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
+  }
+
+  if (range.preset === "This month") {
+    const start = new Date(current.getFullYear(), current.getMonth(), 1);
+    const end = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+    return { start: toIsoDate(start), end: toIsoDate(end) };
+  }
+
+  const start = new Date(current.getFullYear(), current.getMonth() - 1, 1);
+  const end = new Date(current.getFullYear(), current.getMonth(), 0);
+  return { start: toIsoDate(start), end: toIsoDate(end) };
+}
+
+function dateInRange(date, range) {
+  return date >= range.start && date <= range.end;
+}
+
+function formatRangeDate(date) {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(parseDate(date));
+}
+
+function rangeLabel(rangeState, range) {
+  return `${rangeState.preset}: ${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
+}
+
+function activeDepartmentNames(departmentSettings) {
+  const active = departmentSettings.filter((department) => department.active).map((department) => department.name);
+  return active.length ? active : defaultDepartments;
+}
+
+function targetForDepartment(departmentSettings, department, fallback) {
+  if (department === "All departments") return numberValue(fallback, 75);
+  return numberValue(departmentSettings.find((item) => item.name === department)?.targetGp, fallback);
+}
+
 function App() {
   const [active, setActive] = useState("dashboard");
-  const [department, setDepartment] = useState("Kitchen Made");
+  const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
+  const departmentNames = activeDepartmentNames(departmentSettings);
+  const departmentOptions = ["All departments", ...departmentNames];
+  const [department, setDepartmentState] = useState(() => {
+    try {
+      const stored = localStorage.getItem("marginflow.department") || "Kitchen Made";
+      return stored;
+    } catch {
+      return "Kitchen Made";
+    }
+  });
+  const [departmentOpen, setDepartmentOpen] = useState(false);
   const [products, setProducts] = useState(initialProducts);
   const [suppliers, setSuppliers] = useState(initialSuppliers);
   const [invoices, setInvoices] = useState(initialInvoices);
-  const [sales, setSales] = useState(initialSales);
+  const [sales] = useState(initialSales);
+  const [openingStockByDept, setOpeningStockByDept] = useState(initialOpeningStock);
+  const [stocktakes, setStocktakes] = useState(initialStocktakes);
+  const [wasteItems, setWasteItems] = useState(initialWaste);
+  const [recipes, setRecipes] = useState(initialRecipes);
+  const [menus, setMenus] = useState(initialMenus);
+  const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
+  const [financialSettings, setFinancialSettingsState] = useState(() => safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings));
+  const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
+  const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
+  const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
+  const [dateRangeState, setDateRangeState] = useState({ preset: "This month", startDate: "2026-06-01", endDate: today() });
   const [draft, setDraft] = useState({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
 
-  const metrics = useMemo(() => calculateMetrics(invoices, sales, department), [invoices, sales, department]);
-  const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers), [invoices, suppliers]);
+  const setCompanySettings = (value) => {
+    setCompanySettingsState(value);
+    saveLocalStorage("marginflow.companySettings", value);
+  };
+  const setFinancialSettings = (value) => {
+    setFinancialSettingsState(value);
+    saveLocalStorage("marginflow.financialSettings", value);
+  };
+  const setMenuSettings = (value) => {
+    setMenuSettingsState(value);
+    saveLocalStorage("marginflow.menuSettings", value);
+  };
+  const setInvoiceSettings = (value) => {
+    setInvoiceSettingsState(value);
+    saveLocalStorage("marginflow.invoiceSettings", value);
+  };
+  const setAiSettings = (value) => {
+    setAiSettingsState(value);
+    saveLocalStorage("marginflow.aiSettings", value);
+  };
+  const setDepartmentSettings = (value) => {
+    setDepartmentSettingsState(value);
+    saveLocalStorage("marginflow.departmentSettings", value);
+  };
+
+  const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
+  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames), [invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames]);
+  const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
+  const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
+  const hasDepartmentContext = departmentContextPages.includes(active);
+
+  const setDepartment = (value) => {
+    setDepartmentState(value);
+    setDepartmentOpen(false);
+    try {
+      localStorage.setItem("marginflow.department", value);
+    } catch {
+      // Local storage is best-effort in preview environments.
+    }
+  };
 
   const approveInvoice = () => {
     if (!draft.items.length) return;
     const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
+    const normalizedItems = draft.items.map((item) => ({ ...item, supplier: item.supplier || supplier }));
     const invoice = {
       id: uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date: draft.date || today(),
       status: "Approved",
-      items: draft.items,
+      items: normalizedItems,
     };
     setInvoices((current) => [invoice, ...current]);
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, draft.items, invoice.date));
+    setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
     setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
   };
 
@@ -215,7 +797,7 @@ function App() {
           <div className="brand-mark">MF</div>
           <div>
             <strong>MarginFlow</strong>
-            <span>F&B profit management</span>
+            <span>Hospitality profit management</span>
           </div>
         </div>
         <nav>
@@ -231,134 +813,129 @@ function App() {
         </nav>
         <div className="sidebar-card">
           <Sparkles size={18} />
-          <strong>AI architecture ready</strong>
-          <p>Frontend calls a backend endpoint. The OpenAI key never belongs in the browser.</p>
+          <strong>AI assisted workflows</strong>
+          <p>Invoices and stock imports use matching confidence, aliases and review steps before changes affect GP.</p>
         </div>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">MarginFlow v2</p>
+            <p className="eyebrow">MarginFlow v3</p>
             <h1>{navItems.find((item) => item.id === active)?.label}</h1>
-            <p>Turn invoices, stock, recipes and sales into restaurant profit insight.</p>
-          </div>
-          <div className="top-actions">
-            <select value={department} onChange={(event) => setDepartment(event.target.value)}>
-              {departments.slice(0, 3).map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
+            <p>Turn invoices, stock, recipes, waste and menus into live hospitality margin control.</p>
           </div>
         </header>
 
-        <section className="view-title">
-          <ActiveIcon size={20} />
-          <span>Viewing {department}</span>
-        </section>
+        {hasDepartmentContext && (
+          <div className="view-context">
+            <button className="view-title" onClick={() => setDepartmentOpen((current) => !current)} type="button">
+              <ActiveIcon size={20} />
+              <span>Viewing {department}</span>
+              <span aria-hidden="true">▼</span>
+            </button>
+            {active === "dashboard" && <span className="range-chip">{rangeLabel(dateRangeState, dateRange)}</span>}
+            {departmentOpen && (
+              <div className="department-menu">
+                {departmentOptions.map((option) => (
+                  <button className={department === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
+                    {option}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
-        {active === "dashboard" && <Dashboard metrics={metrics} supplierSpend={supplierSpend} invoices={invoices} />}
+        {active === "dashboard" && <Dashboard dateRange={dateRange} dateRangeState={dateRangeState} department={department} gpTarget={gpTarget} metrics={metrics} setDateRangeState={setDateRangeState} supplierSpend={supplierSpend} />}
         {active === "invoices" && (
           <Invoices
+            aiSettings={aiSettings}
             draft={draft}
             setDraft={setDraft}
             invoices={invoices}
+            invoiceSettings={invoiceSettings}
             suppliers={suppliers}
+            setSuppliers={setSuppliers}
+            products={products}
+            departmentNames={departmentNames}
             approveInvoice={approveInvoice}
             setInvoices={setInvoices}
           />
         )}
-        {active === "products" && <Products products={products} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products departmentNames={departmentNames} products={products} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && <Suppliers suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
-        {active === "stocktake" && <Stocktake products={products} />}
-        {active === "recipes" && <Recipes products={products} />}
-        {active === "menu" && <MenuCosting />}
-        {active === "waste" && <Waste />}
-        {active === "gp" && <GpAnalysis metrics={metrics} invoices={invoices} supplierSpend={supplierSpend} />}
+        {active === "stocktake" && (
+          <Stocktake
+            department={department}
+            departmentNames={departmentNames}
+            openingStockByDept={openingStockByDept}
+            products={products}
+            setOpeningStockByDept={setOpeningStockByDept}
+            setProducts={setProducts}
+            setStocktakes={setStocktakes}
+            stocktakes={stocktakes}
+          />
+        )}
+        {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
+        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "gp" && <GpAnalysis dateRange={dateRange} department={department} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} />}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
-        {active === "settings" && <SettingsPanel />}
+        {active === "settings" && (
+          <SettingsPanel
+            aiSettings={aiSettings}
+            companySettings={companySettings}
+            departmentSettings={departmentSettings}
+            financialSettings={financialSettings}
+            invoiceSettings={invoiceSettings}
+            menuSettings={menuSettings}
+            setAiSettings={setAiSettings}
+            setCompanySettings={setCompanySettings}
+            setDepartmentSettings={setDepartmentSettings}
+            setFinancialSettings={setFinancialSettings}
+            setInvoiceSettings={setInvoiceSettings}
+            setMenuSettings={setMenuSettings}
+          />
+        )}
       </main>
     </div>
   );
 }
 
-function calculateMetrics(invoices, sales, department) {
-  const salesTotal = sales.reduce((sum, row) => sum + row.sales, 0);
-  const purchases = invoices.reduce(
-    (sum, invoice) => sum + invoice.items.filter((item) => item.department === department).reduce((lineSum, item) => lineSum + lineTotal(item), 0),
-    0
-  );
-  const allPurchases = invoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  return {
-    sales: salesTotal,
-    purchases,
-    allPurchases,
-    invoiceGp: salesTotal ? ((salesTotal - purchases) / salesTotal) * 100 : 0,
-    realGp: 69.7,
-    waste: 34.74,
-    salesRows: sales,
-  };
-}
+function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, setDateRangeState, supplierSpend }) {
+  const recentInvoices = [...metrics.invoices].sort((a, b) => b.date.localeCompare(a.date));
 
-function spendBySupplier(invoices, suppliers) {
-  return suppliers.map((supplier) => {
-    const spend = invoices
-      .filter((invoice) => invoice.supplier === supplier.name)
-      .reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-    return { ...supplier, spend };
-  });
-}
-
-function ensureSupplierList(suppliers, name) {
-  if (suppliers.some((supplier) => supplier.name.toLowerCase() === name.toLowerCase())) return suppliers;
-  return [...suppliers, { id: uid(), name, category: "New supplier", contact: "", email: "", phone: "", active: true }];
-}
-
-function mergeInvoiceProducts(products, items, invoiceDate) {
-  const next = [...products];
-  items.forEach((item) => {
-    const index = next.findIndex((product) => product.name.toLowerCase() === item.productName.toLowerCase() && product.supplier === item.supplier);
-    const historyEntry = { date: invoiceDate, price: Number(item.unitCost) || 0 };
-    if (index >= 0) {
-      next[index] = {
-        ...next[index],
-        packSize: item.packSize,
-        quantity: item.quantity,
-        unitCost: Number(item.unitCost) || 0,
-        department: item.department,
-        priceHistory: [...(next[index].priceHistory || []), historyEntry],
-      };
-    } else {
-      next.push({
-        id: uid(),
-        name: item.productName,
-        supplier: item.supplier,
-        packSize: item.packSize,
-        quantity: item.quantity,
-        unitCost: Number(item.unitCost) || 0,
-        department: item.department,
-        priceHistory: [historyEntry],
-      });
-    }
-  });
-  return next;
-}
-
-function Dashboard({ metrics, supplierSpend, invoices }) {
   return (
     <>
+      <Panel title="Dashboard date range" action={rangeLabel(dateRangeState, dateRange)}>
+        <div className="form-grid six range-grid">
+          <label>
+            Range
+            <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
+              {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
+            </select>
+          </label>
+          {dateRangeState.preset === "Custom range" && (
+            <>
+              <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
+              <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
+            </>
+          )}
+        </div>
+      </Panel>
       <div className="metric-grid">
-        <Metric label="Net sales" value={money(metrics.sales)} delta="Current week" />
-        <Metric label="Invoice spend" value={money(metrics.purchases)} delta="Selected department" />
-        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta="Before stocktake" />
-        <Metric label="Real GP" value={percent(metrics.realGp)} delta="With stocktake" />
-        <Metric label="Waste cost" value={money(metrics.waste)} delta="This month" tone="warn" />
+        <Metric label="Net sales" value={money(metrics.sales)} delta={rangeLabel(dateRangeState, dateRange)} />
+        <Metric label="Invoice spend" value={money(metrics.purchases)} delta={department} />
+        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Waste cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of sales`} tone="warn" />
       </div>
       <div className="dashboard-layout">
-        <Panel title="Weekly profit flow" action="Thin bar chart">
+        <Panel title="Profit flow" action={rangeLabel(dateRangeState, dateRange)}>
           <BarSeries rows={metrics.salesRows} valueKey="sales" />
         </Panel>
-        <Panel title="Supplier spend">
+        <Panel title="Supplier spend" action={rangeLabel(dateRangeState, dateRange)}>
           <DonutBars rows={supplierSpend} />
         </Panel>
       </div>
@@ -371,21 +948,22 @@ function Dashboard({ metrics, supplierSpend, invoices }) {
               { key: "date", label: "Date" },
               { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             ]}
-            rows={invoices}
+            rows={recentInvoices}
           />
         </Panel>
         <Panel title="Cost alerts">
-          <InsightList />
+          <InsightList metrics={metrics} />
         </Panel>
       </div>
     </>
   );
 }
 
-function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const isReading = draft.status === "Reading invoice with AI...";
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
+  const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
 
   const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
@@ -401,7 +979,16 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
     }
   };
 
-  const readInvoiceWithAi = async () => {
+  const createSupplier = () => {
+    setSuppliers((current) => ensureSupplierList(current, draft.supplier));
+    setDraft((current) => ({ ...current, status: `${current.supplier} created` }));
+  };
+
+  const readInvoice = async () => {
+    if (!aiSettings.enableAiInvoiceReading) {
+      setDraft((current) => ({ ...current, status: "AI failed. AI invoice reading is disabled in Settings." }));
+      return;
+    }
     const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
@@ -423,22 +1010,22 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
       const items = (payload.lines || []).map((line) => {
-        const quantity = asDraftNumber(line.quantity, 1);
-        const unitCost = asDraftNumber(line.unitCost, 0);
-        return {
-          id: uid(),
-          productName: line.productName || "Unknown product",
-          packSize: line.packSize || "",
-          quantity,
-          unit: line.unit || "",
-          unitCost,
-          vat: asDraftNumber(line.vat, 0),
-          lineTotal: asDraftNumber(line.lineTotal, quantity * unitCost),
-          confidence: asDraftNumber(line.confidence, 0.5),
-          supplier,
-          department: departmentForProduct(line.productName),
-          source: "OpenAI",
-        };
+        const quantity = numberValue(line.quantity, 1);
+        const unitCost = numberValue(line.unitCost, 0);
+        return enrichInvoiceLine(
+          {
+            id: uid(),
+            productName: line.productName || "Unknown product",
+            packSize: line.packSize || "",
+            quantity,
+            unitCost,
+            supplier,
+            department: departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+            source: "OpenAI",
+          },
+          products,
+          aiSettings
+        );
       });
 
       setDraft((current) => ({
@@ -455,29 +1042,38 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
   };
 
   const updateDraftItem = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost", "vat", "lineTotal", "confidence"];
+    const numericFields = ["quantity", "unitCost"];
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const nextValue = numericFields.includes(field) ? Number(value) : value;
-        const updated = { ...item, [field]: nextValue };
-        if (field === "quantity" || field === "unitCost") {
-          updated.lineTotal = (Number(updated.quantity) || 0) * (Number(updated.unitCost) || 0);
-        }
-        return updated;
+        const updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
+        return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
+      }),
+    }));
+  };
+
+  const applySuggestion = (id) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const product = products.find((candidate) => candidate.id === item.suggestedProductId);
+        return product
+          ? { ...item, productName: product.name, matchedProductId: product.id, suggestedProductId: "", suggestedProductName: "", matchStatus: "Suggestion accepted", matchConfidence: 1 }
+          : item;
       }),
     }));
   };
 
   const addManualLine = () => {
-    const supplier = draft.supplier || "Unknown Supplier";
+    const supplier = draft.supplier || suppliers[0]?.name || "Unknown Supplier";
     setDraft((current) => ({
       ...current,
       supplier,
       items: [
         ...current.items,
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unit: "", unitCost: 0, vat: 0, lineTotal: 0, confidence: 1, supplier, department: "Kitchen Made" },
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, matchStatus: "Create new product", matchConfidence: 0 },
       ],
       status: "Manual review",
     }));
@@ -508,13 +1104,21 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
           </label>
         </div>
         <div className="invoice-meta">
-          <label>Supplier<select value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })}>
-            <option value="">Auto detect</option>
-            {suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}
-          </select></label>
+          <label>
+            Supplier
+            <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
+            <datalist id="supplier-list">
+              {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
+            </datalist>
+          </label>
           <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
           <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
         </div>
+        {showCreateSupplier && (
+          <div className="button-row left tight">
+            <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
+          </div>
+        )}
         <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
         <div className="file-list">
           {draft.files.map((file, index) => (
@@ -523,33 +1127,38 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
-          <button disabled={isReading} onClick={readInvoiceWithAi} type="button"><Sparkles size={16} />Read with AI</button>
+          <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
           <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
         </div>
       </Panel>
 
-      <Panel title="Review extracted items" action={`${draft.items.length} line(s)`}>
+      <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                {["Product", "Pack size", "Quantity", "Unit", "Unit cost", "VAT", "Supplier", "Department", "Line total", "Confidence", ""].map((header) => <th key={header}>{header}</th>)}
+                {["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
               </tr>
             </thead>
             <tbody>
               {draft.items.map((item) => (
                 <tr key={item.id}>
-                  <td><input value={item.productName} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} /></td>
+                  <td>
+                    <input value={item.productName} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} />
+                    {item.suggestedProductName && (
+                      <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
+                        Did you mean: {item.suggestedProductName}?
+                      </button>
+                    )}
+                    {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
+                  </td>
                   <td><input value={item.packSize} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
-                  <td><input value={item.unit || ""} onChange={(event) => updateDraftItem(item.id, "unit", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.vat || 0} onChange={(event) => updateDraftItem(item.id, "vat", event.target.value)} /></td>
+                  <td><select value={item.department} onChange={(event) => updateDraftItem(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
-                  <td><select value={item.department} onChange={(event) => updateDraftItem(item.id, "department", event.target.value)}>{departments.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
-                  <td><input min="0" step="0.01" type="number" value={item.lineTotal ?? lineTotal(item)} onChange={(event) => updateDraftItem(item.id, "lineTotal", event.target.value)} /></td>
-                  <td><input max="1" min="0" step="0.01" type="number" value={item.confidence ?? 1} onChange={(event) => updateDraftItem(item.id, "confidence", event.target.value)} /></td>
+                  <td>{money(lineTotal(item))}</td>
                   <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
@@ -576,17 +1185,26 @@ function Invoices({ draft, setDraft, invoices, suppliers, approveInvoice, setInv
   );
 }
 
-function Products({ products, setProducts, suppliers }) {
-  const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: "Kitchen Made" };
+function Products({ departmentNames, products, setProducts, suppliers }) {
+  const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
+  const rows = useMemo(() => buildProductRows(products), [products]);
 
   const saveProduct = () => {
     if (!form.name.trim()) return;
+    const aliases = String(form.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
+    const payload = {
+      ...form,
+      aliases,
+      unitCost: numberValue(form.unitCost),
+      quantity: numberValue(form.quantity, 1),
+      supplierPrices: [{ supplier: form.supplier, price: numberValue(form.unitCost), date: today() }],
+    };
     if (editingId) {
-      setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...form, unitCost: Number(form.unitCost), quantity: Number(form.quantity) } : product)));
+      setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
     } else {
-      setProducts((current) => [...current, { ...form, id: uid(), unitCost: Number(form.unitCost), quantity: Number(form.quantity), priceHistory: [{ date: today(), price: Number(form.unitCost) }] }]);
+      setProducts((current) => [...current, { ...payload, id: uid(), priceHistory: [{ date: today(), supplier: payload.supplier, price: payload.unitCost }] }]);
     }
     setForm(empty);
     setEditingId("");
@@ -601,27 +1219,29 @@ function Products({ products, setProducts, suppliers }) {
           <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
           <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
           <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
-          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departments.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
         </div>
         <div className="button-row left"><button onClick={saveProduct} type="button"><Plus size={16} />{editingId ? "Save Product" : "Add Product"}</button></div>
       </Panel>
-      <Panel title="Product database" action="CRUD + price history">
+      <Panel title="Product database" action="Aliases + supplier comparison">
         <DataTable
           columns={[
             { key: "name", label: "Product" },
-            { key: "supplier", label: "Supplier" },
+            { key: "supplier", label: "Current supplier" },
+            { key: "unitCost", label: "Current cost", render: (value) => money(value) },
+            { key: "cheapestSupplier", label: "Cheapest supplier" },
+            { key: "priceDifference", label: "Price difference", render: (value) => (value > 0 ? `+${percent(value)}` : percent(value)) },
             { key: "packSize", label: "Pack" },
-            { key: "quantity", label: "Qty" },
-            { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
             { key: "department", label: "Department" },
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
           onDelete={(id) => setProducts((current) => current.filter((product) => product.id !== id))}
           onEdit={(row) => {
-            setForm(row);
+            setForm({ ...row, aliases: (row.aliases || []).join(", ") });
             setEditingId(row.id);
           }}
-          rows={products}
+          rows={rows}
         />
       </Panel>
     </div>
@@ -661,7 +1281,8 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
             { key: "category", label: "Category" },
             { key: "contact", label: "Contact" },
             { key: "email", label: "Email" },
-            { key: "spend", label: "Spend", render: (value) => money(value) },
+            { key: "phone", label: "Phone" },
+            { key: "spend", label: "Spend total", render: (value) => money(value) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
           onDelete={(id) => setSuppliers((current) => current.filter((supplier) => supplier.id !== id))}
@@ -676,85 +1297,493 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
   );
 }
 
-function Stocktake({ products }) {
+function Stocktake({ department, departmentNames, openingStockByDept, products, setOpeningStockByDept, setProducts, stocktakes, setStocktakes }) {
+  const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
+  const [mode, setMode] = useState("Manual total value");
+  const [form, setForm] = useState({ date: today(), department: stocktakeDepartment, lines: [] });
+  const [status, setStatus] = useState("");
+  const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
+  const currentOpening = selectedOpeningStock(openingStockByDept, department);
+  const currentClosing = latestStocktakeValue(stocktakes, department, departmentNames);
+
+  const addLine = (product = products.find((item) => departmentMatches(item.department, form.department)) || products[0]) => {
+    if (!product) return;
+    setForm((current) => ({
+      ...current,
+      lines: [
+        ...current.lines,
+        { id: uid(), productName: product.name, matchedProductId: product.id, quantity: 1, unitCost: numberValue(product.unitCost), stockValue: numberValue(product.unitCost), matchStatus: "Matched" },
+      ],
+    }));
+  };
+
+  const updateLine = (id, field, value) => {
+    setForm((current) => ({
+      ...current,
+      lines: current.lines.map((line) => {
+        if (line.id !== id) return line;
+        const updated = { ...line, [field]: field === "productName" ? value : Number(value) };
+        if (field === "productName") {
+          const match = matchProduct(value, products);
+          if (match) {
+            updated.productName = match.product.name;
+            updated.matchedProductId = match.product.id;
+            updated.unitCost = match.product.unitCost;
+            updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
+          } else {
+            updated.matchedProductId = "";
+            updated.matchStatus = "Create product on save";
+          }
+        }
+        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
+        return updated;
+      }),
+    }));
+  };
+
+  const importCsv = async (file) => {
+    if (!file) return;
+    const text = await file.text();
+    const rows = text.split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
+    const [, ...dataRows] = rows;
+    const imported = dataRows.map(([productName, quantity, unitCost]) => {
+      const match = matchProduct(productName, products);
+      const cost = unitCost ? numberValue(unitCost) : numberValue(match?.product?.unitCost);
+      return {
+        id: uid(),
+        productName: match?.product?.name || productName,
+        matchedProductId: match?.product?.id || "",
+        quantity: numberValue(quantity),
+        unitCost: cost,
+        stockValue: numberValue(quantity) * cost,
+        matchStatus: match ? (match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`) : "Create product on save",
+      };
+    });
+    setForm((current) => ({ ...current, lines: [...current.lines, ...imported] }));
+    setStatus(`Imported ${imported.length} CSV line(s).`);
+  };
+
+  const saveStocktake = () => {
+    const incomplete = form.lines.some((line) => !numberValue(line.quantity) || !numberValue(line.unitCost) || !numberValue(line.stockValue));
+    if (!form.lines.length || incomplete) {
+      setStatus("Every line needs quantity, unit cost and stock value before saving.");
+      return;
+    }
+
+    let nextProducts = [...products];
+    const savedLines = form.lines.map((line) => {
+      const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
+      if (match) return line;
+      const product = {
+        id: uid(),
+        name: line.productName,
+        supplier: "Unknown Supplier",
+        packSize: "",
+        quantity: 1,
+        unitCost: numberValue(line.unitCost),
+        department: form.department,
+        aliases: [],
+        supplierPrices: [],
+        priceHistory: [{ date: form.date, supplier: "Stocktake", price: numberValue(line.unitCost) }],
+      };
+      nextProducts = [...nextProducts, product];
+      return { ...line, matchedProductId: product.id, matchStatus: "Created product" };
+    });
+
+    const totalValue = savedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    setProducts(nextProducts);
+    setStocktakes((current) => [{ id: uid(), date: form.date, department: form.department, lines: savedLines, totalValue }, ...current]);
+    setForm({ date: today(), department: form.department, lines: [] });
+    setStatus(`Saved stocktake at ${money(totalValue)}.`);
+  };
+
+  const csv = ["Product,Quantity,Unit cost,Stock value", ...form.lines.map((line) => `${line.productName},${line.quantity},${line.unitCost},${line.stockValue}`)].join("\n");
+
   return (
-    <Panel title="Stocktake control" action="Manual or CSV ready">
+    <div className="page-grid">
       <div className="metric-grid compact">
-        <Metric label="Opening stock" value="£3,796.31" delta="13 Apr" />
-        <Metric label="Closing stock" value="£4,000.00" delta="09 Jun" />
-        <Metric label="Real cost used" value="£3,593.69" delta="Opening + purchases - closing" />
+        <Metric label="Opening stock" value={money(currentOpening)} delta={mode} />
+        <Metric label="Closing stock" value={money(currentClosing)} delta="Latest saved stocktake" />
+        <Metric label="Real cost used" value={money(Math.max(0, currentOpening - currentClosing))} delta="Before new purchases" />
       </div>
-      <DataTable
-        columns={[
-          { key: "name", label: "Product" },
-          { key: "packSize", label: "Pack" },
-          { key: "quantity", label: "Expected" },
-          { key: "unitCost", label: "Latest cost", render: (value) => money(value) },
-          { key: "value", label: "Stock value", render: (_, row) => money(row.quantity * row.unitCost) },
-        ]}
-        rows={products}
-      />
-    </Panel>
+      <Panel title="Opening stock">
+        <div className="form-grid">
+          <label>Mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option>Manual total value</option><option>Detailed stocktake</option></select></label>
+          {departmentNames.map((dept) => (
+            <Field key={dept} label={`${dept} opening value`} type="number" value={openingStockByDept[dept]} onChange={(value) => setOpeningStockByDept((current) => ({ ...current, [dept]: Number(value) }))} />
+          ))}
+        </div>
+      </Panel>
+      <Panel title="Create stocktake" action="Future dates allowed">
+        <div className="form-grid six">
+          <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
+        </div>
+        <div className="button-row left">
+          <button onClick={() => addLine()} type="button"><Plus size={16} />Add Product</button>
+          <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
+          <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
+        </div>
+        {status && <div className="invoice-status info">{status}</div>}
+        <div className="table-wrap">
+          <table>
+            <thead><tr>{["Product", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+            <tbody>
+              {form.lines.map((line) => (
+                <tr key={line.id}>
+                  <td><input value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
+                  <td>{money(line.stockValue)}</td>
+                  <td><small className="line-note">{line.matchStatus}</small></td>
+                  <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+      <Panel title="Saved stocktakes">
+        <DataTable
+          columns={[
+            { key: "date", label: "Date" },
+            { key: "department", label: "Department" },
+            { key: "lines", label: "Lines", render: (lines) => lines.length },
+            { key: "totalValue", label: "Stock value", render: (value) => money(value) },
+          ]}
+          rows={visibleStocktakes}
+        />
+      </Panel>
+    </div>
   );
 }
 
-function Recipes({ products }) {
-  const rows = [
-    { id: "r1", name: "Chilli Jam", yield: "5kg", cost: 12.5, unit: "£2.50/kg", linked: 4 },
-    { id: "r2", name: "Whipped Feta", yield: "2.5kg", cost: 18.8, unit: "£7.52/kg", linked: 7 },
-  ];
+function Recipes({ products, recipes, setRecipes }) {
+  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", productSearch: "", ingredientQuantity: 1, ingredients: [] };
+  const [form, setForm] = useState(empty);
+  const [editingId, setEditingId] = useState("");
+  const suggestions = form.productSearch
+    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 5)
+    : [];
+
+  const addIngredient = (product = suggestions[0]) => {
+    if (!product) return;
+    const cheapest = cheapestOffer(product, products);
+    setForm((current) => ({
+      ...current,
+      productSearch: "",
+      ingredientQuantity: 1,
+      ingredients: [...current.ingredients, { id: uid(), productId: product.id, productName: product.name, supplier: cheapest.supplier, quantity: numberValue(current.ingredientQuantity, 1), unitCost: cheapest.price }],
+    }));
+  };
+
+  const saveRecipe = () => {
+    if (!form.name.trim()) return;
+    const payload = { id: editingId || uid(), name: form.name, yieldQuantity: numberValue(form.yieldQuantity, 1), yieldUnit: form.yieldUnit, ingredients: form.ingredients };
+    if (editingId) setRecipes((current) => current.map((recipe) => (recipe.id === editingId ? payload : recipe)));
+    else setRecipes((current) => [payload, ...current]);
+    setForm(empty);
+    setEditingId("");
+  };
+
+  const rows = recipes.map((recipe) => ({
+    ...recipe,
+    yieldLabel: `${recipe.yieldQuantity} ${recipe.yieldUnit}`,
+    batchCost: recipeBatchCost(recipe),
+    unitCost: recipeUnitCost(recipe),
+    linked: recipe.ingredients.length,
+  }));
+
   return (
-    <Panel title="Recipe costing" action={`${products.length} product ingredients available`}>
-      <DataTable
-        columns={[
-          { key: "name", label: "Recipe" },
-          { key: "yield", label: "Yield" },
-          { key: "cost", label: "Batch cost", render: (value) => money(value) },
-          { key: "unit", label: "Unit cost" },
-          { key: "linked", label: "Menu links" },
-        ]}
-        rows={rows}
-      />
-    </Panel>
+    <div className="page-grid">
+      <Panel title={editingId ? "Edit recipe" : "Create recipe"}>
+        <div className="form-grid six">
+          <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+          <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
+          <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
+          <Field label="Ingredient quantity" type="number" value={form.ingredientQuantity} onChange={(value) => setForm({ ...form, ingredientQuantity: value })} />
+          <label>
+            Ingredients
+            <input placeholder="Type Mush..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} />
+          </label>
+        </div>
+        {suggestions.length > 0 && (
+          <div className="suggestion-list">
+            {suggestions.map((product) => {
+              const cheapest = cheapestOffer(product, products);
+              return <button key={product.id} onClick={() => addIngredient(product)} type="button">{product.name}<span>{cheapest.supplier} {money(cheapest.price)}</span></button>;
+            })}
+          </div>
+        )}
+        <div className="stack-list tight">
+          {form.ingredients.map((ingredient) => (
+            <div className="compact-row" key={ingredient.id}>
+              <span>{ingredient.productName}</span>
+              <span>{ingredient.supplier}</span>
+              <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
+              <button className="icon danger" onClick={() => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) }))} type="button"><Trash2 size={15} /></button>
+            </div>
+          ))}
+        </div>
+        <div className="button-row left">
+          <button onClick={() => addIngredient()} type="button"><Plus size={16} />Add Ingredient</button>
+          <button onClick={saveRecipe} type="button"><Save size={16} />{editingId ? "Save Recipe" : "Create Recipe"}</button>
+        </div>
+      </Panel>
+      <Panel title="Recipe costing">
+        <DataTable
+          columns={[
+            { key: "name", label: "Recipe" },
+            { key: "yieldLabel", label: "Yield" },
+            { key: "batchCost", label: "Batch cost", render: (value) => money(value) },
+            { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
+            { key: "linked", label: "Ingredients" },
+          ]}
+          onDelete={(id) => setRecipes((current) => current.filter((recipe) => recipe.id !== id))}
+          onEdit={(row) => {
+            setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients });
+            setEditingId(row.id);
+          }}
+          rows={rows}
+        />
+      </Panel>
+    </div>
   );
 }
 
-function MenuCosting() {
-  const rows = [
-    { id: "m1", dish: "Bacon & Egg Muffin", menu: "Breakfast", cost: 1.5, price: 9.5, gp: 84.2 },
-    { id: "m2", dish: "Mushrooms on Toast", menu: "Brunch", cost: 1.72, price: 11.5, gp: 85 },
-    { id: "m3", dish: "Hake", menu: "Evening", cost: 5.85, price: 24, gp: 75.6 },
-  ];
-  return <Panel title="Menu costing"><DataTable columns={[{ key: "dish", label: "Dish" }, { key: "menu", label: "Menu" }, { key: "cost", label: "Cost", render: money }, { key: "price", label: "Price", render: money }, { key: "gp", label: "GP", render: percent }]} rows={rows} /></Panel>;
+function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus }) {
+  const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
+  const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
+  const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
+  const [subcategoryName, setSubcategoryName] = useState("");
+  const [dishForm, setDishForm] = useState({ subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+  const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
+  const subcategories = activeMenu?.subcategories || [];
+  const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
+    subcategory.dishes.map((dish) => {
+      const cost = dishCost(dish, recipes);
+      const gp = gpFor(cost, dish.sellingPrice);
+      const dishTarget = menuSettings.allowDishTargetOverride ? numberValue(dish.targetGp) : 0;
+      const subcategoryTarget = menuSettings.allowSubcategoryTargetOverride ? numberValue(subcategory.targetGp) : 0;
+      const menuTargetValue = menuSettings.allowMenuTargetOverride ? numberValue(activeMenu.targetGp) : 0;
+      const target = dishTarget || subcategoryTarget || menuTargetValue || defaultTarget;
+      return {
+        ...dish,
+        id: dish.id,
+        subcategory: subcategory.name,
+        cost,
+        gp,
+        targetGp: target,
+        variance: gp - target,
+      };
+    })
+  );
+  const menuGp = average(dishRows.map((dish) => dish.gp));
+  const menuTarget = (menuSettings.allowMenuTargetOverride ? numberValue(activeMenu?.targetGp) : 0) || defaultTarget;
+  const estimatedTotalCost = dishRows.reduce((sum, dish) => sum + dish.cost, 0);
+
+  const createMenu = () => {
+    if (!menuForm.name.trim()) return;
+    const menu = { ...menuForm, id: uid(), targetGp: numberValue(menuForm.targetGp, defaultTarget), subcategories: [] };
+    setMenus((current) => [menu, ...current]);
+    setActiveMenuId(menu.id);
+    setMenuForm({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
+  };
+
+  const addSubcategory = () => {
+    if (!activeMenu || !subcategoryName.trim()) return;
+    const subcategory = { id: uid(), name: subcategoryName, targetGp: activeMenu.targetGp, dishes: [] };
+    setMenus((current) => current.map((menu) => (menu.id === activeMenu.id ? { ...menu, subcategories: [...menu.subcategories, subcategory] } : menu)));
+    setDishForm((current) => ({ ...current, subcategoryId: subcategory.id }));
+    setSubcategoryName("");
+  };
+
+  const addDish = () => {
+    if (!activeMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
+    const dish = {
+      id: uid(),
+      name: dishForm.name,
+      sellingPrice: numberValue(dishForm.sellingPrice),
+      recipeIds: dishForm.recipeId ? [dishForm.recipeId] : [],
+      manualCost: numberValue(dishForm.manualCost),
+      targetGp: dishForm.targetGp === "" ? "" : numberValue(dishForm.targetGp),
+      status: dishForm.status,
+    };
+    setMenus((current) => current.map((menu) => {
+      if (menu.id !== activeMenu.id) return menu;
+      return {
+        ...menu,
+        subcategories: menu.subcategories.map((subcategory) => (subcategory.id === dishForm.subcategoryId ? { ...subcategory, dishes: [...subcategory.dishes, dish] } : subcategory)),
+      };
+    }));
+    setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+  };
+
+  return (
+    <div className="page-grid">
+      <Panel title="Create menu">
+        <div className="form-grid six">
+          <Field label="Name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
+          <Field label="Season / Type" value={menuForm.season} onChange={(value) => setMenuForm({ ...menuForm, season: value })} />
+          <Field label="Start date" type="date" value={menuForm.startDate} onChange={(value) => setMenuForm({ ...menuForm, startDate: value })} />
+          <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
+          <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
+          <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+        </div>
+        <div className="button-row left"><button onClick={createMenu} type="button"><Plus size={16} />Create Menu</button></div>
+      </Panel>
+
+      {activeMenu && (
+        <>
+          <div className="metric-grid compact">
+            <Metric label="Menu GP" value={percent(menuGp)} delta="Average GP without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
+            <Metric label="Target GP" value={percent(menuTarget)} delta={activeMenu.name} />
+            <Metric label="Variance" value={percent(menuGp - menuTarget)} delta={`${dishRows.length} dishes`} tone={menuGp >= menuTarget ? "good" : "warn"} />
+            <Metric label="Number of dishes" value={dishRows.length} delta="Active menu" />
+            <Metric label="Estimated total cost" value={money(estimatedTotalCost)} delta="All dishes" />
+          </div>
+          <Panel title="Menu hierarchy" action={activeMenu.name}>
+            <div className="form-grid six">
+              <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+              <Field label="Add subcategory" value={subcategoryName} onChange={setSubcategoryName} />
+              <label>Dish subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{subcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
+              <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
+              <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
+              <label>Linked recipe<select value={dishForm.recipeId} onChange={(event) => setDishForm({ ...dishForm, recipeId: event.target.value })}><option value="">None</option>{recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
+              <Field label="Manual ingredients cost" type="number" value={dishForm.manualCost} onChange={(value) => setDishForm({ ...dishForm, manualCost: value })} />
+              <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
+              <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+            </div>
+            <div className="button-row left">
+              <button className="ghost" onClick={addSubcategory} type="button"><Plus size={16} />Add Subcategory</button>
+              <button onClick={addDish} type="button"><Plus size={16} />Add Dish</button>
+            </div>
+          </Panel>
+          <Panel title="Subcategory summary">
+            <div className="stack-list">
+              {subcategories.map((subcategory) => {
+                const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
+                const gp = average(rows.map((dish) => dish.gp));
+                const target = numberValue(subcategory.targetGp, menuTarget);
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span></div>;
+              })}
+            </div>
+          </Panel>
+          <Panel title="Dish table">
+            <DataTable
+              columns={[
+                { key: "name", label: "Dish" },
+                { key: "subcategory", label: "Subcategory" },
+                { key: "cost", label: "Cost", render: (value) => money(value) },
+                { key: "sellingPrice", label: "Selling price", render: (value) => money(value) },
+                { key: "gp", label: "GP %", render: (value) => percent(value) },
+                { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
+                { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : value > -5 ? "amber" : "red"}>{percent(value)}</Badge> },
+                { key: "status", label: "Status" },
+              ]}
+              rows={dishRows}
+            />
+          </Panel>
+        </>
+      )}
+    </div>
+  );
 }
 
-function Waste() {
-  const rows = [
-    { id: "w1", date: "2026-06-08", item: "Hake garnish", reason: "Overproduction", department: "Kitchen Made", cost: 18.4 },
-    { id: "w2", date: "2026-06-08", item: "Orange juice", reason: "FOH mistake", department: "Bar", cost: 9.38 },
-    { id: "w3", date: "2026-06-07", item: "Croissant", reason: "Spoiled", department: "Bought In", cost: 6.96 },
-  ];
-  return <Panel title="Waste tracking" action="Reporting only"><DataTable columns={[{ key: "date", label: "Date" }, { key: "item", label: "Item" }, { key: "reason", label: "Reason" }, { key: "department", label: "Department" }, { key: "cost", label: "Cost", render: money }]} rows={rows} /></Panel>;
+function Waste({ department, departmentNames, products, wasteItems, setWasteItems }) {
+  const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
+  const [form, setForm] = useState({ date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
+
+  const updateProduct = (value) => {
+    const match = matchProduct(value, products);
+    setForm({ ...form, productName: value, unitCost: match?.product?.unitCost ?? form.unitCost });
+  };
+
+  const addWaste = () => {
+    if (!form.productName.trim()) return;
+    setWasteItems((current) => [{ ...form, id: uid(), cost: wasteCost(form) }, ...current]);
+    setForm({ date: today(), department: form.department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
+  };
+
+  return (
+    <div className="page-grid">
+      <Panel title="Create waste">
+        <div className="form-grid six">
+          <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>Product<input list="product-list" value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
+          <datalist id="product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+          <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
+          <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+          <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
+          <Field label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
+        </div>
+        <div className="button-row left"><button onClick={addWaste} type="button"><Plus size={16} />Add Waste</button></div>
+      </Panel>
+      <Panel title="Waste tracking" action="Separate cost line">
+        <DataTable
+          columns={[
+            { key: "date", label: "Date" },
+            { key: "department", label: "Department" },
+            { key: "productName", label: "Product" },
+            { key: "quantity", label: "Quantity" },
+            { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
+            { key: "reason", label: "Reason" },
+            { key: "notes", label: "Notes" },
+            { key: "cost", label: "Waste cost", render: (value) => money(value) },
+          ]}
+          onDelete={(id) => setWasteItems((current) => current.filter((item) => item.id !== id))}
+          rows={visibleWaste}
+        />
+      </Panel>
+    </div>
+  );
 }
 
-function GpAnalysis({ metrics, invoices, supplierSpend }) {
-  const costIncreaseRows = invoices.flatMap((invoice) => invoice.items).map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
+function GpAnalysis({ dateRange, department, gpTarget, metrics, supplierSpend }) {
+  const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
+  const monthlyRows = [
+    { day: "Apr", sales: metrics.sales * 0.82 },
+    { day: "May", sales: metrics.sales * 0.91 },
+    { day: "Jun", sales: metrics.sales },
+  ];
+
   return (
     <>
       <div className="metric-grid">
-        <Metric label="Kitchen Made GP" value={percent(metrics.invoiceGp)} delta="Invoice GP" />
-        <Metric label="Spend trend" value={money(metrics.purchases)} delta="Week selected" />
-        <Metric label="Real GP" value={percent(metrics.realGp)} delta="Stocktake" />
-        <Metric label="Top supplier" value={supplierSpend.sort((a, b) => b.spend - a.spend)[0]?.name || "-"} delta="By spend" />
+        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Waste %" value={percent(metrics.wastePercent)} delta={money(metrics.waste)} tone="warn" />
+        <Metric label="Stock variance" value={money(metrics.stockVariance)} delta="Closing - opening" />
       </div>
       <div className="dashboard-layout secondary">
-        <Panel title="GP trend chart"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
-        <Panel title="Spend trend chart"><BarSeries rows={metrics.salesRows.map((row) => ({ ...row, purchases: row.sales * 0.31 }))} valueKey="purchases" /></Panel>
+        <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
+        <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
       </div>
       <div className="dashboard-layout secondary">
-        <Panel title="Supplier spend chart"><DonutBars rows={supplierSpend} /></Panel>
-        <Panel title="Top cost increases"><DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} /></Panel>
+        <Panel title="Top suppliers">
+          <DataTable
+            columns={[
+              { key: "name", label: "Supplier" },
+              { key: "category", label: "Category" },
+              { key: "spend", label: "Spend", render: (value) => money(value) },
+            ]}
+            rows={[...supplierSpend].sort((a, b) => b.spend - a.spend)}
+          />
+        </Panel>
+        <Panel title="Top cost increases">
+          <DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} />
+        </Panel>
       </div>
+      <Panel title="Formula checks" action="Restaurant GP logic">
+        <div className="code-card">
+          <p>Invoice GP = (food sales - purchases) / food sales x 100</p>
+          <p>Stocktake real cost = opening stock + purchases - closing stock</p>
+          <p>Real GP including waste = (food sales - (stocktake real cost + waste)) / food sales x 100</p>
+        </div>
+      </Panel>
     </>
   );
 }
@@ -800,28 +1829,182 @@ function AiInsights({ metrics, products, supplierSpend }) {
       </Panel>
       <Panel title="AI backend structure">
         <div className="code-card">
-          <p>Frontend calls <code>POST /api/ai/ask</code>.</p>
+          <p>Invoices call <code>POST /.netlify/functions/read-invoice-ai</code>.</p>
           <p>The backend owns <code>OPENAI_API_KEY</code>. The browser never receives it.</p>
-          <p>Use the included <code>server.js</code> as the integration point.</p>
+          <p>Product matching uses exact, normalized and similarity confidence before approval updates products.</p>
         </div>
       </Panel>
     </div>
   );
 }
 
-function SettingsPanel() {
+function SettingsPanel({
+  aiSettings,
+  companySettings,
+  departmentSettings,
+  financialSettings,
+  invoiceSettings,
+  menuSettings,
+  setAiSettings,
+  setCompanySettings,
+  setDepartmentSettings,
+  setFinancialSettings,
+  setInvoiceSettings,
+  setMenuSettings,
+}) {
+  const departmentEmpty = { name: "", type: "Food", targetGp: financialSettings.targetGp, active: true };
+  const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
+  const [editingDepartmentId, setEditingDepartmentId] = useState("");
+  const [dataStatus, setDataStatus] = useState("");
+
+  const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
+  const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
+  const updateMenu = (field, value) => setMenuSettings({ ...menuSettings, [field]: value });
+  const updateInvoice = (field, value) => setInvoiceSettings({ ...invoiceSettings, [field]: value });
+  const updateAi = (field, value) => setAiSettings({ ...aiSettings, [field]: value });
+
+  const saveDepartment = () => {
+    if (!departmentForm.name.trim()) return;
+    const payload = { ...departmentForm, targetGp: numberValue(departmentForm.targetGp), active: Boolean(departmentForm.active) };
+    if (editingDepartmentId) {
+      setDepartmentSettings(departmentSettings.map((department) => (department.id === editingDepartmentId ? { ...department, ...payload } : department)));
+    } else {
+      setDepartmentSettings([...departmentSettings, { ...payload, id: uid() }]);
+    }
+    setDepartmentForm(departmentEmpty);
+    setEditingDepartmentId("");
+  };
+
+  const backup = {
+    companySettings,
+    financialSettings,
+    departmentSettings,
+    menuSettings,
+    invoiceSettings,
+    aiSettings,
+    exportedAt: new Date().toISOString(),
+  };
+  const backupHref = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(backup, null, 2))}`;
+  const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
+
+  const importBackup = async (file) => {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      if (payload.companySettings) setCompanySettings({ ...defaultCompanySettings, ...payload.companySettings });
+      if (payload.financialSettings) setFinancialSettings({ ...defaultFinancialSettings, ...payload.financialSettings });
+      if (Array.isArray(payload.departmentSettings)) setDepartmentSettings(payload.departmentSettings);
+      if (payload.menuSettings) setMenuSettings({ ...defaultMenuSettings, ...payload.menuSettings });
+      if (payload.invoiceSettings) setInvoiceSettings({ ...defaultInvoiceSettings, ...payload.invoiceSettings });
+      if (payload.aiSettings) setAiSettings({ ...defaultAiSettings, ...payload.aiSettings });
+      setDataStatus("Backup imported.");
+    } catch {
+      setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
+    }
+  };
+
+  const resetDemoSettings = () => {
+    setCompanySettings(defaultCompanySettings);
+    setFinancialSettings(defaultFinancialSettings);
+    setDepartmentSettings(defaultDepartmentSettings);
+    setMenuSettings(defaultMenuSettings);
+    setInvoiceSettings(defaultInvoiceSettings);
+    setAiSettings(defaultAiSettings);
+    setDepartmentForm(departmentEmpty);
+    setEditingDepartmentId("");
+    setDataStatus("Demo settings restored.");
+  };
+
   return (
     <div className="settings-grid">
-      <Panel title="Restaurant setup">
-        <div className="form-grid">
-          <Field label="Restaurant name" value="Reading Room" readOnly />
-          <label>Currency<select defaultValue="GBP"><option>GBP</option><option>EUR</option><option>USD</option></select></label>
-          <Field label="Target GP" value="75%" readOnly />
-          <label>Week starts<select defaultValue="Monday"><option>Monday</option><option>Sunday</option></select></label>
+      <Panel title="Company settings">
+        <div className="form-grid six">
+          <Field label="Company name" value={companySettings.companyName} onChange={(value) => updateCompany("companyName", value)} />
+          <Field label="Trading name" value={companySettings.tradingName} onChange={(value) => updateCompany("tradingName", value)} />
+          <Field label="Address" value={companySettings.address} onChange={(value) => updateCompany("address", value)} />
+          <Field label="Postcode" value={companySettings.postcode} onChange={(value) => updateCompany("postcode", value)} />
+          <Field label="Country" value={companySettings.country} onChange={(value) => updateCompany("country", value)} />
+          <Field label="VAT number" value={companySettings.vatNumber} onChange={(value) => updateCompany("vatNumber", value)} />
+          <Field label="Email" type="email" value={companySettings.email} onChange={(value) => updateCompany("email", value)} />
+          <Field label="Phone" value={companySettings.phone} onChange={(value) => updateCompany("phone", value)} />
+          <Field label="Website" value={companySettings.website} onChange={(value) => updateCompany("website", value)} />
         </div>
       </Panel>
-      <Panel title="Departments">
-        <DataTable columns={[{ key: "department", label: "Department" }, { key: "base", label: "GP base" }, { key: "target", label: "Target" }]} rows={departments.map((department) => ({ id: department, department, base: department === "Non-food" ? "Excluded" : department, target: department === "Non-food" ? "-" : "75%" }))} />
+
+      <Panel title="Financial settings">
+        <div className="form-grid six">
+          <label>Currency<select value={financialSettings.currency} onChange={(event) => updateFinancial("currency", event.target.value)}><option>GBP</option><option>EUR</option><option>USD</option></select></label>
+          <label>Week starts on<select value={financialSettings.weekStartsOn} onChange={(event) => updateFinancial("weekStartsOn", event.target.value)}><option>Monday</option><option>Sunday</option></select></label>
+          <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
+          <Field label="Default VAT %" type="number" value={financialSettings.defaultVat} onChange={(value) => updateFinancial("defaultVat", numberValue(value))} />
+          <label>Fiscal year start month<select value={financialSettings.fiscalYearStartMonth} onChange={(event) => updateFinancial("fiscalYearStartMonth", event.target.value)}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((month) => <option key={month}>{month}</option>)}</select></label>
+          <Field label="Timezone" value={financialSettings.timezone} onChange={(value) => updateFinancial("timezone", value)} />
+        </div>
+      </Panel>
+
+      <Panel title="Department settings">
+        <div className="form-grid six">
+          <Field label="Department" value={departmentForm.name} onChange={(value) => setDepartmentForm({ ...departmentForm, name: value })} />
+          <label>Department type<select value={departmentForm.type} onChange={(event) => setDepartmentForm({ ...departmentForm, type: event.target.value })}>{departmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+          <Field label="Department target GP %" type="number" value={departmentForm.targetGp} onChange={(value) => setDepartmentForm({ ...departmentForm, targetGp: value })} />
+          <label>Status<select value={departmentForm.active ? "Active" : "Inactive"} onChange={(event) => setDepartmentForm({ ...departmentForm, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+        </div>
+        <div className="button-row left">
+          <button onClick={saveDepartment} type="button"><Plus size={16} />{editingDepartmentId ? "Save Department" : "Add Department"}</button>
+        </div>
+        <DataTable
+          columns={[
+            { key: "name", label: "Department" },
+            { key: "type", label: "Department type" },
+            { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
+            { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
+          ]}
+          onDelete={(id) => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id))}
+          onEdit={(row) => {
+            setDepartmentForm(row);
+            setEditingDepartmentId(row.id);
+          }}
+          rows={departmentSettings}
+        />
+      </Panel>
+
+      <Panel title="Menu costing settings">
+        <div className="form-grid six">
+          <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
+          <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
+          <CheckboxField checked={menuSettings.allowSubcategoryTargetOverride} label="Allow subcategory target override" onChange={(value) => updateMenu("allowSubcategoryTargetOverride", value)} />
+          <CheckboxField checked={menuSettings.allowDishTargetOverride} label="Allow dish target override" onChange={(value) => updateMenu("allowDishTargetOverride", value)} />
+        </div>
+      </Panel>
+
+      <Panel title="Invoice settings">
+        <div className="form-grid six">
+          <CheckboxField checked={invoiceSettings.requireApprovalBeforeGp} label="Require approval before invoice affects GP" onChange={(value) => updateInvoice("requireApprovalBeforeGp", value)} />
+          <label>Default invoice department<select value={invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateInvoice("defaultInvoiceDepartment", event.target.value)}>{departmentSettings.filter((department) => department.active).map((department) => <option key={department.id}>{department.name}</option>)}</select></label>
+          <Field label="Default VAT %" type="number" value={invoiceSettings.defaultVat} onChange={(value) => updateInvoice("defaultVat", numberValue(value))} />
+          <CheckboxField checked={invoiceSettings.allowUnknownSuppliers} label="Allow unknown suppliers" onChange={(value) => updateInvoice("allowUnknownSuppliers", value)} />
+          <CheckboxField checked={invoiceSettings.autoCreateProductsAfterApproval} label="Auto-create products after invoice approval" onChange={(value) => updateInvoice("autoCreateProductsAfterApproval", value)} />
+        </div>
+      </Panel>
+
+      <Panel title="AI settings">
+        <div className="form-grid six">
+          <CheckboxField checked={aiSettings.enableAiInvoiceReading} label="Enable AI invoice reading" onChange={(value) => updateAi("enableAiInvoiceReading", value)} />
+          <CheckboxField checked={aiSettings.enableAiProductMatching} label="Enable AI product matching" onChange={(value) => updateAi("enableAiProductMatching", value)} />
+          <Field label="Auto-match confidence threshold" type="number" value={aiSettings.autoMatchConfidenceThreshold} onChange={(value) => updateAi("autoMatchConfidenceThreshold", numberValue(value))} />
+          <CheckboxField checked={aiSettings.requireManualApprovalBelowThreshold} label="Require manual approval below threshold" onChange={(value) => updateAi("requireManualApprovalBelowThreshold", value)} />
+          <label>Product matching sensitivity<select value={aiSettings.productMatchingSensitivity} onChange={(event) => updateAi("productMatchingSensitivity", event.target.value)}><option>Low</option><option>Medium</option><option>High</option></select></label>
+        </div>
+      </Panel>
+
+      <Panel title="Data settings">
+        <div className="button-row left">
+          <a className="file-button secondary" download="marginflow-backup.json" href={backupHref}>Export backup</a>
+          <label className="file-button secondary">Import backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
+          <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
+          <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
+        </div>
+        {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
       </Panel>
     </div>
   );
@@ -883,6 +2066,15 @@ function Field({ label, value, onChange, type = "text", readOnly = false }) {
   return <label>{label}<input readOnly={readOnly} type={type} value={value} onChange={(event) => onChange?.(event.target.value)} /></label>;
 }
 
+function CheckboxField({ checked, label, onChange }) {
+  return (
+    <label className="checkbox-field">
+      <input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
+      <span>{label}</span>
+    </label>
+  );
+}
+
 function Metric({ label, value, delta, tone = "default" }) {
   return (
     <div className={`metric-card ${tone}`}>
@@ -921,7 +2113,7 @@ function BarSeries({ rows, valueKey }) {
 
 function LineSeries({ rows, valueKey }) {
   const max = Math.max(...rows.map((row) => Number(row[valueKey]) || 0), 1);
-  const points = rows.map((row, index) => `${(index / (rows.length - 1)) * 100},${100 - ((Number(row[valueKey]) || 0) / max) * 88}`).join(" ");
+  const points = rows.map((row, index) => `${(index / Math.max(rows.length - 1, 1)) * 100},${100 - ((Number(row[valueKey]) || 0) / max) * 88}`).join(" ");
   return (
     <div className="line-chart">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -937,12 +2129,12 @@ function DonutBars({ rows }) {
   return <div className="donut-list">{rows.map((row) => <div key={row.id || row.name}><span>{row.name}</span><strong>{money(row.spend)}</strong><i style={{ width: `${(row.spend / max) * 100}%` }} /></div>)}</div>;
 }
 
-function InsightList() {
+function InsightList({ metrics }) {
   return (
     <div className="stack-list">
-      <Opportunity title="Kitchen GP below target" body="Wednesday has purchases higher than net sales. Check invoice timing or stock usage." />
-      <Opportunity title="Supplier movement" body="Albion and Woods are driving most of the current spend." />
-      <Opportunity title="Menu pricing" body="Review low-GP dishes and compare selling price against target GP." />
+      <Opportunity title="Invoice GP" body={`Invoice GP is ${percent(metrics.invoiceGp)}. Review high-value invoices before the next order.`} />
+      <Opportunity title="Stocktake cost" body={`Opening + purchases - closing gives ${money(metrics.stocktakeCost)} real cost used.`} />
+      <Opportunity title="Waste pressure" body={`Waste is ${money(metrics.waste)} or ${percent(metrics.wastePercent)} of current sales.`} />
     </div>
   );
 }
@@ -953,6 +2145,15 @@ function Opportunity({ title, body }) {
 
 function Badge({ children, tone }) {
   return <span className={`badge ${tone}`}>{children}</span>;
+}
+
+function departmentForProduct(name = "", departmentNames = defaultDepartments, fallback = "Kitchen Made") {
+  const lower = name.toLowerCase();
+  const pick = (department) => (departmentNames.includes(department) ? department : fallback);
+  if (lower.includes("juice") || lower.includes("wine") || lower.includes("beer")) return pick("Bar");
+  if (lower.includes("blue roll") || lower.includes("napkin") || lower.includes("clean")) return pick("Non-food");
+  if (lower.includes("croissant") || lower.includes("cake") || lower.includes("bread")) return pick("Bought In");
+  return pick(fallback);
 }
 
 function mockAiAnswer(question, metrics, products, supplierSpend) {
@@ -968,7 +2169,10 @@ function mockAiAnswer(question, metrics, products, supplierSpend) {
   if (lower.includes("price")) {
     return "Start with dishes below 75% GP or dishes using products that recently increased. Increase selling price only where volume and guest perception can support it.";
   }
-  return `GP is currently ${percent(metrics.invoiceGp)} before stocktake. The usual causes of a GP drop are higher invoice spend, missing sales split, waste, or stock timing.`;
+  return `Real GP including waste is currently ${percent(metrics.realGp)}. Check invoice spend, stock variance and waste by department.`;
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = document.getElementById("root");
+const root = rootElement._marginFlowRoot || createRoot(rootElement);
+rootElement._marginFlowRoot = root;
+root.render(<App />);
