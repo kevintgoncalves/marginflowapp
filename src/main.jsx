@@ -63,6 +63,8 @@ const defaultFinancialSettings = {
   weekStartsOn: "Monday",
   targetGp: 75,
   defaultVat: 20,
+  salesInputMethod: "Manual Gross + Net Sales",
+  gpCalculationBase: "Net Sales",
   fiscalYearStartMonth: "April",
   timezone: "Europe/London",
 };
@@ -300,11 +302,23 @@ function vatAmountFromGross(gross, vatRate = 20) {
   return Number((numberValue(gross, 0) - netFromGross(gross, vatRate)).toFixed(2));
 }
 
+function vatAmountFromGrossNet(gross, net) {
+  return Number((numberValue(gross) - numberValue(net)).toFixed(2));
+}
+
+function effectiveVatRate(gross, net) {
+  const netValue = numberValue(net);
+  return netValue ? (vatAmountFromGrossNet(gross, netValue) / netValue) * 100 : 0;
+}
+
 function netSalesForRow(row) {
-  const discount = numberValue(row?.discounts);
   return row?.grossSales !== undefined
-    ? Math.max(0, Number((netFromGross(row.grossSales, row.vatRate ?? 20) - discount).toFixed(2)))
+    ? numberValue(row.sales)
     : numberValue(row?.sales);
+}
+
+function salesBaseForRow(row, gpCalculationBase = "Net Sales") {
+  return gpCalculationBase === "Gross Sales" ? numberValue(row?.grossSales) : netSalesForRow(row);
 }
 
 function lineTotal(item) {
@@ -688,28 +702,64 @@ async function textFromInvoiceFiles(files) {
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
-function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20) {
-  return text
+function parseCurrencyCell(value) {
+  return numberValue(String(value || "").replace(/[£$,]/g, ""));
+}
+
+function normalizeHeader(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
+  const rows = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => line.split(",").map((cell) => cell.trim()))
-    .filter((cells) => cells.length >= 2 && !/^date$/i.test(cells[0]))
+    .map((line) => line.split(",").map((cell) => cell.trim()));
+  if (!rows.length) return [];
+
+  const header = rows[0].map(normalizeHeader);
+  const hasHeader = header.some((cell) => ["date", "grosssales", "netsales", "gross", "net", "department", "salestype"].includes(cell));
+  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
+  const dateIndex = hasHeader ? findIndex(["date", "businessdate", "day"]) : 0;
+  const departmentIndex = hasHeader ? findIndex(["department", "salestype", "type", "category"]) : -1;
+  const grossIndex = hasHeader ? findIndex(["grosssales", "gross", "totalsales"]) : -1;
+  const netIndex = hasHeader ? findIndex(["netsales", "net", "netrevenue"]) : -1;
+  const vatIndex = hasHeader ? findIndex(["vat", "vatamount", "tax", "taxamount"]) : -1;
+  const vatRateIndex = hasHeader ? findIndex(["vatrate", "vatpercent", "taxrate"]) : -1;
+  const discountIndex = hasHeader ? findIndex(["discounts", "discount", "refunds", "discountsrefunds"]) : -1;
+  const serviceIndex = hasHeader ? findIndex(["servicecharge", "servicecharges", "gratuity"]) : -1;
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  return dataRows
+    .filter((cells) => cells.length >= 2)
     .map((cells) => {
-      const [date, second, third] = cells;
-      const hasDepartment = cells.length >= 3;
-      const department = hasDepartment ? second : "Total";
-      const grossSales = numberValue(hasDepartment ? third : second, 0);
-      const vatRate = numberValue(cells[3], defaultVatRate);
+      const hasDepartment = !hasHeader && cells.length >= 3;
+      const date = cells[dateIndex >= 0 ? dateIndex : 0];
+      const department = hasHeader
+        ? cells[departmentIndex] || "Total"
+        : hasDepartment ? cells[1] : "Total";
+      const grossSales = hasHeader
+        ? parseCurrencyCell(cells[grossIndex])
+        : parseCurrencyCell(hasDepartment ? cells[2] : cells[1]);
+      const vatRate = hasHeader ? numberValue(cells[vatRateIndex], defaultVatRate) : numberValue(cells[3], defaultVatRate);
+      const importedNet = hasHeader && netIndex >= 0 ? parseCurrencyCell(cells[netIndex]) : 0;
+      const sales = importedNet || (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0);
+      const vatAmount = sales ? vatAmountFromGrossNet(grossSales, sales) : parseCurrencyCell(cells[vatIndex]);
+      const discounts = parseCurrencyCell(cells[discountIndex]);
+      const serviceCharge = parseCurrencyCell(cells[serviceIndex]);
       return {
         id: uid(),
         date,
         day: new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
         department: departmentNames.includes(department) ? department : department || "Total",
         grossSales,
+        sales,
         vatRate,
-        vatAmount: vatAmountFromGross(grossSales, vatRate),
-        sales: netFromGross(grossSales, vatRate),
+        vatAmount,
+        effectiveVatRate: effectiveVatRate(grossSales, sales),
+        discounts,
+        serviceCharge,
       };
     })
     .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.grossSales > 0);
@@ -719,14 +769,18 @@ function normalizeSalesRows(rows) {
   return rows.map((row) => {
     const grossSales = numberValue(row.grossSales, numberValue(row.sales));
     const vatRate = numberValue(row.vatRate, 20);
+    const sales = row.sales !== undefined ? numberValue(row.sales) : netFromGross(grossSales, vatRate);
     return {
       ...row,
       id: row.id || uid(),
       department: row.department || "Total",
       grossSales,
       vatRate,
-      vatAmount: vatAmountFromGross(grossSales, vatRate),
-      sales: netFromGross(grossSales, vatRate),
+      sales,
+      vatAmount: vatAmountFromGrossNet(grossSales, sales),
+      effectiveVatRate: effectiveVatRate(grossSales, sales),
+      discounts: numberValue(row.discounts),
+      serviceCharge: numberValue(row.serviceCharge),
     };
   });
 }
