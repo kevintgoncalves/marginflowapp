@@ -401,7 +401,7 @@ function singlePackFromCasePack(packSize) {
 
 function parseEliteInvoiceRows(invoiceText) {
   const text = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
-  const rowPattern = /(?:^|\s)\d+\s+[A-Z0-9]+\s+(?:(?=[A-Z0-9]*\d)[A-Z0-9]+\s+)?(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:x|\*)\s*\d+(?:[.,]\d+)?\s*(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s+\d+\b/gi;
+  const rowPattern = /(?:^|\s)\d{1,2}\s+[A-Z0-9]+\s+(?:(?=[A-Z0-9]*\d)[A-Z0-9]+\s+)?(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:x|\*)\s*\d+(?:[.,]\d+)?\s*(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s+\d+\b/gi;
   const rows = [];
   let match;
 
@@ -1276,9 +1276,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       if (readControllerRef.current !== controller) return;
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
-      const deterministicLines = supplier === "TG Fruits"
+      const supplierKey = supplier.toLowerCase();
+      const invoiceKey = invoiceText.toLowerCase();
+      const deterministicLines = supplierKey.includes("tg fruits") || invoiceKey.includes("tg fruits")
         ? extractTgFruitsInvoiceRows(invoiceText)
-        : supplier.toLowerCase().includes("elite")
+        : supplierKey.includes("elite") || invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
           ? parseEliteInvoiceRows(invoiceText)
           : [];
       const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
