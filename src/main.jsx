@@ -317,6 +317,116 @@ function invoiceUnitCostFromExtraction(line) {
   return unitCost;
 }
 
+function invoiceDateTokenPattern() {
+  return "\\b(?:\\d{1,2}[-/][A-Z]{3}|\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?|20\\d{2}-\\d{2}-\\d{2})\\b";
+}
+
+function invoiceNumberMatches(text) {
+  const spacedText = text.replace(/(\d+[.,]\d{2})(?=\d+[.,]\d{2})/g, "$1 ");
+  const matches = [];
+  const pattern = /(^|\s)(-?\d+(?:[.,]\d{1,2})?)(?=\s|$)/g;
+  let match;
+  while ((match = pattern.exec(spacedText))) {
+    const value = numberValue(match[2].replace(",", "."), NaN);
+    if (Number.isFinite(value)) matches.push({ value, index: match.index + match[1].length });
+  }
+  return matches;
+}
+
+function splitInvoiceProductAndPack(description) {
+  const cleaned = description.replace(/\s+/g, " ").trim();
+  const packPattern = /\b(?:X?\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
+  const match = cleaned.match(packPattern);
+  if (!match || match.index < 2) return { productName: cleaned, packSize: "" };
+  return {
+    productName: cleaned.slice(0, match.index).trim(),
+    packSize: cleaned.slice(match.index).trim(),
+  };
+}
+
+function parseTgFruitsInvoiceRow(rowText) {
+  const withoutDate = rowText.replace(new RegExp(`^\\s*${invoiceDateTokenPattern()}\\s*`, "i"), "").trim();
+  const numbers = invoiceNumberMatches(withoutDate);
+  if (numbers.length < 4) return null;
+
+  for (let index = numbers.length - 4; index >= 0; index -= 1) {
+    const vat = numbers[index].value;
+    const lineTotalValue = numbers[index + 1]?.value;
+    const unitCostValue = numbers[index + 2]?.value;
+    const quantityValue = numbers[index + 3]?.value;
+    if (vat < 0 || quantityValue <= 0 || unitCostValue <= 0 || lineTotalValue <= 0) continue;
+    if (!amountsAlmostEqual(quantityValue * unitCostValue, lineTotalValue)) continue;
+
+    const description = withoutDate.slice(0, numbers[index].index).trim();
+    const { productName, packSize } = splitInvoiceProductAndPack(description);
+    if (!/[A-Za-z]{2}/.test(productName)) return null;
+    return {
+      productName,
+      packSize,
+      quantity: quantityValue,
+      unitCost: unitCostValue,
+      lineTotal: lineTotalValue,
+    };
+  }
+
+  return null;
+}
+
+function extractTgFruitsInvoiceRows(invoiceText) {
+  const normalizedText = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
+  const datePattern = new RegExp(invoiceDateTokenPattern(), "gi");
+  const dateMatches = [...normalizedText.matchAll(datePattern)];
+  const rows = [];
+
+  dateMatches.forEach((match, index) => {
+    const start = match.index;
+    const end = dateMatches[index + 1]?.index ?? normalizedText.length;
+    const row = parseTgFruitsInvoiceRow(normalizedText.slice(start, end).trim());
+    if (row) rows.push(row);
+  });
+
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function singlePackFromCasePack(packSize) {
+  const match = packSize.match(/^\s*(\d+(?:[.,]\d+)?)\s*(?:x|\*)\s*(.+?)\s*$/i);
+  return match ? { caseUnits: numberValue(match[1], 1), singlePackSize: match[2].replace(/\s+/g, " ").trim() } : { caseUnits: 1, singlePackSize: packSize };
+}
+
+function parseEliteInvoiceRows(invoiceText) {
+  const text = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
+  const rowPattern = /(?:^|\s)\d+\s+[A-Z0-9]+\s+(?:(?=[A-Z0-9]*\d)[A-Z0-9]+\s+)?(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:x|\*)\s*\d+(?:[.,]\d+)?\s*(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s+\d+\b/gi;
+  const rows = [];
+  let match;
+
+  while ((match = rowPattern.exec(text))) {
+    const [, productName, packSizeRaw, quantityRaw, unitPriceRaw, lineValueRaw] = match;
+    const packSize = packSizeRaw.replace(/\s+/g, " ").replace(/\*/g, "x").trim();
+    const splitQuantity = numberValue(quantityRaw.replace(",", "."), 1);
+    const caseUnitPrice = numberValue(unitPriceRaw.replace(",", "."), 0);
+    const lineTotalValue = numberValue(lineValueRaw.replace(",", "."), 0);
+    const { caseUnits, singlePackSize } = singlePackFromCasePack(packSize);
+    const splitUnitCost = splitQuantity > 0 ? Number((lineTotalValue / splitQuantity).toFixed(4)) : caseUnitPrice;
+    const isSplitPack = caseUnits > 1 && lineTotalValue > 0 && !amountsAlmostEqual(splitQuantity * caseUnitPrice, lineTotalValue);
+
+    rows.push({
+      productName: productName.replace(/\s+/g, " ").trim(),
+      packSize: isSplitPack ? singlePackSize : packSize,
+      quantity: splitQuantity,
+      unitCost: isSplitPack ? splitUnitCost : caseUnitPrice,
+      lineTotal: lineTotalValue || splitQuantity * caseUnitPrice,
+    });
+  }
+
+  return rows;
+}
+
 function normalizeInvoiceUnitCost(item) {
   const quantity = numberValue(item.quantity, 1);
   const unitCost = numberValue(item.unitCost, 0);
@@ -1166,7 +1276,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       if (readControllerRef.current !== controller) return;
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
-      const items = (payload.lines || []).map((line) => {
+      const deterministicLines = supplier === "TG Fruits"
+        ? extractTgFruitsInvoiceRows(invoiceText)
+        : supplier.toLowerCase().includes("elite")
+          ? parseEliteInvoiceRows(invoiceText)
+          : [];
+      const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
+      const items = sourceLines.map((line) => {
         const quantity = numberValue(line.quantity, 1);
         const unitCost = invoiceUnitCostFromExtraction(line);
         return enrichInvoiceLine(
@@ -1210,6 +1326,9 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       items: current.items.map((item) => {
         if (item.id !== id) return item;
         const updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
+        if (numericFields.includes(field)) {
+          updated.lineTotal = numberValue(updated.quantity) * numberValue(updated.unitCost);
+        }
         return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
       }),
     }));

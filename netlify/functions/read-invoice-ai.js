@@ -155,9 +155,10 @@ function dateTokenPattern() {
 
 function numberMatches(text) {
   const matches = [];
+  const spacedText = text.replace(/(\d+[.,]\d{2})(?=\d+[.,]\d{2})/g, "$1 ");
   const numberPattern = /(^|\s)(-?\d+(?:[.,]\d{1,2})?)(?=\s|$)/g;
   let match;
-  while ((match = numberPattern.exec(text))) {
+  while ((match = numberPattern.exec(spacedText))) {
     matches.push({
       raw: match[2],
       value: asNumber(match[2]),
@@ -165,6 +166,21 @@ function numberMatches(text) {
     });
   }
   return matches;
+}
+
+function findTgFruitsColumns(numbers) {
+  const usable = numbers.filter((number) => Number.isFinite(number.value));
+  for (let index = usable.length - 4; index >= 0; index -= 1) {
+    const vat = usable[index].value;
+    const lineTotal = usable[index + 1]?.value;
+    const unitCost = usable[index + 2]?.value;
+    const quantity = usable[index + 3]?.value;
+    if (vat < 0 || quantity <= 0 || unitCost <= 0 || lineTotal <= 0) continue;
+    if (almostEqual(quantity * unitCost, lineTotal)) {
+      return { quantity, unitCost, vat, lineTotal, score: 0 };
+    }
+  }
+  return null;
 }
 
 function findBestNumericColumns(numbers) {
@@ -217,7 +233,7 @@ function splitProductAndPack(description) {
 function parseTableRow(rowText) {
   const withoutDate = rowText.replace(new RegExp(`^\\s*${dateTokenPattern()}\\s*`, "i"), "").trim();
   const numbers = numberMatches(withoutDate);
-  const columns = findBestNumericColumns(numbers);
+  const columns = findTgFruitsColumns(numbers) || findBestNumericColumns(numbers);
   if (!columns) return null;
 
   const firstNumberIndex = Math.min(...numbers.map((number) => number.index));
