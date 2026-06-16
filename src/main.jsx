@@ -1549,7 +1549,7 @@ function App() {
           />
         )}
         {active === "recipes" && <Recipes departmentNames={departmentNames} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         {active === "gp" && (
           <GpAnalysis
@@ -2807,7 +2807,270 @@ function BulkSuppliersTable({ rows, setRows, updateRow }) {
   );
 }
 
+function stocktakeBlankLine(department, product = {}) {
+  const quantity = numberValue(product.quantity, 1) || 1;
+  const unitCost = numberValue(product.unitCost);
+  return {
+    id: uid(),
+    productName: product.name || "",
+    matchedProductId: product.id || "",
+    supplier: product.supplier || "",
+    packSize: product.packSize || "",
+    department: product.department || department,
+    quantity,
+    unitCost,
+    stockValue: quantity * unitCost,
+    matchStatus: product.id ? "Matched" : "Manual entry",
+  };
+}
+
 function Stocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
+  const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
+  const blankModal = (type = "Stocktake") => ({
+    type,
+    id: "",
+    department: defaultDepartment,
+    date: today(),
+    entryMode: "Product List",
+    manualValue: 0,
+    lines: [stocktakeBlankLine(defaultDepartment), stocktakeBlankLine(defaultDepartment)],
+    pendingImport: [],
+    status: "",
+    importFileKey: 0,
+  });
+  const [modal, setModal] = useState(null);
+  const [viewingStocktake, setViewingStocktake] = useState(null);
+  const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
+
+  const openModal = (type, stocktake = null) => {
+    if (!stocktake) {
+      setModal(blankModal(type));
+      return;
+    }
+    const isOpening = numberValue(stocktake.openingStockValue) && !numberValue(stocktake.totalValue);
+    setModal({
+      ...blankModal(isOpening ? "Opening Stock" : "Stocktake"),
+      id: stocktake.id,
+      department: stocktake.department,
+      date: stocktake.date,
+      entryMode: stocktake.manualOpeningType === "Manual Value" || stocktake.entryMode === "Manual Value" ? "Manual Value" : "Product List",
+      manualValue: isOpening ? stocktake.openingStockValue : stocktake.totalValue,
+      lines: ((isOpening ? stocktake.openingLines : stocktake.lines) || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
+      pendingImport: [],
+      status: "",
+      importFileKey: 0,
+    });
+  };
+
+  const updateModalLine = (id, field, value) => {
+    setModal((current) => ({
+      ...current,
+      lines: current.lines.map((line) => {
+        if (line.id !== id) return line;
+        let updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
+        if (field === "productName") {
+          const match = matchProduct(value, products);
+          if (match) updated = stocktakeBlankLine(current.department, match.product);
+          else updated = { ...updated, matchedProductId: "", supplier: "", packSize: "", matchStatus: "Create product on save" };
+        }
+        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
+        return updated;
+      }),
+    }));
+  };
+
+  const importStocktakeCsv = async (file) => {
+    if (!file || !modal) return;
+    const rows = (await file.text()).split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
+    const hasHeader = normalizeHeader(rows[0]?.[0]).includes("product");
+    const imported = (hasHeader ? rows.slice(1) : rows).map(([productName, quantity, unitCost]) => {
+      const match = matchProduct(productName, products);
+      const product = match?.product;
+      const line = product ? stocktakeBlankLine(modal.department, product) : stocktakeBlankLine(modal.department, { name: productName, quantity: 1, unitCost: numberValue(unitCost) });
+      const nextQuantity = numberValue(quantity, line.quantity);
+      const nextUnitCost = unitCost ? numberValue(unitCost) : line.unitCost;
+      return { ...line, quantity: nextQuantity, unitCost: nextUnitCost, stockValue: nextQuantity * nextUnitCost };
+    }).filter((line) => line.productName.trim());
+    setModal((current) => ({ ...current, pendingImport: imported, status: `${imported.length} row(s) ready for review.` }));
+  };
+
+  const ensureStocktakeProducts = (lines, selectedDepartment, selectedDate) => {
+    let nextProducts = [...products];
+    const savedLines = lines.map((line) => {
+      const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
+      if (match) return { ...line, matchedProductId: match.id, supplier: match.supplier || line.supplier };
+      const product = {
+        id: uid(),
+        name: line.productName,
+        supplier: line.supplier || "Stocktake",
+        packSize: line.packSize || "",
+        quantity: 1,
+        unitCost: numberValue(line.unitCost),
+        department: selectedDepartment,
+        aliases: [],
+        supplierPrices: [],
+        priceHistory: [{ date: selectedDate, supplier: "Stocktake", price: numberValue(line.unitCost) }],
+      };
+      nextProducts = [...nextProducts, product];
+      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
+    });
+    return { nextProducts, savedLines };
+  };
+
+  const saveModal = () => {
+    if (!modal) return;
+    const isManual = modal.entryMode === "Manual Value";
+    const sourceLines = isManual ? [] : modal.lines.filter((line) => line.productName.trim());
+    const incomplete = sourceLines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
+    if (!isManual && (!sourceLines.length || incomplete)) {
+      setModal((current) => ({ ...current, status: "Every row needs product, quantity and unit cost." }));
+      return;
+    }
+    const { nextProducts, savedLines } = ensureStocktakeProducts(sourceLines, modal.department, modal.date);
+    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
+    const value = isManual ? numberValue(modal.manualValue) : normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    const isOpening = modal.type === "Opening Stock";
+    const stocktake = {
+      id: modal.id || uid(),
+      date: modal.date,
+      department: modal.department,
+      entryMode: modal.entryMode,
+      openingStockMode: "Manual",
+      manualOpeningType: modal.entryMode,
+      manualOpeningValue: isOpening && isManual ? value : 0,
+      openingLines: isOpening ? normalizedLines : [],
+      openingStockValue: isOpening ? value : 0,
+      lines: isOpening ? [] : normalizedLines,
+      totalValue: isOpening ? 0 : value,
+      status: "Saved",
+    };
+    setProducts(nextProducts);
+    setStocktakes((current) => modal.id ? current.map((item) => (item.id === modal.id ? stocktake : item)) : [stocktake, ...current]);
+    setModal(null);
+  };
+
+  return (
+    <div className="page-grid">
+      <Panel title="Stocktake">
+        <div className="button-row left">
+          <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>
+          <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>
+        </div>
+      </Panel>
+      <Panel title="Saved stocktakes">
+        <DataTable
+          columns={[
+            { key: "date", label: "Date" },
+            { key: "department", label: "Department" },
+            { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
+            { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
+            { key: "lines", label: "Lines", render: (lines, row) => (row.openingLines?.length || 0) + (lines?.length || 0) },
+            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
+            { key: "actions", label: "Actions", render: (_, row) => (
+              <div className="row-actions">
+                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
+                <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>
+                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>
+              </div>
+            ) },
+          ]}
+          rows={visibleStocktakes}
+        />
+      </Panel>
+      {modal && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal wide stocktake-modal" role="dialog" aria-modal="true" aria-label={modal.type}>
+            <div className="modal-header">
+              <div><h3>{modal.type}</h3><p>{modal.department} · {modal.date}</p></div>
+              <button className="icon" onClick={() => setModal(null)} type="button"><X size={16} /></button>
+            </div>
+            <div className="form-grid six">
+              <label>Department<select value={modal.department} onChange={(event) => setModal({ ...modal, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+              <Field label="Date" type="date" value={modal.date} onChange={(value) => setModal({ ...modal, date: value })} />
+            </div>
+            <div className="radio-section">
+              <strong>Entry mode</strong>
+              <div className="radio-row">
+                {["Manual Value", "Product List", "CSV Import"].map((mode) => <label key={mode}><input checked={modal.entryMode === mode} onChange={() => setModal({ ...modal, entryMode: mode })} type="radio" />{mode}</label>)}
+              </div>
+            </div>
+            {modal.entryMode === "Manual Value" ? (
+              <div className="form-grid six">
+                <Field label={modal.type === "Opening Stock" ? "Opening stock value" : "Stock value"} type="number" value={modal.manualValue} onChange={(value) => setModal({ ...modal, manualValue: value })} />
+              </div>
+            ) : (
+              <>
+                {modal.entryMode === "CSV Import" && (
+                  <>
+                    <div className="button-row left tight">
+                      <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeCsv(event.target.files?.[0])} type="file" /></label>
+                    </div>
+                    {modal.pendingImport.length > 0 && (
+                      <div className="import-review">
+                        <div className="panel-head"><h2>Review import</h2><span>{modal.pendingImport.length} row(s)</span></div>
+                        <DataTable columns={[
+                          { key: "productName", label: "Product" },
+                          { key: "quantity", label: "Quantity" },
+                          { key: "unitCost", label: "Unit cost", render: money },
+                          { key: "stockValue", label: "Stock value", render: money },
+                        ]} rows={modal.pendingImport} />
+                        <div className="button-row left">
+                          <button onClick={() => setModal((current) => ({ ...current, lines: current.pendingImport, pendingImport: [], status: "Import confirmed." }))} type="button"><Save size={16} />Confirm Import</button>
+                          <button className="ghost danger" onClick={() => setModal((current) => ({ ...current, pendingImport: [], importFileKey: current.importFileKey + 1, status: "Import cancelled." }))} type="button"><X size={16} />Cancel Import</button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="table-wrap bulk-entry-table stocktake-entry-table">
+                  <table>
+                    <thead><tr>{["Product search", "Quantity", "Unit cost", "Stock value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+                    <tbody>
+                      {modal.lines.map((line) => (
+                        <tr key={line.id}>
+                          <td><input list="stocktake-product-list" value={line.productName} onChange={(event) => updateModalLine(line.id, "productName", event.target.value)} /></td>
+                          <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateModalLine(line.id, "quantity", event.target.value)} /></td>
+                          <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateModalLine(line.id, "unitCost", event.target.value)} /></td>
+                          <td>{money(line.stockValue)}</td>
+                          <td><button className="icon danger" onClick={() => setModal((current) => ({ ...current, lines: current.lines.length > 1 ? current.lines.filter((item) => item.id !== line.id) : current.lines }))} type="button"><Trash2 size={15} /></button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <datalist id="stocktake-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+                <div className="button-row left tight">
+                  <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>
+                </div>
+              </>
+            )}
+            {modal.status && <div className="invoice-status info">{modal.status}</div>}
+            <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.entryMode === "Manual Value" ? modal.manualValue : modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
+            <div className="button-row left">
+              <button className="ghost" onClick={() => setModal(null)} type="button">Cancel</button>
+              <button onClick={saveModal} type="button"><Save size={16} />Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {viewingStocktake && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal" role="dialog" aria-modal="true" aria-label="View stocktake">
+            <div className="modal-header">
+              <div><h3>Stocktake</h3><p>{viewingStocktake.department} · {viewingStocktake.date}</p></div>
+              <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
+            </div>
+            {[...(viewingStocktake.openingLines || []), ...(viewingStocktake.lines || [])].map((line) => (
+              <div className="compact-row" key={line.id}><span>{line.productName}</span><span>{line.quantity} x {money(line.unitCost)}</span><strong>{money(line.stockValue)}</strong></div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LegacyStocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
   const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const emptyForm = {
     id: "",
@@ -3462,19 +3725,20 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestDelete, setMenus }) {
+function MenuCosting({ financialSettings, menuSettings, menus, products, recipes, requestDelete, setMenus }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
-  const [subcategoryName, setSubcategoryName] = useState("");
   const [menuSubcategoryRows, setMenuSubcategoryRows] = useState([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
-  const [dishForm, setDishForm] = useState({ subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+  const [dishForm, setDishForm] = useState({ menuId: menus[0]?.id || "", subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" });
   const [menuModalOpen, setMenuModalOpen] = useState(false);
   const [dishModalOpen, setDishModalOpen] = useState(false);
   const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
   const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
   const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
   const subcategories = activeMenu?.subcategories || [];
+  const dishMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
+  const dishSubcategories = dishMenu?.subcategories || [];
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
     subcategory.dishes.map((dish) => {
       const cost = dishCost(dish, recipes);
@@ -3512,16 +3776,9 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
     setMenuModalOpen(false);
   };
 
-  const addSubcategory = () => {
-    if (!activeMenu || !subcategoryName.trim()) return;
-    const subcategory = { id: uid(), name: subcategoryName, targetGp: activeMenu.targetGp, dishes: [] };
-    setMenus((current) => current.map((menu) => (menu.id === activeMenu.id ? { ...menu, subcategories: [...menu.subcategories, subcategory] } : menu)));
-    setDishForm((current) => ({ ...current, subcategoryId: subcategory.id }));
-    setSubcategoryName("");
-  };
-
   const addDish = () => {
-    if (!activeMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
+    const selectedMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
+    if (!selectedMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
     const dishIngredients = dishIngredientRows
       .filter((ingredient) => ingredient.name.trim())
       .map((ingredient) => ({ ...ingredient, lineCost: numberValue(ingredient.quantity) * numberValue(ingredient.unitCost) }));
@@ -3530,20 +3787,21 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
       id: uid(),
       name: dishForm.name,
       sellingPrice: numberValue(dishForm.sellingPrice),
-      recipeIds: dishForm.recipeId ? [dishForm.recipeId] : [],
+      recipeIds: [],
       ingredients: dishIngredients,
-      manualCost: ingredientCost ? 0 : numberValue(dishForm.manualCost),
-      targetGp: dishForm.targetGp === "" ? "" : numberValue(dishForm.targetGp),
+      manualCost: 0,
+      targetGp: "",
       status: dishForm.status,
     };
     setMenus((current) => current.map((menu) => {
-      if (menu.id !== activeMenu.id) return menu;
+      if (menu.id !== selectedMenu.id) return menu;
       return {
         ...menu,
         subcategories: menu.subcategories.map((subcategory) => (subcategory.id === dishForm.subcategoryId ? { ...subcategory, dishes: [...subcategory.dishes, dish] } : subcategory)),
       };
     }));
-    setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+    setActiveMenuId(selectedMenu.id);
+    setDishForm({ menuId: selectedMenu.id, subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, status: "Draft" });
     setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]);
     setDishModalOpen(false);
   };
@@ -3559,14 +3817,16 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             updated.name = product.name;
             updated.sourceId = product.id;
             updated.unitCost = numberValue(product.unitCost);
+            updated.unit = product.packSize || updated.unit;
           }
         }
         if (updated.type === "Recipe") {
-          const recipe = recipes.find((item) => item.name.toLowerCase().includes(String(value).toLowerCase()));
+          const recipe = recipes.find((item) => item.name.toLowerCase() === String(value).trim().toLowerCase()) || recipes.find((item) => item.name.toLowerCase().includes(String(value).toLowerCase()));
           if (recipe) {
             updated.name = recipe.name;
             updated.sourceId = recipe.id;
             updated.unitCost = recipeUnitCost(recipe);
+            updated.unit = recipe.yieldUnit || updated.unit;
           }
         }
       }
@@ -3625,12 +3885,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
           <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
-              <Field label="Add subcategory" value={subcategoryName} onChange={setSubcategoryName} />
             </div>
             <div className="button-row left">
               <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>
-              <button className="ghost" onClick={addSubcategory} type="button"><Plus size={16} />Add Subcategory</button>
-              <button onClick={() => setDishModalOpen(true)} type="button"><Plus size={16} />Add Dish</button>
+              <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>
               <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>
             </div>
           </Panel>
@@ -3681,7 +3939,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             ))}
           </div>
           <div className="button-row left tight">
-            <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add subcategory</button>
+            <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add Subcategory</button>
           </div>
         </EditModal>
       )}
@@ -3689,21 +3947,21 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
         <EditModal title="Add dish" onCancel={() => setDishModalOpen(false)} onSave={addDish} saveLabel="Save Dish">
           <div className="form-grid six">
             <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
-            <label>Menu<select value={activeMenu?.id || ""} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
-            <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{subcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
+            <label>Menu<select value={dishForm.menuId} onChange={(event) => {
+              const nextMenu = menus.find((menu) => menu.id === event.target.value);
+              setDishForm({ ...dishForm, menuId: event.target.value, subcategoryId: nextMenu?.subcategories?.[0]?.id || "" });
+            }}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+            <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{dishSubcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
             <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
-            <label>Linked recipe<select value={dishForm.recipeId} onChange={(event) => setDishForm({ ...dishForm, recipeId: event.target.value })}><option value="">None</option>{recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
-            <Field label="Manual ingredients cost" type="number" value={dishForm.manualCost} onChange={(value) => setDishForm({ ...dishForm, manualCost: value })} />
-            <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
             <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
           </div>
-          <div className="table-wrap compact-table">
+          <div className="table-wrap compact-table dish-builder-table">
             <table>
-              <thead><tr>{["Type", "Search ingredient", "Quantity", "Unit", "Unit cost", "Line cost"].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+              <thead><tr>{["Type", "Search", "Quantity", "Unit", "Cost auto", "Line cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
               <tbody>
                 {dishIngredientRows.map((ingredient) => (
                   <tr key={ingredient.id}>
-                    <td><select value={ingredient.type} onChange={(event) => updateDishIngredient(ingredient.id, "type", event.target.value)}><option>Product</option><option>Recipe</option><option>Manual</option></select></td>
+                    <td><select value={ingredient.type} onChange={(event) => updateDishIngredient(ingredient.id, "type", event.target.value)}><option>Product</option><option>Recipe</option></select></td>
                     <td>
                       <input list={`dish-ingredient-${ingredient.id}`} value={ingredient.name} onChange={(event) => updateDishIngredient(ingredient.id, "name", event.target.value)} />
                       <datalist id={`dish-ingredient-${ingredient.id}`}>
@@ -3714,15 +3972,20 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
                     </td>
                     <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateDishIngredient(ingredient.id, "quantity", event.target.value)} /></td>
                     <td><input value={ingredient.unit} onChange={(event) => updateDishIngredient(ingredient.id, "unit", event.target.value)} /></td>
-                    <td><input min="0" step="0.01" type="number" value={ingredient.unitCost} onChange={(event) => updateDishIngredient(ingredient.id, "unitCost", event.target.value)} /></td>
+                    <td>{money(ingredient.unitCost)}</td>
                     <td>{money(ingredient.lineCost)}</td>
+                    <td><button className="icon danger" onClick={() => setDishIngredientRows((current) => current.length > 1 ? current.filter((item) => item.id !== ingredient.id) : current)} type="button"><Trash2 size={15} /></button></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <div className="button-row left tight">
-            <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add ingredient row</button>
+            <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add Ingredient Row</button>
+          </div>
+          <div className="metric-grid compact">
+            <Metric label="Dish cost" value={money(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0))} delta="Sum all ingredients" />
+            <Metric label="GP" value={percent(gpFor(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0), dishForm.sellingPrice))} delta="Selling price vs cost" />
           </div>
         </EditModal>
       )}
