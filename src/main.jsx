@@ -632,6 +632,20 @@ function matchProduct(productName, products) {
   return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "AI similarity" };
 }
 
+function productAutocomplete(products, query, limit = 8) {
+  const term = String(query || "").trim().toLowerCase();
+  if (!term) return [];
+  return products
+    .filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(term)))
+    .slice(0, limit);
+}
+
+function recipeAutocomplete(recipes, query, limit = 8) {
+  const term = String(query || "").trim().toLowerCase();
+  if (!term) return [];
+  return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
+}
+
 function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
   if (!aiSettings.enableAiProductMatching) {
     return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
@@ -3682,7 +3696,10 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
                   return (
                     <tr key={ingredient.id}>
                       <td>
-                        <input list="recipe-product-list" value={ingredient.productName} onChange={(event) => updateIngredient(ingredient.id, "productName", event.target.value)} />
+                        <input list={`recipe-product-${ingredient.id}`} value={ingredient.productName} onChange={(event) => updateIngredient(ingredient.id, "productName", event.target.value)} />
+                        <datalist id={`recipe-product-${ingredient.id}`}>
+                          {productAutocomplete(products, ingredient.productName).map((product) => <option key={product.id} value={product.name} />)}
+                        </datalist>
                         {needsProduct && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
                       </td>
                       <td>{ingredient.productId ? ingredient.productName : "-"}</td>
@@ -3698,7 +3715,6 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
               </tbody>
             </table>
           </div>
-          <datalist id="recipe-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
           <div className="button-row left tight">
             <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>
           </div>
@@ -3966,8 +3982,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                       <input list={`dish-ingredient-${ingredient.id}`} value={ingredient.name} onChange={(event) => updateDishIngredient(ingredient.id, "name", event.target.value)} />
                       <datalist id={`dish-ingredient-${ingredient.id}`}>
                         {ingredient.type === "Recipe"
-                          ? recipes.map((recipe) => <option key={recipe.id} value={recipe.name} />)
-                          : products.map((product) => <option key={product.id} value={product.name} />)}
+                          ? recipeAutocomplete(recipes, ingredient.name).map((recipe) => <option key={recipe.id} value={recipe.name} />)
+                          : productAutocomplete(products, ingredient.name).map((product) => <option key={product.id} value={product.name} />)}
                       </datalist>
                     </td>
                     <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateDishIngredient(ingredient.id, "quantity", event.target.value)} /></td>
@@ -4046,7 +4062,7 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
             <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
             <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
             <label>Product<input list="product-list" value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
-            <datalist id="product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+            <datalist id="product-list">{productAutocomplete(products, form.productName).map((product) => <option key={product.id} value={product.name} />)}</datalist>
             <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
             <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
             <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
