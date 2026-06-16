@@ -1548,7 +1548,7 @@ function App() {
             stocktakes={stocktakes}
           />
         )}
-        {active === "recipes" && <Recipes products={products} recipes={recipes} requestDelete={requestDelete} setRecipes={setRecipes} />}
+        {active === "recipes" && <Recipes departmentNames={departmentNames} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         {active === "gp" && (
@@ -3242,29 +3242,108 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
   );
 }
 
-function Recipes({ products, recipes, requestDelete, setRecipes }) {
-  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", productSearch: "", ingredientQuantity: 1, ingredients: [] };
+function Recipes({ departmentNames, products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
+  const blankIngredient = () => ({ id: uid(), productId: "", productName: "", supplier: "", quantity: 1, unit: "", unitCost: 0, lineCost: 0 });
+  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", ingredients: [blankIngredient(), blankIngredient()] };
+  const emptyProduct = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
-  const suggestions = form.productSearch
-    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 5)
-    : [];
+  const [createProductForIngredientId, setCreateProductForIngredientId] = useState("");
+  const [productForm, setProductForm] = useState(emptyProduct);
 
-  const addIngredient = (product = suggestions[0]) => {
-    if (!product) return;
+  const ingredientFromProduct = (ingredient, product) => {
     const cheapest = cheapestOffer(product, products);
+    const quantity = numberValue(ingredient.quantity, 1);
+    const unitCost = numberValue(cheapest.price, product.unitCost);
+    return {
+      ...ingredient,
+      productId: product.id,
+      productName: product.name,
+      supplier: cheapest.supplier || product.supplier || "",
+      unit: ingredient.unit || product.packSize || "",
+      unitCost,
+      lineCost: quantity * unitCost,
+    };
+  };
+
+  const updateIngredient = (id, field, value) => {
     setForm((current) => ({
       ...current,
-      productSearch: "",
-      ingredientQuantity: 1,
-      ingredients: [...current.ingredients, { id: uid(), productId: product.id, productName: product.name, supplier: cheapest.supplier, quantity: numberValue(current.ingredientQuantity, 1), unitCost: cheapest.price }],
+      ingredients: current.ingredients.map((ingredient) => {
+        if (ingredient.id !== id) return ingredient;
+        let updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
+        if (field === "productName") {
+          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
+          updated = product ? ingredientFromProduct(updated, product) : { ...updated, productId: "", supplier: "", unitCost: 0, lineCost: 0 };
+        }
+        if (field === "quantity" || field === "unitCost") {
+          updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
+        }
+        return updated;
+      }),
     }));
+  };
+
+  const openCreateProduct = (ingredient) => {
+    setCreateProductForIngredientId(ingredient.id);
+    setProductForm({
+      ...emptyProduct,
+      name: ingredient.productName || "",
+      unitCost: ingredient.unitCost || 0,
+      packSize: ingredient.unit || "",
+    });
+  };
+
+  const saveCreatedProduct = () => {
+    if (!productForm.name.trim()) return;
+    const aliases = String(productForm.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
+    const unitCost = numberValue(productForm.unitCost);
+    const product = {
+      ...productForm,
+      id: uid(),
+      aliases,
+      quantity: numberValue(productForm.quantity, 1),
+      unitCost,
+      supplierPrices: [{ supplier: productForm.supplier, price: unitCost, date: today() }],
+      priceHistory: [{ date: today(), supplier: productForm.supplier, price: unitCost }],
+    };
+    setProducts((current) => [product, ...current]);
+    setForm((current) => ({
+      ...current,
+      ingredients: current.ingredients.map((ingredient) => (
+        ingredient.id === createProductForIngredientId
+          ? ingredientFromProduct({ ...ingredient, productName: product.name, unit: ingredient.unit || product.packSize }, product)
+          : ingredient
+      )),
+    }));
+    setCreateProductForIngredientId("");
+    setProductForm(emptyProduct);
   };
 
   const saveRecipe = () => {
     if (!form.name.trim()) return;
-    const payload = { id: editingId || uid(), name: form.name, yieldQuantity: numberValue(form.yieldQuantity, 1), yieldUnit: form.yieldUnit, notes: form.notes, method: form.method, ingredients: form.ingredients };
+    const ingredients = form.ingredients
+      .filter((ingredient) => ingredient.productName.trim())
+      .map((ingredient) => ({
+        ...ingredient,
+        quantity: numberValue(ingredient.quantity, 1),
+        unitCost: numberValue(ingredient.unitCost),
+        lineCost: numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost),
+      }));
+    const batchCost = ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
+    const yieldQuantity = numberValue(form.yieldQuantity, 1);
+    const payload = {
+      id: editingId || uid(),
+      name: form.name,
+      yieldQuantity,
+      yieldUnit: form.yieldUnit,
+      notes: form.notes,
+      method: form.method,
+      ingredients,
+      batchCost,
+      unitCost: yieldQuantity ? batchCost / yieldQuantity : 0,
+    };
     if (editingId) setRecipes((current) => current.map((recipe) => (recipe.id === editingId ? payload : recipe)));
     else setRecipes((current) => [payload, ...current]);
     setForm(empty);
@@ -3274,12 +3353,23 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
 
   const openRecipeModal = (row = null) => {
     if (row) {
-      setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients || [] });
+      const ingredients = (row.ingredients || []).map((ingredient) => ({
+        id: ingredient.id || uid(),
+        productId: ingredient.productId || "",
+        productName: ingredient.productName || ingredient.name || "",
+        supplier: ingredient.supplier || "",
+        quantity: numberValue(ingredient.quantity, 1),
+        unit: ingredient.unit || "",
+        unitCost: numberValue(ingredient.unitCost),
+        lineCost: numberValue(ingredient.lineCost, numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost)),
+      }));
+      setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", ingredients: ingredients.length ? ingredients : [blankIngredient(), blankIngredient()] });
       setEditingId(row.id);
     } else {
       setForm(empty);
       setEditingId("");
     }
+    setCreateProductForIngredientId("");
     setModalOpen(true);
   };
 
@@ -3290,6 +3380,8 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
     unitCost: recipeUnitCost(recipe),
     linked: recipe.ingredients.length,
   }));
+  const currentBatchCost = form.ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
+  const currentUnitCost = numberValue(form.yieldQuantity, 1) ? currentBatchCost / numberValue(form.yieldQuantity, 1) : 0;
 
   return (
     <div className="page-grid">
@@ -3314,31 +3406,55 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
             <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
             <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
             <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
-            <Field label="Ingredient quantity" type="number" value={form.ingredientQuantity} onChange={(value) => setForm({ ...form, ingredientQuantity: value })} />
-            <label>Ingredient search<input placeholder="Type product name..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} /></label>
             <label>Recipe notes<textarea rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
-            <label>Method<textarea rows={5} value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} /></label>
+            <label className="wide-field">Method<textarea rows={7} placeholder="large text box" value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} /></label>
           </div>
-          {suggestions.length > 0 && (
-            <div className="suggestion-list">
-              {suggestions.map((product) => {
-                const cheapest = cheapestOffer(product, products);
-                return <button key={product.id} onClick={() => addIngredient(product)} type="button">{product.name}<span>{product.packSize} · {cheapest.supplier} {money(cheapest.price)}</span></button>;
-              })}
-            </div>
-          )}
-          <div className="stack-list tight">
-            {form.ingredients.map((ingredient) => (
-              <div className="compact-row" key={ingredient.id}>
-                <span>{ingredient.productName}</span>
-                <span>{ingredient.supplier}</span>
-                <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
-                <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) })) })} type="button"><Trash2 size={15} /></button>
-              </div>
-            ))}
+          <div className="table-wrap bulk-entry-table recipe-builder-table">
+            <table>
+              <thead><tr>{["Search ingredient", "Product", "Supplier", "Unit cost", "Quantity", "Unit", "Cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+              <tbody>
+                {form.ingredients.map((ingredient) => {
+                  const productFound = products.some((product) => product.name.toLowerCase() === ingredient.productName.trim().toLowerCase());
+                  const needsProduct = ingredient.productName.trim() && !productFound;
+                  return (
+                    <tr key={ingredient.id}>
+                      <td>
+                        <input list="recipe-product-list" value={ingredient.productName} onChange={(event) => updateIngredient(ingredient.id, "productName", event.target.value)} />
+                        {needsProduct && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
+                      </td>
+                      <td>{ingredient.productId ? ingredient.productName : "-"}</td>
+                      <td>{ingredient.supplier || "-"}</td>
+                      <td>{money(ingredient.unitCost)}</td>
+                      <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateIngredient(ingredient.id, "quantity", event.target.value)} /></td>
+                      <td><input value={ingredient.unit} onChange={(event) => updateIngredient(ingredient.id, "unit", event.target.value)} /></td>
+                      <td>{money(numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)))}</td>
+                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.length > 1 ? current.ingredients.filter((item) => item.id !== ingredient.id) : current.ingredients })) })} type="button"><Trash2 size={15} /></button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
+          <datalist id="recipe-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
           <div className="button-row left tight">
-            <button onClick={() => addIngredient()} type="button"><Plus size={16} />Add Ingredient</button>
+            <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>
+          </div>
+          <div className="metric-grid compact">
+            <Metric label="Batch cost" value={money(currentBatchCost)} delta={`${form.ingredients.filter((ingredient) => ingredient.productName.trim()).length} ingredient(s)`} />
+            <Metric label="Unit cost" value={money(currentUnitCost)} delta={`Per ${form.yieldUnit || "unit"}`} />
+          </div>
+        </EditModal>
+      )}
+      {createProductForIngredientId && (
+        <EditModal title="Create product" onCancel={() => setCreateProductForIngredientId("")} onSave={saveCreatedProduct} saveLabel="Save Product">
+          <div className="form-grid six">
+            <Field label="Product name" value={productForm.name} onChange={(value) => setProductForm({ ...productForm, name: value })} />
+            <label>Supplier<select value={productForm.supplier} onChange={(event) => setProductForm({ ...productForm, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
+            <Field label="Pack size" value={productForm.packSize} onChange={(value) => setProductForm({ ...productForm, packSize: value })} />
+            <Field label="Quantity" type="number" value={productForm.quantity} onChange={(value) => setProductForm({ ...productForm, quantity: value })} />
+            <Field label="Unit cost" type="number" value={productForm.unitCost} onChange={(value) => setProductForm({ ...productForm, unitCost: value })} />
+            <label>Department<select value={productForm.department} onChange={(event) => setProductForm({ ...productForm, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+            <Field label="Aliases" value={productForm.aliases} onChange={(value) => setProductForm({ ...productForm, aliases: value })} />
           </div>
         </EditModal>
       )}
