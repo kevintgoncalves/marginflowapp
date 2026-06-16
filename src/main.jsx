@@ -729,7 +729,8 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
   const netIndex = hasHeader ? findIndex(["netsales", "net", "netrevenue"]) : -1;
   const vatIndex = hasHeader ? findIndex(["vat", "vatamount", "tax", "taxamount"]) : -1;
   const vatRateIndex = hasHeader ? findIndex(["vatrate", "vatpercent", "taxrate"]) : -1;
-  const discountIndex = hasHeader ? findIndex(["discounts", "discount", "refunds", "discountsrefunds"]) : -1;
+      const discountIndex = hasHeader ? findIndex(["discounts", "discount"]) : -1;
+      const refundIndex = hasHeader ? findIndex(["refunds", "refund", "returns"]) : -1;
   const serviceIndex = hasHeader ? findIndex(["servicecharge", "servicecharges", "gratuity"]) : -1;
   const dataRows = hasHeader ? rows.slice(1) : rows;
 
@@ -749,6 +750,7 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
       const sales = importedNet || (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0);
       const vatAmount = sales ? vatAmountFromGrossNet(grossSales, sales) : parseCurrencyCell(cells[vatIndex]);
       const discounts = parseCurrencyCell(cells[discountIndex]);
+      const refunds = parseCurrencyCell(cells[refundIndex]);
       const serviceCharge = parseCurrencyCell(cells[serviceIndex]);
       return {
         id: uid(),
@@ -761,6 +763,7 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
         vatAmount,
         effectiveVatRate: effectiveVatRate(grossSales, sales),
         discounts,
+        refunds,
         serviceCharge,
       };
     })
@@ -782,6 +785,7 @@ function normalizeSalesRows(rows) {
       vatAmount: vatAmountFromGrossNet(grossSales, sales),
       effectiveVatRate: effectiveVatRate(grossSales, sales),
       discounts: numberValue(row.discounts),
+      refunds: numberValue(row.refunds),
       serviceCharge: numberValue(row.serviceCharge),
     };
   });
@@ -1082,7 +1086,8 @@ function dishCost(dish, recipes) {
     const recipe = recipes.find((item) => item.id === recipeId);
     return sum + (recipe ? recipeUnitCost(recipe) : 0);
   }, 0);
-  return linkedRecipeCost + numberValue(dish.manualCost);
+  const ingredientCost = (dish.ingredients || []).reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
+  return linkedRecipeCost + ingredientCost + numberValue(dish.manualCost);
 }
 
 function gpFor(cost, price) {
@@ -1978,23 +1983,25 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             />
           </label>
         </div>
-        <div className="invoice-meta">
-          <label>
-            Supplier
-            <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
-            <datalist id="supplier-list">
-              {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
-            </datalist>
-          </label>
-          <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
-          <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
-        </div>
+        {hasDraftWork && (
+          <div className="invoice-meta">
+            <label>
+              Supplier
+              <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
+              <datalist id="supplier-list">
+                {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
+              </datalist>
+            </label>
+            <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
+            <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
+          </div>
+        )}
         {showCreateSupplier && (
           <div className="button-row left tight">
             <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
           </div>
         )}
-        <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
+        {hasDraftWork && <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>}
         <div className="file-list">
           {draft.files.map((file, index) => (
             <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => requestDelete({ title: "Delete uploaded file", message: "Are you sure you want to delete this uploaded file?", onConfirm: () => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) })) })} type="button"><X size={14} /></button></span>
@@ -2003,7 +2010,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
-          <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
+          <button className="ghost" onClick={addManualLine} type="button">Add Manual Invoice</button>
           <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />{draft.editingInvoiceId ? "Save Invoice" : "Confirm Invoice"}</button>
         </div>
@@ -2777,9 +2784,12 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
   const [subcategoryName, setSubcategoryName] = useState("");
+  const [menuSubcategoryRows, setMenuSubcategoryRows] = useState([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
   const [dishForm, setDishForm] = useState({ subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
   const [menuModalOpen, setMenuModalOpen] = useState(false);
   const [dishModalOpen, setDishModalOpen] = useState(false);
+  const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
+  const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
   const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
   const subcategories = activeMenu?.subcategories || [];
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
@@ -2807,10 +2817,15 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
 
   const createMenu = () => {
     if (!menuForm.name.trim()) return;
-    const menu = { ...menuForm, id: uid(), targetGp: numberValue(menuForm.targetGp, defaultTarget), subcategories: [] };
+    const subcategories = menuSubcategoryRows
+      .map((row) => row.name.trim())
+      .filter(Boolean)
+      .map((name) => ({ id: uid(), name, targetGp: numberValue(menuForm.targetGp, defaultTarget), dishes: [] }));
+    const menu = { ...menuForm, id: uid(), targetGp: numberValue(menuForm.targetGp, defaultTarget), subcategories };
     setMenus((current) => [menu, ...current]);
     setActiveMenuId(menu.id);
     setMenuForm({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
+    setMenuSubcategoryRows([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
     setMenuModalOpen(false);
   };
 
@@ -2824,12 +2839,17 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
 
   const addDish = () => {
     if (!activeMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
+    const dishIngredients = dishIngredientRows
+      .filter((ingredient) => ingredient.name.trim())
+      .map((ingredient) => ({ ...ingredient, lineCost: numberValue(ingredient.quantity) * numberValue(ingredient.unitCost) }));
+    const ingredientCost = dishIngredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
     const dish = {
       id: uid(),
       name: dishForm.name,
       sellingPrice: numberValue(dishForm.sellingPrice),
       recipeIds: dishForm.recipeId ? [dishForm.recipeId] : [],
-      manualCost: numberValue(dishForm.manualCost),
+      ingredients: dishIngredients,
+      manualCost: ingredientCost ? 0 : numberValue(dishForm.manualCost),
       targetGp: dishForm.targetGp === "" ? "" : numberValue(dishForm.targetGp),
       status: dishForm.status,
     };
@@ -2841,7 +2861,35 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
       };
     }));
     setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+    setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]);
     setDishModalOpen(false);
+  };
+
+  const updateDishIngredient = (id, field, value) => {
+    setDishIngredientRows((current) => current.map((ingredient) => {
+      if (ingredient.id !== id) return ingredient;
+      const updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
+      if (field === "name") {
+        if (updated.type === "Product") {
+          const product = matchProduct(value, products)?.product;
+          if (product) {
+            updated.name = product.name;
+            updated.sourceId = product.id;
+            updated.unitCost = numberValue(product.unitCost);
+          }
+        }
+        if (updated.type === "Recipe") {
+          const recipe = recipes.find((item) => item.name.toLowerCase().includes(String(value).toLowerCase()));
+          if (recipe) {
+            updated.name = recipe.name;
+            updated.sourceId = recipe.id;
+            updated.unitCost = recipeUnitCost(recipe);
+          }
+        }
+      }
+      updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
+      return updated;
+    }));
   };
 
   const deleteMenu = () => {
@@ -2941,7 +2989,16 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
             <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
             <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
-            <Field label="Subcategories" value={subcategoryName} onChange={setSubcategoryName} />
+          </div>
+          <div className="stack-list tight">
+            {menuSubcategoryRows.map((row) => (
+              <div className="compact-row" key={row.id}>
+                <input placeholder="Subcategory name" value={row.name} onChange={(event) => setMenuSubcategoryRows((current) => current.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} />
+              </div>
+            ))}
+          </div>
+          <div className="button-row left tight">
+            <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add subcategory</button>
           </div>
         </EditModal>
       )}
@@ -2957,6 +3014,33 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
             <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
           </div>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead><tr>{["Type", "Search ingredient", "Quantity", "Unit", "Unit cost", "Line cost"].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+              <tbody>
+                {dishIngredientRows.map((ingredient) => (
+                  <tr key={ingredient.id}>
+                    <td><select value={ingredient.type} onChange={(event) => updateDishIngredient(ingredient.id, "type", event.target.value)}><option>Product</option><option>Recipe</option><option>Manual</option></select></td>
+                    <td>
+                      <input list={`dish-ingredient-${ingredient.id}`} value={ingredient.name} onChange={(event) => updateDishIngredient(ingredient.id, "name", event.target.value)} />
+                      <datalist id={`dish-ingredient-${ingredient.id}`}>
+                        {ingredient.type === "Recipe"
+                          ? recipes.map((recipe) => <option key={recipe.id} value={recipe.name} />)
+                          : products.map((product) => <option key={product.id} value={product.name} />)}
+                      </datalist>
+                    </td>
+                    <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateDishIngredient(ingredient.id, "quantity", event.target.value)} /></td>
+                    <td><input value={ingredient.unit} onChange={(event) => updateDishIngredient(ingredient.id, "unit", event.target.value)} /></td>
+                    <td><input min="0" step="0.01" type="number" value={ingredient.unitCost} onChange={(event) => updateDishIngredient(ingredient.id, "unitCost", event.target.value)} /></td>
+                    <td>{money(ingredient.lineCost)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="button-row left tight">
+            <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add ingredient row</button>
+          </div>
         </EditModal>
       )}
     </div>
@@ -2965,7 +3049,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
 
 function Waste({ department, departmentNames, products, requestDelete, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
-  const [form, setForm] = useState({ date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
+  const emptyWaste = { date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" };
+  const [form, setForm] = useState(emptyWaste);
+  const [editingWasteId, setEditingWasteId] = useState("");
+  const [wasteModalOpen, setWasteModalOpen] = useState(false);
 
   const updateProduct = (value) => {
     const match = matchProduct(value, products);
@@ -2974,25 +3061,21 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
 
   const addWaste = () => {
     if (!form.productName.trim()) return;
-    setWasteItems((current) => [{ ...form, id: uid(), cost: wasteCost(form) }, ...current]);
-    setForm({ date: today(), department: form.department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
+    const payload = { ...form, id: editingWasteId || uid(), cost: wasteCost(form) };
+    setWasteItems((current) => editingWasteId ? current.map((item) => (item.id === editingWasteId ? payload : item)) : [payload, ...current]);
+    setForm({ ...emptyWaste, department: form.department });
+    setEditingWasteId("");
+    setWasteModalOpen(false);
+  };
+
+  const openWasteModal = (row = null) => {
+    setForm(row || emptyWaste);
+    setEditingWasteId(row?.id || "");
+    setWasteModalOpen(true);
   };
 
   return (
     <div className="page-grid">
-      <Panel title="Create waste">
-        <div className="form-grid six">
-          <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-          <label>Product<input list="product-list" value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
-          <datalist id="product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
-          <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
-          <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
-          <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-          <Field label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
-        </div>
-        <div className="button-row left"><button onClick={addWaste} type="button"><Plus size={16} />Add Waste</button></div>
-      </Panel>
       <Panel title="Waste tracking" action="Separate cost line">
         <DataTable
           columns={[
@@ -3005,19 +3088,37 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
             { key: "notes", label: "Notes" },
             { key: "cost", label: "Waste cost", render: (value) => money(value) },
           ]}
+          onEdit={openWasteModal}
           onDelete={(id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) })}
           rows={visibleWaste}
+          toolbarAction={<button onClick={() => openWasteModal()} type="button"><Plus size={16} />Add Waste</button>}
         />
       </Panel>
+      {wasteModalOpen && (
+        <EditModal title={editingWasteId ? "Edit waste" : "Add waste"} onCancel={() => { setWasteModalOpen(false); setEditingWasteId(""); setForm(emptyWaste); }} onSave={addWaste} saveLabel="Save Waste">
+          <div className="form-grid six">
+            <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
+            <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+            <label>Product<input list="product-list" value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
+            <datalist id="product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+            <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
+            <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+            <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
+            <Field label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
+          </div>
+        </EditModal>
+      )}
     </div>
   );
 }
 
 function SalesManager({ financialSettings, departmentNames, requestDelete, sales, setSales }) {
   const defaultVatRate = financialSettings.defaultVat;
-  const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, serviceCharge: 0 };
+  const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [addModalOpen, setAddModalOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [pendingImport, setPendingImport] = useState([]);
   const [importFileKey, setImportFileKey] = useState(0);
@@ -3061,12 +3162,14 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       vatAmount: vatAmountFromGrossNet(grossSales, netSales),
       effectiveVatRate: effectiveVatRate(grossSales, netSales),
       discounts: numberValue(form.discounts),
+      refunds: numberValue(form.refunds),
       serviceCharge: numberValue(form.serviceCharge),
     };
     setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
     setForm(empty);
     setEditingId("");
     setEditModalOpen(false);
+    setAddModalOpen(false);
     setStatus("Sales saved");
   };
 
@@ -3097,17 +3200,9 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
 
   return (
     <Panel title="Sales input" action="Manual or CSV">
-      <div className="form-grid six">
-        <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-        <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-        <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
-        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
-        <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
-        <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
-        <Field label="Discounts / refunds" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
-        <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
-        <Field label="VAT % helper" type="number" value={form.vatRate} onChange={updateVatRate} />
-        <label>CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
+      <div className="button-row left">
+        <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>
+        <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
       {pendingImport.length > 0 && (
@@ -3129,10 +3224,6 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
           </div>
         </div>
       )}
-      <div className="button-row left">
-        <button onClick={saveSale} type="button"><Save size={16} />{editingId ? "Save Sales" : "Add Sales"}</button>
-        {editingId && <button className="ghost" onClick={() => { setForm(empty); setEditingId(""); }} type="button">Cancel Edit</button>}
-      </div>
       <DataTable
         columns={[
           { key: "date", label: "Date" },
@@ -3141,28 +3232,23 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
           { key: "sales", label: "Net Sales", render: (_, row) => money(netSalesForRow(row)) },
           { key: "vatAmount", label: "VAT Amount", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
           { key: "effectiveVatRate", label: "Effective VAT %", render: (_, row) => percent(effectiveVatRate(row.grossSales, row.sales)) },
+          { key: "serviceCharge", label: "Service Charge", render: (value) => money(value) },
+          { key: "discounts", label: "Discounts", render: (value) => money(value) },
+          { key: "refunds", label: "Refunds", render: (value) => money(value) },
         ]}
         onDelete={(id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) })}
         onEdit={(row) => {
-          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, serviceCharge: row.serviceCharge ?? 0 });
+          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, refunds: row.refunds ?? 0, serviceCharge: row.serviceCharge ?? 0 });
           setEditingId(row.id);
           setEditModalOpen(true);
         }}
         rows={sales}
       />
+      {addModalOpen && (
+        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} setForm={setForm} title="Add sales" updateGross={updateGross} />
+      )}
       {editModalOpen && (
-        <EditModal title="Edit sales record" onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} saveLabel="Save Sales">
-          <div className="form-grid six">
-            <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-            <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
-            <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
-            <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
-            <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
-            <Field label="Discounts / refunds" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
-            <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
-          </div>
-        </EditModal>
+        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} setForm={setForm} title="Edit sales record" updateGross={updateGross} />
       )}
     </Panel>
   );
@@ -3187,6 +3273,24 @@ function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, de
         </div>
       </Panel>
     </>
+  );
+}
+
+function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmount, onCancel, onSave, setForm, title, updateGross }) {
+  return (
+    <EditModal title={title} onCancel={onCancel} onSave={onSave} saveLabel="Save Sales">
+      <div className="form-grid six">
+        <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
+        <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+        <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
+        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
+        <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
+        <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
+        <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
+        <Field label="Discounts" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
+        <Field label="Refunds" type="number" value={form.refunds} onChange={(value) => setForm({ ...form, refunds: value })} />
+      </div>
+    </EditModal>
   );
 }
 
