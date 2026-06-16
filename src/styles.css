@@ -375,6 +375,8 @@ nav button.active {
   padding: 0 18px 18px;
 }
 .form-grid.six { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.form-grid.five { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.form-grid.three { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .range-grid {
   padding-top: 18px;
 }
@@ -1056,6 +1058,42 @@ code {
 }
 .split-modal.wide {
   width: min(980px, 100%);
+}
+
+.manual-invoice-modal {
+  max-height: min(86vh, 820px);
+  overflow: auto;
+}
+
+.manual-invoice-modal .form-grid {
+  padding: 0 0 1rem;
+}
+
+.segmented-control {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 1rem;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.segmented-control button {
+  background: transparent;
+  color: var(--muted);
+}
+
+.segmented-control button.active {
+  background: var(--primary);
+  color: white;
+}
+
+.manual-invoice-table {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
 }
 
 .import-review {
