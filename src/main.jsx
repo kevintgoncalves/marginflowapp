@@ -293,6 +293,8 @@ function numberValue(value, fallback = 0) {
 }
 
 function lineTotal(item) {
+  const extractedLineTotal = numberValue(item.lineTotal, 0);
+  if (extractedLineTotal > 0) return extractedLineTotal;
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
@@ -307,6 +309,18 @@ function invoiceUnitCostFromExtraction(line) {
   const quantity = numberValue(line.quantity, 1);
   const unitCost = numberValue(line.unitCost, 0);
   const extractedLineTotal = numberValue(line.lineTotal, 0);
+
+  if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
+    return Number((extractedLineTotal / quantity).toFixed(4));
+  }
+
+  return unitCost;
+}
+
+function normalizeInvoiceUnitCost(item) {
+  const quantity = numberValue(item.quantity, 1);
+  const unitCost = numberValue(item.unitCost, 0);
+  const extractedLineTotal = numberValue(item.lineTotal, 0);
 
   if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
     return Number((extractedLineTotal / quantity).toFixed(4));
@@ -568,12 +582,13 @@ function mergeInvoiceProducts(products, items, invoiceDate) {
   const next = [...products];
 
   items.forEach((item) => {
+    const invoiceUnitCost = normalizeInvoiceUnitCost(item);
     const match = item.matchedProductId
       ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
       : matchProduct(item.productName, next);
     const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
-    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: numberValue(item.unitCost) };
-    const supplierEntry = { supplier: item.supplier, price: numberValue(item.unitCost), date: invoiceDate };
+    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: invoiceUnitCost };
+    const supplierEntry = { supplier: item.supplier, price: invoiceUnitCost, date: invoiceDate };
 
     if (index >= 0 && match.confidence > 0.9) {
       const aliases = new Set([...(next[index].aliases || [])]);
@@ -584,7 +599,7 @@ function mergeInvoiceProducts(products, items, invoiceDate) {
         supplier: item.supplier,
         packSize: item.packSize,
         quantity: numberValue(item.quantity, 1),
-        unitCost: numberValue(item.unitCost),
+        unitCost: invoiceUnitCost,
         department: primaryDepartment(item),
         departmentSplits: normalizeDepartmentSplits(item, item.department),
         aliases: [...aliases],
@@ -600,7 +615,7 @@ function mergeInvoiceProducts(products, items, invoiceDate) {
       supplier: item.supplier,
       packSize: item.packSize,
       quantity: numberValue(item.quantity, 1),
-      unitCost: numberValue(item.unitCost),
+      unitCost: invoiceUnitCost,
       department: primaryDepartment(item),
       departmentSplits: normalizeDepartmentSplits(item, item.department),
       aliases: [],
@@ -879,7 +894,13 @@ function App() {
     const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
     const normalizedItems = draft.items.map((item) => {
       const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
-      return { ...item, supplier: item.supplier || supplier, department: departmentSplits[0]?.department || item.department, departmentSplits };
+      return {
+        ...item,
+        supplier: item.supplier || supplier,
+        unitCost: normalizeInvoiceUnitCost(item),
+        department: departmentSplits[0]?.department || item.department,
+        departmentSplits,
+      };
     });
     const invoice = {
       id: uid(),
@@ -1155,6 +1176,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             packSize: line.packSize || "",
             quantity,
             unitCost,
+            lineTotal: numberValue(line.lineTotal, quantity * unitCost),
             supplier,
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
             departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
