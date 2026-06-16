@@ -321,6 +321,10 @@ function invoiceDateTokenPattern() {
   return "\\b(?:\\d{1,2}[-/][A-Z]{3}|\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?|20\\d{2}-\\d{2}-\\d{2})\\b";
 }
 
+function invoiceRowDateTokenPattern() {
+  return "\\b\\d{1,2}[-/][A-Z]{3}\\b";
+}
+
 function invoiceNumberMatches(text) {
   const spacedText = text.replace(/(\d+[.,]\d{2})(?=\d+[.,]\d{2})/g, "$1 ");
   const matches = [];
@@ -345,6 +349,33 @@ function splitInvoiceProductAndPack(description) {
 }
 
 function parseTgFruitsInvoiceRow(rowText) {
+  const qtyDateMatch = rowText.match(new RegExp(`^\\s*(-?\\d+(?:[.,]\\d{1,2})?)\\s+${invoiceRowDateTokenPattern()}\\s+(.+)$`, "i"));
+  if (qtyDateMatch) {
+    const quantityValue = numberValue(qtyDateMatch[1].replace(",", "."), 0);
+    const rowBody = qtyDateMatch[2].trim();
+    const numbers = invoiceNumberMatches(rowBody);
+    if (quantityValue > 0 && numbers.length >= 3) {
+      for (let index = numbers.length - 3; index >= 0; index -= 1) {
+        const vat = numbers[index].value;
+        const lineTotalValue = numbers[index + 1]?.value;
+        const unitCostValue = numbers[index + 2]?.value;
+        if (vat < 0 || unitCostValue <= 0 || lineTotalValue <= 0) continue;
+        if (!amountsAlmostEqual(quantityValue * unitCostValue, lineTotalValue)) continue;
+
+        const description = rowBody.slice(0, numbers[index].index).trim();
+        const { productName, packSize } = splitInvoiceProductAndPack(description);
+        if (!/[A-Za-z]{2}/.test(productName)) return null;
+        return {
+          productName,
+          packSize,
+          quantity: quantityValue,
+          unitCost: unitCostValue,
+          lineTotal: lineTotalValue,
+        };
+      }
+    }
+  }
+
   const withoutDate = rowText.replace(new RegExp(`^\\s*${invoiceDateTokenPattern()}\\s*`, "i"), "").trim();
   const numbers = invoiceNumberMatches(withoutDate);
   if (numbers.length < 4) return null;
@@ -374,16 +405,27 @@ function parseTgFruitsInvoiceRow(rowText) {
 
 function extractTgFruitsInvoiceRows(invoiceText) {
   const normalizedText = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
-  const datePattern = new RegExp(invoiceDateTokenPattern(), "gi");
-  const dateMatches = [...normalizedText.matchAll(datePattern)];
+  const qtyDatePattern = new RegExp(`(?:^|\\s)(-?\\d+(?:[.,]\\d{1,2})?)\\s+${invoiceRowDateTokenPattern()}`, "gi");
+  const qtyDateMatches = [...normalizedText.matchAll(qtyDatePattern)];
   const rows = [];
 
-  dateMatches.forEach((match, index) => {
-    const start = match.index;
-    const end = dateMatches[index + 1]?.index ?? normalizedText.length;
+  qtyDateMatches.forEach((match, index) => {
+    const start = match.index + (match[0].startsWith(" ") ? 1 : 0);
+    const end = qtyDateMatches[index + 1]?.index ?? normalizedText.length;
     const row = parseTgFruitsInvoiceRow(normalizedText.slice(start, end).trim());
     if (row) rows.push(row);
   });
+
+  if (!rows.length) {
+    const datePattern = new RegExp(invoiceDateTokenPattern(), "gi");
+    const dateMatches = [...normalizedText.matchAll(datePattern)];
+    dateMatches.forEach((match, index) => {
+      const start = match.index;
+      const end = dateMatches[index + 1]?.index ?? normalizedText.length;
+      const row = parseTgFruitsInvoiceRow(normalizedText.slice(start, end).trim());
+      if (row) rows.push(row);
+    });
+  }
 
   const seen = new Set();
   return rows.filter((row) => {
@@ -1255,6 +1297,48 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     readControllerRef.current = controller;
     setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
 
+    const buildInvoiceItems = (sourceLines, supplier) => sourceLines.map((line) => {
+      const quantity = numberValue(line.quantity, 1);
+      const unitCost = invoiceUnitCostFromExtraction(line);
+      return enrichInvoiceLine(
+        {
+          id: uid(),
+          productName: line.productName || "Unknown product",
+          packSize: line.packSize || "",
+          quantity,
+          unitCost,
+          lineTotal: numberValue(line.lineTotal, quantity * unitCost),
+          supplier,
+          department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+          departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
+          source: "OpenAI",
+        },
+        products,
+        aiSettings
+      );
+    });
+
+    const invoiceKey = invoiceText.toLowerCase();
+    const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : "");
+    const preParsedLines = invoiceKey.includes("tg fruits")
+      ? extractTgFruitsInvoiceRows(invoiceText)
+      : invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
+        ? parseEliteInvoiceRows(invoiceText)
+        : [];
+
+    if (preParsedLines.length >= 2) {
+      const supplier = draftSupplier || "Unknown Supplier";
+      setDraft((current) => ({
+        ...current,
+        supplier,
+        invoiceText,
+        items: buildInvoiceItems(preParsedLines, supplier),
+        status: `AI extracted ${preParsedLines.length} lines. Please review before approving.`,
+      }));
+      readControllerRef.current = null;
+      return;
+    }
+
     try {
       const response = await fetch("/.netlify/functions/read-invoice-ai", {
         method: "POST",
@@ -1277,33 +1361,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
       const supplierKey = supplier.toLowerCase();
-      const invoiceKey = invoiceText.toLowerCase();
       const deterministicLines = supplierKey.includes("tg fruits") || invoiceKey.includes("tg fruits")
         ? extractTgFruitsInvoiceRows(invoiceText)
         : supplierKey.includes("elite") || invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
           ? parseEliteInvoiceRows(invoiceText)
           : [];
       const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
-      const items = sourceLines.map((line) => {
-        const quantity = numberValue(line.quantity, 1);
-        const unitCost = invoiceUnitCostFromExtraction(line);
-        return enrichInvoiceLine(
-          {
-            id: uid(),
-            productName: line.productName || "Unknown product",
-            packSize: line.packSize || "",
-            quantity,
-            unitCost,
-            lineTotal: numberValue(line.lineTotal, quantity * unitCost),
-            supplier,
-            department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
-            departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
-            source: "OpenAI",
-          },
-          products,
-          aiSettings
-        );
-      });
+      const items = buildInvoiceItems(sourceLines, supplier);
 
       setDraft((current) => ({
         ...current,
