@@ -170,7 +170,7 @@ function numberMatches(text) {
 
 function findTgFruitsColumns(numbers) {
   const usable = numbers.filter((number) => Number.isFinite(number.value));
-  for (let index = usable.length - 4; index >= 0; index -= 1) {
+  for (let index = 0; index <= usable.length - 4; index += 1) {
     const vat = usable[index].value;
     const lineTotal = usable[index + 1]?.value;
     const unitCost = usable[index + 2]?.value;
