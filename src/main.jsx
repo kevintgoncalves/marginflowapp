@@ -37,7 +37,7 @@ const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], suppli
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
-const rangePresets = ["Today", "Specific date", "This week", "Last week", "This month", "Last month", "Custom range"];
+const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
 
 const defaultDepartmentSettings = [
   { id: uid(), name: "Kitchen Made", type: "Food", targetGp: 75, active: true },
@@ -301,8 +301,9 @@ function vatAmountFromGross(gross, vatRate = 20) {
 }
 
 function netSalesForRow(row) {
+  const discount = numberValue(row?.discounts);
   return row?.grossSales !== undefined
-    ? netFromGross(row.grossSales, row.vatRate ?? 20)
+    ? Math.max(0, Number((netFromGross(row.grossSales, row.vatRate ?? 20) - discount).toFixed(2)))
     : numberValue(row?.sales);
 }
 
@@ -899,21 +900,58 @@ function salesForDepartment(salesRows, selectedDepartment) {
     : totalRows.reduce((sum, row) => sum + netSalesForRow(row), 0);
 }
 
-function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames) {
+function grossSalesForDepartment(salesRows, selectedDepartment) {
+  const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
+  if (selectedDepartment === "All departments") {
+    return totalRows.length
+      ? totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
+      : salesRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+  }
+  const departmentRows = salesRows.filter((row) => row.department === selectedDepartment);
+  return departmentRows.length
+    ? departmentRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
+    : totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+}
+
+function vatForDepartment(salesRows, selectedDepartment) {
+  const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
+  const rows = selectedDepartment === "All departments"
+    ? (totalRows.length ? totalRows : salesRows)
+    : salesRows.filter((row) => row.department === selectedDepartment);
+  const fallbackRows = rows.length ? rows : totalRows;
+  return fallbackRows.reduce((sum, row) => sum + vatAmountFromGross(row.grossSales, row.vatRate), 0);
+}
+
+function purchasesForDepartment(invoices, selectedDepartment) {
+  return invoices
+    .flatMap((invoice) => invoice.items || [])
+    .reduce((sum, item) => sum + lineTotalForDepartment(item, selectedDepartment), 0);
+}
+
+function wasteForDepartment(wasteItems, selectedDepartment) {
+  return wasteItems
+    .filter((item) => departmentMatches(item.department, selectedDepartment))
+    .reduce((sum, item) => sum + wasteCost(item), 0);
+}
+
+function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames) {
   const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
-  const salesTotal = salesForDepartment(salesRows, department);
-  const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []);
-  const purchases = invoiceItems.reduce((sum, item) => sum + lineTotalForDepartment(item, department), 0);
+  const salesTotal = salesForDepartment(salesRows, selectedDepartment);
+  const grossSales = grossSalesForDepartment(salesRows, selectedDepartment);
+  const vat = vatForDepartment(salesRows, selectedDepartment);
+  const purchases = purchasesForDepartment(filteredInvoices, selectedDepartment);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  const openingStock = openingStockValue(stocktakes, department, departmentNames, dateRange);
-  const closingStock = latestStocktakeValue(stocktakes, department, departmentNames, dateRange);
-  const waste = filteredWaste.filter((item) => departmentMatches(item.department, department)).reduce((sum, item) => sum + wasteCost(item), 0);
+  const openingStock = openingStockValue(stocktakes, selectedDepartment, departmentNames, dateRange);
+  const closingStock = latestStocktakeValue(stocktakes, selectedDepartment, departmentNames, dateRange);
+  const waste = wasteForDepartment(filteredWaste, selectedDepartment);
   const stocktakeCost = openingStock + purchases - closingStock;
   const realCostIncludingWaste = stocktakeCost + waste;
 
   return {
+    grossSales,
+    vat,
     sales: salesTotal,
     purchases,
     allPurchases,
@@ -928,9 +966,47 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
     wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
     stockVariance: closingStock - openingStock,
     salesRows,
-    invoiceItems,
+    invoiceItems: filteredInvoices.flatMap((invoice) => invoice.items || []),
     invoices: filteredInvoices,
   };
+}
+
+function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames) {
+  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames);
+  const days = dateRangeDays(dateRange);
+  const dailyRows = days.map((date) => {
+    const period = { start: date, end: date };
+    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames);
+    return {
+      id: date,
+      date,
+      day: formatRangeDate(date),
+      grossSales: row.grossSales,
+      vat: row.vat,
+      netSales: row.sales,
+      purchases: row.purchases,
+      waste: row.waste,
+      invoiceGp: row.invoiceGp,
+      stocktakeGp: row.stocktakeGp,
+      realGp: row.realGp,
+      targetGp: 0,
+    };
+  });
+  const departmentRows = departmentNames.map((name) => {
+    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames);
+    return {
+      id: name,
+      department: name,
+      grossSales: row.grossSales,
+      netSales: row.sales,
+      purchases: row.purchases,
+      waste: row.waste,
+      gp: row.invoiceGp,
+      targetGp: 0,
+      variance: row.invoiceGp,
+    };
+  });
+  return { ...base, dailyRows, departmentRows };
 }
 
 function recipeBatchCost(recipe) {
@@ -1020,35 +1096,75 @@ function startOfWeek(date, weekStartsOn = "Monday") {
 }
 
 function resolveDateRange(range, weekStartsOn = "Monday") {
-  if (range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
-  if (range.preset === "Specific date") {
+  if (range.preset === "Custom Range" || range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
+  if (range.preset === "Specific Date" || range.preset === "Specific date") {
     const date = range.specificDate || range.startDate || today();
     return { start: date, end: date };
   }
 
   const current = parseDate(today());
   if (range.preset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
+  if (range.preset === "Yesterday") {
+    const yesterday = addDays(current, -1);
+    return { start: toIsoDate(yesterday), end: toIsoDate(yesterday) };
+  }
 
-  if (range.preset === "This week") {
+  if (range.preset === "This Week" || range.preset === "This week") {
     const start = startOfWeek(current, weekStartsOn);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
 
-  if (range.preset === "Last week") {
+  if (range.preset === "Last Week" || range.preset === "Last week") {
     const thisStart = startOfWeek(current, weekStartsOn);
     const start = addDays(thisStart, -7);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
 
-  if (range.preset === "This month") {
+  if (range.preset === "This Month" || range.preset === "This month") {
     const start = new Date(current.getFullYear(), current.getMonth(), 1);
     const end = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+    return { start: toIsoDate(start), end: toIsoDate(end) };
+  }
+
+  if (range.preset === "This Year" || range.preset === "This year") {
+    const start = new Date(current.getFullYear(), 0, 1);
+    const end = new Date(current.getFullYear(), 11, 31);
     return { start: toIsoDate(start), end: toIsoDate(end) };
   }
 
   const start = new Date(current.getFullYear(), current.getMonth() - 1, 1);
   const end = new Date(current.getFullYear(), current.getMonth(), 0);
   return { start: toIsoDate(start), end: toIsoDate(end) };
+}
+
+function dateRangeDays(range) {
+  const days = [];
+  let cursor = parseDate(range.start);
+  const end = parseDate(range.end);
+  while (cursor <= end && days.length < 370) {
+    days.push(toIsoDate(cursor));
+    cursor = addDays(cursor, 1);
+  }
+  return days;
+}
+
+function dateRangeLength(range) {
+  return dateRangeDays(range).length || 1;
+}
+
+function comparisonDateRange(range, mode) {
+  if (mode === "None") return null;
+  const length = dateRangeLength(range);
+  const start = parseDate(range.start);
+  const end = parseDate(range.end);
+  if (mode === "Same period last year") {
+    return {
+      start: toIsoDate(new Date(start.getFullYear() - 1, start.getMonth(), start.getDate())),
+      end: toIsoDate(new Date(end.getFullYear() - 1, end.getMonth(), end.getDate())),
+    };
+  }
+  const previousEnd = addDays(start, -1);
+  return { start: toIsoDate(addDays(previousEnd, -(length - 1))), end: toIsoDate(previousEnd) };
 }
 
 function dateInRange(date, range) {
@@ -1100,7 +1216,7 @@ function App() {
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
-  const [dateRangeState, setDateRangeState] = useState({ preset: "This month", startDate: "2026-06-01", endDate: today() });
+  const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const setProducts = storedStateUpdater(setProductsState, "marginflow.products");
@@ -1253,7 +1369,24 @@ function App() {
           </div>
         )}
 
-        {active === "dashboard" && <Dashboard dateRange={dateRange} dateRangeState={dateRangeState} department={department} gpTarget={gpTarget} metrics={metrics} setDateRangeState={setDateRangeState} supplierSpend={supplierSpend} />}
+        {active === "dashboard" && (
+          <Dashboard
+            dateRange={dateRange}
+            dateRangeState={dateRangeState}
+            department={department}
+            departmentNames={departmentNames}
+            departmentSettings={departmentSettings}
+            gpTarget={gpTarget}
+            invoices={invoices}
+            metrics={metrics}
+            sales={sales}
+            setDateRangeState={setDateRangeState}
+            stocktakes={stocktakes}
+            suppliers={suppliers}
+            supplierSpend={supplierSpend}
+            wasteItems={wasteItems}
+          />
+        )}
         {active === "invoices" && (
           <Invoices
             aiSettings={aiSettings}
@@ -1286,7 +1419,27 @@ function App() {
         {active === "recipes" && <Recipes products={products} recipes={recipes} requestDelete={requestDelete} setRecipes={setRecipes} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} financialSettings={financialSettings} gpTarget={gpTarget} metrics={metrics} requestDelete={requestDelete} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
+        {active === "gp" && (
+          <GpAnalysis
+            dateRange={dateRange}
+            dateRangeState={dateRangeState}
+            department={department}
+            departmentNames={departmentNames}
+            departmentSettings={departmentSettings}
+            financialSettings={financialSettings}
+            gpTarget={gpTarget}
+            invoices={invoices}
+            metrics={metrics}
+            requestDelete={requestDelete}
+            sales={sales}
+            setDateRangeState={setDateRangeState}
+            setSales={setSales}
+            stocktakes={stocktakes}
+            suppliers={suppliers}
+            supplierSpend={supplierSpend}
+            wasteItems={wasteItems}
+          />
+        )}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
@@ -1318,29 +1471,121 @@ function App() {
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, setDateRangeState, supplierSpend }) {
+function targetForRow(departmentSettings, department, fallback) {
+  return targetForDepartment(departmentSettings, department, fallback);
+}
+
+function displayDepartmentName(name) {
+  return name === "Non-food" ? "Non-food / Excluded" : name;
+}
+
+function enrichPerformanceRows(metrics, departmentSettings, gpTarget) {
+  return {
+    dailyRows: metrics.dailyRows.map((row) => ({ ...row, targetGp: gpTarget })),
+    departmentRows: metrics.departmentRows.map((row) => {
+      const targetGp = targetForRow(departmentSettings, row.department, gpTarget);
+      return { ...row, targetGp, variance: row.gp - targetGp };
+    }),
+  };
+}
+
+function changePercent(current, previous) {
+  if (!numberValue(previous)) return numberValue(current) ? 100 : 0;
+  return ((numberValue(current) - numberValue(previous)) / Math.abs(numberValue(previous))) * 100;
+}
+
+function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
+  return (
+    <div className="metric-grid performance-grid">
+      <Metric label="Gross Sales" value={money(metrics.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
+      <Metric label="VAT" value={money(metrics.vat)} delta="Deducted from gross" />
+      <Metric label="Net Sales" value={money(metrics.sales)} delta="Used for GP" />
+      <Metric label="Purchases" value={money(metrics.purchases)} delta={department} />
+      <Metric label="Invoice GP %" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+      <Metric label="Stocktake GP %" value={percent(metrics.stocktakeGp)} delta="Opening + purchases - closing" tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+      <Metric label="Waste Cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of net sales`} tone="warn" />
+      <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
+    </div>
+  );
+}
+
+function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, metrics }) {
+  return (
+    <Panel title="Comparison" action={comparisonMode}>
+      <div className="form-grid six compact-form">
+        <label>Compare with<select value={comparisonMode} onChange={(event) => setComparisonMode(event.target.value)}><option>Previous period</option><option>Same period last year</option><option>None</option></select></label>
+      </div>
+      {comparisonMode === "None" || !comparisonMetrics ? (
+        <EmptyState />
+      ) : (
+        <div className="metric-grid compact">
+          <Metric label="Net Sales change" value={percent(changePercent(metrics.sales, comparisonMetrics.sales))} delta={`${money(comparisonMetrics.sales)} comparison`} tone={metrics.sales >= comparisonMetrics.sales ? "good" : "warn"} />
+          <Metric label="Purchases change" value={percent(changePercent(metrics.purchases, comparisonMetrics.purchases))} delta={`${money(comparisonMetrics.purchases)} comparison`} tone={metrics.purchases <= comparisonMetrics.purchases ? "good" : "warn"} />
+          <Metric label="GP change" value={percent(metrics.invoiceGp - comparisonMetrics.invoiceGp)} delta={`${percent(comparisonMetrics.invoiceGp)} comparison`} tone={metrics.invoiceGp >= comparisonMetrics.invoiceGp ? "good" : "warn"} />
+          <Metric label="Waste change" value={percent(changePercent(metrics.waste, comparisonMetrics.waste))} delta={`${money(comparisonMetrics.waste)} comparison`} tone={metrics.waste <= comparisonMetrics.waste ? "good" : "warn"} />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function PerformanceCharts({ departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
+  const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
+  const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
+  const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
+
+  if (!hasData) return <EmptyState />;
+
+  return (
+    <>
+      <div className="dashboard-layout">
+        <Panel title="Daily GP Chart" action="Actual vs target">
+          <DailyGpChart rows={dailyRows} targetGp={gpTarget} />
+        </Panel>
+        <Panel title="Sales vs Purchases Chart" action="Net sales and purchases by day">
+          <SalesPurchasesChart rows={dailyRows} />
+        </Panel>
+      </div>
+      <div className="dashboard-layout secondary">
+        <Panel title="Department Breakdown" action="Gross, net, cost and GP">
+          <DepartmentBreakdown rows={departmentRows} />
+        </Panel>
+        <Panel title="Supplier Spend" action="High to low">
+          <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} />
+        </Panel>
+      </div>
+      <Panel title="Daily GP Table">
+        <DailyGpTable rows={dailyRows} />
+      </Panel>
+    </>
+  );
+}
+
+function PerformanceSections({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, requestDelete, setSales }) {
+  const [comparisonMode, setComparisonMode] = useState("Previous period");
+  const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
+  const compareRange = comparisonDateRange(dateRange, comparisonMode);
+  const comparisonMetrics = compareRange ? calculateMetrics(invoices, sales, department, stocktakes, wasteItems, compareRange, departmentNames) : null;
+
+  return (
+    <>
+      <Panel title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
+      </Panel>
+      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
+      <PerformanceCharts departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
+      <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
+      {showSalesManager && <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
+    </>
+  );
+}
+
+function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const recentInvoices = [...metrics.invoices].sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <>
-      <Panel title="Dashboard date range" action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-      </Panel>
-      <div className="metric-grid">
-        <Metric label="Net sales" value={money(metrics.sales)} delta={rangeLabel(dateRangeState, dateRange)} />
-        <Metric label="Invoice spend" value={money(metrics.purchases)} delta={department} />
-        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Waste cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of sales`} tone="warn" />
-      </div>
-      <div className="dashboard-layout">
-        <Panel title="Profit flow" action={rangeLabel(dateRangeState, dateRange)}>
-          <BarSeries rows={metrics.salesRows} valueKey="sales" />
-        </Panel>
-        <Panel title="Supplier spend" action={rangeLabel(dateRangeState, dateRange)}>
-          <DonutBars rows={supplierSpend} />
-        </Panel>
-      </div>
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -1370,10 +1615,10 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
           {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
         </select>
       </label>
-      {dateRangeState.preset === "Specific date" && (
+      {(dateRangeState.preset === "Specific Date" || dateRangeState.preset === "Specific date") && (
         <Field label="Date" type="date" value={dateRangeState.specificDate || dateRangeState.startDate || today()} onChange={(value) => setDateRangeState({ ...dateRangeState, specificDate: value, startDate: value, endDate: value })} />
       )}
-      {dateRangeState.preset === "Custom range" && (
+      {(dateRangeState.preset === "Custom Range" || dateRangeState.preset === "Custom range") && (
         <>
           <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
           <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
@@ -2736,42 +2981,13 @@ function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, s
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, financialSettings, gpTarget, metrics, requestDelete, sales, setDateRangeState, setSales, supplierSpend }) {
+function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, requestDelete, sales, setDateRangeState, setSales, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
-  const monthlyRows = [
-    { day: "Apr", sales: metrics.sales * 0.82 },
-    { day: "May", sales: metrics.sales * 0.91 },
-    { day: "Jun", sales: metrics.sales },
-  ];
 
   return (
     <>
-      <Panel title="GP date range" action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-      </Panel>
-      <div className="metric-grid">
-        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Waste %" value={percent(metrics.wastePercent)} delta={money(metrics.waste)} tone="warn" />
-        <Metric label="Stock variance" value={money(metrics.stockVariance)} delta="Closing - opening" />
-      </div>
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} requestDelete={requestDelete} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} showSalesManager stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
-        <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
-        <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
-      </div>
-      <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />
-      <div className="dashboard-layout secondary">
-        <Panel title="Top suppliers">
-          <DataTable
-            columns={[
-              { key: "name", label: "Supplier" },
-              { key: "category", label: "Category" },
-              { key: "spend", label: "Spend", render: (value) => money(value) },
-            ]}
-            rows={[...supplierSpend].sort((a, b) => b.spend - a.spend)}
-          />
-        </Panel>
         <Panel title="Top cost increases">
           <DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} />
         </Panel>
@@ -3114,6 +3330,139 @@ function Panel({ title, action, children }) {
       </div>
       {children}
     </section>
+  );
+}
+
+function EmptyState() {
+  return <div className="empty-state">No data available for this selected period.</div>;
+}
+
+function DailyGpChart({ rows, targetGp }) {
+  const validRows = rows.filter((row) => row.netSales || row.purchases || row.waste);
+  if (!validRows.length) return <EmptyState />;
+  const values = validRows.flatMap((row) => [row.invoiceGp, targetGp]);
+  const min = Math.min(0, ...values);
+  const max = Math.max(100, ...values);
+  const y = (value) => 90 - (((numberValue(value) - min) / Math.max(max - min, 1)) * 78);
+  const x = (index) => 8 + (index / Math.max(validRows.length - 1, 1)) * 84;
+  const points = validRows.map((row, index) => `${x(index)},${y(row.invoiceGp)}`).join(" ");
+  const targetY = y(targetGp);
+
+  return (
+    <div className="performance-chart">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line className="target-line" x1="8" x2="92" y1={targetY} y2={targetY} />
+        <polyline className="actual-line" points={points} />
+        {validRows.map((row, index) => (
+          <circle className="chart-point" cx={x(index)} cy={y(row.invoiceGp)} key={row.id} r="1.6">
+            <title>{`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
+          </circle>
+        ))}
+      </svg>
+      <div className="chart-legend"><span><i className="legend-actual" />Actual GP %</span><span><i className="legend-target" />Target GP %</span></div>
+      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${validRows.length}, 1fr)` }}>{validRows.map((row) => <span key={row.id}>{formatRangeDate(row.date)}</span>)}</div>
+    </div>
+  );
+}
+
+function SalesPurchasesChart({ rows }) {
+  const validRows = rows.filter((row) => row.netSales || row.purchases);
+  if (!validRows.length) return <EmptyState />;
+  const max = Math.max(...validRows.flatMap((row) => [row.netSales, row.purchases]), 1);
+
+  return (
+    <div className="grouped-bars">
+      {validRows.map((row) => (
+        <div className="grouped-bar" key={row.id}>
+          <div className="group-track">
+            <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
+            <span className="purchase-bar" style={{ height: `${(row.purchases / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
+          </div>
+          <small>{formatRangeDate(row.date)}</small>
+        </div>
+      ))}
+      <div className="chart-legend"><span><i className="legend-sales" />Net Sales</span><span><i className="legend-purchases" />Purchases</span></div>
+    </div>
+  );
+}
+
+function DepartmentBreakdown({ rows }) {
+  const visibleRows = rows.filter((row) => row.grossSales || row.netSales || row.purchases || row.waste);
+  const chartRows = visibleRows.length ? visibleRows : rows;
+  const max = Math.max(...chartRows.map((row) => Math.abs(row.gp)), 1);
+  if (!visibleRows.length) return <EmptyState />;
+
+  return (
+    <div className="breakdown-layout">
+      <div className="donut-list compact">
+        {chartRows.map((row) => (
+          <div key={row.department} title={`${displayDepartmentName(row.department)}: GP ${percent(row.gp)}, target ${percent(row.targetGp)}, variance ${percent(row.variance)}`}>
+            <span>{displayDepartmentName(row.department)}</span>
+            <strong>{percent(row.gp)}</strong>
+            <i style={{ width: `${Math.min(100, (Math.abs(row.gp) / max) * 100)}%` }} />
+          </div>
+        ))}
+      </div>
+      <div className="table-wrap compact-table">
+        <table>
+          <thead><tr>{["Department", "Gross Sales", "Net Sales", "Purchases", "Waste", "GP %", "Target GP %", "Variance"].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+          <tbody>
+            {visibleRows.map((row) => (
+              <tr key={row.department}>
+                <td>{displayDepartmentName(row.department)}</td>
+                <td>{money(row.grossSales)}</td>
+                <td>{money(row.netSales)}</td>
+                <td>{money(row.purchases)}</td>
+                <td>{money(row.waste)}</td>
+                <td>{percent(row.gp)}</td>
+                <td>{percent(row.targetGp)}</td>
+                <td><Badge tone={row.variance >= 0 ? "green" : row.variance > -5 ? "amber" : "red"}>{percent(row.variance)}</Badge></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function SupplierSpendChart({ rows, total }) {
+  const visibleRows = rows.filter((row) => row.spend > 0);
+  if (!visibleRows.length) return <EmptyState />;
+  const max = Math.max(...visibleRows.map((row) => row.spend), 1);
+  return (
+    <div className="donut-list">
+      {visibleRows.map((row) => {
+        const share = total ? (row.spend / total) * 100 : 0;
+        return (
+          <div key={row.id || row.name} title={`${row.name}\nSpend: ${money(row.spend)}\n${percent(share)} of total purchases`}>
+            <span>{row.name}</span>
+            <strong>{money(row.spend)} · {percent(share)}</strong>
+            <i style={{ width: `${(row.spend / max) * 100}%` }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DailyGpTable({ rows }) {
+  const visibleRows = rows.filter((row) => row.grossSales || row.netSales || row.purchases || row.waste);
+  if (!visibleRows.length) return <EmptyState />;
+  return (
+    <DataTable
+      columns={[
+        { key: "date", label: "Date" },
+        { key: "grossSales", label: "Gross Sales", render: (value) => money(value) },
+        { key: "netSales", label: "Net Sales", render: (value) => money(value) },
+        { key: "purchases", label: "Purchases", render: (value) => money(value) },
+        { key: "waste", label: "Waste", render: (value) => money(value) },
+        { key: "invoiceGp", label: "Invoice GP %", render: (value) => percent(value) },
+        { key: "stocktakeGp", label: "Stocktake GP %", render: (value) => percent(value) },
+        { key: "realGp", label: "Real GP including waste", render: (value) => percent(value) },
+      ]}
+      rows={visibleRows}
+    />
   );
 }
 
