@@ -770,6 +770,71 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
     .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.grossSales > 0);
 }
 
+function csvRows(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(",").map((cell) => cell.trim()));
+}
+
+function parseProductsCsv(text, suppliers = [], departmentNames = []) {
+  const rows = csvRows(text);
+  if (!rows.length) return [];
+  const header = rows[0].map(normalizeHeader);
+  const hasHeader = header.some((cell) => ["product", "productname", "supplier", "packsize", "unitcost", "department"].includes(cell));
+  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const nameIndex = hasHeader ? findIndex(["product", "productname", "name"]) : 0;
+  const supplierIndex = hasHeader ? findIndex(["supplier", "suppliername"]) : 1;
+  const packIndex = hasHeader ? findIndex(["packsize", "pack", "unit"]) : 2;
+  const quantityIndex = hasHeader ? findIndex(["quantity", "qty"]) : 3;
+  const costIndex = hasHeader ? findIndex(["unitcost", "cost", "price"]) : 4;
+  const departmentIndex = hasHeader ? findIndex(["department", "salesdepartment"]) : 5;
+  const aliasesIndex = hasHeader ? findIndex(["aliases", "alias"]) : 6;
+  const defaultSupplier = suppliers[0]?.name || "";
+  const defaultDepartment = departmentNames[0] || "Kitchen Made";
+
+  return dataRows.map((cells) => ({
+    id: uid(),
+    name: cells[nameIndex] || "",
+    supplier: cells[supplierIndex] || defaultSupplier,
+    packSize: cells[packIndex] || "",
+    quantity: parseCurrencyCell(cells[quantityIndex]) || 1,
+    unitCost: parseCurrencyCell(cells[costIndex]),
+    department: cells[departmentIndex] || defaultDepartment,
+    aliases: cells[aliasesIndex] || "",
+  })).filter((row) => row.name.trim());
+}
+
+function parseSuppliersCsv(text) {
+  const rows = csvRows(text);
+  if (!rows.length) return [];
+  const header = rows[0].map(normalizeHeader);
+  const hasHeader = header.some((cell) => ["supplier", "suppliername", "category", "contact", "email", "phone", "status"].includes(cell));
+  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const nameIndex = hasHeader ? findIndex(["supplier", "suppliername", "name"]) : 0;
+  const categoryIndex = hasHeader ? findIndex(["category", "type"]) : 1;
+  const contactIndex = hasHeader ? findIndex(["contact", "contactname"]) : 2;
+  const emailIndex = hasHeader ? findIndex(["email", "emailaddress"]) : 3;
+  const phoneIndex = hasHeader ? findIndex(["phone", "telephone", "mobile"]) : 4;
+  const statusIndex = hasHeader ? findIndex(["status", "active"]) : 5;
+
+  return dataRows.map((cells) => {
+    const status = String(cells[statusIndex] || "Active").toLowerCase();
+    return {
+      id: uid(),
+      name: cells[nameIndex] || "",
+      category: cells[categoryIndex] || "",
+      contact: cells[contactIndex] || "",
+      email: cells[emailIndex] || "",
+      phone: cells[phoneIndex] || "",
+      active: !["inactive", "false", "no", "0"].includes(status),
+    };
+  }).filter((row) => row.name.trim());
+}
+
 function normalizeSalesRows(rows) {
   return rows.map((row) => {
     const grossSales = numberValue(row.grossSales, numberValue(row.sales));
