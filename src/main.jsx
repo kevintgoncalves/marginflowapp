@@ -36,7 +36,7 @@ const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], suppli
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
-const rangePresets = ["Today", "This week", "Last week", "This month", "Last month", "Custom range"];
+const rangePresets = ["Today", "Specific date", "This week", "Last week", "This month", "Last month", "Custom range"];
 
 const defaultDepartmentSettings = [
   { id: uid(), name: "Kitchen Made", type: "Food", targetGp: 75, active: true },
@@ -971,6 +971,10 @@ function startOfWeek(date, weekStartsOn = "Monday") {
 
 function resolveDateRange(range, weekStartsOn = "Monday") {
   if (range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
+  if (range.preset === "Specific date") {
+    const date = range.specificDate || range.startDate || today();
+    return { start: date, end: date };
+  }
 
   const current = parseDate(today());
   if (range.preset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
@@ -1218,7 +1222,7 @@ function App() {
         {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && <GpAnalysis dateRange={dateRange} department={department} departmentNames={departmentNames} gpTarget={gpTarget} metrics={metrics} sales={sales} setSales={setSales} supplierSpend={supplierSpend} />}
+        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} gpTarget={gpTarget} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
@@ -1247,20 +1251,7 @@ function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, s
   return (
     <>
       <Panel title="Dashboard date range" action={rangeLabel(dateRangeState, dateRange)}>
-        <div className="form-grid six range-grid">
-          <label>
-            Range
-            <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
-              {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
-            </select>
-          </label>
-          {dateRangeState.preset === "Custom range" && (
-            <>
-              <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
-              <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
-            </>
-          )}
-        </div>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
       <div className="metric-grid">
         <Metric label="Net sales" value={money(metrics.sales)} delta={rangeLabel(dateRangeState, dateRange)} />
@@ -1294,6 +1285,28 @@ function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, s
         </Panel>
       </div>
     </>
+  );
+}
+
+function DateRangeControls({ dateRangeState, setDateRangeState }) {
+  return (
+    <div className="form-grid six range-grid">
+      <label>
+        Range
+        <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
+          {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
+        </select>
+      </label>
+      {dateRangeState.preset === "Specific date" && (
+        <Field label="Date" type="date" value={dateRangeState.specificDate || dateRangeState.startDate || today()} onChange={(value) => setDateRangeState({ ...dateRangeState, specificDate: value, startDate: value, endDate: value })} />
+      )}
+      {dateRangeState.preset === "Custom range" && (
+        <>
+          <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
+          <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
+        </>
+      )}
+    </div>
   );
 }
 
@@ -2299,7 +2312,7 @@ function SalesManager({ departmentNames, sales, setSales }) {
   );
 }
 
-function GpAnalysis({ dateRange, department, departmentNames, gpTarget, metrics, sales, setSales, supplierSpend }) {
+function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, gpTarget, metrics, sales, setDateRangeState, setSales, supplierSpend }) {
   const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
   const monthlyRows = [
     { day: "Apr", sales: metrics.sales * 0.82 },
@@ -2309,6 +2322,9 @@ function GpAnalysis({ dateRange, department, departmentNames, gpTarget, metrics,
 
   return (
     <>
+      <Panel title="GP date range" action={rangeLabel(dateRangeState, dateRange)}>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
+      </Panel>
       <div className="metric-grid">
         <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
         <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
