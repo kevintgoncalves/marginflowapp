@@ -1463,6 +1463,7 @@ function App() {
             suppliers={suppliers}
             setSuppliers={setSuppliers}
             products={products}
+            setProducts={setProducts}
             departmentNames={departmentNames}
             approveInvoice={approveInvoice}
             requestDelete={requestDelete}
@@ -1737,9 +1738,10 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, requestDelete, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [splitEditorId, setSplitEditorId] = useState(null);
+  const [manualInvoiceOpen, setManualInvoiceOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const readControllerRef = useRef(null);
   const uploadRunRef = useRef(0);
@@ -1953,17 +1955,50 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }));
   };
 
-  const addManualLine = () => {
-    const supplier = draft.supplier || suppliers[0]?.name || "Unknown Supplier";
-    setDraft((current) => ({
-      ...current,
+  const saveManualInvoice = (manualDraft) => {
+    const supplier = manualDraft.supplier || suppliers[0]?.name || "Unknown Supplier";
+    const items = manualDraft.items.map((item) => enrichInvoiceLine({
+      ...item,
+      id: item.id || uid(),
       supplier,
-      items: [
-        ...current.items,
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, departmentSplits: defaultDepartmentSplits(invoiceSettings.defaultInvoiceDepartment), matchStatus: "Create new product", matchConfidence: 0 },
-      ],
-      status: "Manual review",
-    }));
+      quantity: numberValue(item.quantity, 1),
+      unitCost: numberValue(item.unitCost),
+      lineTotal: numberValue(item.lineTotal, numberValue(item.quantity, 1) * numberValue(item.unitCost)),
+      department: item.department || invoiceSettings.defaultInvoiceDepartment,
+      departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
+      matchStatus: "Manual invoice",
+      matchConfidence: 0,
+    }, products, aiSettings));
+
+    const invalidSplit = items.find((item) => !splitIsValid(item));
+    if (invalidSplit) {
+      setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
+      return;
+    }
+
+    const normalizedItems = items.map((item) => {
+      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
+      return {
+        ...item,
+        supplier,
+        unitCost: normalizeInvoiceUnitCost(item),
+        department: departmentSplits[0]?.department || item.department,
+        departmentSplits,
+      };
+    });
+    const invoice = {
+      id: uid(),
+      invoiceNumber: manualDraft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+      supplier,
+      date: manualDraft.date || today(),
+      status: "Approved",
+      items: normalizedItems,
+    };
+    setInvoices((current) => [invoice, ...current]);
+    setSuppliers((current) => ensureSupplierList(current, supplier));
+    setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
+    setDraft(emptyInvoiceDraft());
+    setManualInvoiceOpen(false);
   };
 
   const editApprovedInvoice = (invoice) => {
@@ -2054,11 +2089,22 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
-          <button className="ghost" onClick={addManualLine} type="button">Add Manual Invoice</button>
+          <button className="ghost" onClick={() => setManualInvoiceOpen(true)} type="button"><Plus size={16} />Add Manual Invoice</button>
           <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />{draft.editingInvoiceId ? "Save Invoice" : "Confirm Invoice"}</button>
         </div>
       </Panel>
+
+      {manualInvoiceOpen && (
+        <ManualInvoiceModal
+          departmentNames={departmentNames}
+          invoiceSettings={invoiceSettings}
+          onCancel={() => setManualInvoiceOpen(false)}
+          onSave={saveManualInvoice}
+          products={products}
+          suppliers={suppliers}
+        />
+      )}
 
       <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
         <div className="table-wrap">
@@ -2148,6 +2194,189 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           rows={invoices}
         />
       </Panel>
+    </div>
+  );
+}
+
+function manualInvoiceLine(defaultDepartment, product = {}) {
+  const department = product.department || defaultDepartment;
+  const quantity = numberValue(product.quantity, 1) || 1;
+  const unitCost = numberValue(product.unitCost);
+  return {
+    id: uid(),
+    productName: product.name || "",
+    packSize: product.packSize || "",
+    quantity,
+    unitCost,
+    department,
+    departmentSplits: defaultDepartmentSplits(department),
+    lineTotal: quantity * unitCost,
+    supplier: product.supplier || "",
+  };
+}
+
+function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave, products, suppliers }) {
+  const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+  const defaultSupplier = suppliers[0]?.name || "";
+  const [mode, setMode] = useState("Simple Mode");
+  const [status, setStatus] = useState("");
+  const [simple, setSimple] = useState({
+    supplier: defaultSupplier,
+    department: defaultDepartment,
+    invoiceNumber: "",
+    date: today(),
+    totalPrice: "",
+  });
+  const [complete, setComplete] = useState({
+    supplier: defaultSupplier,
+    invoiceNumber: "",
+    date: today(),
+    rows: [manualInvoiceLine(defaultDepartment), manualInvoiceLine(defaultDepartment)],
+  });
+
+  const updateCompleteHeader = (field, value) => setComplete((current) => ({ ...current, [field]: value }));
+  const updateRow = (id, field, value) => {
+    setComplete((current) => ({
+      ...current,
+      rows: current.rows.map((row) => {
+        if (row.id !== id) return row;
+        let next = { ...row, [field]: ["quantity", "unitCost", "lineTotal", "splitPercentage"].includes(field) ? numberValue(value) : value };
+        if (field === "productName") {
+          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
+          if (product) {
+            next = {
+              ...next,
+              productName: product.name,
+              packSize: product.packSize || next.packSize,
+              unitCost: numberValue(product.unitCost),
+              supplier: product.supplier || next.supplier,
+              department: product.department || next.department,
+              departmentSplits: defaultDepartmentSplits(product.department || next.department),
+            };
+          }
+        }
+        if (field === "department") next.departmentSplits = defaultDepartmentSplits(value);
+        if (field === "quantity" || field === "unitCost" || field === "productName" || field === "department") {
+          next.lineTotal = numberValue(next.quantity, 1) * numberValue(next.unitCost);
+        }
+        if (field === "lineTotal") {
+          next.unitCost = numberValue(next.quantity, 1) ? Number((numberValue(value) / numberValue(next.quantity, 1)).toFixed(4)) : next.unitCost;
+        }
+        if (field === "splitPercentage") {
+          next.departmentSplits = [{ ...(normalizeDepartmentSplits(next, next.department)[0] || { id: uid(), department: next.department }), percentage: numberValue(value) }];
+        }
+        return next;
+      }),
+    }));
+  };
+
+  const addRow = () => setComplete((current) => ({ ...current, rows: [...current.rows, manualInvoiceLine(defaultDepartment)] }));
+  const removeRow = (id) => setComplete((current) => ({ ...current, rows: current.rows.length > 1 ? current.rows.filter((row) => row.id !== id) : current.rows }));
+
+  const save = () => {
+    if (mode === "Simple Mode") {
+      if (!simple.supplier.trim() || !simple.date || !numberValue(simple.totalPrice)) {
+        setStatus("Supplier, date and total price are required.");
+        return;
+      }
+      const total = numberValue(simple.totalPrice);
+      onSave({
+        supplier: simple.supplier,
+        invoiceNumber: simple.invoiceNumber,
+        date: simple.date,
+        items: [{
+          id: uid(),
+          productName: "Manual invoice total",
+          packSize: "Summary",
+          quantity: 1,
+          unitCost: total,
+          lineTotal: total,
+          department: simple.department,
+          departmentSplits: defaultDepartmentSplits(simple.department),
+          supplier: simple.supplier,
+        }],
+      });
+      return;
+    }
+
+    const rows = complete.rows.filter((row) => row.productName.trim() || numberValue(row.lineTotal));
+    const invalid = rows.find((row) => !row.productName.trim() || !numberValue(row.quantity) || !numberValue(row.unitCost) || !splitIsValid(row));
+    if (!complete.supplier.trim() || !complete.date || !rows.length || invalid) {
+      setStatus("Complete every row with product, quantity, unit cost and a 100% department split.");
+      return;
+    }
+    onSave({
+      supplier: complete.supplier,
+      invoiceNumber: complete.invoiceNumber,
+      date: complete.date,
+      items: rows.map((row) => ({ ...row, supplier: complete.supplier, lineTotal: numberValue(row.lineTotal, numberValue(row.quantity) * numberValue(row.unitCost)) })),
+    });
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="split-modal wide manual-invoice-modal" role="dialog" aria-modal="true" aria-label="Add manual invoice">
+        <div className="modal-header">
+          <div>
+            <h3>Add Manual Invoice</h3>
+            <p>{mode}</p>
+          </div>
+          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
+        </div>
+        <div className="segmented-control">
+          {["Simple Mode", "Complete Mode"].map((option) => (
+            <button className={mode === option ? "active" : ""} key={option} onClick={() => setMode(option)} type="button">{option}</button>
+          ))}
+        </div>
+        {mode === "Simple Mode" ? (
+          <div className="form-grid five">
+            <label>Supplier<input list="manual-supplier-list" value={simple.supplier} onChange={(event) => setSimple({ ...simple, supplier: event.target.value })} /></label>
+            <label>Department<select value={simple.department} onChange={(event) => setSimple({ ...simple, department: event.target.value })}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></label>
+            <Field label="Invoice number" value={simple.invoiceNumber} onChange={(value) => setSimple({ ...simple, invoiceNumber: value })} />
+            <Field label="Date" type="date" value={simple.date} onChange={(value) => setSimple({ ...simple, date: value })} />
+            <Field label="Total price" type="number" value={simple.totalPrice} onChange={(value) => setSimple({ ...simple, totalPrice: value })} />
+          </div>
+        ) : (
+          <>
+            <div className="form-grid three compact-form">
+              <label>Supplier<input list="manual-supplier-list" value={complete.supplier} onChange={(event) => updateCompleteHeader("supplier", event.target.value)} /></label>
+              <Field label="Invoice number" value={complete.invoiceNumber} onChange={(value) => updateCompleteHeader("invoiceNumber", value)} />
+              <Field label="Date" type="date" value={complete.date} onChange={(value) => updateCompleteHeader("date", value)} />
+            </div>
+            <div className="table-wrap manual-invoice-table">
+              <table>
+                <thead>
+                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Department", "Department split", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {complete.rows.map((row) => (
+                    <tr key={row.id}>
+                      <td><input list="manual-product-list" value={row.productName} onChange={(event) => updateRow(row.id, "productName", event.target.value)} /></td>
+                      <td><input value={row.packSize} onChange={(event) => updateRow(row.id, "packSize", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.quantity} onChange={(event) => updateRow(row.id, "quantity", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.unitCost} onChange={(event) => updateRow(row.id, "unitCost", event.target.value)} /></td>
+                      <td><select value={row.department} onChange={(event) => updateRow(row.id, "department", event.target.value)}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></td>
+                      <td><input min="0" max="100" step="1" type="number" value={departmentSplitTotal(row)} onChange={(event) => updateRow(row.id, "splitPercentage", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={numberValue(row.lineTotal, numberValue(row.quantity) * numberValue(row.unitCost))} onChange={(event) => updateRow(row.id, "lineTotal", event.target.value)} /></td>
+                      <td><button className="icon danger" onClick={() => removeRow(row.id)} type="button"><Trash2 size={15} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="button-row left tight">
+              <button className="ghost" onClick={addRow} type="button"><Plus size={16} />Add row</button>
+            </div>
+          </>
+        )}
+        <datalist id="manual-supplier-list">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
+        <datalist id="manual-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+        {status && <div className="invoice-status error">{status}</div>}
+        <div className="button-row left">
+          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
+          <button onClick={save} type="button"><Save size={16} />Save Invoice</button>
+        </div>
+      </div>
     </div>
   );
 }
