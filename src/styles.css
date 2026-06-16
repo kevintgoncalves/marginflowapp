@@ -1096,6 +1096,27 @@ code {
   border-radius: 10px;
 }
 
+.bulk-modal {
+  max-height: min(86vh, 860px);
+  overflow: auto;
+}
+
+.bulk-entry-table {
+  max-height: 380px;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+}
+
+.bulk-entry-table table {
+  min-width: 1080px;
+}
+
+.bulk-entry-table td input,
+.bulk-entry-table td select {
+  min-width: 130px;
+}
+
 .import-review {
   margin: 0 18px 18px;
   border: 1px solid var(--line);

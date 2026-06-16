@@ -2448,40 +2448,93 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
 
 function Products({ departmentNames, products, requestDelete, setProducts, suppliers }) {
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
+  const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
+  const [bulkRows, setBulkRows] = useState([emptyBulkRow(), emptyBulkRow()]);
+  const [pendingImport, setPendingImport] = useState([]);
+  const [status, setStatus] = useState("");
+  const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
-  const [editModalOpen, setEditModalOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const rows = useMemo(() => buildProductRows(products), [products]);
 
+  const productPayload = (row) => {
+    const aliases = String(row.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
+    const unitCost = numberValue(row.unitCost);
+    const supplier = row.supplier || suppliers[0]?.name || "";
+    return {
+      ...row,
+      supplier,
+      aliases,
+      unitCost,
+      quantity: numberValue(row.quantity, 1),
+      supplierPrices: [{ supplier, price: unitCost, date: today() }],
+      priceHistory: [{ date: today(), supplier, price: unitCost }],
+    };
+  };
+
   const saveProduct = () => {
     if (!form.name.trim()) return;
-    const aliases = String(form.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
-    const payload = {
-      ...form,
-      aliases,
-      unitCost: numberValue(form.unitCost),
-      quantity: numberValue(form.quantity, 1),
-      supplierPrices: [{ supplier: form.supplier, price: numberValue(form.unitCost), date: today() }],
-    };
-    if (editingId) {
-      setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
-    } else {
-      setProducts((current) => [...current, { ...payload, id: uid(), priceHistory: [{ date: today(), supplier: payload.supplier, price: payload.unitCost }] }]);
-    }
+    const payload = productPayload(form);
+    setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, id: editingId, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
     setForm(empty);
     setEditingId("");
     setModalOpen(false);
+  };
+
+  const saveBulkProducts = () => {
+    const validRows = bulkRows.filter((row) => row.name.trim());
+    if (!validRows.length) {
+      setStatus("Add at least one product name.");
+      return;
+    }
+    setProducts((current) => [...current, ...validRows.map((row) => ({ ...productPayload(row), id: uid() }))]);
+    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
+    setPendingImport([]);
+    setStatus("");
+    setImportFileKey((current) => current + 1);
+    setModalOpen(false);
+  };
+
+  const updateBulkRow = (id, field, value) => {
+    setBulkRows((current) => current.map((row) => (row.id === id ? { ...row, [field]: ["quantity", "unitCost"].includes(field) ? value : value } : row)));
+  };
+
+  const importProducts = async (file) => {
+    if (!file) return;
+    const imported = parseProductsCsv(await file.text(), suppliers, departmentNames);
+    if (!imported.length) {
+      setStatus("CSV import found no product rows.");
+      return;
+    }
+    setPendingImport(imported);
+    setStatus(`${imported.length} product row(s) ready for review.`);
+  };
+
+  const confirmImport = () => {
+    setProducts((current) => [...current, ...pendingImport.map((row) => ({ ...productPayload(row), id: uid() }))]);
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setModalOpen(false);
+  };
+
+  const cancelImport = () => {
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setStatus("Product import cancelled.");
   };
 
   const openProductModal = (row = null) => {
     if (row) {
       setForm({ ...row, aliases: (row.aliases || []).join(", ") });
       setEditingId(row.id);
-    } else {
-      setForm(empty);
-      setEditingId("");
+      setModalOpen(true);
+      return;
     }
+    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
+    setPendingImport([]);
+    setStatus("");
+    setEditingId("");
     setModalOpen(true);
   };
 
@@ -2505,8 +2558,46 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
           toolbarAction={<button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
         />
       </Panel>
-      {modalOpen && (
-        <EditModal title={editingId ? "Edit product" : "Add product"} onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
+      {modalOpen && !editingId && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add products">
+            <div className="modal-header">
+              <div><h3>Add products</h3><p>Bulk create products</p></div>
+              <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
+            </div>
+            <div className="button-row left tight">
+              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importProducts(event.target.files?.[0])} type="file" /></label>
+            </div>
+            {status && <div className="invoice-status info">{status}</div>}
+            {pendingImport.length > 0 && (
+              <div className="import-review">
+                <div className="panel-head"><h2>Review import</h2><span>{pendingImport.length} row(s)</span></div>
+                <DataTable columns={[
+                  { key: "name", label: "Product name" },
+                  { key: "supplier", label: "Supplier" },
+                  { key: "packSize", label: "Pack size" },
+                  { key: "quantity", label: "Quantity" },
+                  { key: "unitCost", label: "Unit cost", render: money },
+                  { key: "department", label: "Department" },
+                  { key: "aliases", label: "Aliases" },
+                ]} rows={pendingImport} />
+                <div className="button-row left">
+                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+                  <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
+                </div>
+              </div>
+            )}
+            <BulkProductsTable rows={bulkRows} setRows={setBulkRows} suppliers={suppliers} departmentNames={departmentNames} updateRow={updateBulkRow} />
+            <div className="button-row left">
+              <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
+              <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
+              <button onClick={saveBulkProducts} type="button"><Save size={16} />Save Products</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {modalOpen && editingId && (
+        <EditModal title="Edit product" onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
           <div className="form-grid six">
             <Field label="Product name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
             <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
@@ -2522,24 +2613,102 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
   );
 }
 
+function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRow }) {
+  return (
+    <div className="table-wrap bulk-entry-table">
+      <table>
+        <thead><tr>{["Product name", "Supplier", "Pack size", "Quantity", "Unit cost", "Department", "Aliases", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td><input value={row.name} onChange={(event) => updateRow(row.id, "name", event.target.value)} /></td>
+              <td><select value={row.supplier} onChange={(event) => updateRow(row.id, "supplier", event.target.value)}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></td>
+              <td><input value={row.packSize} onChange={(event) => updateRow(row.id, "packSize", event.target.value)} /></td>
+              <td><input min="0" step="0.01" type="number" value={row.quantity} onChange={(event) => updateRow(row.id, "quantity", event.target.value)} /></td>
+              <td><input min="0" step="0.01" type="number" value={row.unitCost} onChange={(event) => updateRow(row.id, "unitCost", event.target.value)} /></td>
+              <td><select value={row.department} onChange={(event) => updateRow(row.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
+              <td><input value={row.aliases} onChange={(event) => updateRow(row.id, "aliases", event.target.value)} /></td>
+              <td><button className="icon danger" onClick={() => setRows((current) => current.length > 1 ? current.filter((item) => item.id !== row.id) : current)} type="button"><Trash2 size={15} /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
+  const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
+  const [bulkRows, setBulkRows] = useState([emptyBulkRow(), emptyBulkRow()]);
+  const [pendingImport, setPendingImport] = useState([]);
+  const [status, setStatus] = useState("");
+  const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
 
   const saveSupplier = () => {
     if (!form.name.trim()) return;
-    if (editingId) setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...form } : supplier)));
-    else setSuppliers((current) => [...current, { ...form, id: uid() }]);
+    setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...form } : supplier)));
     setForm(empty);
     setEditingId("");
     setModalOpen(false);
   };
 
+  const saveBulkSuppliers = () => {
+    const validRows = bulkRows.filter((row) => row.name.trim());
+    if (!validRows.length) {
+      setStatus("Add at least one supplier name.");
+      return;
+    }
+    setSuppliers((current) => [...current, ...validRows.map((row) => ({ ...row, id: uid() }))]);
+    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
+    setPendingImport([]);
+    setStatus("");
+    setImportFileKey((current) => current + 1);
+    setModalOpen(false);
+  };
+
+  const updateBulkRow = (id, field, value) => {
+    setBulkRows((current) => current.map((row) => (row.id === id ? { ...row, [field]: field === "active" ? value === "Active" : value } : row)));
+  };
+
+  const importSuppliers = async (file) => {
+    if (!file) return;
+    const imported = parseSuppliersCsv(await file.text());
+    if (!imported.length) {
+      setStatus("CSV import found no supplier rows.");
+      return;
+    }
+    setPendingImport(imported);
+    setStatus(`${imported.length} supplier row(s) ready for review.`);
+  };
+
+  const confirmImport = () => {
+    setSuppliers((current) => [...current, ...pendingImport.map((row) => ({ ...row, id: uid() }))]);
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setModalOpen(false);
+  };
+
+  const cancelImport = () => {
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setStatus("Supplier import cancelled.");
+  };
+
   const openSupplierModal = (row = null) => {
-    setForm(row || empty);
-    setEditingId(row?.id || "");
+    if (row) {
+      setForm(row);
+      setEditingId(row.id);
+      setModalOpen(true);
+      return;
+    }
+    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
+    setPendingImport([]);
+    setStatus("");
+    setEditingId("");
     setModalOpen(true);
   };
 
@@ -2562,8 +2731,45 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
           toolbarAction={<button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button>}
         />
       </Panel>
-      {modalOpen && (
-        <EditModal title={editingId ? "Edit supplier" : "Add supplier"} onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
+      {modalOpen && !editingId && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add suppliers">
+            <div className="modal-header">
+              <div><h3>Add suppliers</h3><p>Bulk create suppliers</p></div>
+              <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
+            </div>
+            <div className="button-row left tight">
+              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSuppliers(event.target.files?.[0])} type="file" /></label>
+            </div>
+            {status && <div className="invoice-status info">{status}</div>}
+            {pendingImport.length > 0 && (
+              <div className="import-review">
+                <div className="panel-head"><h2>Review import</h2><span>{pendingImport.length} row(s)</span></div>
+                <DataTable columns={[
+                  { key: "name", label: "Supplier" },
+                  { key: "category", label: "Category" },
+                  { key: "contact", label: "Contact" },
+                  { key: "email", label: "Email" },
+                  { key: "phone", label: "Phone" },
+                  { key: "active", label: "Status", render: (value) => value ? "Active" : "Inactive" },
+                ]} rows={pendingImport} />
+                <div className="button-row left">
+                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+                  <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
+                </div>
+              </div>
+            )}
+            <BulkSuppliersTable rows={bulkRows} setRows={setBulkRows} updateRow={updateBulkRow} />
+            <div className="button-row left">
+              <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
+              <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
+              <button onClick={saveBulkSuppliers} type="button"><Save size={16} />Save Suppliers</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {modalOpen && editingId && (
+        <EditModal title="Edit supplier" onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
           <div className="form-grid six">
             <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
             <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
@@ -2574,6 +2780,29 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
           </div>
         </EditModal>
       )}
+    </div>
+  );
+}
+
+function BulkSuppliersTable({ rows, setRows, updateRow }) {
+  return (
+    <div className="table-wrap bulk-entry-table">
+      <table>
+        <thead><tr>{["Supplier", "Category", "Contact", "Email", "Phone", "Status", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td><input value={row.name} onChange={(event) => updateRow(row.id, "name", event.target.value)} /></td>
+              <td><input value={row.category} onChange={(event) => updateRow(row.id, "category", event.target.value)} /></td>
+              <td><input value={row.contact} onChange={(event) => updateRow(row.id, "contact", event.target.value)} /></td>
+              <td><input value={row.email} onChange={(event) => updateRow(row.id, "email", event.target.value)} /></td>
+              <td><input value={row.phone} onChange={(event) => updateRow(row.id, "phone", event.target.value)} /></td>
+              <td><select value={row.active ? "Active" : "Inactive"} onChange={(event) => updateRow(row.id, "active", event.target.value)}><option>Active</option><option>Inactive</option></select></td>
+              <td><button className="icon danger" onClick={() => setRows((current) => current.length > 1 ? current.filter((item) => item.id !== row.id) : current)} type="button"><Trash2 size={15} /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
