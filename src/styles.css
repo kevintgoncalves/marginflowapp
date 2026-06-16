@@ -705,9 +705,17 @@ td input, td select { min-width: 110px; }
 
 .actual-line {
   fill: none;
-  stroke: var(--primary);
-  stroke-width: 2.4;
+  stroke: url("#gpLineGradient");
+  stroke-width: 3;
   vector-effect: non-scaling-stroke;
+}
+
+.smooth-line {
+  filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.35));
+}
+
+.gp-area {
+  fill: url("#gpAreaGradient");
 }
 
 .target-line {
@@ -756,6 +764,58 @@ td input, td select { min-width: 110px; }
 .chart-labels.dynamic {
   margin-top: 8px;
   overflow: hidden;
+}
+
+.comparison-chart {
+  min-height: 260px;
+  padding: 18px 20px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.comparison-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.comparison-bars {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: end;
+  min-height: 210px;
+  padding-top: 14px;
+}
+
+.comparison-bar {
+  display: grid;
+  gap: 8px;
+  align-items: end;
+  min-height: 190px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.comparison-bar span {
+  display: block;
+  width: min(58px, 80%);
+  min-height: 4px;
+  margin: 0 auto;
+  border-radius: 8px 8px 2px 2px;
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.92), rgba(71, 85, 105, 0.78));
+}
+
+.comparison-bar.current span {
+  background: linear-gradient(180deg, #60a5fa, #2563eb);
+  box-shadow: 0 0 18px rgba(96, 165, 250, 0.18);
+}
+
+.comparison-bar strong {
+  color: var(--text);
 }
 
 .grouped-bars {

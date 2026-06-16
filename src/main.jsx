@@ -1560,6 +1560,50 @@ function changePercent(current, previous) {
   return ((numberValue(current) - numberValue(previous)) / Math.abs(numberValue(previous))) * 100;
 }
 
+function totalSalesRows(rows, range) {
+  const filteredRows = normalizeSalesRows(rows.filter((row) => dateInRange(row.date, range)));
+  const totals = filteredRows.reduce((sum, row) => ({
+    grossSales: sum.grossSales + numberValue(row.grossSales),
+    netSales: sum.netSales + netSalesForRow(row),
+    vat: sum.vat + vatAmountFromGrossNet(row.grossSales, row.sales),
+    discounts: sum.discounts + numberValue(row.discounts),
+    refunds: sum.refunds + numberValue(row.refunds),
+    serviceCharge: sum.serviceCharge + numberValue(row.serviceCharge),
+  }), { grossSales: 0, netSales: 0, vat: 0, discounts: 0, refunds: 0, serviceCharge: 0 });
+  return {
+    ...totals,
+    rows: filteredRows,
+    averageDailySales: totals.netSales / dateRangeLength(range),
+  };
+}
+
+function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn) {
+  if (mode === "Today vs Yesterday") {
+    return {
+      current: resolveDateRange({ preset: "Today" }, weekStartsOn),
+      previous: resolveDateRange({ preset: "Yesterday" }, weekStartsOn),
+    };
+  }
+  if (mode === "Today vs Last Week") {
+    const current = resolveDateRange({ preset: "Today" }, weekStartsOn);
+    const previousDate = toIsoDate(addDays(parseDate(current.start), -7));
+    return { current, previous: { start: previousDate, end: previousDate } };
+  }
+  if (mode === "This Week vs Last Week") {
+    return {
+      current: resolveDateRange({ preset: "This Week" }, weekStartsOn),
+      previous: resolveDateRange({ preset: "Last Week" }, weekStartsOn),
+    };
+  }
+  if (mode === "This Month vs Last Month") {
+    return {
+      current: resolveDateRange({ preset: "This Month" }, weekStartsOn),
+      previous: resolveDateRange({ preset: "Last Month" }, weekStartsOn),
+    };
+  }
+  return { current: currentCustom, previous: previousCustom };
+}
+
 function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget, gpCalculationBase }) {
   return (
     <div className="metric-grid performance-grid">
@@ -3116,6 +3160,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
   const defaultVatRate = financialSettings.defaultVat;
   const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
+  const [salesMode, setSalesMode] = useState(financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? "Calculate Net from VAT" : "Gross + Net");
   const [editingId, setEditingId] = useState("");
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -3131,7 +3176,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     setForm((current) => ({
       ...current,
       grossSales,
-      sales: financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, current.vatRate) : current.sales,
+      sales: salesMode === "Calculate Net from VAT" ? netFromGross(grossSales, current.vatRate) : current.sales,
     }));
   };
 
@@ -3140,7 +3185,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     setForm((current) => ({
       ...current,
       vatRate,
-      sales: financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(current.grossSales, vatRate) : current.sales,
+      sales: salesMode === "Calculate Net from VAT" ? netFromGross(current.grossSales, vatRate) : current.sales,
     }));
   };
 
@@ -3245,45 +3290,121 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
         rows={sales}
       />
       {addModalOpen && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} setForm={setForm} title="Add sales" updateGross={updateGross} />
+        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Add sales" updateGross={updateGross} updateVatRate={updateVatRate} />
       )}
       {editModalOpen && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} setForm={setForm} title="Edit sales record" updateGross={updateGross} />
+        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Edit sales record" updateGross={updateGross} updateVatRate={updateVatRate} />
       )}
     </Panel>
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, requestDelete, sales, setDateRangeState, setSales, stocktakes, suppliers, supplierSpend, wasteItems }) {
-  const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
+function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSettings, requestDelete, sales, setDateRangeState, setSales }) {
+  const salesTotals = totalSalesRows(sales, dateRange);
 
   return (
     <>
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} requestDelete={requestDelete} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} showSalesManager stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
-      <div className="dashboard-layout secondary">
-        <Panel title="Top cost increases">
-          <DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} />
-        </Panel>
-      </div>
-      <Panel title="Formula checks" action="Restaurant GP logic">
-        <div className="code-card">
-          <p>Invoice GP = (Net Sales - purchases) / Net Sales x 100</p>
-          <p>Stocktake real cost = opening stock + purchases - closing stock</p>
-          <p>Real GP including waste = (Net Sales - (stocktake real cost + waste)) / Net Sales x 100</p>
-        </div>
+      <Panel title="Sales date range" action={rangeLabel(dateRangeState, dateRange)}>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
+      <div className="metric-grid compact">
+        <Metric label="Gross Sales" value={money(salesTotals.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
+        <Metric label="Net Sales" value={money(salesTotals.netSales)} delta="Stored from POS/manual entry" />
+        <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
+        <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
+      </div>
+      <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />
+      <SalesComparison financialSettings={financialSettings} sales={sales} />
     </>
   );
 }
 
-function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmount, onCancel, onSave, setForm, title, updateGross }) {
+function SalesComparison({ financialSettings, sales }) {
+  const [mode, setMode] = useState("Today vs Yesterday");
+  const [currentCustom, setCurrentCustom] = useState(resolveDateRange({ preset: "This Week" }, financialSettings.weekStartsOn));
+  const [previousCustom, setPreviousCustom] = useState(resolveDateRange({ preset: "Last Week" }, financialSettings.weekStartsOn));
+  const { current, previous } = salesComparisonRanges(mode, currentCustom, previousCustom, financialSettings.weekStartsOn);
+  const currentTotals = totalSalesRows(sales, current);
+  const previousTotals = totalSalesRows(sales, previous);
+  const hasData = currentTotals.rows.length || previousTotals.rows.length;
+
+  return (
+    <Panel title="Sales comparison" action={`${formatRangeDate(current.start)} - ${formatRangeDate(current.end)}`}>
+      <div className="form-grid six compact-form">
+        <label>Compare<select value={mode} onChange={(event) => setMode(event.target.value)}>
+          <option>Today vs Yesterday</option>
+          <option>Today vs Last Week</option>
+          <option>This Week vs Last Week</option>
+          <option>This Month vs Last Month</option>
+          <option>Custom Period vs Custom Period</option>
+        </select></label>
+        {mode === "Custom Period vs Custom Period" && (
+          <>
+            <Field label="Current from" type="date" value={currentCustom.start} onChange={(value) => setCurrentCustom((range) => ({ ...range, start: value }))} />
+            <Field label="Current to" type="date" value={currentCustom.end} onChange={(value) => setCurrentCustom((range) => ({ ...range, end: value }))} />
+            <Field label="Compare from" type="date" value={previousCustom.start} onChange={(value) => setPreviousCustom((range) => ({ ...range, start: value }))} />
+            <Field label="Compare to" type="date" value={previousCustom.end} onChange={(value) => setPreviousCustom((range) => ({ ...range, end: value }))} />
+          </>
+        )}
+      </div>
+      {!hasData ? (
+        <EmptyState />
+      ) : (
+        <>
+          <div className="metric-grid compact">
+            <Metric label="Gross Sales difference" value={percent(changePercent(currentTotals.grossSales, previousTotals.grossSales))} delta={`${money(currentTotals.grossSales)} vs ${money(previousTotals.grossSales)}`} tone={currentTotals.grossSales >= previousTotals.grossSales ? "good" : "warn"} />
+            <Metric label="Net Sales difference" value={percent(changePercent(currentTotals.netSales, previousTotals.netSales))} delta={`${money(currentTotals.netSales)} vs ${money(previousTotals.netSales)}`} tone={currentTotals.netSales >= previousTotals.netSales ? "good" : "warn"} />
+            <Metric label="Average daily sales" value={money(currentTotals.averageDailySales)} delta={`${money(previousTotals.averageDailySales)} comparison`} tone={currentTotals.averageDailySales >= previousTotals.averageDailySales ? "good" : "warn"} />
+            <Metric label="VAT difference" value={percent(changePercent(currentTotals.vat, previousTotals.vat))} delta={`${money(currentTotals.vat)} vs ${money(previousTotals.vat)}`} tone={currentTotals.vat <= previousTotals.vat ? "good" : "warn"} />
+          </div>
+          <div className="dashboard-layout secondary">
+            <SalesComparisonBars title="Gross Sales comparison" current={currentTotals.grossSales} previous={previousTotals.grossSales} currentRange={current} previousRange={previous} />
+            <SalesComparisonBars title="Net Sales comparison" current={currentTotals.netSales} previous={previousTotals.netSales} currentRange={current} previousRange={previous} />
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function SalesComparisonBars({ title, current, previous, currentRange, previousRange }) {
+  const max = Math.max(numberValue(current), numberValue(previous), 1);
+  return (
+    <div className="comparison-chart" aria-label={title}>
+      <div className="comparison-title">{title}</div>
+      <div className="comparison-bars">
+        <div className="comparison-bar">
+          <span style={{ height: `${(numberValue(previous) / max) * 100}%` }} title={`${formatRangeDate(previousRange.start)} - ${formatRangeDate(previousRange.end)}: ${money(previous)}`} />
+          <strong>{money(previous)}</strong>
+          <small>Comparison</small>
+        </div>
+        <div className="comparison-bar current">
+          <span style={{ height: `${(numberValue(current) / max) * 100}%` }} title={`${formatRangeDate(currentRange.start)} - ${formatRangeDate(currentRange.end)}: ${money(current)}`} />
+          <strong>{money(current)}</strong>
+          <small>Selected</small>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmount, onCancel, onSave, salesMode, setForm, setSalesMode, title, updateGross, updateVatRate }) {
+  const changeMode = (mode) => {
+    setSalesMode(mode);
+    if (mode === "Calculate Net from VAT") {
+      setForm((current) => ({ ...current, sales: netFromGross(current.grossSales, current.vatRate) }));
+    }
+  };
+
   return (
     <EditModal title={title} onCancel={onCancel} onSave={onSave} saveLabel="Save Sales">
       <div className="form-grid six">
+        <label>Mode<select value={salesMode} onChange={(event) => changeMode(event.target.value)}><option>Gross + Net</option><option>Calculate Net from VAT</option><option>Manual Net</option></select></label>
         <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
         <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
         <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
-        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
+        <Field label="VAT %" type="number" value={form.vatRate} onChange={updateVatRate} />
+        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} readOnly={salesMode === "Calculate Net from VAT"} />
         <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
         <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
         <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
@@ -3693,17 +3814,37 @@ function DailyGpChart({ rows, targetGp }) {
   const max = Math.max(100, ...values);
   const y = (value) => 90 - (((numberValue(value) - min) / Math.max(max - min, 1)) * 78);
   const x = (index) => 8 + (index / Math.max(validRows.length - 1, 1)) * 84;
-  const points = validRows.map((row, index) => `${x(index)},${y(row.invoiceGp)}`).join(" ");
+  const points = validRows.map((row, index) => ({ x: x(index), y: y(row.invoiceGp) }));
+  const smoothPath = points.reduce((path, point, index) => {
+    if (!index) return `M ${point.x} ${point.y}`;
+    const previous = points[index - 1];
+    const controlOffset = (point.x - previous.x) / 2;
+    return `${path} C ${previous.x + controlOffset} ${previous.y}, ${point.x - controlOffset} ${point.y}, ${point.x} ${point.y}`;
+  }, "");
+  const areaPath = points.length
+    ? `${smoothPath} L ${points.at(-1).x} 92 L ${points[0].x} 92 Z`
+    : "";
   const targetY = y(targetGp);
 
   return (
     <div className="performance-chart">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="gpLineGradient" x1="0%" x2="100%" y1="0%" y2="0%">
+            <stop offset="0%" stopColor="#38bdf8" />
+            <stop offset="100%" stopColor="#60a5fa" />
+          </linearGradient>
+          <linearGradient id="gpAreaGradient" x1="0%" x2="0%" y1="0%" y2="100%">
+            <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.26" />
+            <stop offset="100%" stopColor="#60a5fa" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {areaPath && <path className="gp-area" d={areaPath} fill="url(#gpAreaGradient)" />}
         <line className="target-line" x1="8" x2="92" y1={targetY} y2={targetY} />
-        <polyline className="actual-line" points={points} />
+        <path className="actual-line smooth-line" d={smoothPath} stroke="url(#gpLineGradient)" />
         {validRows.map((row, index) => (
           <circle className="chart-point" cx={x(index)} cy={y(row.invoiceGp)} key={row.id} r="1.6">
-            <title>{`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
+            <title>{`${row.date}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
           </circle>
         ))}
       </svg>
