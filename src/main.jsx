@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
@@ -32,6 +32,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
+const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
@@ -805,7 +806,7 @@ function App() {
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This month", startDate: "2026-06-01", endDate: today() });
-  const [draft, setDraft] = useState({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+  const [draft, setDraft] = useState(() => emptyInvoiceDraft());
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -872,7 +873,7 @@ function App() {
     setInvoices((current) => [invoice, ...current]);
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
-    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+    setDraft(emptyInvoiceDraft());
   };
 
   return (
@@ -1047,15 +1048,31 @@ function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, s
 function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [splitEditorId, setSplitEditorId] = useState(null);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
+  const readControllerRef = useRef(null);
+  const uploadRunRef = useRef(0);
   const isReading = draft.status === "Reading invoice with AI...";
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
+  const hasDraftWork = draft.files.length || draft.invoiceText.trim() || draft.items.length || draft.supplier.trim() || draft.invoiceNumber.trim();
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
+
+  const cancelDraft = () => {
+    readControllerRef.current?.abort();
+    readControllerRef.current = null;
+    uploadRunRef.current += 1;
+    setSplitEditorId(null);
+    setUploadInputKey((current) => current + 1);
+    setDraft(emptyInvoiceDraft());
+  };
 
   const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
+    const uploadRun = uploadRunRef.current + 1;
+    uploadRunRef.current = uploadRun;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded` }));
     const uploadedText = await textFromInvoiceFiles(uploaded);
+    if (uploadRunRef.current !== uploadRun) return;
     if (uploadedText) {
       setDraft((current) => ({
         ...current,
@@ -1083,12 +1100,16 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       return;
     }
 
+    readControllerRef.current?.abort();
+    const controller = new AbortController();
+    readControllerRef.current = controller;
     setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
 
     try {
       const response = await fetch("/.netlify/functions/read-invoice-ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           invoiceText,
           suppliers,
@@ -1102,6 +1123,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       });
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
       if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
+      if (readControllerRef.current !== controller) return;
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
       const items = (payload.lines || []).map((line) => {
@@ -1133,7 +1155,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         status: `AI extracted ${items.length} lines. Please review before approving.`,
       }));
     } catch (error) {
+      if (error.name === "AbortError") return;
       setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
+    } finally {
+      if (readControllerRef.current === controller) readControllerRef.current = null;
     }
   };
 
@@ -1236,7 +1261,16 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           <label className="file-button">
             Choose invoice
-            <input accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
+            <input
+              accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv"
+              key={uploadInputKey}
+              multiple
+              onChange={(event) => {
+                addFiles(event.target.files);
+                event.target.value = "";
+              }}
+              type="file"
+            />
           </label>
         </div>
         <div className="invoice-meta">
@@ -1265,6 +1299,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         <div className="button-row left">
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
           <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
+          <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
         </div>
       </Panel>

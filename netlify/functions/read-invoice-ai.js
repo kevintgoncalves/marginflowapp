@@ -1,6 +1,6 @@
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
-const FUNCTION_VERSION = "read-invoice-ai-table-repair-2026-06-15";
+const FUNCTION_VERSION = "read-invoice-ai-table-source-2026-06-16";
 
 const invoiceSchema = {
   type: "object",
@@ -307,6 +307,50 @@ function repairLineFromRows(line, rows) {
   };
 }
 
+function rowToLine(row, sourceLine = {}) {
+  return {
+    productName: row.productName,
+    packSize: row.packSize,
+    quantity: row.quantity,
+    unit: asString(sourceLine.unit),
+    unitCost: row.unitCost,
+    vat: row.vat,
+    lineTotal: row.lineTotal,
+    department: asString(sourceLine.department || sourceLine.suggested_department, "Kitchen Made"),
+    confidence: Math.max(clampConfidence(sourceLine.confidence, 0.78), 0.86),
+  };
+}
+
+function bestSourceLineForRow(row, lines) {
+  return lines
+    .map((line) => ({ line, score: productTokenScore(asString(line.productName || line.product || line.name), row) }))
+    .filter((candidate) => candidate.score >= 0.45)
+    .sort((a, b) => b.score - a.score)[0]?.line || {};
+}
+
+function hasInvoiceTableColumns(text) {
+  return /\bQTY\b/i.test(text) && /\b(?:PRICE|UNIT\s*PRICE)\b/i.test(text) && /\bTOTAL\b/i.test(text);
+}
+
+function shouldPreferTableRows(sourceText, tableRows, normalizedLines) {
+  if (tableRows.length < 2) return false;
+  const supplier = inferSupplier(sourceText);
+  const hasColumns = hasInvoiceTableColumns(sourceText);
+  const normalizedTotal = normalizedLines.reduce((sum, line) => sum + asNumber(line.lineTotal, line.quantity * line.unitCost), 0);
+  const tableTotal = tableRows.reduce((sum, row) => sum + row.lineTotal, 0);
+  const totalsAgree = normalizedTotal > 0 && almostEqual(normalizedTotal, tableTotal);
+  const anyMisreadTotalAsUnit = normalizedLines.some((line) => tableRows.some((row) => (
+    productTokenScore(line.productName, row) >= 0.45 && almostEqual(line.unitCost, row.lineTotal) && !almostEqual(row.unitCost, row.lineTotal)
+  )));
+
+  return (
+    supplier === "TG Fruits" ||
+    hasColumns ||
+    anyMisreadTotalAsUnit ||
+    (tableRows.length >= 3 && (tableRows.length >= normalizedLines.length || totalsAgree))
+  );
+}
+
 function normalizeInvoice(invoice, sourceText) {
   const supplier = asString(invoice.supplier, inferSupplier(sourceText));
   const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
@@ -334,7 +378,9 @@ function normalizeInvoice(invoice, sourceText) {
     .map((line) => repairLineFromRows(line, tableRows))
     .filter((line) => line.productName && (line.lineTotal || line.unitCost));
 
-  const repairedLines = normalizedLines.length
+  const repairedLines = shouldPreferTableRows(sourceText, tableRows, normalizedLines)
+    ? tableRows.map((row) => rowToLine(row, bestSourceLineForRow(row, lines)))
+    : normalizedLines.length
     ? normalizedLines
     : tableRows.map((row) => ({
       productName: row.productName,

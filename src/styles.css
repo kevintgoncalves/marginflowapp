@@ -59,6 +59,11 @@ button.ghost {
   color: var(--text);
 }
 
+button.ghost.danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: #fca5a5;
+}
+
 button.icon {
   width: 34px;
   min-height: 34px;
