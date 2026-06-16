@@ -296,6 +296,25 @@ function lineTotal(item) {
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
+function amountsAlmostEqual(a, b) {
+  const left = Number(a);
+  const right = Number(b);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  return Math.abs(left - right) <= Math.max(0.03, Math.abs(right) * 0.015);
+}
+
+function invoiceUnitCostFromExtraction(line) {
+  const quantity = numberValue(line.quantity, 1);
+  const unitCost = numberValue(line.unitCost, 0);
+  const extractedLineTotal = numberValue(line.lineTotal, 0);
+
+  if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
+    return Number((extractedLineTotal / quantity).toFixed(4));
+  }
+
+  return unitCost;
+}
+
 function defaultDepartmentSplits(department = "Kitchen Made") {
   return [{ id: uid(), department: department || "Kitchen Made", percentage: 100 }];
 }
@@ -1128,7 +1147,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
       const items = (payload.lines || []).map((line) => {
         const quantity = numberValue(line.quantity, 1);
-        const unitCost = numberValue(line.unitCost, 0);
+        const unitCost = invoiceUnitCostFromExtraction(line);
         return enrichInvoiceLine(
           {
             id: uid(),

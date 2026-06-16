@@ -307,6 +307,17 @@ function repairLineFromRows(line, rows) {
   };
 }
 
+function repairUnitCostFromLineTotal(line) {
+  if (line.quantity > 0 && line.lineTotal > 0 && line.unitCost > 0 && !almostEqual(line.quantity * line.unitCost, line.lineTotal)) {
+    return {
+      ...line,
+      unitCost: Number((line.lineTotal / line.quantity).toFixed(4)),
+      confidence: Math.max(line.confidence, 0.8),
+    };
+  }
+  return line;
+}
+
 function rowToLine(row, sourceLine = {}) {
   return {
     productName: row.productName,
@@ -376,6 +387,7 @@ function normalizeInvoice(invoice, sourceText) {
       };
     })
     .map((line) => repairLineFromRows(line, tableRows))
+    .map(repairUnitCostFromLineTotal)
     .filter((line) => line.productName && (line.lineTotal || line.unitCost));
 
   const repairedLines = shouldPreferTableRows(sourceText, tableRows, normalizedLines)
