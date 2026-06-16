@@ -208,6 +208,11 @@ const initialStocktakes = [
     id: uid(),
     date: "2026-06-09",
     department: "Kitchen Made",
+    openingStockMode: "Manual",
+    manualOpeningType: "Manual Total Value",
+    manualOpeningValue: 0,
+    openingStockValue: 0,
+    openingLines: [],
     lines: [
       { id: uid(), productName: "Chestnut Mushrooms", quantity: 6, unitCost: 8.9, stockValue: 53.4 },
       { id: uid(), productName: "Eggs Box x180 Large", quantity: 2, unitCost: 45, stockValue: 90 },
@@ -289,6 +294,16 @@ function numberValue(value, fallback = 0) {
 function netFromGross(gross, vatRate = 20) {
   const divisor = 1 + (numberValue(vatRate, 0) / 100);
   return divisor ? Number((numberValue(gross, 0) / divisor).toFixed(2)) : numberValue(gross, 0);
+}
+
+function vatAmountFromGross(gross, vatRate = 20) {
+  return Number((numberValue(gross, 0) - netFromGross(gross, vatRate)).toFixed(2));
+}
+
+function netSalesForRow(row) {
+  return row?.grossSales !== undefined
+    ? netFromGross(row.grossSales, row.vatRate ?? 20)
+    : numberValue(row?.sales);
 }
 
 function lineTotal(item) {
@@ -692,6 +707,7 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20) {
         department: departmentNames.includes(department) ? department : department || "Total",
         grossSales,
         vatRate,
+        vatAmount: vatAmountFromGross(grossSales, vatRate),
         sales: netFromGross(grossSales, vatRate),
       };
     })
@@ -699,13 +715,33 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20) {
 }
 
 function normalizeSalesRows(rows) {
-  return rows.map((row) => ({
-    ...row,
-    id: row.id || uid(),
-    department: row.department || "Total",
-    grossSales: numberValue(row.grossSales, numberValue(row.sales)),
-    vatRate: numberValue(row.vatRate, 20),
-    sales: row.grossSales ? netFromGross(row.grossSales, row.vatRate ?? 20) : numberValue(row.sales),
+  return rows.map((row) => {
+    const grossSales = numberValue(row.grossSales, numberValue(row.sales));
+    const vatRate = numberValue(row.vatRate, 20);
+    return {
+      ...row,
+      id: row.id || uid(),
+      department: row.department || "Total",
+      grossSales,
+      vatRate,
+      vatAmount: vatAmountFromGross(grossSales, vatRate),
+      sales: netFromGross(grossSales, vatRate),
+    };
+  });
+}
+
+function normalizeStocktakes(rows) {
+  return rows.map((stocktake) => ({
+    ...stocktake,
+    id: stocktake.id || uid(),
+    openingStockMode: "Manual",
+    manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
+    manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
+    openingLines: stocktake.openingLines || [],
+    openingStockValue: numberValue(stocktake.openingStockValue),
+    lines: stocktake.lines || [],
+    totalValue: numberValue(stocktake.totalValue),
+    status: stocktake.status || "Saved",
   }));
 }
 
@@ -834,57 +870,44 @@ function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = 
   return numberValue(relevant[0]?.totalValue);
 }
 
-function previousStocktakeValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, beforeDate = today()) {
+function latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
+  const relevant = stocktakes
+    .filter((stocktake) => departmentMatches(stocktake.department, selectedDepartment) && stocktake.date <= dateRange.end)
+    .sort((a, b) => b.date.localeCompare(a.date));
   if (selectedDepartment === "All departments") {
-    return departmentNames.reduce((sum, department) => sum + previousStocktakeValue(stocktakes, department, departmentNames, beforeDate), 0);
+    return departmentNames.map((department) => relevant.find((stocktake) => stocktake.department === department)).filter(Boolean);
   }
-  const previous = stocktakes
-    .filter((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate)
-    .sort((a, b) => b.date.localeCompare(a.date))[0];
-  return numberValue(previous?.totalValue);
+  return relevant[0] ? [relevant[0]] : [];
 }
 
-function previousStocktakeRecord(stocktakes, selectedDepartment, beforeDate = today()) {
-  return stocktakes
-    .filter((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate)
-    .sort((a, b) => b.date.localeCompare(a.date))[0] || null;
-}
-
-function shortDate(date) {
-  if (!date) return "";
-  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", year: "2-digit" }).format(parseDate(date));
-}
-
-function hasPreviousStocktake(stocktakes, selectedDepartment, departmentNames = defaultDepartments, beforeDate = today()) {
-  if (selectedDepartment === "All departments") {
-    return departmentNames.some((department) => hasPreviousStocktake(stocktakes, department, departmentNames, beforeDate));
-  }
-  return stocktakes.some((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate);
+function openingStockValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
+  return latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames, dateRange)
+    .reduce((sum, stocktake) => sum + numberValue(stocktake.openingStockValue), 0);
 }
 
 function salesForDepartment(salesRows, selectedDepartment) {
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
   if (selectedDepartment === "All departments") {
     return totalRows.length
-      ? totalRows.reduce((sum, row) => sum + numberValue(row.sales), 0)
-      : salesRows.reduce((sum, row) => sum + numberValue(row.sales), 0);
+      ? totalRows.reduce((sum, row) => sum + netSalesForRow(row), 0)
+      : salesRows.reduce((sum, row) => sum + netSalesForRow(row), 0);
   }
 
   const departmentRows = salesRows.filter((row) => row.department === selectedDepartment);
   return departmentRows.length
-    ? departmentRows.reduce((sum, row) => sum + numberValue(row.sales), 0)
-    : totalRows.reduce((sum, row) => sum + numberValue(row.sales), 0);
+    ? departmentRows.reduce((sum, row) => sum + netSalesForRow(row), 0)
+    : totalRows.reduce((sum, row) => sum + netSalesForRow(row), 0);
 }
 
 function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames) {
-  const salesRows = sales.filter((row) => dateInRange(row.date, dateRange));
+  const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
   const salesTotal = salesForDepartment(salesRows, department);
   const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []);
   const purchases = invoiceItems.reduce((sum, item) => sum + lineTotalForDepartment(item, department), 0);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  const openingStock = previousStocktakeValue(stocktakes, department, departmentNames, dateRange.start);
+  const openingStock = openingStockValue(stocktakes, department, departmentNames, dateRange);
   const closingStock = latestStocktakeValue(stocktakes, department, departmentNames, dateRange);
   const waste = filteredWaste.filter((item) => departmentMatches(item.department, department)).reduce((sum, item) => sum + wasteCost(item), 0);
   const stocktakeCost = openingStock + purchases - closingStock;
@@ -1068,7 +1091,7 @@ function App() {
   const [suppliers, setSuppliersState] = useState(() => safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
   const [invoices, setInvoicesState] = useState(() => safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
   const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
-  const [stocktakes, setStocktakesState] = useState(() => safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes));
+  const [stocktakes, setStocktakesState] = useState(() => normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
   const [wasteItems, setWasteItems] = useState(initialWaste);
   const [recipes, setRecipes] = useState(initialRecipes);
   const [menus, setMenus] = useState(initialMenus);
@@ -1079,6 +1102,7 @@ function App() {
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This month", startDate: "2026-06-01", endDate: today() });
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
+  const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const setProducts = storedStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = storedStateUpdater(setSuppliersState, "marginflow.suppliers");
   const setInvoices = storedStateUpdater(setInvoicesState, "marginflow.invoices");
@@ -1125,6 +1149,15 @@ function App() {
     } catch {
       // Local storage is best-effort in preview environments.
     }
+  };
+
+  const requestDelete = ({ title = "Delete item", message = "Are you sure you want to delete this item?", onConfirm }) => {
+    setDeleteConfirmation({ title, message, onConfirm });
+  };
+
+  const confirmDelete = () => {
+    deleteConfirmation?.onConfirm?.();
+    setDeleteConfirmation(null);
   };
 
   const approveInvoice = () => {
@@ -1233,25 +1266,27 @@ function App() {
             products={products}
             departmentNames={departmentNames}
             approveInvoice={approveInvoice}
+            requestDelete={requestDelete}
             setInvoices={setInvoices}
           />
         )}
-        {active === "products" && <Products departmentNames={departmentNames} products={products} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
+        {active === "products" && <Products departmentNames={departmentNames} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "suppliers" && <Suppliers requestDelete={requestDelete} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
         {active === "stocktake" && (
           <Stocktake
             department={department}
             departmentNames={departmentNames}
             products={products}
+            requestDelete={requestDelete}
             setProducts={setProducts}
             setStocktakes={setStocktakes}
             stocktakes={stocktakes}
           />
         )}
-        {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} financialSettings={financialSettings} gpTarget={gpTarget} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
+        {active === "recipes" && <Recipes products={products} recipes={recipes} requestDelete={requestDelete} setRecipes={setRecipes} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
+        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} financialSettings={financialSettings} gpTarget={gpTarget} metrics={metrics} requestDelete={requestDelete} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
@@ -1261,12 +1296,21 @@ function App() {
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
             menuSettings={menuSettings}
+            requestDelete={requestDelete}
             setAiSettings={setAiSettings}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
             setFinancialSettings={setFinancialSettings}
             setInvoiceSettings={setInvoiceSettings}
             setMenuSettings={setMenuSettings}
+          />
+        )}
+        {deleteConfirmation && (
+          <DeleteConfirmationModal
+            message={deleteConfirmation.message}
+            onCancel={() => setDeleteConfirmation(null)}
+            onDelete={confirmDelete}
+            title={deleteConfirmation.title}
           />
         )}
       </main>
@@ -1339,7 +1383,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, requestDelete, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [splitEditorId, setSplitEditorId] = useState(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
@@ -1589,10 +1633,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const deleteApprovedInvoice = (id) => {
-    const invoice = invoices.find((item) => item.id === id);
-    const label = invoice?.invoiceNumber ? `invoice ${invoice.invoiceNumber}` : "this invoice";
-    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
-    setInvoices((current) => current.filter((item) => item.id !== id));
+    requestDelete({
+      title: "Delete invoice",
+      message: "Are you sure you want to delete this invoice?",
+      onConfirm: () => setInvoices((current) => current.filter((item) => item.id !== id)),
+    });
   };
 
   return (
@@ -1647,7 +1692,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
         <div className="file-list">
           {draft.files.map((file, index) => (
-            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) }))} type="button"><X size={14} /></button></span>
+            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => requestDelete({ title: "Delete uploaded file", message: "Are you sure you want to delete this uploaded file?", onConfirm: () => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) })) })} type="button"><X size={14} /></button></span>
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
@@ -1690,7 +1735,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                   </td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
                   <td>{money(lineTotal(item))}</td>
-                  <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
+                  <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete invoice line", message: "Are you sure you want to delete this invoice line?", onConfirm: () => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) })) })} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
             </tbody>
@@ -1716,7 +1761,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                   </select>
                   <input min="0" max="100" step="1" type="number" value={split.percentage} onChange={(event) => updateDraftItemSplit(splitEditorItem.id, split.id, "percentage", event.target.value)} />
                   <span>{money(lineTotal(splitEditorItem) * (numberValue(split.percentage) / 100))}</span>
-                  <button className="icon danger" onClick={() => removeDraftItemSplit(splitEditorItem.id, split.id)} type="button"><Trash2 size={14} /></button>
+                  <button className="icon danger" onClick={() => requestDelete({ title: "Delete department split", message: "Are you sure you want to delete this department split?", onConfirm: () => removeDraftItemSplit(splitEditorItem.id, split.id) })} type="button"><Trash2 size={14} /></button>
                 </div>
               ))}
             </div>
@@ -1751,7 +1796,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   );
 }
 
-function Products({ departmentNames, products, setProducts, suppliers }) {
+function Products({ departmentNames, products, requestDelete, setProducts, suppliers }) {
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
@@ -1802,7 +1847,7 @@ function Products({ departmentNames, products, setProducts, suppliers }) {
             { key: "department", label: "Department" },
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
-          onDelete={(id) => setProducts((current) => current.filter((product) => product.id !== id))}
+          onDelete={(id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) })}
           onEdit={(row) => {
             setForm({ ...row, aliases: (row.aliases || []).join(", ") });
             setEditingId(row.id);
@@ -1814,7 +1859,7 @@ function Products({ departmentNames, products, setProducts, suppliers }) {
   );
 }
 
-function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
+function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
@@ -1851,7 +1896,7 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
             { key: "spend", label: "Spend total", render: (value) => money(value) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => setSuppliers((current) => current.filter((supplier) => supplier.id !== id))}
+          onDelete={(id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) })}
           onEdit={(row) => {
             setForm(row);
             setEditingId(row.id);
@@ -1863,14 +1908,13 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
   );
 }
 
-function Stocktake({ department, departmentNames, products, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
   const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const emptyForm = {
     id: "",
     date: today(),
     department: stocktakeDepartment,
     entryMode: "Product List",
-    openingStockMode: "Automatic",
     manualOpeningType: "Manual Total Value",
     manualOpeningValue: 0,
     openingProductSearch: "",
@@ -1881,14 +1925,9 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
   const [form, setForm] = useState(emptyForm);
   const [status, setStatus] = useState("");
   const [viewingStocktake, setViewingStocktake] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-  const previousStocktake = previousStocktakeRecord(stocktakes, form.department, form.date);
-  const automaticOpeningStock = previousStocktakeValue(stocktakes, form.department, departmentNames, form.date);
   const openingProductTotal = (form.openingLines || []).reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-  const openingStockValue = form.openingStockMode === "Automatic"
-    ? automaticOpeningStock
-    : form.manualOpeningType === "Opening Product List"
+  const openingStockValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
       ? openingProductTotal
       : numberValue(form.manualOpeningValue);
   const currentStockValue = form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
@@ -2030,9 +2069,34 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
     setStatus(`Imported ${imported.length} CSV line(s).`);
   };
 
+  const importOpeningCsv = async (file) => {
+    if (!file) return;
+    const text = await file.text();
+    const rows = text.split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
+    const [, ...dataRows] = rows;
+    const imported = dataRows.map(([productName, quantity, unitCost]) => {
+      const match = matchProduct(productName, products);
+      const cost = unitCost ? numberValue(unitCost) : numberValue(match?.product?.unitCost);
+      return {
+        id: uid(),
+        productName: match?.product?.name || productName,
+        matchedProductId: match?.product?.id || "",
+        supplier: match?.product?.supplier || "",
+        packSize: match?.product?.packSize || "",
+        department: match?.product?.department || form.department,
+        quantity: numberValue(quantity),
+        unitCost: cost,
+        stockValue: numberValue(quantity) * cost,
+        matchStatus: match ? (match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`) : "Manual opening",
+      };
+    });
+    setForm((current) => ({ ...current, openingLines: [...(current.openingLines || []), ...imported] }));
+    setStatus(`Imported ${imported.length} opening stock CSV line(s).`);
+  };
+
   const saveStocktake = () => {
     const incomplete = form.lines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
-    const incompleteOpening = form.openingStockMode === "Manual" && form.manualOpeningType === "Opening Product List"
+    const incompleteOpening = form.manualOpeningType !== "Manual Total Value"
       ? (form.openingLines || []).some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost))
       : false;
     if (!form.lines.length || incomplete) {
@@ -2070,9 +2134,7 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
     const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
     const normalizedOpeningLines = savedOpeningLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
     const totalValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-    const savedOpeningValue = form.openingStockMode === "Automatic"
-      ? automaticOpeningStock
-      : form.manualOpeningType === "Opening Product List"
+    const savedOpeningValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
         ? normalizedOpeningLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0)
         : numberValue(form.manualOpeningValue);
     const stocktake = {
@@ -2080,12 +2142,11 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
       date: form.date,
       department: form.department,
       entryMode: form.entryMode,
-      openingStockMode: form.openingStockMode,
+      openingStockMode: "Manual",
       manualOpeningType: form.manualOpeningType,
       manualOpeningValue: numberValue(form.manualOpeningValue),
       openingLines: normalizedOpeningLines,
       openingStockValue: savedOpeningValue,
-      openingSourceDate: form.openingStockMode === "Automatic" ? previousStocktake?.date || "" : "",
       lines: normalizedLines,
       totalValue,
       status: "Saved",
@@ -2102,7 +2163,6 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
       date: stocktake.date,
       department: stocktake.department,
       entryMode: stocktake.entryMode || "Manual Entry",
-      openingStockMode: stocktake.openingStockMode || "Automatic",
       manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
       manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
       openingProductSearch: "",
@@ -2111,13 +2171,6 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
       lines: (stocktake.lines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
     });
     setStatus(`Editing stocktake from ${stocktake.date}.`);
-  };
-
-  const confirmDeleteStocktake = () => {
-    if (!deleteTarget) return;
-    setStocktakes((current) => current.filter((stocktake) => stocktake.id !== deleteTarget.id));
-    setDeleteTarget(null);
-    setStatus("Stocktake deleted.");
   };
 
   const csv = ["Product,Quantity,Unit cost,Stock value", ...form.lines.map((line) => `${line.productName},${line.quantity},${line.unitCost},${line.stockValue}`)].join("\n");
@@ -2137,35 +2190,21 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
             ))}
           </div>
         </div>
-        <div className="radio-section">
-          <strong>Opening stock mode</strong>
+        <div className="radio-section compact">
+          <strong>Opening stock</strong>
           <div className="radio-row">
-            {["Automatic", "Manual"].map((mode) => (
-              <label key={mode}><input checked={form.openingStockMode === mode} onChange={() => setForm({ ...form, openingStockMode: mode })} type="radio" />{mode === "Manual" ? "Manual / First Stocktake" : mode}</label>
+            {["Manual Total Value", "Opening Product List", "CSV Import"].map((mode) => (
+              <label key={mode}><input checked={form.manualOpeningType === mode} onChange={() => setForm({ ...form, manualOpeningType: mode })} type="radio" />{mode === "CSV Import" ? "Opening CSV Import" : mode}</label>
             ))}
           </div>
         </div>
-        {form.openingStockMode === "Automatic" ? (
-          <div className="stocktake-summary">
-            <span>Opening Stock</span>
-            <strong>{money(openingStockValue)}</strong>
-            <small>{previousStocktake ? `Auto calculated from: ${shortDate(previousStocktake.date)} stocktake` : "No previous stocktake found. Opening stock set to £0."}</small>
+        {form.manualOpeningType === "Manual Total Value" ? (
+          <div className="form-grid six">
+            <label>Opening Stock<input min="0" step="0.01" type="number" value={form.manualOpeningValue} onChange={(event) => setForm({ ...form, manualOpeningValue: event.target.value })} /></label>
           </div>
         ) : (
           <>
-            <div className="radio-section compact">
-              <strong>Manual opening type</strong>
-              <div className="radio-row">
-                {["Manual Total Value", "Opening Product List"].map((mode) => (
-                  <label key={mode}><input checked={form.manualOpeningType === mode} onChange={() => setForm({ ...form, manualOpeningType: mode })} type="radio" />{mode}</label>
-                ))}
-              </div>
-            </div>
-            {form.manualOpeningType === "Manual Total Value" ? (
-              <div className="form-grid six">
-                <label>Opening Stock<input min="0" step="0.01" type="number" value={form.manualOpeningValue} onChange={(event) => setForm({ ...form, manualOpeningValue: event.target.value })} /></label>
-              </div>
-            ) : (
+            {form.manualOpeningType === "Opening Product List" && (
               <>
                 <div className="form-grid six">
                   <label>Opening product search<input placeholder="Type product name..." value={form.openingProductSearch} onChange={(event) => setForm({ ...form, openingProductSearch: event.target.value })} /></label>
@@ -2178,27 +2217,32 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
                 <div className="button-row left tight">
                   <button className="ghost" onClick={() => addOpeningLine()} type="button"><Plus size={16} />Add product</button>
                 </div>
-                <div className="table-wrap compact-table">
-                  <table>
-                    <thead><tr>{["Product", "Quantity", "Unit Cost", "Stock Value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-                    <tbody>
-                      {(form.openingLines || []).map((line) => (
-                        <tr key={line.id}>
-                          <td><input value={line.productName} onChange={(event) => updateOpeningLine(line.id, "productName", event.target.value)} /></td>
-                          <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateOpeningLine(line.id, "quantity", event.target.value)} /></td>
-                          <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateOpeningLine(line.id, "unitCost", event.target.value)} /></td>
-                          <td>{money(line.stockValue)}</td>
-                          <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, openingLines: (current.openingLines || []).filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="stocktake-summary slim"><span>Opening Stock Total</span><strong>{money(openingStockValue)}</strong></div>
               </>
             )}
+            {form.manualOpeningType === "CSV Import" && (
+              <div className="form-grid six">
+                <label>Opening CSV Import<input accept=".csv,text/csv" onChange={(event) => importOpeningCsv(event.target.files?.[0])} type="file" /></label>
+              </div>
+            )}
+            <div className="table-wrap compact-table">
+              <table>
+                <thead><tr>{["Product", "Quantity", "Unit Cost", "Stock Value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+                <tbody>
+                  {(form.openingLines || []).map((line) => (
+                    <tr key={line.id}>
+                      <td><input value={line.productName} onChange={(event) => updateOpeningLine(line.id, "productName", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateOpeningLine(line.id, "quantity", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateOpeningLine(line.id, "unitCost", event.target.value)} /></td>
+                      <td>{money(line.stockValue)}</td>
+                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete opening stock line", message: "Are you sure you want to delete this opening stock line?", onConfirm: () => setForm((current) => ({ ...current, openingLines: (current.openingLines || []).filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
+        <div className="stocktake-summary slim"><span>Opening Stock Total</span><strong>{money(openingStockValue)}</strong></div>
         <div className="button-row left">
           {form.entryMode === "Manual Entry" && <button onClick={addManualLine} type="button"><Plus size={16} />Add Product</button>}
           <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
@@ -2222,6 +2266,9 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
           </div>
         )}
         {status && <div className="invoice-status info">{status}</div>}
+        <div className="radio-section compact">
+          <strong>Current / Closing stock</strong>
+        </div>
         <div className="table-wrap">
           <table>
             <thead><tr>{["Product", "Unit", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
@@ -2234,7 +2281,7 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
                   <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
                   <td>{money(line.stockValue)}</td>
                   <td><small className="line-note">{line.matchStatus}{line.supplier ? ` · ${line.supplier}` : ""}</small></td>
-                  <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
+                  <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete stocktake line", message: "Are you sure you want to delete this stocktake line?", onConfirm: () => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
             </tbody>
@@ -2250,14 +2297,15 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
           columns={[
             { key: "date", label: "Date" },
             { key: "department", label: "Department" },
+            { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
+            { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
             { key: "lines", label: "Lines", render: (lines) => lines.length },
-            { key: "totalValue", label: "Stock value", render: (value) => money(value) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
             { key: "actions", label: "Actions", render: (_, row) => (
               <div className="row-actions">
                 <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
                 <button className="ghost" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} />Edit</button>
-                <button className="ghost danger" onClick={() => setDeleteTarget(row)} type="button"><Trash2 size={15} />Delete</button>
+                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => { setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)); setStatus("Stocktake deleted."); } })} type="button"><Trash2 size={15} />Delete</button>
               </div>
             ) },
           ]}
@@ -2276,7 +2324,7 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
             </div>
             <div className="compact-row">
               <span>Opening Stock</span>
-              <span>{viewingStocktake.openingStockMode || "Automatic"}</span>
+              <span>{viewingStocktake.manualOpeningType || "Manual Total Value"}</span>
               <strong>{money(viewingStocktake.openingStockValue)}</strong>
             </div>
             <div className="split-list">
@@ -2291,28 +2339,11 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
           </div>
         </div>
       )}
-      {deleteTarget && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="Delete stocktake">
-            <div className="modal-header">
-              <div>
-                <h3>Delete stocktake</h3>
-                <p>Are you sure you want to delete this stocktake?</p>
-              </div>
-              <button className="icon" onClick={() => setDeleteTarget(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="button-row left">
-              <button className="ghost" onClick={() => setDeleteTarget(null)} type="button">Cancel</button>
-              <button className="ghost danger" onClick={confirmDeleteStocktake} type="button">Delete</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function Recipes({ products, recipes, setRecipes }) {
+function Recipes({ products, recipes, requestDelete, setRecipes }) {
   const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", productSearch: "", ingredientQuantity: 1, ingredients: [] };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
@@ -2375,7 +2406,7 @@ function Recipes({ products, recipes, setRecipes }) {
               <span>{ingredient.productName}</span>
               <span>{ingredient.supplier}</span>
               <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
-              <button className="icon danger" onClick={() => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) }))} type="button"><Trash2 size={15} /></button>
+              <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) })) })} type="button"><Trash2 size={15} /></button>
             </div>
           ))}
         </div>
@@ -2393,7 +2424,7 @@ function Recipes({ products, recipes, setRecipes }) {
             { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
             { key: "linked", label: "Ingredients" },
           ]}
-          onDelete={(id) => setRecipes((current) => current.filter((recipe) => recipe.id !== id))}
+          onDelete={(id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) })}
           onEdit={(row) => {
             setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients });
             setEditingId(row.id);
@@ -2405,7 +2436,7 @@ function Recipes({ products, recipes, setRecipes }) {
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus }) {
+function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestDelete, setMenus }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
@@ -2473,6 +2504,42 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus
     setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
   };
 
+  const deleteMenu = () => {
+    if (!activeMenu) return;
+    requestDelete({
+      title: "Delete menu",
+      message: "Are you sure you want to delete this menu?",
+      onConfirm: () => {
+        setMenus((current) => current.filter((menu) => menu.id !== activeMenu.id));
+        const nextMenu = menus.find((menu) => menu.id !== activeMenu.id);
+        setActiveMenuId(nextMenu?.id || "");
+      },
+    });
+  };
+
+  const deleteSubcategory = (subcategoryId) => {
+    requestDelete({
+      title: "Delete subcategory",
+      message: "Are you sure you want to delete this subcategory?",
+      onConfirm: () => setMenus((current) => current.map((menu) => (
+        menu.id === activeMenu?.id
+          ? { ...menu, subcategories: menu.subcategories.filter((subcategory) => subcategory.id !== subcategoryId) }
+          : menu
+      ))),
+    });
+  };
+
+  const deleteDish = (dishId) => {
+    requestDelete({
+      title: "Delete menu dish",
+      message: "Are you sure you want to delete this menu dish?",
+      onConfirm: () => setMenus((current) => current.map((menu) => ({
+        ...menu,
+        subcategories: menu.subcategories.map((subcategory) => ({ ...subcategory, dishes: subcategory.dishes.filter((dish) => dish.id !== dishId) })),
+      }))),
+    });
+  };
+
   return (
     <div className="page-grid">
       <Panel title="Create menu">
@@ -2511,6 +2578,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus
             <div className="button-row left">
               <button className="ghost" onClick={addSubcategory} type="button"><Plus size={16} />Add Subcategory</button>
               <button onClick={addDish} type="button"><Plus size={16} />Add Dish</button>
+              <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>
             </div>
           </Panel>
           <Panel title="Subcategory summary">
@@ -2519,7 +2587,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus
                 const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
                 const gp = average(rows.map((dish) => dish.gp));
                 const target = numberValue(subcategory.targetGp, menuTarget);
-                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span></div>;
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span><button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button></div>;
               })}
             </div>
           </Panel>
@@ -2535,6 +2603,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus
                 { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : value > -5 ? "amber" : "red"}>{percent(value)}</Badge> },
                 { key: "status", label: "Status" },
               ]}
+              onDelete={deleteDish}
               rows={dishRows}
             />
           </Panel>
@@ -2544,7 +2613,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus
   );
 }
 
-function Waste({ department, departmentNames, products, wasteItems, setWasteItems }) {
+function Waste({ department, departmentNames, products, requestDelete, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
   const [form, setForm] = useState({ date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
 
@@ -2586,7 +2655,7 @@ function Waste({ department, departmentNames, products, wasteItems, setWasteItem
             { key: "notes", label: "Notes" },
             { key: "cost", label: "Waste cost", render: (value) => money(value) },
           ]}
-          onDelete={(id) => setWasteItems((current) => current.filter((item) => item.id !== id))}
+          onDelete={(id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) })}
           rows={visibleWaste}
         />
       </Panel>
@@ -2594,7 +2663,7 @@ function Waste({ department, departmentNames, products, wasteItems, setWasteItem
   );
 }
 
-function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
+function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, setSales }) {
   const empty = { date: today(), department: "Total", grossSales: 0, vatRate: defaultVatRate };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
@@ -2611,6 +2680,7 @@ function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
       day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
       grossSales,
       vatRate,
+      vatAmount: vatAmountFromGross(grossSales, vatRate),
       sales: netFromGross(grossSales, vatRate),
     };
     setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
@@ -2637,6 +2707,7 @@ function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
         <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
         <Field label="Gross sales" type="number" value={form.grossSales} onChange={(value) => setForm({ ...form, grossSales: value })} />
         <Field label="VAT %" type="number" value={form.vatRate} onChange={(value) => setForm({ ...form, vatRate: value })} />
+        <Field label="VAT amount" type="number" readOnly value={vatAmountFromGross(form.grossSales, form.vatRate)} />
         <Field label="Net sales" type="number" readOnly value={netFromGross(form.grossSales, form.vatRate)} />
         <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
@@ -2651,9 +2722,10 @@ function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
           { key: "department", label: "Sales type" },
           { key: "grossSales", label: "Gross", render: (value) => money(value) },
           { key: "vatRate", label: "VAT %", render: (value) => percent(value) },
-          { key: "sales", label: "Net", render: (value) => money(value) },
+          { key: "vatAmount", label: "VAT amount", render: (_, row) => money(vatAmountFromGross(row.grossSales, row.vatRate)) },
+          { key: "sales", label: "Net", render: (_, row) => money(netSalesForRow(row)) },
         ]}
-        onDelete={(id) => setSales((current) => current.filter((row) => row.id !== id))}
+        onDelete={(id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) })}
         onEdit={(row) => {
           setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, vatRate: row.vatRate ?? defaultVatRate });
           setEditingId(row.id);
@@ -2664,7 +2736,7 @@ function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, financialSettings, gpTarget, metrics, sales, setDateRangeState, setSales, supplierSpend }) {
+function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, financialSettings, gpTarget, metrics, requestDelete, sales, setDateRangeState, setSales, supplierSpend }) {
   const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
   const monthlyRows = [
     { day: "Apr", sales: metrics.sales * 0.82 },
@@ -2688,7 +2760,7 @@ function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, fi
         <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
         <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
       </div>
-      <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} sales={sales} setSales={setSales} />
+      <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />
       <div className="dashboard-layout secondary">
         <Panel title="Top suppliers">
           <DataTable
@@ -2706,9 +2778,9 @@ function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, fi
       </div>
       <Panel title="Formula checks" action="Restaurant GP logic">
         <div className="code-card">
-          <p>Invoice GP = (food sales - purchases) / food sales x 100</p>
+          <p>Invoice GP = (Net Sales - purchases) / Net Sales x 100</p>
           <p>Stocktake real cost = opening stock + purchases - closing stock</p>
-          <p>Real GP including waste = (food sales - (stocktake real cost + waste)) / food sales x 100</p>
+          <p>Real GP including waste = (Net Sales - (stocktake real cost + waste)) / Net Sales x 100</p>
         </div>
       </Panel>
     </>
@@ -2772,6 +2844,7 @@ function SettingsPanel({
   financialSettings,
   invoiceSettings,
   menuSettings,
+  requestDelete,
   setAiSettings,
   setCompanySettings,
   setDepartmentSettings,
@@ -2886,7 +2959,7 @@ function SettingsPanel({
             { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id))}
+          onDelete={(id) => requestDelete({ title: "Delete department", message: "Are you sure you want to delete this department?", onConfirm: () => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id)) })}
           onEdit={(row) => {
             setDepartmentForm(row);
             setEditingDepartmentId(row.id);
@@ -2986,6 +3059,26 @@ function DataTable({ columns, rows, onEdit, onDelete }) {
         </table>
       </div>
     </>
+  );
+}
+
+function DeleteConfirmationModal({ title, message, onCancel, onDelete }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="split-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header">
+          <div>
+            <h3>{title}</h3>
+            <p>{message}</p>
+          </div>
+          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
+        </div>
+        <div className="button-row left">
+          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
+          <button className="ghost danger" onClick={onDelete} type="button">Delete</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
