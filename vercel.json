@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/.netlify/functions/read-invoice-ai",
+      "destination": "/api/read-invoice-ai"
+    }
+  ]
+}
