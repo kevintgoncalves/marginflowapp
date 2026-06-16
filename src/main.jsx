@@ -32,7 +32,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
-const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle", editingInvoiceId: "" });
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
@@ -193,21 +193,14 @@ const initialInvoices = [
 ];
 
 const initialSales = [
-  { id: uid(), day: "Mon", date: "2026-06-01", department: "Total", sales: 1321.55 },
-  { id: uid(), day: "Tue", date: "2026-06-02", department: "Total", sales: 817.35 },
-  { id: uid(), day: "Wed", date: "2026-06-03", department: "Total", sales: 672.25 },
-  { id: uid(), day: "Thu", date: "2026-06-04", department: "Total", sales: 1480.35 },
-  { id: uid(), day: "Fri", date: "2026-06-05", department: "Total", sales: 3348.5 },
-  { id: uid(), day: "Sat", date: "2026-06-06", department: "Total", sales: 3212.25 },
-  { id: uid(), day: "Sun", date: "2026-06-07", department: "Total", sales: 1035.79 },
+  { id: uid(), day: "Mon", date: "2026-06-01", department: "Total", grossSales: 1585.86, vatRate: 20, sales: 1321.55 },
+  { id: uid(), day: "Tue", date: "2026-06-02", department: "Total", grossSales: 980.82, vatRate: 20, sales: 817.35 },
+  { id: uid(), day: "Wed", date: "2026-06-03", department: "Total", grossSales: 806.7, vatRate: 20, sales: 672.25 },
+  { id: uid(), day: "Thu", date: "2026-06-04", department: "Total", grossSales: 1776.42, vatRate: 20, sales: 1480.35 },
+  { id: uid(), day: "Fri", date: "2026-06-05", department: "Total", grossSales: 4018.2, vatRate: 20, sales: 3348.5 },
+  { id: uid(), day: "Sat", date: "2026-06-06", department: "Total", grossSales: 3854.7, vatRate: 20, sales: 3212.25 },
+  { id: uid(), day: "Sun", date: "2026-06-07", department: "Total", grossSales: 1242.95, vatRate: 20, sales: 1035.79 },
 ];
-
-const initialOpeningStock = {
-  "Kitchen Made": 3796.31,
-  "Bought In": 410,
-  Bar: 625,
-  "Non-food": 260,
-};
 
 const initialStocktakes = [
   {
@@ -290,6 +283,11 @@ function percent(value) {
 function numberValue(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function netFromGross(gross, vatRate = 20) {
+  const divisor = 1 + (numberValue(vatRate, 0) / 100);
+  return divisor ? Number((numberValue(gross, 0) / divisor).toFixed(2)) : numberValue(gross, 0);
 }
 
 function lineTotal(item) {
@@ -531,11 +529,6 @@ function departmentMatches(rowDepartment, selectedDepartment) {
   return selectedDepartment === "All departments" || rowDepartment === selectedDepartment;
 }
 
-function selectedOpeningStock(openingStockByDept, selectedDepartment) {
-  if (selectedDepartment === "All departments") return Object.values(openingStockByDept).reduce((sum, value) => sum + numberValue(value), 0);
-  return numberValue(openingStockByDept[selectedDepartment]);
-}
-
 function compactPlural(token) {
   if (token.endsWith("ies") && token.length > 4) return `${token.slice(0, -3)}y`;
   if (token.endsWith("s") && !token.endsWith("ss") && token.length > 3) return token.slice(0, -1);
@@ -678,7 +671,7 @@ async function textFromInvoiceFiles(files) {
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
-function parseSalesCsv(text, departmentNames = []) {
+function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20) {
   return text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -689,16 +682,19 @@ function parseSalesCsv(text, departmentNames = []) {
       const [date, second, third] = cells;
       const hasDepartment = cells.length >= 3;
       const department = hasDepartment ? second : "Total";
-      const sales = numberValue(hasDepartment ? third : second, 0);
+      const grossSales = numberValue(hasDepartment ? third : second, 0);
+      const vatRate = numberValue(cells[3], defaultVatRate);
       return {
         id: uid(),
         date,
         day: new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
         department: departmentNames.includes(department) ? department : department || "Total",
-        sales,
+        grossSales,
+        vatRate,
+        sales: netFromGross(grossSales, vatRate),
       };
     })
-    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.sales > 0);
+    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.grossSales > 0);
 }
 
 function normalizeSalesRows(rows) {
@@ -706,7 +702,9 @@ function normalizeSalesRows(rows) {
     ...row,
     id: row.id || uid(),
     department: row.department || "Total",
-    sales: numberValue(row.sales),
+    grossSales: numberValue(row.grossSales, numberValue(row.sales)),
+    vatRate: numberValue(row.vatRate, 20),
+    sales: row.grossSales ? netFromGross(row.grossSales, row.vatRate ?? 20) : numberValue(row.sales),
   }));
 }
 
@@ -835,6 +833,23 @@ function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = 
   return numberValue(relevant[0]?.totalValue);
 }
 
+function previousStocktakeValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, beforeDate = today()) {
+  if (selectedDepartment === "All departments") {
+    return departmentNames.reduce((sum, department) => sum + previousStocktakeValue(stocktakes, department, departmentNames, beforeDate), 0);
+  }
+  const previous = stocktakes
+    .filter((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  return numberValue(previous?.totalValue);
+}
+
+function hasPreviousStocktake(stocktakes, selectedDepartment, departmentNames = defaultDepartments, beforeDate = today()) {
+  if (selectedDepartment === "All departments") {
+    return departmentNames.some((department) => hasPreviousStocktake(stocktakes, department, departmentNames, beforeDate));
+  }
+  return stocktakes.some((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate);
+}
+
 function salesForDepartment(salesRows, selectedDepartment) {
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
   if (selectedDepartment === "All departments") {
@@ -849,7 +864,7 @@ function salesForDepartment(salesRows, selectedDepartment) {
     : totalRows.reduce((sum, row) => sum + numberValue(row.sales), 0);
 }
 
-function calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames) {
+function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames) {
   const salesRows = sales.filter((row) => dateInRange(row.date, dateRange));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
@@ -857,10 +872,10 @@ function calculateMetrics(invoices, sales, department, openingStockByDept, stock
   const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []);
   const purchases = invoiceItems.reduce((sum, item) => sum + lineTotalForDepartment(item, department), 0);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  const openingStock = selectedOpeningStock(openingStockByDept, department);
+  const openingStock = previousStocktakeValue(stocktakes, department, departmentNames, dateRange.start);
   const closingStock = latestStocktakeValue(stocktakes, department, departmentNames, dateRange);
   const waste = filteredWaste.filter((item) => departmentMatches(item.department, department)).reduce((sum, item) => sum + wasteCost(item), 0);
-  const stocktakeCost = Math.max(0, openingStock + purchases - closingStock);
+  const stocktakeCost = openingStock + purchases - closingStock;
   const realCostIncludingWaste = stocktakeCost + waste;
 
   return {
@@ -1041,8 +1056,7 @@ function App() {
   const [suppliers, setSuppliersState] = useState(() => safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
   const [invoices, setInvoicesState] = useState(() => safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
   const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
-  const [openingStockByDept, setOpeningStockByDept] = useState(initialOpeningStock);
-  const [stocktakes, setStocktakes] = useState(initialStocktakes);
+  const [stocktakes, setStocktakesState] = useState(() => safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes));
   const [wasteItems, setWasteItems] = useState(initialWaste);
   const [recipes, setRecipes] = useState(initialRecipes);
   const [menus, setMenus] = useState(initialMenus);
@@ -1057,6 +1071,7 @@ function App() {
   const setSuppliers = storedStateUpdater(setSuppliersState, "marginflow.suppliers");
   const setInvoices = storedStateUpdater(setInvoicesState, "marginflow.invoices");
   const setSales = storedStateUpdater(setSalesState, "marginflow.sales");
+  const setStocktakes = storedStateUpdater(setStocktakesState, "marginflow.stocktakes");
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -1084,7 +1099,7 @@ function App() {
   };
 
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
-  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames), [invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames]);
+  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
@@ -1119,14 +1134,18 @@ function App() {
       };
     });
     const invoice = {
-      id: uid(),
+      id: draft.editingInvoiceId || uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date: draft.date || today(),
       status: "Approved",
       items: normalizedItems,
     };
-    setInvoices((current) => [invoice, ...current]);
+    setInvoices((current) => (
+      draft.editingInvoiceId
+        ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
+        : [invoice, ...current]
+    ));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
     setDraft(emptyInvoiceDraft());
@@ -1211,9 +1230,7 @@ function App() {
           <Stocktake
             department={department}
             departmentNames={departmentNames}
-            openingStockByDept={openingStockByDept}
             products={products}
-            setOpeningStockByDept={setOpeningStockByDept}
             setProducts={setProducts}
             setStocktakes={setStocktakes}
             stocktakes={stocktakes}
@@ -1222,7 +1239,7 @@ function App() {
         {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} gpTarget={gpTarget} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
+        {active === "gp" && <GpAnalysis dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} financialSettings={financialSettings} gpTarget={gpTarget} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} setSales={setSales} supplierSpend={supplierSpend} />}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
@@ -1539,6 +1556,33 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }));
   };
 
+  const editApprovedInvoice = (invoice) => {
+    const supplier = invoice.supplier || "Unknown Supplier";
+    setSplitEditorId(null);
+    setDraft({
+      files: [],
+      invoiceText: "",
+      items: (invoice.items || []).map((item) => ({
+        ...item,
+        id: item.id || uid(),
+        supplier: item.supplier || supplier,
+        departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
+      })),
+      supplier,
+      date: invoice.date || today(),
+      invoiceNumber: invoice.invoiceNumber || "",
+      status: `Editing approved invoice ${invoice.invoiceNumber || ""}. Review and confirm to save changes.`,
+      editingInvoiceId: invoice.id,
+    });
+  };
+
+  const deleteApprovedInvoice = (id) => {
+    const invoice = invoices.find((item) => item.id === id);
+    const label = invoice?.invoiceNumber ? `invoice ${invoice.invoiceNumber}` : "this invoice";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    setInvoices((current) => current.filter((item) => item.id !== id));
+  };
+
   return (
     <div className="page-grid">
       <Panel title="Invoice workflow" action={draft.status}>
@@ -1599,7 +1643,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
           <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
           <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
-          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
+          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />{draft.editingInvoiceId ? "Save Invoice" : "Confirm Invoice"}</button>
         </div>
       </Panel>
 
@@ -1686,7 +1730,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
-          onDelete={(id) => setInvoices((current) => current.filter((invoice) => invoice.id !== id))}
+          onEdit={editApprovedInvoice}
+          onDelete={deleteApprovedInvoice}
           rows={invoices}
         />
       </Panel>
@@ -1806,22 +1851,46 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
   );
 }
 
-function Stocktake({ department, departmentNames, openingStockByDept, products, setOpeningStockByDept, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ department, departmentNames, products, setProducts, stocktakes, setStocktakes }) {
   const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
-  const [mode, setMode] = useState("Manual total value");
-  const [form, setForm] = useState({ date: today(), department: stocktakeDepartment, lines: [] });
+  const emptyForm = { id: "", date: today(), department: stocktakeDepartment, entryMode: "Manual Entry", productSearch: "", lines: [] };
+  const [form, setForm] = useState(emptyForm);
   const [status, setStatus] = useState("");
+  const [viewingStocktake, setViewingStocktake] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-  const currentOpening = selectedOpeningStock(openingStockByDept, department);
-  const currentClosing = latestStocktakeValue(stocktakes, department, departmentNames);
+  const openingStock = previousStocktakeValue(stocktakes, form.department, departmentNames, form.date);
+  const openingNote = hasPreviousStocktake(stocktakes, form.department, departmentNames, form.date)
+    ? `Opening stock from latest saved ${form.department} stocktake before ${form.date}.`
+    : "No previous stocktake found. Opening stock set to £0.";
+  const productSuggestions = form.productSearch
+    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 8)
+    : [];
 
-  const addLine = (product = products.find((item) => departmentMatches(item.department, form.department)) || products[0]) => {
-    if (!product) return;
+  const newStocktake = () => {
+    setForm({ ...emptyForm, date: today(), department: stocktakeDepartment });
+    setStatus("");
+  };
+
+  const addManualLine = () => {
     setForm((current) => ({
       ...current,
       lines: [
         ...current.lines,
-        { id: uid(), productName: product.name, matchedProductId: product.id, quantity: 1, unitCost: numberValue(product.unitCost), stockValue: numberValue(product.unitCost), matchStatus: "Matched" },
+        { id: uid(), productName: "", matchedProductId: "", supplier: "", quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual entry" },
+      ],
+    }));
+  };
+
+  const addProductLine = (product) => {
+    if (!product) return;
+    const unitCost = numberValue(product.unitCost);
+    setForm((current) => ({
+      ...current,
+      productSearch: "",
+      lines: [
+        ...current.lines,
+        { id: uid(), productName: product.name, matchedProductId: product.id, supplier: product.supplier || "", quantity: 1, unitCost, stockValue: unitCost, matchStatus: "Matched" },
       ],
     }));
   };
@@ -1837,6 +1906,7 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
           if (match) {
             updated.productName = match.product.name;
             updated.matchedProductId = match.product.id;
+            updated.supplier = match.product.supplier || "";
             updated.unitCost = match.product.unitCost;
             updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
           } else {
@@ -1862,6 +1932,7 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
         id: uid(),
         productName: match?.product?.name || productName,
         matchedProductId: match?.product?.id || "",
+        supplier: match?.product?.supplier || "",
         quantity: numberValue(quantity),
         unitCost: cost,
         stockValue: numberValue(quantity) * cost,
@@ -1873,9 +1944,9 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
   };
 
   const saveStocktake = () => {
-    const incomplete = form.lines.some((line) => !numberValue(line.quantity) || !numberValue(line.unitCost) || !numberValue(line.stockValue));
+    const incomplete = form.lines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
     if (!form.lines.length || incomplete) {
-      setStatus("Every line needs quantity, unit cost and stock value before saving.");
+      setStatus("Every line needs product name, quantity and unit cost before saving.");
       return;
     }
 
@@ -1886,7 +1957,7 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
       const product = {
         id: uid(),
         name: line.productName,
-        supplier: "Unknown Supplier",
+        supplier: line.supplier || "Unknown Supplier",
         packSize: "",
         quantity: 1,
         unitCost: numberValue(line.unitCost),
@@ -1896,14 +1967,35 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
         priceHistory: [{ date: form.date, supplier: "Stocktake", price: numberValue(line.unitCost) }],
       };
       nextProducts = [...nextProducts, product];
-      return { ...line, matchedProductId: product.id, matchStatus: "Created product" };
+      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
     });
 
-    const totalValue = savedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
+    const totalValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    const stocktake = { id: form.id || uid(), date: form.date, department: form.department, entryMode: form.entryMode, lines: normalizedLines, totalValue, status: "Saved" };
     setProducts(nextProducts);
-    setStocktakes((current) => [{ id: uid(), date: form.date, department: form.department, lines: savedLines, totalValue }, ...current]);
-    setForm({ date: today(), department: form.department, lines: [] });
+    setStocktakes((current) => form.id ? current.map((item) => (item.id === form.id ? stocktake : item)) : [stocktake, ...current]);
+    setForm({ ...emptyForm, date: today(), department: form.department, entryMode: form.entryMode });
     setStatus(`Saved stocktake at ${money(totalValue)}.`);
+  };
+
+  const editStocktake = (stocktake) => {
+    setForm({
+      id: stocktake.id,
+      date: stocktake.date,
+      department: stocktake.department,
+      entryMode: stocktake.entryMode || "Manual Entry",
+      productSearch: "",
+      lines: (stocktake.lines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
+    });
+    setStatus(`Editing stocktake from ${stocktake.date}.`);
+  };
+
+  const confirmDeleteStocktake = () => {
+    if (!deleteTarget) return;
+    setStocktakes((current) => current.filter((stocktake) => stocktake.id !== deleteTarget.id));
+    setDeleteTarget(null);
+    setStatus("Stocktake deleted.");
   };
 
   const csv = ["Product,Quantity,Unit cost,Stock value", ...form.lines.map((line) => `${line.productName},${line.quantity},${line.unitCost},${line.stockValue}`)].join("\n");
@@ -1911,29 +2003,40 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
   return (
     <div className="page-grid">
       <div className="metric-grid compact">
-        <Metric label="Opening stock" value={money(currentOpening)} delta={mode} />
-        <Metric label="Closing stock" value={money(currentClosing)} delta="Latest saved stocktake" />
-        <Metric label="Real cost used" value={money(Math.max(0, currentOpening - currentClosing))} delta="Before new purchases" />
+        <Metric label="Opening stock" value={money(openingStock)} delta="Auto calculated" />
+        <Metric label="Current stocktake" value={money(form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))} delta={form.entryMode} />
+        <Metric label="Saved stocktakes" value={visibleStocktakes.length} delta={form.department} />
       </div>
-      <Panel title="Opening stock">
-        <div className="form-grid">
-          <label>Mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option>Manual total value</option><option>Detailed stocktake</option></select></label>
-          {departmentNames.map((dept) => (
-            <Field key={dept} label={`${dept} opening value`} type="number" value={openingStockByDept[dept]} onChange={(value) => setOpeningStockByDept((current) => ({ ...current, [dept]: Number(value) }))} />
-          ))}
-        </div>
-      </Panel>
-      <Panel title="Create stocktake" action="Future dates allowed">
+      <Panel title={form.id ? "Edit stocktake" : "New stocktake"} action="Opening stock is automatic">
         <div className="form-grid six">
-          <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
           <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-          <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
+          <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
+          <label>Entry mode<select value={form.entryMode} onChange={(event) => setForm({ ...form, entryMode: event.target.value })}><option>Manual Entry</option><option>Product List</option><option>CSV Import</option></select></label>
         </div>
+        <div className="invoice-status info">{openingNote}</div>
         <div className="button-row left">
-          <button onClick={() => addLine()} type="button"><Plus size={16} />Add Product</button>
-          <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
+          <button className="ghost" onClick={newStocktake} type="button"><Plus size={16} />New Stocktake</button>
+          {form.entryMode === "Manual Entry" && <button onClick={addManualLine} type="button"><Plus size={16} />Add Product</button>}
           <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
         </div>
+        {form.entryMode === "Product List" && (
+          <>
+            <div className="form-grid">
+              <label>Search products<input placeholder="Type product name..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} /></label>
+            </div>
+            {productSuggestions.length > 0 && (
+              <div className="suggestion-list">
+                {productSuggestions.map((product) => <button key={product.id} onClick={() => addProductLine(product)} type="button">{product.name}<span>{money(product.unitCost)} {product.supplier}</span></button>)}
+              </div>
+            )}
+          </>
+        )}
+        {form.entryMode === "CSV Import" && (
+          <div className="form-grid six">
+            <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
+            <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
+          </div>
+        )}
         {status && <div className="invoice-status info">{status}</div>}
         <div className="table-wrap">
           <table>
@@ -1941,9 +2044,9 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
             <tbody>
               {form.lines.map((line) => (
                 <tr key={line.id}>
-                  <td><input value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
+                  <td><input readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId)} value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
+                  <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId)} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
                   <td>{money(line.stockValue)}</td>
                   <td><small className="line-note">{line.matchStatus}</small></td>
                   <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
@@ -1960,10 +2063,57 @@ function Stocktake({ department, departmentNames, openingStockByDept, products, 
             { key: "department", label: "Department" },
             { key: "lines", label: "Lines", render: (lines) => lines.length },
             { key: "totalValue", label: "Stock value", render: (value) => money(value) },
+            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
+            { key: "actions", label: "Actions", render: (_, row) => (
+              <div className="row-actions">
+                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button">View</button>
+                <button className="icon" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} /></button>
+                <button className="icon danger" onClick={() => setDeleteTarget(row)} type="button"><Trash2 size={15} /></button>
+              </div>
+            ) },
           ]}
           rows={visibleStocktakes}
         />
       </Panel>
+      {viewingStocktake && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal" role="dialog" aria-modal="true" aria-label="View stocktake">
+            <div className="modal-header">
+              <div>
+                <h3>Stocktake</h3>
+                <p>{viewingStocktake.department} · {viewingStocktake.date} · {money(viewingStocktake.totalValue)}</p>
+              </div>
+              <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
+            </div>
+            <div className="split-list">
+              {(viewingStocktake.lines || []).map((line) => (
+                <div className="compact-row" key={line.id}>
+                  <span>{line.productName}</span>
+                  <span>{line.quantity} x {money(line.unitCost)}</span>
+                  <strong>{money(line.stockValue)}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteTarget && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal" role="dialog" aria-modal="true" aria-label="Delete stocktake">
+            <div className="modal-header">
+              <div>
+                <h3>Delete stocktake</h3>
+                <p>Are you sure you want to delete this stocktake?</p>
+              </div>
+              <button className="icon" onClick={() => setDeleteTarget(null)} type="button"><X size={16} /></button>
+            </div>
+            <div className="button-row left">
+              <button className="ghost" onClick={() => setDeleteTarget(null)} type="button">Cancel</button>
+              <button className="ghost danger" onClick={confirmDeleteStocktake} type="button">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2250,20 +2400,24 @@ function Waste({ department, departmentNames, products, wasteItems, setWasteItem
   );
 }
 
-function SalesManager({ departmentNames, sales, setSales }) {
-  const empty = { date: today(), department: "Total", sales: 0 };
+function SalesManager({ defaultVatRate, departmentNames, sales, setSales }) {
+  const empty = { date: today(), department: "Total", grossSales: 0, vatRate: defaultVatRate };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [status, setStatus] = useState("");
   const departmentOptions = ["Total", ...departmentNames];
 
   const saveSale = () => {
-    if (!form.date || !numberValue(form.sales)) return;
+    if (!form.date || !numberValue(form.grossSales)) return;
+    const grossSales = numberValue(form.grossSales);
+    const vatRate = numberValue(form.vatRate, defaultVatRate);
     const payload = {
       ...form,
       id: editingId || uid(),
       day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-      sales: numberValue(form.sales),
+      grossSales,
+      vatRate,
+      sales: netFromGross(grossSales, vatRate),
     };
     setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
     setForm(empty);
@@ -2273,9 +2427,9 @@ function SalesManager({ departmentNames, sales, setSales }) {
 
   const importSales = async (file) => {
     if (!file) return;
-    const imported = parseSalesCsv(await file.text(), departmentNames);
+    const imported = parseSalesCsv(await file.text(), departmentNames, defaultVatRate);
     if (!imported.length) {
-      setStatus("CSV import found no sales rows. Use date,sales or date,department,sales.");
+      setStatus("CSV import found no sales rows. Use date,gross or date,department,gross,vatRate.");
       return;
     }
     setSales((current) => [...imported, ...current]);
@@ -2287,7 +2441,9 @@ function SalesManager({ departmentNames, sales, setSales }) {
       <div className="form-grid six">
         <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
         <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-        <Field label="Sales amount" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
+        <Field label="Gross sales" type="number" value={form.grossSales} onChange={(value) => setForm({ ...form, grossSales: value })} />
+        <Field label="VAT %" type="number" value={form.vatRate} onChange={(value) => setForm({ ...form, vatRate: value })} />
+        <Field label="Net sales" type="number" readOnly value={netFromGross(form.grossSales, form.vatRate)} />
         <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
@@ -2299,11 +2455,13 @@ function SalesManager({ departmentNames, sales, setSales }) {
         columns={[
           { key: "date", label: "Date" },
           { key: "department", label: "Sales type" },
-          { key: "sales", label: "Sales", render: (value) => money(value) },
+          { key: "grossSales", label: "Gross", render: (value) => money(value) },
+          { key: "vatRate", label: "VAT %", render: (value) => percent(value) },
+          { key: "sales", label: "Net", render: (value) => money(value) },
         ]}
         onDelete={(id) => setSales((current) => current.filter((row) => row.id !== id))}
         onEdit={(row) => {
-          setForm({ date: row.date, department: row.department || "Total", sales: row.sales });
+          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, vatRate: row.vatRate ?? defaultVatRate });
           setEditingId(row.id);
         }}
         rows={sales}
@@ -2312,7 +2470,7 @@ function SalesManager({ departmentNames, sales, setSales }) {
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, gpTarget, metrics, sales, setDateRangeState, setSales, supplierSpend }) {
+function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, financialSettings, gpTarget, metrics, sales, setDateRangeState, setSales, supplierSpend }) {
   const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
   const monthlyRows = [
     { day: "Apr", sales: metrics.sales * 0.82 },
@@ -2336,7 +2494,7 @@ function GpAnalysis({ dateRange, dateRangeState, department, departmentNames, gp
         <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
         <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
       </div>
-      <SalesManager departmentNames={departmentNames} sales={sales} setSales={setSales} />
+      <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} sales={sales} setSales={setSales} />
       <div className="dashboard-layout secondary">
         <Panel title="Top suppliers">
           <DataTable
