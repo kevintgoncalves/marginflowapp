@@ -65,6 +65,8 @@ const defaultFinancialSettings = {
   defaultVat: 20,
   salesInputMethod: "Manual Gross + Net Sales",
   gpCalculationBase: "Net Sales",
+  posProvider: "Square",
+  salesDataMode: "Gross + Net from POS",
   fiscalYearStartMonth: "April",
   timezone: "Europe/London",
 };
@@ -275,7 +277,7 @@ const navItems = [
   { id: "recipes", label: "Recipes", icon: ChefHat },
   { id: "menu", label: "Menu Costing", icon: UtensilsCrossed },
   { id: "waste", label: "Waste", icon: Trash2 },
-  { id: "gp", label: "GP Analysis", icon: Gauge },
+  { id: "gp", label: "Sales", icon: Gauge },
   { id: "ai", label: "AI Insights", icon: Bot },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -2103,6 +2105,8 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
   const rows = useMemo(() => buildProductRows(products), [products]);
 
   const saveProduct = () => {
@@ -2122,22 +2126,22 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
     }
     setForm(empty);
     setEditingId("");
+    setModalOpen(false);
+  };
+
+  const openProductModal = (row = null) => {
+    if (row) {
+      setForm({ ...row, aliases: (row.aliases || []).join(", ") });
+      setEditingId(row.id);
+    } else {
+      setForm(empty);
+      setEditingId("");
+    }
+    setModalOpen(true);
   };
 
   return (
     <div className="page-grid">
-      <Panel title={editingId ? "Edit product" : "Add product"}>
-        <div className="form-grid six">
-          <Field label="Product" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-          <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
-          <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
-          <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
-          <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
-          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-          <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
-        </div>
-        <div className="button-row left"><button onClick={saveProduct} type="button"><Plus size={16} />{editingId ? "Save Product" : "Add Product"}</button></div>
-      </Panel>
       <Panel title="Product database" action="Aliases + supplier comparison">
         <DataTable
           columns={[
@@ -2151,13 +2155,24 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
           onDelete={(id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) })}
-          onEdit={(row) => {
-            setForm({ ...row, aliases: (row.aliases || []).join(", ") });
-            setEditingId(row.id);
-          }}
+          onEdit={openProductModal}
           rows={rows}
+          toolbarAction={<button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
         />
       </Panel>
+      {modalOpen && (
+        <EditModal title={editingId ? "Edit product" : "Add product"} onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
+          <div className="form-grid six">
+            <Field label="Product name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+            <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
+            <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
+            <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
+            <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+            <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+            <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
+          </div>
+        </EditModal>
+      )}
     </div>
   );
 }
@@ -2166,6 +2181,7 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
 
   const saveSupplier = () => {
     if (!form.name.trim()) return;
@@ -2173,21 +2189,17 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
     else setSuppliers((current) => [...current, { ...form, id: uid() }]);
     setForm(empty);
     setEditingId("");
+    setModalOpen(false);
+  };
+
+  const openSupplierModal = (row = null) => {
+    setForm(row || empty);
+    setEditingId(row?.id || "");
+    setModalOpen(true);
   };
 
   return (
     <div className="page-grid">
-      <Panel title={editingId ? "Edit supplier" : "Add supplier"}>
-        <div className="form-grid six">
-          <Field label="Supplier" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-          <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
-          <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
-          <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-          <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
-          <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
-        </div>
-        <div className="button-row left"><button onClick={saveSupplier} type="button"><Plus size={16} />{editingId ? "Save Supplier" : "Add Supplier"}</button></div>
-      </Panel>
       <Panel title="Supplier directory" action="Spend totals">
         <DataTable
           columns={[
@@ -2200,13 +2212,23 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
           onDelete={(id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) })}
-          onEdit={(row) => {
-            setForm(row);
-            setEditingId(row.id);
-          }}
+          onEdit={openSupplierModal}
           rows={supplierSpend}
+          toolbarAction={<button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button>}
         />
       </Panel>
+      {modalOpen && (
+        <EditModal title={editingId ? "Edit supplier" : "Add supplier"} onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
+          <div className="form-grid six">
+            <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+            <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
+            <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
+            <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+            <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
+            <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+          </div>
+        </EditModal>
+      )}
     </div>
   );
 }
@@ -2647,9 +2669,10 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
 }
 
 function Recipes({ products, recipes, requestDelete, setRecipes }) {
-  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", productSearch: "", ingredientQuantity: 1, ingredients: [] };
+  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", productSearch: "", ingredientQuantity: 1, ingredients: [] };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
   const suggestions = form.productSearch
     ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 5)
     : [];
@@ -2667,11 +2690,23 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
 
   const saveRecipe = () => {
     if (!form.name.trim()) return;
-    const payload = { id: editingId || uid(), name: form.name, yieldQuantity: numberValue(form.yieldQuantity, 1), yieldUnit: form.yieldUnit, ingredients: form.ingredients };
+    const payload = { id: editingId || uid(), name: form.name, yieldQuantity: numberValue(form.yieldQuantity, 1), yieldUnit: form.yieldUnit, notes: form.notes, method: form.method, ingredients: form.ingredients };
     if (editingId) setRecipes((current) => current.map((recipe) => (recipe.id === editingId ? payload : recipe)));
     else setRecipes((current) => [payload, ...current]);
     setForm(empty);
     setEditingId("");
+    setModalOpen(false);
+  };
+
+  const openRecipeModal = (row = null) => {
+    if (row) {
+      setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients || [] });
+      setEditingId(row.id);
+    } else {
+      setForm(empty);
+      setEditingId("");
+    }
+    setModalOpen(true);
   };
 
   const rows = recipes.map((recipe) => ({
@@ -2684,40 +2719,6 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
 
   return (
     <div className="page-grid">
-      <Panel title={editingId ? "Edit recipe" : "Create recipe"}>
-        <div className="form-grid six">
-          <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-          <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
-          <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
-          <Field label="Ingredient quantity" type="number" value={form.ingredientQuantity} onChange={(value) => setForm({ ...form, ingredientQuantity: value })} />
-          <label>
-            Ingredients
-            <input placeholder="Type Mush..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} />
-          </label>
-        </div>
-        {suggestions.length > 0 && (
-          <div className="suggestion-list">
-            {suggestions.map((product) => {
-              const cheapest = cheapestOffer(product, products);
-              return <button key={product.id} onClick={() => addIngredient(product)} type="button">{product.name}<span>{cheapest.supplier} {money(cheapest.price)}</span></button>;
-            })}
-          </div>
-        )}
-        <div className="stack-list tight">
-          {form.ingredients.map((ingredient) => (
-            <div className="compact-row" key={ingredient.id}>
-              <span>{ingredient.productName}</span>
-              <span>{ingredient.supplier}</span>
-              <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
-              <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) })) })} type="button"><Trash2 size={15} /></button>
-            </div>
-          ))}
-        </div>
-        <div className="button-row left">
-          <button onClick={() => addIngredient()} type="button"><Plus size={16} />Add Ingredient</button>
-          <button onClick={saveRecipe} type="button"><Save size={16} />{editingId ? "Save Recipe" : "Create Recipe"}</button>
-        </div>
-      </Panel>
       <Panel title="Recipe costing">
         <DataTable
           columns={[
@@ -2728,13 +2729,45 @@ function Recipes({ products, recipes, requestDelete, setRecipes }) {
             { key: "linked", label: "Ingredients" },
           ]}
           onDelete={(id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) })}
-          onEdit={(row) => {
-            setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients });
-            setEditingId(row.id);
-          }}
+          onEdit={openRecipeModal}
           rows={rows}
+          toolbarAction={<button onClick={() => openRecipeModal()} type="button"><Plus size={16} />Add Recipe</button>}
         />
       </Panel>
+      {modalOpen && (
+        <EditModal title={editingId ? "Edit recipe" : "Create recipe"} onCancel={() => setModalOpen(false)} onSave={saveRecipe} saveLabel="Save Recipe">
+          <div className="form-grid six">
+            <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+            <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
+            <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
+            <Field label="Ingredient quantity" type="number" value={form.ingredientQuantity} onChange={(value) => setForm({ ...form, ingredientQuantity: value })} />
+            <label>Ingredient search<input placeholder="Type product name..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} /></label>
+            <label>Recipe notes<textarea rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
+            <label>Method<textarea rows={5} value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} /></label>
+          </div>
+          {suggestions.length > 0 && (
+            <div className="suggestion-list">
+              {suggestions.map((product) => {
+                const cheapest = cheapestOffer(product, products);
+                return <button key={product.id} onClick={() => addIngredient(product)} type="button">{product.name}<span>{product.packSize} · {cheapest.supplier} {money(cheapest.price)}</span></button>;
+              })}
+            </div>
+          )}
+          <div className="stack-list tight">
+            {form.ingredients.map((ingredient) => (
+              <div className="compact-row" key={ingredient.id}>
+                <span>{ingredient.productName}</span>
+                <span>{ingredient.supplier}</span>
+                <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
+                <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) })) })} type="button"><Trash2 size={15} /></button>
+              </div>
+            ))}
+          </div>
+          <div className="button-row left tight">
+            <button onClick={() => addIngredient()} type="button"><Plus size={16} />Add Ingredient</button>
+          </div>
+        </EditModal>
+      )}
     </div>
   );
 }
@@ -2745,6 +2778,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
   const [subcategoryName, setSubcategoryName] = useState("");
   const [dishForm, setDishForm] = useState({ subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+  const [menuModalOpen, setMenuModalOpen] = useState(false);
+  const [dishModalOpen, setDishModalOpen] = useState(false);
   const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
   const subcategories = activeMenu?.subcategories || [];
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
@@ -2776,6 +2811,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
     setMenus((current) => [menu, ...current]);
     setActiveMenuId(menu.id);
     setMenuForm({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
+    setMenuModalOpen(false);
   };
 
   const addSubcategory = () => {
@@ -2805,6 +2841,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
       };
     }));
     setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
+    setDishModalOpen(false);
   };
 
   const deleteMenu = () => {
@@ -2845,18 +2882,6 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
 
   return (
     <div className="page-grid">
-      <Panel title="Create menu">
-        <div className="form-grid six">
-          <Field label="Name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
-          <Field label="Season / Type" value={menuForm.season} onChange={(value) => setMenuForm({ ...menuForm, season: value })} />
-          <Field label="Start date" type="date" value={menuForm.startDate} onChange={(value) => setMenuForm({ ...menuForm, startDate: value })} />
-          <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
-          <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
-          <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
-        </div>
-        <div className="button-row left"><button onClick={createMenu} type="button"><Plus size={16} />Create Menu</button></div>
-      </Panel>
-
       {activeMenu && (
         <>
           <div className="metric-grid compact">
@@ -2870,17 +2895,11 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
               <Field label="Add subcategory" value={subcategoryName} onChange={setSubcategoryName} />
-              <label>Dish subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{subcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
-              <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
-              <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
-              <label>Linked recipe<select value={dishForm.recipeId} onChange={(event) => setDishForm({ ...dishForm, recipeId: event.target.value })}><option value="">None</option>{recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
-              <Field label="Manual ingredients cost" type="number" value={dishForm.manualCost} onChange={(value) => setDishForm({ ...dishForm, manualCost: value })} />
-              <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
-              <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
             </div>
             <div className="button-row left">
+              <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>
               <button className="ghost" onClick={addSubcategory} type="button"><Plus size={16} />Add Subcategory</button>
-              <button onClick={addDish} type="button"><Plus size={16} />Add Dish</button>
+              <button onClick={() => setDishModalOpen(true)} type="button"><Plus size={16} />Add Dish</button>
               <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>
             </div>
           </Panel>
@@ -2911,6 +2930,34 @@ function MenuCosting({ financialSettings, menuSettings, menus, recipes, requestD
             />
           </Panel>
         </>
+      )}
+      {!activeMenu && <Panel title="Menu costing"><div className="button-row left"><button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button></div></Panel>}
+      {menuModalOpen && (
+        <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
+          <div className="form-grid six">
+            <Field label="Menu name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
+            <Field label="Season / type" value={menuForm.season} onChange={(value) => setMenuForm({ ...menuForm, season: value })} />
+            <Field label="Start date" type="date" value={menuForm.startDate} onChange={(value) => setMenuForm({ ...menuForm, startDate: value })} />
+            <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
+            <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
+            <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+            <Field label="Subcategories" value={subcategoryName} onChange={setSubcategoryName} />
+          </div>
+        </EditModal>
+      )}
+      {dishModalOpen && (
+        <EditModal title="Add dish" onCancel={() => setDishModalOpen(false)} onSave={addDish} saveLabel="Save Dish">
+          <div className="form-grid six">
+            <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
+            <label>Menu<select value={activeMenu?.id || ""} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+            <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{subcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
+            <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
+            <label>Linked recipe<select value={dishForm.recipeId} onChange={(event) => setDishForm({ ...dishForm, recipeId: event.target.value })}><option value="">None</option>{recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
+            <Field label="Manual ingredients cost" type="number" value={dishForm.manualCost} onChange={(value) => setDishForm({ ...dishForm, manualCost: value })} />
+            <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
+            <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+          </div>
+        </EditModal>
       )}
     </div>
   );
@@ -2972,6 +3019,8 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [status, setStatus] = useState("");
+  const [pendingImport, setPendingImport] = useState([]);
+  const [importFileKey, setImportFileKey] = useState(0);
   const departmentOptions = ["Total", ...departmentNames];
   const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
   const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
@@ -3017,6 +3066,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
     setForm(empty);
     setEditingId("");
+    setEditModalOpen(false);
     setStatus("Sales saved");
   };
 
@@ -3027,9 +3077,22 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       setStatus("CSV import found no sales rows. Use date,gross,net or date,department,gross,net.");
       return;
     }
-    setSales((current) => [...imported, ...current]);
     const missingNet = imported.filter((row) => !numberValue(row.sales)).length;
-    setStatus(missingNet ? `${imported.length} sales row(s) imported. ${missingNet} line(s) need Net Sales entered.` : `${imported.length} sales row(s) imported`);
+    setPendingImport(imported);
+    setStatus(missingNet ? `${imported.length} sales row(s) ready for review. ${missingNet} line(s) need Net Sales entered before GP is accurate.` : `${imported.length} sales row(s) ready for review.`);
+  };
+
+  const confirmImport = () => {
+    setSales((current) => [...pendingImport, ...current]);
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setStatus("Sales import confirmed.");
+  };
+
+  const cancelImport = () => {
+    setPendingImport([]);
+    setImportFileKey((current) => current + 1);
+    setStatus("Sales import cancelled.");
   };
 
   return (
@@ -3044,9 +3107,28 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
         <Field label="Discounts / refunds" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
         <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
         <Field label="VAT % helper" type="number" value={form.vatRate} onChange={updateVatRate} />
-        <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
+        <label>CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
+      {pendingImport.length > 0 && (
+        <div className="import-review">
+          <div className="panel-head"><h2>Review sales import</h2><span>{pendingImport.length} row(s)</span></div>
+          <DataTable
+            columns={[
+              { key: "date", label: "Date" },
+              { key: "department", label: "Sales type" },
+              { key: "grossSales", label: "Gross", render: money },
+              { key: "sales", label: "Net", render: money },
+              { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
+            ]}
+            rows={pendingImport}
+          />
+          <div className="button-row left">
+            <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+            <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
+          </div>
+        </div>
+      )}
       <div className="button-row left">
         <button onClick={saveSale} type="button"><Save size={16} />{editingId ? "Save Sales" : "Add Sales"}</button>
         {editingId && <button className="ghost" onClick={() => { setForm(empty); setEditingId(""); }} type="button">Cancel Edit</button>}
@@ -3064,9 +3146,24 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
         onEdit={(row) => {
           setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, serviceCharge: row.serviceCharge ?? 0 });
           setEditingId(row.id);
+          setEditModalOpen(true);
         }}
         rows={sales}
       />
+      {editModalOpen && (
+        <EditModal title="Edit sales record" onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} saveLabel="Save Sales">
+          <div className="form-grid six">
+            <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
+            <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+            <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
+            <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
+            <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
+            <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
+            <Field label="Discounts / refunds" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
+            <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
+          </div>
+        </EditModal>
+      )}
     </Panel>
   );
 }
@@ -3192,6 +3289,9 @@ function SettingsPanel({
   };
   const backupHref = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(backup, null, 2))}`;
   const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
+  const genericSalesTemplate = "Date,Sales Type,Gross Sales,Net Sales,VAT Amount,Service Charge,Discounts,Refunds\n2026-06-10,Kitchen Made,2053.75,1821.49,232.26,0,0,0";
+  const squareSalesTemplate = "Date,Category,Gross Sales,Net Sales,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Square Food - Make in,2053.75,1821.49,232.26,0,0,0";
+  const lightspeedSalesTemplate = "Date,Category,Gross,Net,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Food,2053.75,1821.49,232.26,0,0,0";
 
   const importBackup = async (file) => {
     if (!file) return;
@@ -3248,10 +3348,35 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Sales settings">
+      <Panel title="POS & Sales Setup">
         <div className="form-grid six">
+          <label>POS Provider<select value={financialSettings.posProvider || defaultFinancialSettings.posProvider} onChange={(event) => updateFinancial("posProvider", event.target.value)}>{["Square", "Lightspeed", "EPOS Now", "Toast", "Zettle", "Other / Manual"].map((provider) => <option key={provider}>{provider}</option>)}</select></label>
           <label>Sales input method<select value={financialSettings.salesInputMethod || defaultFinancialSettings.salesInputMethod} onChange={(event) => updateFinancial("salesInputMethod", event.target.value)}><option>Manual Gross + Net Sales</option><option>Auto-calculate Net Sales from VAT %</option><option>CSV/POS import</option></select></label>
+          <label>Sales Data Mode<select value={financialSettings.salesDataMode || defaultFinancialSettings.salesDataMode} onChange={(event) => updateFinancial("salesDataMode", event.target.value)}><option>Gross + Net from POS</option><option>Calculate Net from VAT %</option><option>Manual Net Sales</option></select></label>
           <label>GP calculation base<select value={financialSettings.gpCalculationBase || defaultFinancialSettings.gpCalculationBase} onChange={(event) => updateFinancial("gpCalculationBase", event.target.value)}><option>Net Sales</option><option>Gross Sales</option></select></label>
+          <label>Date column<input value={financialSettings.csvDateColumn || "Date"} onChange={(event) => updateFinancial("csvDateColumn", event.target.value)} /></label>
+          <label>Category / Sales type column<input value={financialSettings.csvCategoryColumn || "Category"} onChange={(event) => updateFinancial("csvCategoryColumn", event.target.value)} /></label>
+          <label>Gross Sales column<input value={financialSettings.csvGrossColumn || "Gross Sales"} onChange={(event) => updateFinancial("csvGrossColumn", event.target.value)} /></label>
+          <label>Net Sales column<input value={financialSettings.csvNetColumn || "Net Sales"} onChange={(event) => updateFinancial("csvNetColumn", event.target.value)} /></label>
+          <label>VAT / Tax column<input value={financialSettings.csvVatColumn || "Tax"} onChange={(event) => updateFinancial("csvVatColumn", event.target.value)} /></label>
+          <label>Service Charge column<input value={financialSettings.csvServiceColumn || "Service Charge"} onChange={(event) => updateFinancial("csvServiceColumn", event.target.value)} /></label>
+          <label>Discounts column<input value={financialSettings.csvDiscountColumn || "Discounts"} onChange={(event) => updateFinancial("csvDiscountColumn", event.target.value)} /></label>
+          <label>Refunds column<input value={financialSettings.csvRefundColumn || "Refunds"} onChange={(event) => updateFinancial("csvRefundColumn", event.target.value)} /></label>
+          <label>Food category maps to<select value={financialSettings.foodCategoryDepartment || "Kitchen Made"} onChange={(event) => updateFinancial("foodCategoryDepartment", event.target.value)}>{defaultDepartments.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>Drinks category maps to<select value={financialSettings.drinksCategoryDepartment || "Bar"} onChange={(event) => updateFinancial("drinksCategoryDepartment", event.target.value)}>{defaultDepartments.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+        </div>
+      </Panel>
+
+      <Panel title="CSV Templates / Import Guide">
+        <div className="button-row left">
+          <a className="file-button secondary" download="marginflow-sales-generic-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(genericSalesTemplate)}`}>Generic CSV Template</a>
+          <a className="file-button secondary" download="marginflow-square-sales-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(squareSalesTemplate)}`}>Square CSV Template</a>
+          <a className="file-button secondary" download="marginflow-lightspeed-sales-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(lightspeedSalesTemplate)}`}>Lightspeed CSV Template</a>
+        </div>
+        <div className="code-card">
+          <p>Required columns: Date, Sales Type or Category, Gross Sales and Net Sales. Optional columns: VAT/Tax, Service Charge, Discounts, Refunds and Quantity or Items Sold.</p>
+          <p>Accepted dates should use ISO format such as 2026-06-10. POS categories can be mapped to MarginFlow departments in POS & Sales Setup.</p>
+          <p>CSV imports load into a review state first. Use Confirm Import to save, or Cancel Import to clear temporary rows without changing saved records.</p>
         </div>
       </Panel>
 
@@ -3323,7 +3448,7 @@ function SettingsPanel({
   );
 }
 
-function DataTable({ columns, rows, onEdit, onDelete }) {
+function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
   const filtered = useMemo(() => {
@@ -3343,6 +3468,7 @@ function DataTable({ columns, rows, onEdit, onDelete }) {
     <>
       <div className="table-toolbar">
         <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        {toolbarAction}
       </div>
       <div className="table-wrap">
         <table>
@@ -3389,6 +3515,27 @@ function DeleteConfirmationModal({ title, message, onCancel, onDelete }) {
         <div className="button-row left">
           <button className="ghost" onClick={onCancel} type="button">Cancel</button>
           <button className="ghost danger" onClick={onDelete} type="button">Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditModal({ title, children, onCancel, onSave, saveLabel = "Save Changes" }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="split-modal wide" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header">
+          <div>
+            <h3>{title}</h3>
+            <p>Review details before saving changes.</p>
+          </div>
+          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
+        </div>
+        {children}
+        <div className="button-row left">
+          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
+          <button onClick={onSave} type="button"><Save size={16} />{saveLabel}</button>
         </div>
       </div>
     </div>

@@ -994,6 +994,16 @@ code {
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
   padding: 1.25rem;
 }
+.split-modal.wide {
+  width: min(980px, 100%);
+}
+
+.import-review {
+  margin: 0 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111c31;
+}
 
 .modal-header {
   display: flex;
