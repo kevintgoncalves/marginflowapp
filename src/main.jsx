@@ -10,6 +10,7 @@ import {
   Boxes,
   ChefHat,
   Edit3,
+  Eye,
   Gauge,
   Home,
   LineChart,
@@ -841,6 +842,17 @@ function previousStocktakeValue(stocktakes, selectedDepartment, departmentNames 
     .filter((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate)
     .sort((a, b) => b.date.localeCompare(a.date))[0];
   return numberValue(previous?.totalValue);
+}
+
+function previousStocktakeRecord(stocktakes, selectedDepartment, beforeDate = today()) {
+  return stocktakes
+    .filter((stocktake) => stocktake.department === selectedDepartment && stocktake.date < beforeDate)
+    .sort((a, b) => b.date.localeCompare(a.date))[0] || null;
+}
+
+function shortDate(date) {
+  if (!date) return "";
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", year: "2-digit" }).format(parseDate(date));
 }
 
 function hasPreviousStocktake(stocktakes, selectedDepartment, departmentNames = defaultDepartments, beforeDate = today()) {
@@ -1853,18 +1865,38 @@ function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
 
 function Stocktake({ department, departmentNames, products, setProducts, stocktakes, setStocktakes }) {
   const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
-  const emptyForm = { id: "", date: today(), department: stocktakeDepartment, entryMode: "Manual Entry", productSearch: "", lines: [] };
+  const emptyForm = {
+    id: "",
+    date: today(),
+    department: stocktakeDepartment,
+    entryMode: "Product List",
+    openingStockMode: "Automatic",
+    manualOpeningType: "Manual Total Value",
+    manualOpeningValue: 0,
+    openingProductSearch: "",
+    openingLines: [],
+    productSearch: "",
+    lines: [],
+  };
   const [form, setForm] = useState(emptyForm);
   const [status, setStatus] = useState("");
   const [viewingStocktake, setViewingStocktake] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-  const openingStock = previousStocktakeValue(stocktakes, form.department, departmentNames, form.date);
-  const openingNote = hasPreviousStocktake(stocktakes, form.department, departmentNames, form.date)
-    ? `Opening stock from latest saved ${form.department} stocktake before ${form.date}.`
-    : "No previous stocktake found. Opening stock set to £0.";
+  const previousStocktake = previousStocktakeRecord(stocktakes, form.department, form.date);
+  const automaticOpeningStock = previousStocktakeValue(stocktakes, form.department, departmentNames, form.date);
+  const openingProductTotal = (form.openingLines || []).reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+  const openingStockValue = form.openingStockMode === "Automatic"
+    ? automaticOpeningStock
+    : form.manualOpeningType === "Opening Product List"
+      ? openingProductTotal
+      : numberValue(form.manualOpeningValue);
+  const currentStockValue = form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
   const productSuggestions = form.productSearch
     ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 8)
+    : [];
+  const openingProductSuggestions = form.openingProductSearch
+    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.openingProductSearch.toLowerCase()))).slice(0, 8)
     : [];
 
   const newStocktake = () => {
@@ -1872,26 +1904,39 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
     setStatus("");
   };
 
+  const productLineFromProduct = (product, quantity = 1) => {
+    const unitCost = numberValue(product.unitCost);
+    return {
+      id: uid(),
+      productName: product.name,
+      matchedProductId: product.id,
+      supplier: product.supplier || "",
+      packSize: product.packSize || "",
+      department: product.department || form.department,
+      quantity,
+      unitCost,
+      stockValue: numberValue(quantity) * unitCost,
+      matchStatus: "Matched",
+    };
+  };
+
   const addManualLine = () => {
     setForm((current) => ({
       ...current,
       lines: [
         ...current.lines,
-        { id: uid(), productName: "", matchedProductId: "", supplier: "", quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual entry" },
+        { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual entry" },
       ],
     }));
   };
 
   const addProductLine = (product) => {
     if (!product) return;
-    const unitCost = numberValue(product.unitCost);
     setForm((current) => ({
       ...current,
       productSearch: "",
-      lines: [
-        ...current.lines,
-        { id: uid(), productName: product.name, matchedProductId: product.id, supplier: product.supplier || "", quantity: 1, unitCost, stockValue: unitCost, matchStatus: "Matched" },
-      ],
+      department: product.department || current.department,
+      lines: [...current.lines, productLineFromProduct(product)],
     }));
   };
 
@@ -1900,18 +1945,58 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
       ...current,
       lines: current.lines.map((line) => {
         if (line.id !== id) return line;
-        const updated = { ...line, [field]: field === "productName" ? value : Number(value) };
+        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
         if (field === "productName") {
           const match = matchProduct(value, products);
           if (match) {
             updated.productName = match.product.name;
             updated.matchedProductId = match.product.id;
             updated.supplier = match.product.supplier || "";
+            updated.packSize = match.product.packSize || "";
+            updated.department = match.product.department || current.department;
             updated.unitCost = match.product.unitCost;
             updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
           } else {
             updated.matchedProductId = "";
             updated.matchStatus = "Create product on save";
+          }
+        }
+        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
+        return updated;
+      }),
+    }));
+  };
+
+  const addOpeningLine = (product) => {
+    setForm((current) => ({
+      ...current,
+      openingProductSearch: "",
+      openingLines: [
+        ...(current.openingLines || []),
+        product ? productLineFromProduct(product) : { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual opening" },
+      ],
+    }));
+  };
+
+  const updateOpeningLine = (id, field, value) => {
+    setForm((current) => ({
+      ...current,
+      openingLines: (current.openingLines || []).map((line) => {
+        if (line.id !== id) return line;
+        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
+        if (field === "productName") {
+          const match = matchProduct(value, products);
+          if (match) {
+            updated.productName = match.product.name;
+            updated.matchedProductId = match.product.id;
+            updated.supplier = match.product.supplier || "";
+            updated.packSize = match.product.packSize || "";
+            updated.department = match.product.department || current.department;
+            updated.unitCost = match.product.unitCost;
+            updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
+          } else {
+            updated.matchedProductId = "";
+            updated.matchStatus = "Manual opening";
           }
         }
         updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
@@ -1933,6 +2018,8 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
         productName: match?.product?.name || productName,
         matchedProductId: match?.product?.id || "",
         supplier: match?.product?.supplier || "",
+        packSize: match?.product?.packSize || "",
+        department: match?.product?.department || form.department,
         quantity: numberValue(quantity),
         unitCost: cost,
         stockValue: numberValue(quantity) * cost,
@@ -1945,34 +2032,64 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
 
   const saveStocktake = () => {
     const incomplete = form.lines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
+    const incompleteOpening = form.openingStockMode === "Manual" && form.manualOpeningType === "Opening Product List"
+      ? (form.openingLines || []).some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost))
+      : false;
     if (!form.lines.length || incomplete) {
       setStatus("Every line needs product name, quantity and unit cost before saving.");
       return;
     }
+    if (incompleteOpening) {
+      setStatus("Every opening stock line needs product name, quantity and unit cost before saving.");
+      return;
+    }
 
     let nextProducts = [...products];
-    const savedLines = form.lines.map((line) => {
+    const ensureProduct = (line) => {
       const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
       if (match) return line;
       const product = {
         id: uid(),
         name: line.productName,
         supplier: line.supplier || "Unknown Supplier",
-        packSize: "",
+        packSize: line.packSize || "",
         quantity: 1,
         unitCost: numberValue(line.unitCost),
-        department: form.department,
+        department: line.department || form.department,
         aliases: [],
         supplierPrices: [],
         priceHistory: [{ date: form.date, supplier: "Stocktake", price: numberValue(line.unitCost) }],
       };
       nextProducts = [...nextProducts, product];
       return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
-    });
+    };
+
+    const savedLines = form.lines.map(ensureProduct);
+    const savedOpeningLines = (form.openingLines || []).map(ensureProduct);
 
     const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
+    const normalizedOpeningLines = savedOpeningLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
     const totalValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-    const stocktake = { id: form.id || uid(), date: form.date, department: form.department, entryMode: form.entryMode, lines: normalizedLines, totalValue, status: "Saved" };
+    const savedOpeningValue = form.openingStockMode === "Automatic"
+      ? automaticOpeningStock
+      : form.manualOpeningType === "Opening Product List"
+        ? normalizedOpeningLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0)
+        : numberValue(form.manualOpeningValue);
+    const stocktake = {
+      id: form.id || uid(),
+      date: form.date,
+      department: form.department,
+      entryMode: form.entryMode,
+      openingStockMode: form.openingStockMode,
+      manualOpeningType: form.manualOpeningType,
+      manualOpeningValue: numberValue(form.manualOpeningValue),
+      openingLines: normalizedOpeningLines,
+      openingStockValue: savedOpeningValue,
+      openingSourceDate: form.openingStockMode === "Automatic" ? previousStocktake?.date || "" : "",
+      lines: normalizedLines,
+      totalValue,
+      status: "Saved",
+    };
     setProducts(nextProducts);
     setStocktakes((current) => form.id ? current.map((item) => (item.id === form.id ? stocktake : item)) : [stocktake, ...current]);
     setForm({ ...emptyForm, date: today(), department: form.department, entryMode: form.entryMode });
@@ -1985,6 +2102,11 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
       date: stocktake.date,
       department: stocktake.department,
       entryMode: stocktake.entryMode || "Manual Entry",
+      openingStockMode: stocktake.openingStockMode || "Automatic",
+      manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
+      manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
+      openingProductSearch: "",
+      openingLines: (stocktake.openingLines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
       productSearch: "",
       lines: (stocktake.lines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
     });
@@ -2002,20 +2124,82 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
 
   return (
     <div className="page-grid">
-      <div className="metric-grid compact">
-        <Metric label="Opening stock" value={money(openingStock)} delta="Auto calculated" />
-        <Metric label="Current stocktake" value={money(form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))} delta={form.entryMode} />
-        <Metric label="Saved stocktakes" value={visibleStocktakes.length} delta={form.department} />
-      </div>
-      <Panel title={form.id ? "Edit stocktake" : "New stocktake"} action="Opening stock is automatic">
-        <div className="form-grid six">
+      <Panel title="Stocktake" action={form.id ? "Editing saved stocktake" : "Create stocktake"}>
+        <div className="form-grid six stocktake-controls">
           <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
           <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
-          <label>Entry mode<select value={form.entryMode} onChange={(event) => setForm({ ...form, entryMode: event.target.value })}><option>Manual Entry</option><option>Product List</option><option>CSV Import</option></select></label>
         </div>
-        <div className="invoice-status info">{openingNote}</div>
+        <div className="radio-section">
+          <strong>Entry mode</strong>
+          <div className="radio-row">
+            {["Product List", "Manual Entry", "CSV Import"].map((mode) => (
+              <label key={mode}><input checked={form.entryMode === mode} onChange={() => setForm({ ...form, entryMode: mode })} type="radio" />{mode}</label>
+            ))}
+          </div>
+        </div>
+        <div className="radio-section">
+          <strong>Opening stock mode</strong>
+          <div className="radio-row">
+            {["Automatic", "Manual"].map((mode) => (
+              <label key={mode}><input checked={form.openingStockMode === mode} onChange={() => setForm({ ...form, openingStockMode: mode })} type="radio" />{mode === "Manual" ? "Manual / First Stocktake" : mode}</label>
+            ))}
+          </div>
+        </div>
+        {form.openingStockMode === "Automatic" ? (
+          <div className="stocktake-summary">
+            <span>Opening Stock</span>
+            <strong>{money(openingStockValue)}</strong>
+            <small>{previousStocktake ? `Auto calculated from: ${shortDate(previousStocktake.date)} stocktake` : "No previous stocktake found. Opening stock set to £0."}</small>
+          </div>
+        ) : (
+          <>
+            <div className="radio-section compact">
+              <strong>Manual opening type</strong>
+              <div className="radio-row">
+                {["Manual Total Value", "Opening Product List"].map((mode) => (
+                  <label key={mode}><input checked={form.manualOpeningType === mode} onChange={() => setForm({ ...form, manualOpeningType: mode })} type="radio" />{mode}</label>
+                ))}
+              </div>
+            </div>
+            {form.manualOpeningType === "Manual Total Value" ? (
+              <div className="form-grid six">
+                <label>Opening Stock<input min="0" step="0.01" type="number" value={form.manualOpeningValue} onChange={(event) => setForm({ ...form, manualOpeningValue: event.target.value })} /></label>
+              </div>
+            ) : (
+              <>
+                <div className="form-grid six">
+                  <label>Opening product search<input placeholder="Type product name..." value={form.openingProductSearch} onChange={(event) => setForm({ ...form, openingProductSearch: event.target.value })} /></label>
+                </div>
+                {openingProductSuggestions.length > 0 && (
+                  <div className="suggestion-list">
+                    {openingProductSuggestions.map((product) => <button key={product.id} onClick={() => addOpeningLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
+                  </div>
+                )}
+                <div className="button-row left tight">
+                  <button className="ghost" onClick={() => addOpeningLine()} type="button"><Plus size={16} />Add product</button>
+                </div>
+                <div className="table-wrap compact-table">
+                  <table>
+                    <thead><tr>{["Product", "Quantity", "Unit Cost", "Stock Value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+                    <tbody>
+                      {(form.openingLines || []).map((line) => (
+                        <tr key={line.id}>
+                          <td><input value={line.productName} onChange={(event) => updateOpeningLine(line.id, "productName", event.target.value)} /></td>
+                          <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateOpeningLine(line.id, "quantity", event.target.value)} /></td>
+                          <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateOpeningLine(line.id, "unitCost", event.target.value)} /></td>
+                          <td>{money(line.stockValue)}</td>
+                          <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, openingLines: (current.openingLines || []).filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="stocktake-summary slim"><span>Opening Stock Total</span><strong>{money(openingStockValue)}</strong></div>
+              </>
+            )}
+          </>
+        )}
         <div className="button-row left">
-          <button className="ghost" onClick={newStocktake} type="button"><Plus size={16} />New Stocktake</button>
           {form.entryMode === "Manual Entry" && <button onClick={addManualLine} type="button"><Plus size={16} />Add Product</button>}
           <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
         </div>
@@ -2026,7 +2210,7 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
             </div>
             {productSuggestions.length > 0 && (
               <div className="suggestion-list">
-                {productSuggestions.map((product) => <button key={product.id} onClick={() => addProductLine(product)} type="button">{product.name}<span>{money(product.unitCost)} {product.supplier}</span></button>)}
+                {productSuggestions.map((product) => <button key={product.id} onClick={() => addProductLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
               </div>
             )}
           </>
@@ -2040,23 +2224,28 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
         {status && <div className="invoice-status info">{status}</div>}
         <div className="table-wrap">
           <table>
-            <thead><tr>{["Product", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+            <thead><tr>{["Product", "Unit", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
             <tbody>
               {form.lines.map((line) => (
                 <tr key={line.id}>
-                  <td><input readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId)} value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
+                  <td><input readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
+                  <td><input value={line.packSize || ""} onChange={(event) => updateLine(line.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId)} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
+                  <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
                   <td>{money(line.stockValue)}</td>
-                  <td><small className="line-note">{line.matchStatus}</small></td>
+                  <td><small className="line-note">{line.matchStatus}{line.supplier ? ` · ${line.supplier}` : ""}</small></td>
                   <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <div className="stocktake-summary slim"><span>Closing Stock</span><strong>{money(currentStockValue)}</strong></div>
       </Panel>
       <Panel title="Saved stocktakes">
+        <div className="button-row left tight">
+          <button onClick={newStocktake} type="button"><Plus size={16} />New Stocktake</button>
+        </div>
         <DataTable
           columns={[
             { key: "date", label: "Date" },
@@ -2066,9 +2255,9 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
             { key: "actions", label: "Actions", render: (_, row) => (
               <div className="row-actions">
-                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button">View</button>
-                <button className="icon" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} /></button>
-                <button className="icon danger" onClick={() => setDeleteTarget(row)} type="button"><Trash2 size={15} /></button>
+                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
+                <button className="ghost" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} />Edit</button>
+                <button className="ghost danger" onClick={() => setDeleteTarget(row)} type="button"><Trash2 size={15} />Delete</button>
               </div>
             ) },
           ]}
@@ -2084,6 +2273,11 @@ function Stocktake({ department, departmentNames, products, setProducts, stockta
                 <p>{viewingStocktake.department} · {viewingStocktake.date} · {money(viewingStocktake.totalValue)}</p>
               </div>
               <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
+            </div>
+            <div className="compact-row">
+              <span>Opening Stock</span>
+              <span>{viewingStocktake.openingStockMode || "Automatic"}</span>
+              <strong>{money(viewingStocktake.openingStockValue)}</strong>
             </div>
             <div className="split-list">
               {(viewingStocktake.lines || []).map((line) => (

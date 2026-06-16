@@ -456,6 +456,84 @@ label {
 .button-row.left { justify-content: flex-start; }
 .button-row.tight { padding-top: 0; padding-bottom: 12px; }
 
+.stocktake-controls {
+  padding-bottom: 8px;
+}
+
+.radio-section {
+  display: grid;
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+
+.radio-section.compact {
+  padding-bottom: 10px;
+}
+
+.radio-section strong {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.radio-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #101a2e;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.radio-row input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.stocktake-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 0 18px 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 10px;
+  background: #111c31;
+}
+
+.stocktake-summary.slim {
+  justify-content: flex-end;
+}
+
+.stocktake-summary span,
+.stocktake-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.stocktake-summary strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.compact-table {
+  margin-bottom: 10px;
+}
+
 .line-note {
   display: block;
   margin-top: 6px;
