@@ -742,8 +742,8 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
       const grossSales = hasHeader
         ? parseCurrencyCell(cells[grossIndex])
         : parseCurrencyCell(hasDepartment ? cells[2] : cells[1]);
-      const vatRate = hasHeader ? numberValue(cells[vatRateIndex], defaultVatRate) : numberValue(cells[3], defaultVatRate);
-      const importedNet = hasHeader && netIndex >= 0 ? parseCurrencyCell(cells[netIndex]) : 0;
+      const vatRate = hasHeader ? numberValue(cells[vatRateIndex], defaultVatRate) : numberValue(cells[hasDepartment ? 4 : 3], defaultVatRate);
+      const importedNet = hasHeader && netIndex >= 0 ? parseCurrencyCell(cells[netIndex]) : parseCurrencyCell(cells[hasDepartment ? 3 : 2]);
       const sales = importedNet || (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0);
       const vatAmount = sales ? vatAmountFromGrossNet(grossSales, sales) : parseCurrencyCell(cells[vatIndex]);
       const discounts = parseCurrencyCell(cells[discountIndex]);
@@ -940,18 +940,18 @@ function openingStockValue(stocktakes, selectedDepartment, departmentNames = def
     .reduce((sum, stocktake) => sum + numberValue(stocktake.openingStockValue), 0);
 }
 
-function salesForDepartment(salesRows, selectedDepartment) {
+function salesForDepartment(salesRows, selectedDepartment, gpCalculationBase = "Net Sales") {
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
   if (selectedDepartment === "All departments") {
     return totalRows.length
-      ? totalRows.reduce((sum, row) => sum + netSalesForRow(row), 0)
-      : salesRows.reduce((sum, row) => sum + netSalesForRow(row), 0);
+      ? totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0)
+      : salesRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
   }
 
   const departmentRows = salesRows.filter((row) => row.department === selectedDepartment);
   return departmentRows.length
-    ? departmentRows.reduce((sum, row) => sum + netSalesForRow(row), 0)
-    : totalRows.reduce((sum, row) => sum + netSalesForRow(row), 0);
+    ? departmentRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0)
+    : totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
 }
 
 function grossSalesForDepartment(salesRows, selectedDepartment) {
@@ -973,7 +973,7 @@ function vatForDepartment(salesRows, selectedDepartment) {
     ? (totalRows.length ? totalRows : salesRows)
     : salesRows.filter((row) => row.department === selectedDepartment);
   const fallbackRows = rows.length ? rows : totalRows;
-  return fallbackRows.reduce((sum, row) => sum + vatAmountFromGross(row.grossSales, row.vatRate), 0);
+  return fallbackRows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
 }
 
 function purchasesForDepartment(invoices, selectedDepartment) {
@@ -988,11 +988,12 @@ function wasteForDepartment(wasteItems, selectedDepartment) {
     .reduce((sum, item) => sum + wasteCost(item), 0);
 }
 
-function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames) {
+function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
   const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
-  const salesTotal = salesForDepartment(salesRows, selectedDepartment);
+  const salesTotal = salesForDepartment(salesRows, selectedDepartment, financialSettings.gpCalculationBase || "Net Sales");
+  const netSales = salesForDepartment(salesRows, selectedDepartment, "Net Sales");
   const grossSales = grossSalesForDepartment(salesRows, selectedDepartment);
   const vat = vatForDepartment(salesRows, selectedDepartment);
   const purchases = purchasesForDepartment(filteredInvoices, selectedDepartment);
@@ -1006,6 +1007,7 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
   return {
     grossSales,
     vat,
+    netSales,
     sales: salesTotal,
     purchases,
     allPurchases,
@@ -1025,19 +1027,20 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
   };
 }
 
-function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames) {
-  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames);
+function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
+  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
   const days = dateRangeDays(dateRange);
   const dailyRows = days.map((date) => {
     const period = { start: date, end: date };
-    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames);
+    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames, financialSettings);
     return {
       id: date,
       date,
       day: formatRangeDate(date),
       grossSales: row.grossSales,
       vat: row.vat,
-      netSales: row.sales,
+      netSales: row.netSales,
+      salesBase: row.sales,
       purchases: row.purchases,
       waste: row.waste,
       invoiceGp: row.invoiceGp,
@@ -1047,12 +1050,13 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
     };
   });
   const departmentRows = departmentNames.map((name) => {
-    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames);
+    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
     return {
       id: name,
       department: name,
       grossSales: row.grossSales,
-      netSales: row.sales,
+      netSales: row.netSales,
+      salesBase: row.sales,
       purchases: row.purchases,
       waste: row.waste,
       gp: row.invoiceGp,
@@ -1266,7 +1270,7 @@ function App() {
   const [recipes, setRecipes] = useState(initialRecipes);
   const [menus, setMenus] = useState(initialMenus);
   const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
-  const [financialSettings, setFinancialSettingsState] = useState(() => safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings));
+  const [financialSettings, setFinancialSettingsState] = useState(() => ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
@@ -1305,7 +1309,7 @@ function App() {
   };
 
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
-  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames]);
+  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
@@ -1430,6 +1434,7 @@ function App() {
             department={department}
             departmentNames={departmentNames}
             departmentSettings={departmentSettings}
+            financialSettings={financialSettings}
             gpTarget={gpTarget}
             invoices={invoices}
             metrics={metrics}
@@ -1548,16 +1553,15 @@ function changePercent(current, previous) {
   return ((numberValue(current) - numberValue(previous)) / Math.abs(numberValue(previous))) * 100;
 }
 
-function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
+function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget, gpCalculationBase }) {
   return (
     <div className="metric-grid performance-grid">
       <Metric label="Gross Sales" value={money(metrics.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-      <Metric label="VAT" value={money(metrics.vat)} delta="Deducted from gross" />
-      <Metric label="Net Sales" value={money(metrics.sales)} delta="Used for GP" />
+      <Metric label="Net Sales" value={money(metrics.netSales)} delta={gpCalculationBase === "Net Sales" ? "Used for GP" : "Reference only"} />
       <Metric label="Purchases" value={money(metrics.purchases)} delta={department} />
       <Metric label="Invoice GP %" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
       <Metric label="Stocktake GP %" value={percent(metrics.stocktakeGp)} delta="Opening + purchases - closing" tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-      <Metric label="Waste Cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of net sales`} tone="warn" />
+      <Metric label="Waste Cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of GP base`} tone="warn" />
       <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
     </div>
   );
@@ -1619,27 +1623,27 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
-  const comparisonMetrics = compareRange ? calculateMetrics(invoices, sales, department, stocktakes, wasteItems, compareRange, departmentNames) : null;
+  const comparisonMetrics = compareRange ? calculateMetrics(invoices, sales, department, stocktakes, wasteItems, compareRange, departmentNames, financialSettings) : null;
 
   return (
     <>
       <Panel title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
-      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
+      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} gpCalculationBase={financialSettings.gpCalculationBase || "Net Sales"} />
       <PerformanceCharts departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
-      {showSalesManager && <SalesManager defaultVatRate={financialSettings.defaultVat} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
+      {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const recentInvoices = [...metrics.invoices].sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <>
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -2962,25 +2966,53 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
   );
 }
 
-function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, setSales }) {
-  const empty = { date: today(), department: "Total", grossSales: 0, vatRate: defaultVatRate };
+function SalesManager({ financialSettings, departmentNames, requestDelete, sales, setSales }) {
+  const defaultVatRate = financialSettings.defaultVat;
+  const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [status, setStatus] = useState("");
   const departmentOptions = ["Total", ...departmentNames];
+  const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
+  const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
+
+  const updateGross = (value) => {
+    const grossSales = numberValue(value);
+    setForm((current) => ({
+      ...current,
+      grossSales,
+      sales: financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, current.vatRate) : current.sales,
+    }));
+  };
+
+  const updateVatRate = (value) => {
+    const vatRate = numberValue(value, defaultVatRate);
+    setForm((current) => ({
+      ...current,
+      vatRate,
+      sales: financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(current.grossSales, vatRate) : current.sales,
+    }));
+  };
 
   const saveSale = () => {
-    if (!form.date || !numberValue(form.grossSales)) return;
+    if (!form.date || !numberValue(form.grossSales) || !numberValue(form.sales)) {
+      setStatus("Gross Sales and Net Sales are required.");
+      return;
+    }
     const grossSales = numberValue(form.grossSales);
+    const netSales = numberValue(form.sales);
     const vatRate = numberValue(form.vatRate, defaultVatRate);
     const payload = {
       ...form,
       id: editingId || uid(),
       day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
       grossSales,
+      sales: netSales,
       vatRate,
-      vatAmount: vatAmountFromGross(grossSales, vatRate),
-      sales: netFromGross(grossSales, vatRate),
+      vatAmount: vatAmountFromGrossNet(grossSales, netSales),
+      effectiveVatRate: effectiveVatRate(grossSales, netSales),
+      discounts: numberValue(form.discounts),
+      serviceCharge: numberValue(form.serviceCharge),
     };
     setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
     setForm(empty);
@@ -2990,13 +3022,14 @@ function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, s
 
   const importSales = async (file) => {
     if (!file) return;
-    const imported = parseSalesCsv(await file.text(), departmentNames, defaultVatRate);
+    const imported = parseSalesCsv(await file.text(), departmentNames, defaultVatRate, financialSettings.salesInputMethod);
     if (!imported.length) {
-      setStatus("CSV import found no sales rows. Use date,gross or date,department,gross,vatRate.");
+      setStatus("CSV import found no sales rows. Use date,gross,net or date,department,gross,net.");
       return;
     }
     setSales((current) => [...imported, ...current]);
-    setStatus(`${imported.length} sales row(s) imported`);
+    const missingNet = imported.filter((row) => !numberValue(row.sales)).length;
+    setStatus(missingNet ? `${imported.length} sales row(s) imported. ${missingNet} line(s) need Net Sales entered.` : `${imported.length} sales row(s) imported`);
   };
 
   return (
@@ -3004,10 +3037,13 @@ function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, s
       <div className="form-grid six">
         <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
         <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-        <Field label="Gross sales" type="number" value={form.grossSales} onChange={(value) => setForm({ ...form, grossSales: value })} />
-        <Field label="VAT %" type="number" value={form.vatRate} onChange={(value) => setForm({ ...form, vatRate: value })} />
-        <Field label="VAT amount" type="number" readOnly value={vatAmountFromGross(form.grossSales, form.vatRate)} />
-        <Field label="Net sales" type="number" readOnly value={netFromGross(form.grossSales, form.vatRate)} />
+        <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
+        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} />
+        <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
+        <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
+        <Field label="Discounts / refunds" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
+        <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
+        <Field label="VAT % helper" type="number" value={form.vatRate} onChange={updateVatRate} />
         <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
@@ -3019,14 +3055,14 @@ function SalesManager({ defaultVatRate, departmentNames, requestDelete, sales, s
         columns={[
           { key: "date", label: "Date" },
           { key: "department", label: "Sales type" },
-          { key: "grossSales", label: "Gross", render: (value) => money(value) },
-          { key: "vatRate", label: "VAT %", render: (value) => percent(value) },
-          { key: "vatAmount", label: "VAT amount", render: (_, row) => money(vatAmountFromGross(row.grossSales, row.vatRate)) },
-          { key: "sales", label: "Net", render: (_, row) => money(netSalesForRow(row)) },
+          { key: "grossSales", label: "Gross Sales", render: (value) => money(value) },
+          { key: "sales", label: "Net Sales", render: (_, row) => money(netSalesForRow(row)) },
+          { key: "vatAmount", label: "VAT Amount", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
+          { key: "effectiveVatRate", label: "Effective VAT %", render: (_, row) => percent(effectiveVatRate(row.grossSales, row.sales)) },
         ]}
         onDelete={(id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) })}
         onEdit={(row) => {
-          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, vatRate: row.vatRate ?? defaultVatRate });
+          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, serviceCharge: row.serviceCharge ?? 0 });
           setEditingId(row.id);
         }}
         rows={sales}
@@ -3209,6 +3245,13 @@ function SettingsPanel({
           <Field label="Default VAT %" type="number" value={financialSettings.defaultVat} onChange={(value) => updateFinancial("defaultVat", numberValue(value))} />
           <label>Fiscal year start month<select value={financialSettings.fiscalYearStartMonth} onChange={(event) => updateFinancial("fiscalYearStartMonth", event.target.value)}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((month) => <option key={month}>{month}</option>)}</select></label>
           <Field label="Timezone" value={financialSettings.timezone} onChange={(value) => updateFinancial("timezone", value)} />
+        </div>
+      </Panel>
+
+      <Panel title="Sales settings">
+        <div className="form-grid six">
+          <label>Sales input method<select value={financialSettings.salesInputMethod || defaultFinancialSettings.salesInputMethod} onChange={(event) => updateFinancial("salesInputMethod", event.target.value)}><option>Manual Gross + Net Sales</option><option>Auto-calculate Net Sales from VAT %</option><option>CSV/POS import</option></select></label>
+          <label>GP calculation base<select value={financialSettings.gpCalculationBase || defaultFinancialSettings.gpCalculationBase} onChange={(event) => updateFinancial("gpCalculationBase", event.target.value)}><option>Net Sales</option><option>Gross Sales</option></select></label>
         </div>
       </Panel>
 
