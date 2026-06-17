@@ -711,7 +711,7 @@ function loadBrowserImage(file) {
 }
 
 async function imageFileToInvoiceInput(file) {
-  const maxDimension = 2200;
+  const maxDimension = 1800;
   const image = await loadBrowserImage(file);
   const width = image.naturalWidth || image.width;
   const height = image.naturalHeight || image.height;
@@ -728,7 +728,7 @@ async function imageFileToInvoiceInput(file) {
   return {
     fileName: file.name,
     fileType: "image/jpeg",
-    dataUrl: canvas.toDataURL("image/jpeg", 0.86),
+    dataUrl: canvas.toDataURL("image/jpeg", 0.82),
   };
 }
 
@@ -1890,14 +1890,18 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     if (!uploaded.length) return;
     const uploadRun = uploadRunRef.current + 1;
     uploadRunRef.current = uploadRun;
-    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded` }));
+    const hasImageUpload = uploaded.some(isImageInvoiceFile);
+    const uploadStatus = hasImageUpload
+      ? `${uploaded.length} file(s) uploaded. Image invoices will be read directly by AI.`
+      : `${uploaded.length} file(s) uploaded`;
+    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: uploadStatus }));
     const uploadedText = await textFromInvoiceFiles(uploaded);
     if (uploadRunRef.current !== uploadRun) return;
     if (uploadedText) {
       setDraft((current) => ({
         ...current,
         invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
-        status: `${uploaded.length} file(s) uploaded`,
+        status: uploadStatus,
       }));
     }
   };
@@ -2219,7 +2223,17 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
           </div>
         )}
-        {hasDraftWork && <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>}
+        {hasDraftWork && (
+          <label className="invoice-text">
+            Pasted or OCR invoice text <span>(optional for image invoices)</span>
+            <textarea
+              placeholder="Paste invoice text here, or leave blank when uploading a JPG/PNG/WEBP image."
+              rows={7}
+              value={draft.invoiceText}
+              onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })}
+            />
+          </label>
+        )}
         <div className="file-list">
           {draft.files.map((file, index) => (
             <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => requestDelete({ title: "Delete uploaded file", message: "Are you sure you want to delete this uploaded file?", onConfirm: () => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) })) })} type="button"><X size={14} /></button></span>
