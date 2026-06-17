@@ -654,7 +654,7 @@ function parseAlbionOrderRows(invoiceText) {
   const headerMatch = normalized.match(/PRODUCT\s+UNIT PRICE\s+ORDER QTY\s+INVOICED QTY\s+SUBTOTAL\s+(.+)/i);
   const tableText = headerMatch?.[1] || normalized;
   const beforeFooter = tableText.split(/\s+SUBTOTAL\s+£?\d/i)[0] || tableText;
-  const rowPattern = /([A-Za-z][A-Za-z0-9 '&(),./+-]{2,}?)\s+((?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))/gi;
+  const rowPattern = /([A-Za-z][A-Za-z0-9 '&(),./+-]{2,}?)\s+((?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|EACH|EA)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))/gi;
   const rows = [];
   let match;
 
@@ -2623,6 +2623,22 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
     });
   };
 
+  const addDraftInvoiceLine = () => {
+    const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+    setDraft((current) => ({
+      ...current,
+      items: [
+        ...current.items,
+        {
+          ...manualInvoiceLine(defaultDepartment, { supplier: current.supplier || suppliers[0]?.name || "" }),
+          matchStatus: "Manual line",
+          matchConfidence: 0,
+        },
+      ],
+      status: current.status === "Idle" ? "Manual line added. Complete the details before confirming." : current.status,
+    }));
+  };
+
   const updateDraftItemSplit = (itemId, splitId, field, value) => {
     setDraft((current) => ({
       ...current,
@@ -2987,6 +3003,9 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="button-row left tight">
+          <button className="ghost" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add Line</button>
         </div>
       </Panel>
 
