@@ -454,7 +454,7 @@ function invoiceNumberMatches(text) {
 
 function splitInvoiceProductAndPack(description) {
   const cleaned = description.replace(/\s+/g, " ").trim();
-  const packPattern = /\b(?:X?\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
+  const packPattern = /\b(?:(?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:x|\*)\s*\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|X?\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
   const match = cleaned.match(packPattern);
   if (!match || match.index < 2) return { productName: cleaned, packSize: "" };
   return {
@@ -582,6 +582,92 @@ function parseEliteInvoiceRows(invoiceText) {
   }
 
   return rows;
+}
+
+function cleanInvoicePackSize(packSize = "") {
+  return packSize.replace(/\s+\d+(?:\s+\d+)*$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function cleanInvoiceProductName(productName = "") {
+  return productName
+    .replace(/^web\s+ref\.?\s*\d*\s*/i, "")
+    .replace(/^(?:ambient|chilled|frozen|fresh produce)\s+/i, "")
+    .replace(/^\d+\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseCurrencyProductRow(rowText) {
+  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  const match = row.match(/^(.+?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))(?:\s|$)/i);
+  if (!match) return null;
+  const [, descriptionRaw, unitRaw, orderQtyRaw, invoicedQtyRaw, totalRaw] = match;
+  const unitCost = numberValue(unitRaw.replace(",", "."), 0);
+  const quantity = numberValue(invoicedQtyRaw.replace(",", "."), numberValue(orderQtyRaw.replace(",", "."), 1));
+  const lineTotalValue = numberValue(totalRaw.replace(",", "."), 0);
+  if (!unitCost || !quantity || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) return null;
+  const { productName, packSize } = splitInvoiceProductAndPack(descriptionRaw);
+  const cleanProduct = cleanInvoiceProductName(productName);
+  if (!/[A-Za-z]{2}/.test(cleanProduct)) return null;
+  return {
+    productName: cleanProduct,
+    packSize: cleanInvoicePackSize(packSize),
+    quantity,
+    unitCost,
+    lineTotal: lineTotalValue,
+  };
+}
+
+function parseCodeLeadingInvoiceRow(rowText) {
+  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  const match = row.match(/^[A-Z0-9/.-]{3,}\s+(\d+(?:[.,]\d+)?)\s+(.+)$/i);
+  if (!match) return null;
+  const quantity = numberValue(match[1].replace(",", "."), 0);
+  const body = match[2];
+  const moneyMatches = [...body.matchAll(/(?:^|\s)(\d+(?:[.,]\d{2}))(?=\s|$)/g)];
+  if (!quantity || moneyMatches.length < 2) return null;
+  const unitCost = numberValue(moneyMatches[moneyMatches.length - 2][1].replace(",", "."), 0);
+  const lineTotalValue = numberValue(moneyMatches[moneyMatches.length - 1][1].replace(",", "."), 0);
+  if (!unitCost || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) return null;
+  const descriptionRaw = body.slice(0, moneyMatches[moneyMatches.length - 2].index).trim();
+  const { productName, packSize } = splitInvoiceProductAndPack(descriptionRaw);
+  const cleanProduct = cleanInvoiceProductName(productName);
+  if (!/[A-Za-z]{2}/.test(cleanProduct) || /^(invoice|total|account|payment|operator)$/i.test(cleanProduct)) return null;
+  return {
+    productName: cleanProduct,
+    packSize: cleanInvoicePackSize(packSize),
+    quantity,
+    unitCost,
+    lineTotal: lineTotalValue,
+  };
+}
+
+function extractGenericInvoiceRows(invoiceText) {
+  const text = invoiceText.replace(/\r/g, "\n");
+  const normalized = text.replace(/\s+/g, " ");
+  const candidates = new Set();
+
+  text.split(/\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed) candidates.add(trimmed);
+  });
+
+  const currencyPattern = /([A-Za-z][A-Za-z0-9 '&().,/+-]{3,}?\s+£?\s*\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d+)?\s+\d+(?:[.,]\d+)?\s+£?\s*\d+(?:[.,]\d{2}))/g;
+  [...normalized.matchAll(currencyPattern)].forEach((match) => candidates.add(match[1].trim()));
+
+  const codePattern = /(?:^|\s)([A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z][A-Za-z0-9 '&().,/+-]{4,}?\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z]|$)/g;
+  [...normalized.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
+
+  const rows = [...candidates]
+    .map((candidate) => parseCurrencyProductRow(candidate) || parseCodeLeadingInvoiceRow(candidate))
+    .filter(Boolean);
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeInvoiceUnitCost(item) {
@@ -2241,6 +2327,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
   const [splitEditorId, setSplitEditorId] = useState(null);
   const [manualInvoiceOpen, setManualInvoiceOpen] = useState(false);
   const [creditNoteModal, setCreditNoteModal] = useState(null);
+  const [editInvoiceModal, setEditInvoiceModal] = useState(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const readControllerRef = useRef(null);
   const uploadRunRef = useRef(0);
@@ -2352,11 +2439,13 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         : 0
     );
     const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : "");
-    const preParsedLines = invoiceKey.includes("tg fruits")
+    const specificParsedLines = invoiceKey.includes("tg fruits")
       ? extractTgFruitsInvoiceRows(invoiceText)
       : invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
         ? parseEliteInvoiceRows(invoiceText)
         : [];
+    const genericParsedLines = extractGenericInvoiceRows(invoiceText);
+    const preParsedLines = specificParsedLines.length >= 2 ? specificParsedLines : genericParsedLines;
 
     if (preParsedLines.length >= 2) {
       const supplier = draftSupplier || "Unknown Supplier";
@@ -2397,11 +2486,12 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
 
       const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
       const supplierKey = supplier.toLowerCase();
-      const deterministicLines = supplierKey.includes("tg fruits") || invoiceKey.includes("tg fruits")
+      const specificDeterministicLines = supplierKey.includes("tg fruits") || invoiceKey.includes("tg fruits")
         ? extractTgFruitsInvoiceRows(invoiceText)
         : supplierKey.includes("elite") || invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
           ? parseEliteInvoiceRows(invoiceText)
           : [];
+      const deterministicLines = specificDeterministicLines.length >= 2 ? specificDeterministicLines : extractGenericInvoiceRows(invoiceText);
       const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
       const items = buildInvoiceItems(sourceLines, supplier);
 
@@ -2579,10 +2669,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
 
   const editApprovedInvoice = (invoice) => {
     const supplier = invoice.supplier || "Unknown Supplier";
-    setSplitEditorId(null);
-    setDraft({
-      files: [],
-      invoiceText: "",
+    setEditInvoiceModal({
+      ...invoice,
       items: (invoice.items || []).map((item) => ({
         ...item,
         id: item.id || uid(),
@@ -2600,9 +2688,54 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       discountAmount: numberValue(invoice.discountAmount, 0),
       discountPercent: numberValue(invoice.discountPercent, 0),
       finalInvoiceTotal: numberValue(invoice.finalInvoiceTotal, 0),
-      status: `Editing approved invoice ${invoice.invoiceNumber || ""}. Review and confirm to save changes.`,
-      editingInvoiceId: invoice.id,
     });
+  };
+
+  const saveEditedInvoice = (editedInvoice) => {
+    const supplier = editedInvoice.supplier || "Unknown Supplier";
+    const normalizedItems = (editedInvoice.items || []).map((item) => {
+      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
+      return enrichInvoiceLine({
+        ...item,
+        supplier: item.supplier || supplier,
+        quantity: numberValue(item.quantity, 1),
+        unitCost: numberValue(item.unitCost, 0),
+        lineTotal: numberValue(item.lineTotal, numberValue(item.quantity, 1) * numberValue(item.unitCost, 0)),
+        lineStatus: invoiceLineStatus(item),
+        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
+        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
+        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
+        department: departmentSplits[0]?.department || item.department || invoiceSettings.defaultInvoiceDepartment,
+        departmentSplits,
+      }, products, aiSettings);
+    });
+    const invalidSplit = normalizedItems.find((item) => !splitIsValid(item));
+    if (invalidSplit) {
+      setEditInvoiceModal((current) => ({ ...current, modalStatus: `Department split must total 100% for ${invalidSplit.productName}.` }));
+      return;
+    }
+    const invoice = prepareApprovedInvoice({
+      ...editedInvoice,
+      supplier,
+      date: editedInvoice.date || today(),
+      invoiceNumber: editedInvoice.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+      status: "Approved",
+      discountAmount: numberValue(editedInvoice.discountAmount, 0),
+      discountPercent: numberValue(editedInvoice.discountPercent, 0),
+      items: normalizedItems,
+    });
+    setInvoices((current) => current.map((item) => (item.id === invoice.id ? invoice : item)));
+    setCreditNotes((current) => {
+      const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
+      const generated = creditNotesForInvoice(invoice).map((note) => {
+        const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
+        return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
+      });
+      return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
+    });
+    setSuppliers((current) => ensureSupplierList(current, supplier));
+    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
+    setEditInvoiceModal(null);
   };
 
   const deleteApprovedInvoice = (id) => {
@@ -2727,6 +2860,18 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
           onSave={saveManualInvoice}
           products={products}
           suppliers={suppliers}
+        />
+      )}
+
+      {editInvoiceModal && (
+        <ApprovedInvoiceEditModal
+          departmentNames={departmentNames}
+          invoice={editInvoiceModal}
+          invoiceSettings={invoiceSettings}
+          onCancel={() => setEditInvoiceModal(null)}
+          onSave={saveEditedInvoice}
+          products={products}
+          setInvoice={setEditInvoiceModal}
         />
       )}
 
@@ -2888,6 +3033,123 @@ function manualInvoiceLine(defaultDepartment, product = {}) {
     lineDiscountPercent: 0,
     supplier: product.supplier || "",
   };
+}
+
+function ApprovedInvoiceEditModal({ departmentNames, invoice, invoiceSettings, onCancel, onSave, products, setInvoice }) {
+  const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+  const discountContext = { items: invoice.items || [], discountAmount: numberValue(invoice.discountAmount, 0), discountPercent: numberValue(invoice.discountPercent, 0) };
+
+  const updateHeader = (field, value) => setInvoice((current) => ({ ...current, [field]: value }));
+  const updateDiscount = (field, value) => {
+    setInvoice((current) => {
+      const subtotal = receivedLineSubtotal(current.items || []);
+      const numeric = numberValue(value, 0);
+      return field === "discountAmount"
+        ? { ...current, discountAmount: numeric, discountPercent: subtotal ? Number(((numeric / subtotal) * 100).toFixed(2)) : 0 }
+        : { ...current, discountPercent: numeric, discountAmount: Number((subtotal * (numeric / 100)).toFixed(2)) };
+    });
+  };
+  const updateLine = (id, field, value) => {
+    const numericFields = ["quantity", "unitCost", "lineDiscountAmount", "lineDiscountPercent"];
+    setInvoice((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => {
+        if (item.id !== id) return item;
+        let updated = { ...item, [field]: numericFields.includes(field) ? numberValue(value, 0) : value };
+        if (field === "productName") {
+          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
+          if (product) {
+            updated = {
+              ...updated,
+              productName: product.name,
+              matchedProductId: product.id,
+              packSize: product.packSize || updated.packSize,
+              supplier: product.supplier || updated.supplier,
+              unitCost: numberValue(product.unitCost, updated.unitCost),
+              department: product.department || updated.department || defaultDepartment,
+              departmentSplits: normalizeDepartmentSplits(product, product.department || defaultDepartment),
+            };
+          }
+        }
+        if (field === "lineStatus" && value === "Received") updated.creditReason = "";
+        if (field === "department") updated.departmentSplits = defaultDepartmentSplits(value);
+        if (numericFields.includes(field) || field === "productName") updated.lineTotal = numberValue(updated.quantity, 1) * numberValue(updated.unitCost, 0);
+        if (field === "lineDiscountAmount") {
+          const original = originalLineTotal(updated);
+          updated.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
+        }
+        if (field === "lineDiscountPercent") {
+          updated.lineDiscountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
+        }
+        return updated;
+      }),
+    }));
+  };
+  const addLine = () => setInvoice((current) => ({
+    ...current,
+    items: [...(current.items || []), manualInvoiceLine(defaultDepartment, { supplier: current.supplier || "" })],
+  }));
+  const removeLine = (id) => setInvoice((current) => ({ ...current, items: (current.items || []).filter((item) => item.id !== id) }));
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="split-modal wide manual-invoice-modal" role="dialog" aria-modal="true" aria-label="Edit invoice">
+        <div className="modal-header">
+          <div>
+            <h3>Edit invoice</h3>
+            <p>{invoice.invoiceNumber || "Approved invoice"}</p>
+          </div>
+          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
+        </div>
+        <div className="form-grid three compact-form">
+          <Field label="Supplier" value={invoice.supplier || ""} onChange={(value) => updateHeader("supplier", value)} />
+          <Field label="Invoice number" value={invoice.invoiceNumber || ""} onChange={(value) => updateHeader("invoiceNumber", value)} />
+          <Field label="Date" type="date" value={invoice.date || today()} onChange={(value) => updateHeader("date", value)} />
+        </div>
+        <div className="invoice-meta">
+          <label>Subtotal before discount<input readOnly value={money(invoiceSubtotalBeforeDiscount(discountContext))} /></label>
+          <Field label="Discount amount" type="number" value={invoice.discountAmount || 0} onChange={(value) => updateDiscount("discountAmount", value)} />
+          <Field label="Discount %" type="number" value={invoice.discountPercent || 0} onChange={(value) => updateDiscount("discountPercent", value)} />
+          <label>Final invoice total<input readOnly value={money(invoiceFinalTotal(discountContext))} /></label>
+        </div>
+        <div className="table-wrap manual-invoice-table">
+          <table>
+            <thead>
+              <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department", "Original", "Discount", "Net total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
+            </thead>
+            <tbody>
+              {(invoice.items || []).map((item) => (
+                <tr key={item.id}>
+                  <td><input list="approved-edit-product-list" value={item.productName || ""} onChange={(event) => updateLine(item.id, "productName", event.target.value)} /></td>
+                  <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={item.quantity || 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={item.unitCost || 0} onChange={(event) => updateLine(item.id, "unitCost", event.target.value)} /></td>
+                  <td><select value={invoiceLineStatus(item)} onChange={(event) => updateLine(item.id, "lineStatus", event.target.value)}>{invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}</select></td>
+                  <td><input value={item.creditReason || ""} onChange={(event) => updateLine(item.id, "creditReason", event.target.value)} /></td>
+                  <td><input disabled={!isReceivedInvoiceLine(item)} min="0" step="0.01" type="number" value={item.lineDiscountAmount || 0} onChange={(event) => updateLine(item.id, "lineDiscountAmount", event.target.value)} /></td>
+                  <td><input disabled={!isReceivedInvoiceLine(item)} min="0" step="0.01" type="number" value={item.lineDiscountPercent || 0} onChange={(event) => updateLine(item.id, "lineDiscountPercent", event.target.value)} /></td>
+                  <td><select value={primaryDepartment(item)} onChange={(event) => updateLine(item.id, "department", event.target.value)}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></td>
+                  <td>{money(originalLineTotal(item))}</td>
+                  <td>{money(discountAppliedToLine(item, discountContext))}</td>
+                  <td>{money(netLineTotal(item, discountContext))}</td>
+                  <td><button className="icon danger" onClick={() => removeLine(item.id)} type="button"><Trash2 size={15} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <datalist id="approved-edit-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+        <div className="button-row left tight">
+          <button className="ghost" onClick={addLine} type="button"><Plus size={16} />Add line</button>
+        </div>
+        {invoice.modalStatus && <div className="invoice-status error">{invoice.modalStatus}</div>}
+        <div className="button-row left">
+          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
+          <button onClick={() => onSave(invoice)} type="button"><Save size={16} />Save Invoice</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave, products, suppliers }) {

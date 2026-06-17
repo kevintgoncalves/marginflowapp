@@ -235,7 +235,7 @@ function findBestNumericColumns(numbers) {
 
 function splitProductAndPack(description) {
   const cleaned = description.replace(/\s+/g, " ").trim();
-  const packPattern = /\b(?:X?\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
+  const packPattern = /\b(?:(?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:x|\*)\s*\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|X?\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
   const match = cleaned.match(packPattern);
   if (!match || match.index < 2) return { productName: cleaned, packSize: "" };
   return {
@@ -244,11 +244,59 @@ function splitProductAndPack(description) {
   };
 }
 
+function cleanPackSize(packSize = "") {
+  return packSize.replace(/\s+\d+(?:\s+\d+)*$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function cleanProductName(productName = "") {
+  return productName
+    .replace(/^web\s+ref\.?\s*\d*\s*/i, "")
+    .replace(/^(?:ambient|chilled|frozen|fresh produce)\s+/i, "")
+    .replace(/^\d+\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseCurrencyProductRow(rowText) {
+  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  const match = row.match(/^(.+?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))(?:\s|$)/i);
+  if (!match) return null;
+  const [, descriptionRaw, unitRaw, orderQtyRaw, invoicedQtyRaw, totalRaw] = match;
+  const unitCost = asNumber(unitRaw.replace(",", "."), 0);
+  const quantity = asNumber(invoicedQtyRaw.replace(",", "."), asNumber(orderQtyRaw.replace(",", "."), 1));
+  const lineTotal = asNumber(totalRaw.replace(",", "."), 0);
+  if (!unitCost || !quantity || !lineTotal || !almostEqual(quantity * unitCost, lineTotal)) return null;
+  const { productName, packSize } = splitProductAndPack(descriptionRaw);
+  const cleanProduct = cleanProductName(productName);
+  if (!/[A-Za-z]{2}/.test(cleanProduct)) return null;
+  return { raw: rowText, productName: cleanProduct, packSize: cleanPackSize(packSize), quantity, unitCost, vat: 0, lineTotal };
+}
+
+function parseCodeLeadingProductRow(rowText) {
+  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  const match = row.match(/^[A-Z0-9/.-]{3,}\s+(\d+(?:[.,]\d+)?)\s+(.+)$/i);
+  if (!match) return null;
+  const quantity = asNumber(match[1].replace(",", "."), 0);
+  const body = match[2];
+  const moneyMatches = [...body.matchAll(/(?:^|\s)(\d+(?:[.,]\d{2}))(?=\s|$)/g)];
+  if (!quantity || moneyMatches.length < 2) return null;
+  const unitCost = asNumber(moneyMatches[moneyMatches.length - 2][1].replace(",", "."), 0);
+  const lineTotal = asNumber(moneyMatches[moneyMatches.length - 1][1].replace(",", "."), 0);
+  if (!unitCost || !lineTotal || !almostEqual(quantity * unitCost, lineTotal)) return null;
+  const descriptionRaw = body.slice(0, moneyMatches[moneyMatches.length - 2].index).trim();
+  const { productName, packSize } = splitProductAndPack(descriptionRaw);
+  const cleanProduct = cleanProductName(productName);
+  if (!/[A-Za-z]{2}/.test(cleanProduct) || /^(invoice|total|account|payment|operator)$/i.test(cleanProduct)) return null;
+  return { raw: rowText, productName: cleanProduct, packSize: cleanPackSize(packSize), quantity, unitCost, vat: 0, lineTotal };
+}
+
 function parseTableRow(rowText) {
+  const codeLeadingRow = parseCodeLeadingProductRow(rowText);
+  if (codeLeadingRow) return codeLeadingRow;
   const withoutDate = rowText.replace(new RegExp(`^\\s*${dateTokenPattern()}\\s*`, "i"), "").trim();
   const numbers = numberMatches(withoutDate);
   const columns = findTgFruitsColumns(numbers) || findBestNumericColumns(numbers);
-  if (!columns) return null;
+  if (!columns) return parseCurrencyProductRow(rowText) || parseCodeLeadingProductRow(rowText);
 
   const firstNumberIndex = Math.min(...numbers.map((number) => number.index));
   const description = withoutDate.slice(0, firstNumberIndex).trim();
@@ -285,6 +333,12 @@ function extractInvoiceTableRows(sourceText) {
     const candidate = normalizedText.slice(start, end).trim();
     if (candidate) candidates.add(candidate);
   });
+
+  const currencyPattern = /([A-Za-z][A-Za-z0-9 '&().,/+-]{3,}?\s+£?\s*\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d+)?\s+\d+(?:[.,]\d+)?\s+£?\s*\d+(?:[.,]\d{2}))/g;
+  [...normalizedText.matchAll(currencyPattern)].forEach((match) => candidates.add(match[1].trim()));
+
+  const codePattern = /(?:^|\s)([A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z][A-Za-z0-9 '&().,/+-]{4,}?\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z]|$)/g;
+  [...normalizedText.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
 
   const rows = [...candidates].map(parseTableRow).filter(Boolean);
   const seen = new Set();
