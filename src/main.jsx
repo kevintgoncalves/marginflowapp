@@ -1293,6 +1293,159 @@ function extractBackupLocalStorage(payload) {
   return Object.fromEntries(Object.entries(payload || {}).filter(([key]) => key.startsWith("marginflow.")));
 }
 
+function parseBackupValue(value, fallback = null) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function stringifyStorageValue(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function recordCompletenessScore(record) {
+  if (!record || typeof record !== "object") return 0;
+  return Object.values(record).filter((value) => {
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === "object") return Object.keys(value).length > 0;
+    return value !== undefined && value !== null && value !== "";
+  }).length + JSON.stringify(record).length / 1000;
+}
+
+function mergeArrayById(current = [], imported = [], fallbackKey = null) {
+  const rows = [];
+  const indexByKey = new Map();
+  const stats = { added: 0, merged: 0, skipped: 0 };
+  const keyFor = (item) => {
+    if (item?.id) return `id:${item.id}`;
+    return fallbackKey ? `fallback:${fallbackKey(item)}` : "";
+  };
+  const addCurrent = (item) => {
+    const key = keyFor(item);
+    if (key) indexByKey.set(key, rows.length);
+    rows.push(item);
+  };
+  current.forEach(addCurrent);
+
+  imported.forEach((item) => {
+    const key = keyFor(item);
+    const existingIndex = key ? indexByKey.get(key) : -1;
+    if (existingIndex === undefined || existingIndex < 0) {
+      addCurrent(item);
+      stats.added += 1;
+      return;
+    }
+    const existing = rows[existingIndex];
+    const merged = mergeRecords(existing, item);
+    const changed = JSON.stringify(merged) !== JSON.stringify(existing);
+    rows[existingIndex] = merged;
+    if (changed) stats.merged += 1;
+    else stats.skipped += 1;
+  });
+
+  return { rows, stats };
+}
+
+function mergeUniqueArray(current = [], imported = [], keyFn = (item) => JSON.stringify(item)) {
+  const byKey = new Map();
+  [...current, ...imported].forEach((item) => {
+    const key = keyFn(item);
+    if (!byKey.has(key)) byKey.set(key, item);
+    else byKey.set(key, mergeRecords(byKey.get(key), item));
+  });
+  return [...byKey.values()];
+}
+
+function mergeRecords(current, imported) {
+  if (!current || typeof current !== "object") return imported;
+  if (!imported || typeof imported !== "object") return current;
+  const preferImported = recordCompletenessScore(imported) > recordCompletenessScore(current);
+  const base = preferImported ? { ...current, ...imported } : { ...imported, ...current };
+  const merged = { ...base };
+
+  ["aliases"].forEach((field) => {
+    if (Array.isArray(current[field]) || Array.isArray(imported[field])) {
+      merged[field] = [...new Set([...(current[field] || []), ...(imported[field] || [])])];
+    }
+  });
+  ["priceHistory", "supplierPrices", "departmentSplits", "items", "lines", "openingLines", "ingredients", "subcategories"].forEach((field) => {
+    if (Array.isArray(current[field]) || Array.isArray(imported[field])) {
+      merged[field] = mergeUniqueArray(current[field] || [], imported[field] || [], (item) => item?.id || JSON.stringify(item));
+    }
+  });
+  return merged;
+}
+
+function invoiceFallbackKey(invoice) {
+  return [invoice?.supplier || "", invoice?.invoiceNumber || "", invoice?.date || ""].join("|").toLowerCase();
+}
+
+function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSettings = false) {
+  const nextStorage = { ...currentStorage };
+  const summary = {
+    invoicesAdded: 0,
+    invoicesSkipped: 0,
+    productsAdded: 0,
+    productsMerged: 0,
+    suppliersAdded: 0,
+    suppliersSkipped: 0,
+  };
+  const arrayKeys = {
+    "marginflow.invoices": invoiceFallbackKey,
+    "marginflow.products": null,
+    "marginflow.suppliers": null,
+    "marginflow.recipes": null,
+    "marginflow.menus": null,
+    "marginflow.stocktakes": null,
+    "marginflow.waste": null,
+    "marginflow.sales": null,
+  };
+  const settingsKeys = new Set([
+    "marginflow.companySettings",
+    "marginflow.financialSettings",
+    "marginflow.departmentSettings",
+    "marginflow.menuSettings",
+    "marginflow.invoiceSettings",
+    "marginflow.aiSettings",
+    "marginflow.department",
+  ]);
+
+  Object.entries(importedStorage).forEach(([key, value]) => {
+    if (!key.startsWith("marginflow.") || key === "marginflow.preImportBackup") return;
+    if (arrayKeys.hasOwnProperty(key)) {
+      const currentRows = parseBackupValue(currentStorage[key], []);
+      const importedRows = parseBackupValue(value, []);
+      if (!Array.isArray(currentRows) || !Array.isArray(importedRows)) return;
+      const { rows, stats } = mergeArrayById(currentRows, importedRows, arrayKeys[key]);
+      nextStorage[key] = JSON.stringify(rows);
+      if (key === "marginflow.invoices") {
+        summary.invoicesAdded = stats.added;
+        summary.invoicesSkipped = stats.skipped;
+      }
+      if (key === "marginflow.products") {
+        summary.productsAdded = stats.added;
+        summary.productsMerged = stats.merged;
+      }
+      if (key === "marginflow.suppliers") {
+        summary.suppliersAdded = stats.added;
+        summary.suppliersSkipped = stats.skipped;
+      }
+      return;
+    }
+    if (settingsKeys.has(key)) {
+      if (useImportedSettings) nextStorage[key] = stringifyStorageValue(value);
+      return;
+    }
+    if (!currentStorage[key]) nextStorage[key] = stringifyStorageValue(value);
+  });
+
+  return { nextStorage, summary };
+}
+
 function storedStateUpdater(setState, key) {
   return (value) => {
     setState((current) => {
@@ -1440,9 +1593,9 @@ function App() {
   const [invoices, setInvoicesState] = useState(() => safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
   const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
   const [stocktakes, setStocktakesState] = useState(() => normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
-  const [wasteItems, setWasteItems] = useState(initialWaste);
-  const [recipes, setRecipes] = useState(initialRecipes);
-  const [menus, setMenus] = useState(initialMenus);
+  const [wasteItems, setWasteItemsState] = useState(() => safeReadLocalStorageArray("marginflow.waste", initialWaste));
+  const [recipes, setRecipesState] = useState(() => safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
+  const [menus, setMenusState] = useState(() => safeReadLocalStorageArray("marginflow.menus", initialMenus));
   const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
   const [financialSettings, setFinancialSettingsState] = useState(() => ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
@@ -1456,6 +1609,9 @@ function App() {
   const setInvoices = storedStateUpdater(setInvoicesState, "marginflow.invoices");
   const setSales = storedStateUpdater(setSalesState, "marginflow.sales");
   const setStocktakes = storedStateUpdater(setStocktakesState, "marginflow.stocktakes");
+  const setWasteItems = storedStateUpdater(setWasteItemsState, "marginflow.waste");
+  const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
+  const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -4538,6 +4694,10 @@ function SettingsPanel({
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
   const [editingDepartmentId, setEditingDepartmentId] = useState("");
   const [dataStatus, setDataStatus] = useState("");
+  const [pendingFullBackup, setPendingFullBackup] = useState(null);
+  const [backupImportSettingsMode, setBackupImportSettingsMode] = useState("Keep current settings");
+  const [backupInputKey, setBackupInputKey] = useState(0);
+  const [importSummary, setImportSummary] = useState(null);
 
   const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
   const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
@@ -4579,19 +4739,43 @@ function SettingsPanel({
         setDataStatus("Import failed. This file does not contain MarginFlow localStorage keys.");
         return;
       }
-      const confirmed = window.confirm(`Import Full Backup will replace ${entries.length} existing MarginFlow browser data key(s) with values from this file. This does not clear other browser data. Continue?`);
-      if (!confirmed) {
-        setDataStatus("Full backup import cancelled.");
-        return;
-      }
-      entries.forEach(([key, value]) => {
-        localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
-      });
-      setDataStatus(`Imported ${entries.length} MarginFlow localStorage key(s). Reloading app...`);
-      window.setTimeout(() => window.location.reload(), 350);
+      setPendingFullBackup({ payload, storage: Object.fromEntries(entries), keyCount: entries.length });
+      setImportSummary(null);
+      setDataStatus("");
     } catch {
       setDataStatus("Import failed. Choose a valid MarginFlow full backup JSON file.");
+    } finally {
+      setBackupInputKey((current) => current + 1);
     }
+  };
+
+  const savePreImportBackup = () => {
+    const preImportBackup = buildFullBackupPayload();
+    localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
+  };
+
+  const replaceFullBackup = () => {
+    if (!pendingFullBackup) return;
+    savePreImportBackup();
+    Object.entries(pendingFullBackup.storage).forEach(([key, value]) => {
+      if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
+    });
+    setPendingFullBackup(null);
+    setDataStatus(`Replaced ${pendingFullBackup.keyCount} MarginFlow localStorage key(s). Reloading app...`);
+    window.setTimeout(() => window.location.reload(), 500);
+  };
+
+  const mergeFullBackup = () => {
+    if (!pendingFullBackup) return;
+    savePreImportBackup();
+    const { nextStorage, summary } = mergeMarginFlowStorage(readMarginFlowLocalStorage(), pendingFullBackup.storage, backupImportSettingsMode === "Use imported settings");
+    Object.entries(nextStorage).forEach(([key, value]) => {
+      if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
+    });
+    setImportSummary(summary);
+    setPendingFullBackup(null);
+    setDataStatus("Merged full backup. Reloading app...");
+    window.setTimeout(() => window.location.reload(), 1200);
   };
 
   const resetDemoSettings = () => {
@@ -4723,12 +4907,49 @@ function SettingsPanel({
       <Panel title="Data settings">
         <div className="button-row left">
           <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
-          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>
+          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
           <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
         </div>
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
+        {importSummary && (
+          <div className="code-card">
+            <p>Invoices added: {importSummary.invoicesAdded}</p>
+            <p>Invoices skipped as duplicates: {importSummary.invoicesSkipped}</p>
+            <p>Products added: {importSummary.productsAdded}</p>
+            <p>Products merged: {importSummary.productsMerged}</p>
+            <p>Suppliers added: {importSummary.suppliersAdded}</p>
+            <p>Suppliers skipped: {importSummary.suppliersSkipped}</p>
+          </div>
+        )}
       </Panel>
+      {pendingFullBackup && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="split-modal" role="dialog" aria-modal="true" aria-label="Import full backup">
+            <div className="modal-header">
+              <div>
+                <h3>How do you want to import this backup?</h3>
+                <p>{pendingFullBackup.keyCount} MarginFlow localStorage key(s) found.</p>
+              </div>
+              <button className="icon" onClick={() => setPendingFullBackup(null)} type="button"><X size={16} /></button>
+            </div>
+            <div className="code-card">
+              <p><strong>Replace existing data</strong></p>
+              <p>Warning: this replaces MarginFlow browser data for the keys included in the backup. A pre-import backup will be saved first.</p>
+              <p><strong>Merge with existing data</strong></p>
+              <p>Merges imported invoices, products, suppliers and other saved arrays with current browser data. Existing records are not deleted.</p>
+            </div>
+            <div className="form-grid six">
+              <label>Settings during merge<select value={backupImportSettingsMode} onChange={(event) => setBackupImportSettingsMode(event.target.value)}><option>Keep current settings</option><option>Use imported settings</option></select></label>
+            </div>
+            <div className="button-row left">
+              <button className="ghost danger" onClick={replaceFullBackup} type="button">Replace</button>
+              <button onClick={mergeFullBackup} type="button">Merge</button>
+              <button className="ghost" onClick={() => { setPendingFullBackup(null); setDataStatus("Full backup import cancelled."); }} type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
