@@ -1,6 +1,8 @@
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
-const FUNCTION_VERSION = "read-invoice-ai-table-source-2026-06-16";
+const FUNCTION_VERSION = "read-invoice-ai-image-input-2026-06-17";
+const MAX_IMAGE_INPUTS = 8;
+const SUPPORTED_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp|gif);base64,/i;
 
 const invoiceSchema = {
   type: "object",
@@ -436,7 +438,44 @@ function apiKey() {
   return process.env.OPENAI_API_KEY || process.env.Marginflow || process.env.MARGINFLOW_OPENAI_API_KEY || "";
 }
 
-function buildPrompt(invoiceText, suppliers = [], products = []) {
+function normalizeInvoiceImages(payload) {
+  const rawImages = [
+    ...(Array.isArray(payload.invoiceImages) ? payload.invoiceImages : []),
+    ...(Array.isArray(payload.images) ? payload.images : []),
+    payload.fileData ? { dataUrl: payload.fileData, fileName: payload.fileName, fileType: payload.fileType } : null,
+  ].filter(Boolean);
+
+  return rawImages
+    .map((image) => {
+      const dataUrl = asString(image.dataUrl || image.fileData || image.imageUrl || image.url || image);
+      if (!SUPPORTED_IMAGE_DATA_URL.test(dataUrl)) return null;
+      return {
+        dataUrl,
+        fileName: asString(image.fileName || image.name),
+        fileType: asString(image.fileType || image.type),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_IMAGE_INPUTS);
+}
+
+function hasRawImagePayload(payload) {
+  const fileData = asString(payload.fileData);
+  return Boolean(
+    /^data:image\//i.test(fileData) ||
+    (Array.isArray(payload.invoiceImages) && payload.invoiceImages.length) ||
+    (Array.isArray(payload.images) && payload.images.length)
+  );
+}
+
+function imageContentParts(invoiceImages) {
+  return invoiceImages.map((image) => ({
+    type: "input_image",
+    image_url: image.dataUrl,
+  }));
+}
+
+function buildPrompt(invoiceText, suppliers = [], products = [], hasImages = false) {
   const knownSuppliers = suppliers.map((supplier) => supplier.name || supplier).filter(Boolean).join(", ");
   const knownProducts = products
     .map((product) => product.productName || product.name)
@@ -447,7 +486,7 @@ function buildPrompt(invoiceText, suppliers = [], products = []) {
   return `You are MarginFlow AI, an expert hospitality invoice parser.
 
 Task:
-Extract REAL invoice line items from messy PDF/OCR invoice text from any foodservice supplier.
+Extract REAL invoice line items from messy PDF/OCR invoice text or uploaded invoice image(s) from any foodservice supplier.
 Different suppliers use different layouts, column order and terminology. You must infer the structure from the text.
 
 Rules:
@@ -455,7 +494,8 @@ Rules:
 - Do NOT return demo lines.
 - Do NOT invent product names.
 - Keep product names exactly as close as possible to the supplier invoice text.
-- If the text is messy and columns are merged, still extract the likely product rows.
+- If uploaded image(s) are provided, read the invoice visually and extract the actual table rows from the image.
+- If OCR/text is messy and columns are merged, still extract the likely product rows.
 - For each item, identify pack size, quantity, unit cost, VAT and line total where possible.
 - If an invoice has columns like QTY, Price, VAT, Total: quantity must be QTY, unitCost must be Price, vat must be VAT, lineTotal must be Total.
 - Never put the line Total into unitCost when a separate Price or Unit Price exists.
@@ -479,8 +519,11 @@ ${knownSuppliers || "none provided"}
 Known product names for matching/reference only, do not force them if invoice says something different:
 ${knownProducts || "none provided"}
 
-Invoice text:
-${invoiceText}`;
+Uploaded invoice image(s):
+${hasImages ? "Provided in this request. Use them as the source of truth if text is empty or incomplete." : "none provided"}
+
+Invoice text/OCR:
+${invoiceText || "No OCR text supplied. Read the uploaded invoice image(s) directly."}`;
 }
 
 export async function handler(event) {
@@ -494,7 +537,18 @@ export async function handler(event) {
   }
 
   const invoiceText = asString(payload.invoiceText || payload.text || payload.ocrText);
-  if (!invoiceText) return json(400, { error: "Invoice text is required" });
+  const invoiceImages = normalizeInvoiceImages(payload);
+
+  if (hasRawImagePayload(payload) && !invoiceImages.length) {
+    return json(400, {
+      error: "Unsupported invoice image",
+      detail: "Upload invoice images as PNG, JPG, JPEG, WEBP or non-animated GIF.",
+    });
+  }
+
+  if (!invoiceText && !invoiceImages.length) {
+    return json(400, { error: "Invoice text or invoice image is required" });
+  }
 
   const key = apiKey();
   if (!key) {
@@ -528,8 +582,9 @@ export async function handler(event) {
             content: [
               {
                 type: "input_text",
-                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || []),
+                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || [], invoiceImages.length > 0),
               },
+              ...imageContentParts(invoiceImages),
             ],
           },
         ],

@@ -689,6 +689,53 @@ function canReadFileAsText(file) {
   );
 }
 
+function isImageInvoiceFile(file) {
+  const name = file.name.toLowerCase();
+  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
+function loadBrowserImage(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(`Could not read ${file.name}. Use PNG, JPG, WEBP or GIF images.`));
+    };
+    image.src = objectUrl;
+  });
+}
+
+async function imageFileToInvoiceInput(file) {
+  const maxDimension = 2200;
+  const image = await loadBrowserImage(file);
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  return {
+    fileName: file.name,
+    fileType: "image/jpeg",
+    dataUrl: canvas.toDataURL("image/jpeg", 0.86),
+  };
+}
+
+async function invoiceImagesFromFiles(files) {
+  return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
+}
+
 async function extractPdfText(file) {
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
@@ -1868,15 +1915,27 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
-    if (!invoiceText) {
-      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
-      return;
-    }
-
     readControllerRef.current?.abort();
     const controller = new AbortController();
     readControllerRef.current = controller;
     setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
+
+    let invoiceImages = [];
+    try {
+      invoiceImages = await invoiceImagesFromFiles(draft.files);
+    } catch (error) {
+      if (readControllerRef.current === controller) readControllerRef.current = null;
+      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
+      return;
+    }
+
+    if (readControllerRef.current !== controller) return;
+
+    if (!invoiceText && !invoiceImages.length) {
+      readControllerRef.current = null;
+      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or upload a PDF/image invoice first." }));
+      return;
+    }
 
     const buildInvoiceItems = (sourceLines, supplier) => sourceLines.map((line) => {
       const quantity = numberValue(line.quantity, 1);
@@ -1927,9 +1986,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         signal: controller.signal,
         body: JSON.stringify({
           invoiceText,
+          invoiceImages,
           suppliers,
           products: products.map((product) => ({
-            name: product.productName,
+            name: product.name || product.productName,
             supplier: product.supplier,
             packSize: product.packSize,
             aliases: product.aliases || [],
