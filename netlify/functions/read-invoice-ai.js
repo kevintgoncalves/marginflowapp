@@ -7,11 +7,15 @@ const SUPPORTED_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp|gif);base64,/i;
 const invoiceSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["supplier", "invoiceDate", "invoiceNumber", "confidence", "lines"],
+  required: ["supplier", "invoiceDate", "invoiceNumber", "subtotalBeforeDiscount", "discountAmount", "discountPercent", "finalInvoiceTotal", "confidence", "lines"],
   properties: {
     supplier: { type: "string" },
     invoiceDate: { type: "string" },
     invoiceNumber: { type: "string" },
+    subtotalBeforeDiscount: { type: "number" },
+    discountAmount: { type: "number" },
+    discountPercent: { type: "number" },
+    finalInvoiceTotal: { type: "number" },
     confidence: { type: "number" },
     lines: {
       type: "array",
@@ -26,6 +30,10 @@ const invoiceSchema = {
           "unitCost",
           "vat",
           "lineTotal",
+          "lineStatus",
+          "reason",
+          "lineDiscountAmount",
+          "lineDiscountPercent",
           "department",
           "confidence",
         ],
@@ -37,6 +45,10 @@ const invoiceSchema = {
           unitCost: { type: "number" },
           vat: { type: "number" },
           lineTotal: { type: "number" },
+          lineStatus: { type: "string" },
+          reason: { type: "string" },
+          lineDiscountAmount: { type: "number" },
+          lineDiscountPercent: { type: "number" },
           department: { type: "string" },
           confidence: { type: "number" },
         },
@@ -345,6 +357,10 @@ function rowToLine(row, sourceLine = {}) {
     unitCost: row.unitCost,
     vat: row.vat,
     lineTotal: row.lineTotal,
+    lineStatus: asString(sourceLine.lineStatus || sourceLine.status, "Received"),
+    reason: asString(sourceLine.reason || sourceLine.creditReason),
+    lineDiscountAmount: asNumber(sourceLine.lineDiscountAmount || sourceLine.discountAmount, 0),
+    lineDiscountPercent: asNumber(sourceLine.lineDiscountPercent || sourceLine.discountPercent, 0),
     department: asString(sourceLine.department || sourceLine.suggested_department, "Kitchen Made"),
     confidence: Math.max(clampConfidence(sourceLine.confidence, 0.78), 0.86),
   };
@@ -400,6 +416,10 @@ function normalizeInvoice(invoice, sourceText) {
         unitCost,
         vat: asNumber(line.vat, 0),
         lineTotal,
+        lineStatus: asString(line.lineStatus || line.status, "Received"),
+        reason: asString(line.reason || line.creditReason),
+        lineDiscountAmount: asNumber(line.lineDiscountAmount || line.discountAmount, 0),
+        lineDiscountPercent: asNumber(line.lineDiscountPercent || line.discountPercent, 0),
         department: asString(line.department || line.suggested_department, "Kitchen Made"),
         confidence: clampConfidence(line.confidence),
       };
@@ -420,6 +440,10 @@ function normalizeInvoice(invoice, sourceText) {
       unitCost: row.unitCost,
       vat: row.vat,
       lineTotal: row.lineTotal,
+      lineStatus: "Received",
+      reason: "",
+      lineDiscountAmount: 0,
+      lineDiscountPercent: 0,
       department: "Kitchen Made",
       confidence: 0.78,
     }));
@@ -428,6 +452,10 @@ function normalizeInvoice(invoice, sourceText) {
     supplier,
     invoiceDate: asString(invoice.invoiceDate || invoice.date, inferInvoiceDate(sourceText)),
     invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
+    subtotalBeforeDiscount: asNumber(invoice.subtotalBeforeDiscount || invoice.subtotal, 0),
+    discountAmount: asNumber(invoice.discountAmount || invoice.discount, 0),
+    discountPercent: asNumber(invoice.discountPercent, 0),
+    finalInvoiceTotal: asNumber(invoice.finalInvoiceTotal || invoice.total, 0),
     confidence: clampConfidence(invoice.confidence),
     lines: repairedLines,
   };
@@ -497,6 +525,10 @@ Rules:
 - If uploaded image(s) are provided, read the invoice visually and extract the actual table rows from the image.
 - If OCR/text is messy and columns are merged, still extract the likely product rows.
 - For each item, identify pack size, quantity, unit cost, VAT and line total where possible.
+- Extract invoice subtotal before discount, invoice-level discount amount/percent and final invoice total when shown.
+- If a returns/shortage/damaged/credit column exists, mark affected item lineStatus as Missing, Damaged, Sent back or Not ordered. Otherwise lineStatus is Received.
+- For non-Received lines, include a short reason. Do not mark lines non-Received unless the invoice clearly says so.
+- Extract line-level discounts when shown as lineDiscountAmount or lineDiscountPercent.
 - If an invoice has columns like QTY, Price, VAT, Total: quantity must be QTY, unitCost must be Price, vat must be VAT, lineTotal must be Total.
 - Never put the line Total into unitCost when a separate Price or Unit Price exists.
 - Validate the numeric columns: quantity × unitCost should equal lineTotal, allowing small rounding differences.

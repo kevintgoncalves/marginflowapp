@@ -33,7 +33,22 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
-const emptyInvoiceDraft = () => ({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle", editingInvoiceId: "" });
+const invoiceLineStatuses = ["Received", "Missing", "Damaged", "Sent back", "Not ordered"];
+const creditNoteStatuses = ["To chase", "Chased", "Credit received", "Rejected"];
+const emptyInvoiceDraft = () => ({
+  files: [],
+  invoiceText: "",
+  items: [],
+  supplier: "",
+  date: today(),
+  invoiceNumber: "",
+  subtotalBeforeDiscount: 0,
+  discountAmount: 0,
+  discountPercent: 0,
+  finalInvoiceTotal: 0,
+  status: "Idle",
+  editingInvoiceId: "",
+});
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
@@ -329,6 +344,75 @@ function lineTotal(item) {
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
+function invoiceLineStatus(item) {
+  return invoiceLineStatuses.includes(item?.lineStatus) ? item.lineStatus : "Received";
+}
+
+function isReceivedInvoiceLine(item) {
+  return invoiceLineStatus(item) === "Received";
+}
+
+function originalLineTotal(item) {
+  return lineTotal(item);
+}
+
+function lineLevelDiscount(item) {
+  if (!isReceivedInvoiceLine(item)) return 0;
+  const original = originalLineTotal(item);
+  const amount = numberValue(item.lineDiscountAmount, 0);
+  const percentAmount = original * (numberValue(item.lineDiscountPercent, 0) / 100);
+  const discount = amount > 0 ? amount : percentAmount;
+  return Number(Math.min(original, Math.max(0, discount)).toFixed(2));
+}
+
+function lineAfterLineDiscount(item) {
+  if (!isReceivedInvoiceLine(item)) return 0;
+  return Math.max(0, originalLineTotal(item) - lineLevelDiscount(item));
+}
+
+function receivedLineSubtotal(items = []) {
+  return items.filter(isReceivedInvoiceLine).reduce((sum, item) => sum + lineAfterLineDiscount(item), 0);
+}
+
+function invoiceDiscountAmount(invoice = {}) {
+  const subtotal = receivedLineSubtotal(invoice.items || []);
+  const explicitAmount = numberValue(invoice.discountAmount, 0);
+  const percentAmount = subtotal * (numberValue(invoice.discountPercent, 0) / 100);
+  const discount = explicitAmount > 0 ? explicitAmount : percentAmount;
+  return Number(Math.min(subtotal, Math.max(0, discount)).toFixed(2));
+}
+
+function invoiceSubtotalBeforeDiscount(invoice = {}) {
+  return (invoice.items || []).filter(isReceivedInvoiceLine).reduce((sum, item) => sum + originalLineTotal(item), 0);
+}
+
+function proportionalInvoiceDiscount(item, invoice = {}) {
+  if (!isReceivedInvoiceLine(item)) return 0;
+  const subtotalAfterLineDiscount = receivedLineSubtotal(invoice.items || []);
+  if (!subtotalAfterLineDiscount) return 0;
+  const share = lineAfterLineDiscount(item) / subtotalAfterLineDiscount;
+  return Number((invoiceDiscountAmount(invoice) * share).toFixed(2));
+}
+
+function discountAppliedToLine(item, invoice = {}) {
+  return Number((lineLevelDiscount(item) + proportionalInvoiceDiscount(item, invoice)).toFixed(2));
+}
+
+function netLineTotal(item, invoice = {}) {
+  if (!isReceivedInvoiceLine(item)) return 0;
+  const net = originalLineTotal(item) - discountAppliedToLine(item, invoice);
+  return Number(Math.max(0, net).toFixed(2));
+}
+
+function invoiceDiscountPercent(invoice = {}) {
+  const subtotal = receivedLineSubtotal(invoice.items || []);
+  return subtotal ? (invoiceDiscountAmount(invoice) / subtotal) * 100 : 0;
+}
+
+function invoiceFinalTotal(invoice = {}) {
+  return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0);
+}
+
 function amountsAlmostEqual(a, b) {
   const left = Number(a);
   const right = Number(b);
@@ -542,8 +626,8 @@ function splitSummary(item) {
     .join(" / ");
 }
 
-function lineTotalForDepartment(item, selectedDepartment) {
-  const total = lineTotal(item);
+function lineTotalForDepartment(item, selectedDepartment, invoice = {}) {
+  const total = netLineTotal(item, invoice.items ? invoice : { items: [item], discountAmount: 0, discountPercent: 0 });
   if (selectedDepartment === "All departments") return total;
   return normalizeDepartmentSplits(item, item.department)
     .filter((split) => split.department === selectedDepartment)
@@ -555,7 +639,7 @@ function primaryDepartment(item) {
 }
 
 function invoiceTotal(invoice) {
-  return (invoice.items || []).reduce((sum, item) => sum + lineTotal(item), 0);
+  return invoiceFinalTotal(invoice);
 }
 
 function departmentMatches(rowDepartment, selectedDepartment) {
@@ -984,11 +1068,12 @@ function ensureSupplierList(suppliers, name) {
   return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
 }
 
-function mergeInvoiceProducts(products, items, invoiceDate) {
+function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
   const next = [...products];
 
-  items.forEach((item) => {
-    const invoiceUnitCost = normalizeInvoiceUnitCost(item);
+  items.filter(isReceivedInvoiceLine).forEach((item) => {
+    const quantity = numberValue(item.quantity, 1);
+    const invoiceUnitCost = quantity > 0 ? Number((netLineTotal(item, invoiceContext) / quantity).toFixed(4)) : normalizeInvoiceUnitCost(item);
     const match = item.matchedProductId
       ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
       : matchProduct(item.productName, next);
@@ -1031,6 +1116,78 @@ function mergeInvoiceProducts(products, items, invoiceDate) {
   });
 
   return next;
+}
+
+function normalizeInvoiceDiscountFields(invoice) {
+  const subtotalAfterLineDiscount = receivedLineSubtotal(invoice.items || []);
+  const discountAmountValue = invoiceDiscountAmount(invoice);
+  const discountPercentValue = subtotalAfterLineDiscount ? (discountAmountValue / subtotalAfterLineDiscount) * 100 : 0;
+  return {
+    subtotalBeforeDiscount: invoiceSubtotalBeforeDiscount(invoice),
+    discountAmount: Number(discountAmountValue.toFixed(2)),
+    discountPercent: Number(discountPercentValue.toFixed(2)),
+    finalInvoiceTotal: Number(invoiceFinalTotal({ ...invoice, discountAmount: discountAmountValue, discountPercent: discountPercentValue }).toFixed(2)),
+  };
+}
+
+function prepareApprovedInvoice(invoice) {
+  const discountFields = normalizeInvoiceDiscountFields(invoice);
+  const context = { ...invoice, ...discountFields };
+  const items = (invoice.items || []).map((item) => ({
+    ...item,
+    lineStatus: invoiceLineStatus(item),
+    creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
+    lineDiscountAmount: Number(lineLevelDiscount(item).toFixed(2)),
+    lineDiscountPercent: originalLineTotal(item) ? Number(((lineLevelDiscount(item) / originalLineTotal(item)) * 100).toFixed(2)) : 0,
+    originalLineTotal: Number(originalLineTotal(item).toFixed(2)),
+    discountApplied: Number(discountAppliedToLine(item, context).toFixed(2)),
+    netLineTotal: Number(netLineTotal(item, context).toFixed(2)),
+  }));
+  const finalContext = { ...invoice, ...discountFields, items };
+  return {
+    ...invoice,
+    ...normalizeInvoiceDiscountFields(finalContext),
+    items: items.map((item) => ({
+      ...item,
+      discountApplied: Number(discountAppliedToLine(item, finalContext).toFixed(2)),
+      netLineTotal: Number(netLineTotal(item, finalContext).toFixed(2)),
+    })),
+  };
+}
+
+function creditNotesForInvoice(invoice) {
+  return (invoice.items || [])
+    .filter((item) => !isReceivedInvoiceLine(item))
+    .map((item) => ({
+      id: uid(),
+      invoiceId: invoice.id,
+      lineId: item.id,
+      supplier: item.supplier || invoice.supplier,
+      invoiceNumber: invoice.invoiceNumber,
+      date: invoice.date,
+      product: item.productName,
+      quantity: numberValue(item.quantity, 0),
+      value: originalLineTotal(item),
+      reason: item.creditReason || invoiceLineStatus(item),
+      status: "To chase",
+      notes: "",
+    }));
+}
+
+function extractInvoiceTotals(invoiceText = "") {
+  const normalized = invoiceText.replace(/\s+/g, " ");
+  const pickAmount = (patterns) => {
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern);
+      if (match) return numberValue(String(match[1]).replace(",", "."), 0);
+    }
+    return 0;
+  };
+  return {
+    subtotalBeforeDiscount: pickAmount([/(?:subtotal|sub total|goods|net value)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    discountAmount: pickAmount([/(?:discount|disc)\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
+    finalInvoiceTotal: pickAmount([/(?:invoice total|ticket total|grand total|total)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+  };
 }
 
 function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
@@ -1110,8 +1267,7 @@ function vatForDepartment(salesRows, selectedDepartment) {
 
 function purchasesForDepartment(invoices, selectedDepartment) {
   return invoices
-    .flatMap((invoice) => invoice.items || [])
-    .reduce((sum, item) => sum + lineTotalForDepartment(item, selectedDepartment), 0);
+    .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
 }
 
 function wasteForDepartment(wasteItems, selectedDepartment) {
@@ -1403,6 +1559,7 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
     "marginflow.stocktakes": null,
     "marginflow.waste": null,
     "marginflow.sales": null,
+    "marginflow.creditNotes": null,
   };
   const settingsKeys = new Set([
     "marginflow.companySettings",
@@ -1594,6 +1751,7 @@ function App() {
   const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
   const [stocktakes, setStocktakesState] = useState(() => normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
   const [wasteItems, setWasteItemsState] = useState(() => safeReadLocalStorageArray("marginflow.waste", initialWaste));
+  const [creditNotes, setCreditNotesState] = useState(() => safeReadLocalStorageArray("marginflow.creditNotes", []));
   const [recipes, setRecipesState] = useState(() => safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
   const [menus, setMenusState] = useState(() => safeReadLocalStorageArray("marginflow.menus", initialMenus));
   const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
@@ -1610,6 +1768,7 @@ function App() {
   const setSales = storedStateUpdater(setSalesState, "marginflow.sales");
   const setStocktakes = storedStateUpdater(setStocktakesState, "marginflow.stocktakes");
   const setWasteItems = storedStateUpdater(setWasteItemsState, "marginflow.waste");
+  const setCreditNotes = storedStateUpdater(setCreditNotesState, "marginflow.creditNotes");
   const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
   const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
 
@@ -1676,27 +1835,41 @@ function App() {
       const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
       return {
         ...item,
+        lineStatus: invoiceLineStatus(item),
+        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
+        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
+        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
         supplier: item.supplier || supplier,
         unitCost: normalizeInvoiceUnitCost(item),
         department: departmentSplits[0]?.department || item.department,
         departmentSplits,
       };
     });
-    const invoice = {
+    const invoice = prepareApprovedInvoice({
       id: draft.editingInvoiceId || uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date: draft.date || today(),
       status: "Approved",
+      discountAmount: numberValue(draft.discountAmount, 0),
+      discountPercent: numberValue(draft.discountPercent, 0),
       items: normalizedItems,
-    };
+    });
     setInvoices((current) => (
       draft.editingInvoiceId
         ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
         : [invoice, ...current]
     ));
+    setCreditNotes((current) => {
+      const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
+      const generated = creditNotesForInvoice(invoice).map((note) => {
+        const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
+        return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
+      });
+      return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
+    });
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
+    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
     setDraft(emptyInvoiceDraft());
   };
 
@@ -1779,6 +1952,7 @@ function App() {
         {active === "invoices" && (
           <Invoices
             aiSettings={aiSettings}
+            creditNotes={creditNotes}
             draft={draft}
             setDraft={setDraft}
             invoices={invoices}
@@ -1790,6 +1964,7 @@ function App() {
             departmentNames={departmentNames}
             approveInvoice={approveInvoice}
             requestDelete={requestDelete}
+            setCreditNotes={setCreditNotes}
             setInvoices={setInvoices}
           />
         )}
@@ -2061,10 +2236,11 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setInvoices }) {
+function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setCreditNotes, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [splitEditorId, setSplitEditorId] = useState(null);
   const [manualInvoiceOpen, setManualInvoiceOpen] = useState(false);
+  const [creditNoteModal, setCreditNoteModal] = useState(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const readControllerRef = useRef(null);
   const uploadRunRef = useRef(0);
@@ -2072,6 +2248,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const hasDraftWork = draft.files.length || draft.invoiceText.trim() || draft.items.length || draft.supplier.trim() || draft.invoiceNumber.trim();
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
+  const draftDiscountContext = {
+    items: draft.items,
+    discountAmount: numberValue(draft.discountAmount, 0),
+    discountPercent: numberValue(draft.discountPercent, 0),
+  };
 
   const cancelDraft = () => {
     readControllerRef.current?.abort();
@@ -2149,6 +2330,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           quantity,
           unitCost,
           lineTotal: numberValue(line.lineTotal, quantity * unitCost),
+          lineStatus: invoiceLineStatuses.includes(line.lineStatus || line.status) ? (line.lineStatus || line.status) : "Received",
+          creditReason: line.reason || line.creditReason || "",
+          lineDiscountAmount: numberValue(line.lineDiscountAmount || line.discountAmount, 0),
+          lineDiscountPercent: numberValue(line.lineDiscountPercent || line.discountPercent, 0),
           supplier,
           department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
           departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
@@ -2160,6 +2345,12 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     });
 
     const invoiceKey = invoiceText.toLowerCase();
+    const detectedTotals = extractInvoiceTotals(invoiceText);
+    const inferredDiscountAmount = detectedTotals.discountAmount || (
+      detectedTotals.subtotalBeforeDiscount > 0 && detectedTotals.finalInvoiceTotal > 0 && detectedTotals.subtotalBeforeDiscount > detectedTotals.finalInvoiceTotal
+        ? Number((detectedTotals.subtotalBeforeDiscount - detectedTotals.finalInvoiceTotal).toFixed(2))
+        : 0
+    );
     const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : "");
     const preParsedLines = invoiceKey.includes("tg fruits")
       ? extractTgFruitsInvoiceRows(invoiceText)
@@ -2174,6 +2365,9 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         supplier,
         invoiceText,
         items: buildInvoiceItems(preParsedLines, supplier),
+        subtotalBeforeDiscount: detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
+        discountAmount: inferredDiscountAmount || current.discountAmount,
+        finalInvoiceTotal: detectedTotals.finalInvoiceTotal || current.finalInvoiceTotal,
         status: `AI extracted ${preParsedLines.length} lines. Please review before approving.`,
       }));
       readControllerRef.current = null;
@@ -2216,6 +2410,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         supplier,
         invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
         date: payload.invoiceDate || current.date || today(),
+        subtotalBeforeDiscount: numberValue(payload.subtotalBeforeDiscount || payload.subtotal || detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount, 0),
+        discountAmount: numberValue(payload.discountAmount || inferredDiscountAmount || current.discountAmount, 0),
+        discountPercent: numberValue(payload.discountPercent || current.discountPercent, 0),
+        finalInvoiceTotal: numberValue(payload.finalInvoiceTotal || payload.total || detectedTotals.finalInvoiceTotal || current.finalInvoiceTotal, 0),
         items,
         status: `AI extracted ${items.length} lines. Please review before approving.`,
       }));
@@ -2228,7 +2426,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateDraftItem = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost"];
+    const numericFields = ["quantity", "unitCost", "lineDiscountAmount", "lineDiscountPercent"];
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
@@ -2237,9 +2435,36 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         if (numericFields.includes(field)) {
           updated.lineTotal = numberValue(updated.quantity) * numberValue(updated.unitCost);
         }
+        if (field === "lineStatus" && value === "Received") updated.creditReason = "";
+        if (field === "lineDiscountAmount") {
+          const original = originalLineTotal(updated);
+          updated.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
+        }
+        if (field === "lineDiscountPercent") {
+          updated.lineDiscountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
+        }
         return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
       }),
     }));
+  };
+
+  const updateInvoiceDiscount = (field, value) => {
+    setDraft((current) => {
+      const subtotal = receivedLineSubtotal(current.items);
+      const numeric = numberValue(value, 0);
+      if (field === "discountAmount") {
+        return {
+          ...current,
+          discountAmount: numeric,
+          discountPercent: subtotal ? Number(((numeric / subtotal) * 100).toFixed(2)) : 0,
+        };
+      }
+      return {
+        ...current,
+        discountPercent: numeric,
+        discountAmount: Number((subtotal * (numeric / 100)).toFixed(2)),
+      };
+    });
   };
 
   const updateDraftItemSplit = (itemId, splitId, field, value) => {
@@ -2304,6 +2529,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       quantity: numberValue(item.quantity, 1),
       unitCost: numberValue(item.unitCost),
       lineTotal: numberValue(item.lineTotal, numberValue(item.quantity, 1) * numberValue(item.unitCost)),
+      lineStatus: invoiceLineStatus(item),
+      creditReason: item.creditReason || "",
+      lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
+      lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
       department: item.department || invoiceSettings.defaultInvoiceDepartment,
       departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
       matchStatus: "Manual invoice",
@@ -2320,23 +2549,30 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
       return {
         ...item,
+        lineStatus: invoiceLineStatus(item),
+        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
+        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
+        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
         supplier,
         unitCost: normalizeInvoiceUnitCost(item),
         department: departmentSplits[0]?.department || item.department,
         departmentSplits,
       };
     });
-    const invoice = {
+    const invoice = prepareApprovedInvoice({
       id: uid(),
       invoiceNumber: manualDraft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date: manualDraft.date || today(),
       status: "Approved",
+      discountAmount: numberValue(manualDraft.discountAmount, 0),
+      discountPercent: numberValue(manualDraft.discountPercent, 0),
       items: normalizedItems,
-    };
+    });
     setInvoices((current) => [invoice, ...current]);
+    setCreditNotes((current) => [...current, ...creditNotesForInvoice(invoice)]);
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
+    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
     setDraft(emptyInvoiceDraft());
     setManualInvoiceOpen(false);
   };
@@ -2351,11 +2587,19 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         ...item,
         id: item.id || uid(),
         supplier: item.supplier || supplier,
+        lineStatus: invoiceLineStatus(item),
+        creditReason: item.creditReason || "",
+        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
+        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
         departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
       })),
       supplier,
       date: invoice.date || today(),
       invoiceNumber: invoice.invoiceNumber || "",
+      subtotalBeforeDiscount: numberValue(invoice.subtotalBeforeDiscount, 0),
+      discountAmount: numberValue(invoice.discountAmount, 0),
+      discountPercent: numberValue(invoice.discountPercent, 0),
+      finalInvoiceTotal: numberValue(invoice.finalInvoiceTotal, 0),
       status: `Editing approved invoice ${invoice.invoiceNumber || ""}. Review and confirm to save changes.`,
       editingInvoiceId: invoice.id,
     });
@@ -2365,7 +2609,29 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     requestDelete({
       title: "Delete invoice",
       message: "Are you sure you want to delete this invoice?",
-      onConfirm: () => setInvoices((current) => current.filter((item) => item.id !== id)),
+      onConfirm: () => {
+        setInvoices((current) => current.filter((item) => item.id !== id));
+        setCreditNotes((current) => current.filter((note) => note.invoiceId !== id));
+      },
+    });
+  };
+
+  const saveCreditNote = () => {
+    if (!creditNoteModal) return;
+    const payload = {
+      ...creditNoteModal,
+      quantity: numberValue(creditNoteModal.quantity, 0),
+      value: numberValue(creditNoteModal.value, 0),
+    };
+    setCreditNotes((current) => current.map((note) => (note.id === payload.id ? payload : note)));
+    setCreditNoteModal(null);
+  };
+
+  const deleteCreditNote = (id) => {
+    requestDelete({
+      title: "Delete credit note",
+      message: "Are you sure you want to delete this credit note?",
+      onConfirm: () => setCreditNotes((current) => current.filter((note) => note.id !== id)),
     });
   };
 
@@ -2415,6 +2681,14 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
           </div>
         )}
+        {hasDraftWork && (
+          <div className="invoice-meta">
+            <label>Subtotal before discount<input readOnly value={money(invoiceSubtotalBeforeDiscount(draftDiscountContext))} /></label>
+            <Field label="Discount amount" type="number" value={draft.discountAmount || 0} onChange={(value) => updateInvoiceDiscount("discountAmount", value)} />
+            <Field label="Discount %" type="number" value={draft.discountPercent || 0} onChange={(value) => updateInvoiceDiscount("discountPercent", value)} />
+            <label>Final invoice total<input readOnly value={money(invoiceFinalTotal(draftDiscountContext))} /></label>
+          </div>
+        )}
         {showCreateSupplier && (
           <div className="button-row left tight">
             <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
@@ -2461,7 +2735,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <table>
             <thead>
               <tr>
-                {["Product", "Pack size", "Quantity", "Unit cost", "Department split", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
+                {["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department split", "Supplier", "Original", "Discount", "Net total", ""].map((header) => <th key={header}>{header}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -2480,13 +2754,23 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
                   <td>
+                    <select value={invoiceLineStatus(item)} onChange={(event) => updateDraftItem(item.id, "lineStatus", event.target.value)}>
+                      {invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}
+                    </select>
+                  </td>
+                  <td><input value={item.creditReason || ""} onChange={(event) => updateDraftItem(item.id, "creditReason", event.target.value)} placeholder={invoiceLineStatus(item) === "Received" ? "" : "Reason"} /></td>
+                  <td><input min="0" step="0.01" type="number" value={item.lineDiscountAmount || 0} onChange={(event) => updateDraftItem(item.id, "lineDiscountAmount", event.target.value)} disabled={!isReceivedInvoiceLine(item)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={item.lineDiscountPercent || 0} onChange={(event) => updateDraftItem(item.id, "lineDiscountPercent", event.target.value)} disabled={!isReceivedInvoiceLine(item)} /></td>
+                  <td>
                     <button className={`split-button ${splitIsValid(item) ? "" : "invalid"}`} onClick={() => setSplitEditorId(item.id)} type="button">
                       {splitSummary(item)}
                     </button>
                     {!splitIsValid(item) && <small className="line-note error">Split must total 100%</small>}
                   </td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
-                  <td>{money(lineTotal(item))}</td>
+                  <td>{money(originalLineTotal(item))}</td>
+                  <td>{money(discountAppliedToLine(item, draftDiscountContext))}</td>
+                  <td>{money(netLineTotal(item, draftDiscountContext))}</td>
                   <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete invoice line", message: "Are you sure you want to delete this invoice line?", onConfirm: () => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) })) })} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
@@ -2501,7 +2785,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             <div className="modal-header">
               <div>
                 <h3>Department split</h3>
-                <p>{splitEditorItem.productName} · {money(lineTotal(splitEditorItem))}</p>
+                <p>{splitEditorItem.productName} · {money(netLineTotal(splitEditorItem, draftDiscountContext))}</p>
               </div>
               <button className="icon" onClick={() => setSplitEditorId(null)} type="button"><X size={16} /></button>
             </div>
@@ -2512,7 +2796,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                     {departmentNames.map((dept) => <option key={dept}>{dept}</option>)}
                   </select>
                   <input min="0" max="100" step="1" type="number" value={split.percentage} onChange={(event) => updateDraftItemSplit(splitEditorItem.id, split.id, "percentage", event.target.value)} />
-                  <span>{money(lineTotal(splitEditorItem) * (numberValue(split.percentage) / 100))}</span>
+                  <span>{money(netLineTotal(splitEditorItem, draftDiscountContext) * (numberValue(split.percentage) / 100))}</span>
                   <button className="icon danger" onClick={() => requestDelete({ title: "Delete department split", message: "Are you sure you want to delete this department split?", onConfirm: () => removeDraftItemSplit(splitEditorItem.id, split.id) })} type="button"><Trash2 size={14} /></button>
                 </div>
               ))}
@@ -2536,6 +2820,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             { key: "supplier", label: "Supplier" },
             { key: "date", label: "Date" },
             { key: "items", label: "Lines", render: (items) => items.length },
+            { key: "subtotalBeforeDiscount", label: "Subtotal", render: (_, row) => money(invoiceSubtotalBeforeDiscount(row)) },
+            { key: "discountAmount", label: "Discount", render: (_, row) => money(invoiceDiscountAmount(row)) },
             { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
@@ -2544,6 +2830,41 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           rows={invoices}
         />
       </Panel>
+
+      <Panel title="Credit Notes / Supplier Chasing" action={`${creditNotes.length} record(s)`}>
+        <DataTable
+          columns={[
+            { key: "supplier", label: "Supplier" },
+            { key: "invoiceNumber", label: "Invoice" },
+            { key: "date", label: "Date" },
+            { key: "product", label: "Product" },
+            { key: "quantity", label: "Quantity" },
+            { key: "value", label: "Value", render: (value) => money(value) },
+            { key: "reason", label: "Reason" },
+            { key: "status", label: "Status", render: (value) => <Badge tone={value === "Credit received" ? "green" : value === "Rejected" ? "red" : "amber"}>{value}</Badge> },
+            { key: "notes", label: "Notes" },
+          ]}
+          onEdit={(row) => setCreditNoteModal(row)}
+          onDelete={deleteCreditNote}
+          rows={creditNotes}
+        />
+      </Panel>
+
+      {creditNoteModal && (
+        <EditModal onCancel={() => setCreditNoteModal(null)} onSave={saveCreditNote} title="Edit credit note">
+          <div className="form-grid three">
+            <Field label="Supplier" value={creditNoteModal.supplier} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, supplier: value })} />
+            <Field label="Invoice number" value={creditNoteModal.invoiceNumber} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, invoiceNumber: value })} />
+            <Field label="Date" type="date" value={creditNoteModal.date} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, date: value })} />
+            <Field label="Product" value={creditNoteModal.product} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, product: value })} />
+            <Field label="Quantity" type="number" value={creditNoteModal.quantity} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, quantity: value })} />
+            <Field label="Value" type="number" value={creditNoteModal.value} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, value })} />
+            <label>Reason<select value={creditNoteModal.reason} onChange={(event) => setCreditNoteModal({ ...creditNoteModal, reason: event.target.value })}>{invoiceLineStatuses.filter((status) => status !== "Received").map((status) => <option key={status}>{status}</option>)}</select></label>
+            <label>Status<select value={creditNoteModal.status} onChange={(event) => setCreditNoteModal({ ...creditNoteModal, status: event.target.value })}>{creditNoteStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>
+            <Field label="Notes" value={creditNoteModal.notes || ""} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, notes: value })} />
+          </div>
+        </EditModal>
+      )}
     </div>
   );
 }
@@ -2561,6 +2882,10 @@ function manualInvoiceLine(defaultDepartment, product = {}) {
     department,
     departmentSplits: defaultDepartmentSplits(department),
     lineTotal: quantity * unitCost,
+    lineStatus: "Received",
+    creditReason: "",
+    lineDiscountAmount: 0,
+    lineDiscountPercent: 0,
     supplier: product.supplier || "",
   };
 }
@@ -2590,7 +2915,7 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
       ...current,
       rows: current.rows.map((row) => {
         if (row.id !== id) return row;
-        let next = { ...row, [field]: ["quantity", "unitCost", "lineTotal", "splitPercentage"].includes(field) ? numberValue(value) : value };
+        let next = { ...row, [field]: ["quantity", "unitCost", "lineTotal", "splitPercentage", "lineDiscountAmount", "lineDiscountPercent"].includes(field) ? numberValue(value) : value };
         if (field === "productName") {
           const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
           if (product) {
@@ -2611,6 +2936,14 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
         }
         if (field === "lineTotal") {
           next.unitCost = numberValue(next.quantity, 1) ? Number((numberValue(value) / numberValue(next.quantity, 1)).toFixed(4)) : next.unitCost;
+        }
+        if (field === "lineStatus" && value === "Received") next.creditReason = "";
+        if (field === "lineDiscountAmount") {
+          const original = originalLineTotal(next);
+          next.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
+        }
+        if (field === "lineDiscountPercent") {
+          next.lineDiscountAmount = Number((originalLineTotal(next) * (numberValue(value) / 100)).toFixed(2));
         }
         if (field === "splitPercentage") {
           next.departmentSplits = [{ ...(normalizeDepartmentSplits(next, next.department)[0] || { id: uid(), department: next.department }), percentage: numberValue(value) }];
@@ -2641,6 +2974,10 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
           quantity: 1,
           unitCost: total,
           lineTotal: total,
+          lineStatus: "Received",
+          creditReason: "",
+          lineDiscountAmount: 0,
+          lineDiscountPercent: 0,
           department: simple.department,
           departmentSplits: defaultDepartmentSplits(simple.department),
           supplier: simple.supplier,
@@ -2696,7 +3033,7 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
             <div className="table-wrap manual-invoice-table">
               <table>
                 <thead>
-                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Department", "Department split", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
+                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department", "Department split", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
                 </thead>
                 <tbody>
                   {complete.rows.map((row) => (
@@ -2705,6 +3042,10 @@ function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave
                       <td><input value={row.packSize} onChange={(event) => updateRow(row.id, "packSize", event.target.value)} /></td>
                       <td><input min="0" step="0.01" type="number" value={row.quantity} onChange={(event) => updateRow(row.id, "quantity", event.target.value)} /></td>
                       <td><input min="0" step="0.01" type="number" value={row.unitCost} onChange={(event) => updateRow(row.id, "unitCost", event.target.value)} /></td>
+                      <td><select value={invoiceLineStatus(row)} onChange={(event) => updateRow(row.id, "lineStatus", event.target.value)}>{invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}</select></td>
+                      <td><input value={row.creditReason || ""} onChange={(event) => updateRow(row.id, "creditReason", event.target.value)} /></td>
+                      <td><input disabled={!isReceivedInvoiceLine(row)} min="0" step="0.01" type="number" value={row.lineDiscountAmount || 0} onChange={(event) => updateRow(row.id, "lineDiscountAmount", event.target.value)} /></td>
+                      <td><input disabled={!isReceivedInvoiceLine(row)} min="0" step="0.01" type="number" value={row.lineDiscountPercent || 0} onChange={(event) => updateRow(row.id, "lineDiscountPercent", event.target.value)} /></td>
                       <td><select value={row.department} onChange={(event) => updateRow(row.id, "department", event.target.value)}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></td>
                       <td><input min="0" max="100" step="1" type="number" value={departmentSplitTotal(row)} onChange={(event) => updateRow(row.id, "splitPercentage", event.target.value)} /></td>
                       <td><input min="0" step="0.01" type="number" value={numberValue(row.lineTotal, numberValue(row.quantity) * numberValue(row.unitCost))} onChange={(event) => updateRow(row.id, "lineTotal", event.target.value)} /></td>
