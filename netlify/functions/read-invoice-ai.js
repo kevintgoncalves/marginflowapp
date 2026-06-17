@@ -290,6 +290,35 @@ function parseCodeLeadingProductRow(rowText) {
   return { raw: rowText, productName: cleanProduct, packSize: cleanPackSize(packSize), quantity, unitCost, vat: 0, lineTotal };
 }
 
+function parseAlbionOrderRows(sourceText) {
+  const normalized = sourceText
+    .replace(/\r/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods.*?\b\d+\/\d+\b/gi, " ")
+    .replace(/Web Ref\.?\s*\d+\s*Invoice No\.?\s*\d+/gi, " ")
+    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods/gi, " ")
+    .replace(/\b\d+\/\d+\b/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ");
+  const headerMatch = normalized.match(/PRODUCT\s+UNIT PRICE\s+ORDER QTY\s+INVOICED QTY\s+SUBTOTAL\s+(.+)/i);
+  const tableText = headerMatch?.[1] || normalized;
+  const beforeFooter = tableText.split(/\s+SUBTOTAL\s+£?\d/i)[0] || tableText;
+  const rowPattern = /([A-Za-z][A-Za-z0-9 '&(),./+-]{2,}?)\s+((?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))/gi;
+  const rows = [];
+  let match;
+
+  while ((match = rowPattern.exec(beforeFooter))) {
+    const [, productRaw, packRaw, unitRaw, , invoicedQtyRaw, totalRaw] = match;
+    const quantity = asNumber(invoicedQtyRaw.replace(",", "."), 0);
+    const unitCost = asNumber(unitRaw.replace(",", "."), 0);
+    const lineTotal = asNumber(totalRaw.replace(",", "."), 0);
+    const productName = cleanProductName(productRaw);
+    if (!productName || !quantity || !unitCost || !lineTotal || !almostEqual(quantity * unitCost, lineTotal)) continue;
+    rows.push({ raw: match[0], productName, packSize: cleanPackSize(packRaw), quantity, unitCost, vat: 0, lineTotal });
+  }
+
+  return rows;
+}
+
 function parseTableRow(rowText) {
   const codeLeadingRow = parseCodeLeadingProductRow(rowText);
   if (codeLeadingRow) return codeLeadingRow;
@@ -319,6 +348,7 @@ function parseTableRow(rowText) {
 function extractInvoiceTableRows(sourceText) {
   const normalizedText = sourceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
   const candidates = new Set();
+  const albionRows = /albion/i.test(sourceText) ? parseAlbionOrderRows(sourceText) : [];
 
   sourceText.split(/\r?\n/).forEach((line) => {
     const trimmed = line.trim();
@@ -340,7 +370,7 @@ function extractInvoiceTableRows(sourceText) {
   const codePattern = /(?:^|\s)([A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z][A-Za-z0-9 '&().,/+-]{4,}?\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z]|$)/g;
   [...normalizedText.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
 
-  const rows = [...candidates].map(parseTableRow).filter(Boolean);
+  const rows = [...albionRows, ...[...candidates].map(parseTableRow).filter(Boolean)];
   const seen = new Set();
   return rows.filter((row) => {
     const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;

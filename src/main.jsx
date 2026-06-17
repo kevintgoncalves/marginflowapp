@@ -642,6 +642,41 @@ function parseCodeLeadingInvoiceRow(rowText) {
   };
 }
 
+function parseAlbionOrderRows(invoiceText) {
+  const normalized = invoiceText
+    .replace(/\r/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods.*?\b\d+\/\d+\b/gi, " ")
+    .replace(/Web Ref\.?\s*\d+\s*Invoice No\.?\s*\d+/gi, " ")
+    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods/gi, " ")
+    .replace(/\b\d+\/\d+\b/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ");
+  const headerMatch = normalized.match(/PRODUCT\s+UNIT PRICE\s+ORDER QTY\s+INVOICED QTY\s+SUBTOTAL\s+(.+)/i);
+  const tableText = headerMatch?.[1] || normalized;
+  const beforeFooter = tableText.split(/\s+SUBTOTAL\s+£?\d/i)[0] || tableText;
+  const rowPattern = /([A-Za-z][A-Za-z0-9 '&(),./+-]{2,}?)\s+((?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))/gi;
+  const rows = [];
+  let match;
+
+  while ((match = rowPattern.exec(beforeFooter))) {
+    const [, productRaw, packRaw, unitRaw, , invoicedQtyRaw, totalRaw] = match;
+    const quantity = numberValue(invoicedQtyRaw.replace(",", "."), 0);
+    const unitCost = numberValue(unitRaw.replace(",", "."), 0);
+    const lineTotalValue = numberValue(totalRaw.replace(",", "."), 0);
+    const productName = cleanInvoiceProductName(productRaw);
+    if (!productName || !quantity || !unitCost || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) continue;
+    rows.push({
+      productName,
+      packSize: cleanInvoicePackSize(packRaw),
+      quantity,
+      unitCost,
+      lineTotal: lineTotalValue,
+    });
+  }
+
+  return rows;
+}
+
 function extractGenericInvoiceRows(invoiceText) {
   const text = invoiceText.replace(/\r/g, "\n");
   const normalized = text.replace(/\s+/g, " ");
@@ -1274,6 +1309,29 @@ function extractInvoiceTotals(invoiceText = "") {
     discountAmount: pickAmount([/(?:discount|disc)\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
     finalInvoiceTotal: pickAmount([/(?:invoice total|ticket total|grand total|total)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
   };
+}
+
+function extractInvoiceNumberFromText(invoiceText = "") {
+  const normalized = invoiceText.replace(/\s+/g, " ");
+  const patterns = [
+    /Invoice No\.?\s*[:#]?\s*(\d{4,})/i,
+    /Invoice Number\s*[:#]?\s*(\d{4,})/i,
+    /Invoice no\s*[:#]?\s*(\d{4,})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return "";
+}
+
+function extractInvoiceDateFromText(invoiceText = "") {
+  const normalized = invoiceText.replace(/\s+/g, " ");
+  const match = normalized.match(/(?:DELIVERY DATE|Date\/Tax Point|Invoice date|ORDER DATE)\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})/i);
+  if (!match) return "";
+  const [, day, month, yearRaw] = match;
+  const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
 }
 
 function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
@@ -2433,16 +2491,20 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
 
     const invoiceKey = invoiceText.toLowerCase();
     const detectedTotals = extractInvoiceTotals(invoiceText);
+    const detectedInvoiceNumber = extractInvoiceNumberFromText(invoiceText);
+    const detectedInvoiceDate = extractInvoiceDateFromText(invoiceText);
     const inferredDiscountAmount = detectedTotals.discountAmount || (
       detectedTotals.subtotalBeforeDiscount > 0 && detectedTotals.finalInvoiceTotal > 0 && detectedTotals.subtotalBeforeDiscount > detectedTotals.finalInvoiceTotal
         ? Number((detectedTotals.subtotalBeforeDiscount - detectedTotals.finalInvoiceTotal).toFixed(2))
         : 0
     );
-    const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : "");
+    const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : invoiceKey.includes("albion") ? "Albion Fine Foods" : "");
     const specificParsedLines = invoiceKey.includes("tg fruits")
       ? extractTgFruitsInvoiceRows(invoiceText)
       : invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
         ? parseEliteInvoiceRows(invoiceText)
+        : invoiceKey.includes("albion")
+          ? parseAlbionOrderRows(invoiceText)
         : [];
     const genericParsedLines = extractGenericInvoiceRows(invoiceText);
     const preParsedLines = specificParsedLines.length >= 2 ? specificParsedLines : genericParsedLines;
@@ -2453,6 +2515,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         ...current,
         supplier,
         invoiceText,
+        invoiceNumber: detectedInvoiceNumber || current.invoiceNumber,
+        date: detectedInvoiceDate || current.date || today(),
         items: buildInvoiceItems(preParsedLines, supplier),
         subtotalBeforeDiscount: detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
         discountAmount: inferredDiscountAmount || current.discountAmount,
@@ -2490,6 +2554,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         ? extractTgFruitsInvoiceRows(invoiceText)
         : supplierKey.includes("elite") || invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
           ? parseEliteInvoiceRows(invoiceText)
+          : supplierKey.includes("albion") || invoiceKey.includes("albion")
+            ? parseAlbionOrderRows(invoiceText)
           : [];
       const deterministicLines = specificDeterministicLines.length >= 2 ? specificDeterministicLines : extractGenericInvoiceRows(invoiceText);
       const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
@@ -2498,8 +2564,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       setDraft((current) => ({
         ...current,
         supplier,
-        invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
-        date: payload.invoiceDate || current.date || today(),
+        invoiceNumber: payload.invoiceNumber || detectedInvoiceNumber || current.invoiceNumber,
+        date: payload.invoiceDate || detectedInvoiceDate || current.date || today(),
         subtotalBeforeDiscount: numberValue(payload.subtotalBeforeDiscount || payload.subtotal || detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount, 0),
         discountAmount: numberValue(payload.discountAmount || inferredDiscountAmount || current.discountAmount, 0),
         discountPercent: numberValue(payload.discountPercent || current.discountPercent, 0),
