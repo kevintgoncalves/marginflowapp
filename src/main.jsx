@@ -1252,6 +1252,47 @@ function saveLocalStorage(key, value) {
   }
 }
 
+function readMarginFlowLocalStorage() {
+  const data = {};
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith("marginflow.")) data[key] = localStorage.getItem(key);
+    }
+  } catch {
+    return data;
+  }
+  return data;
+}
+
+function buildFullBackupPayload() {
+  const localStorageData = readMarginFlowLocalStorage();
+  return {
+    app: "MarginFlow",
+    appVersion: "0.1.0",
+    exportedAt: new Date().toISOString(),
+    localStorage: localStorageData,
+    ...localStorageData,
+  };
+}
+
+function downloadJsonFile(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function extractBackupLocalStorage(payload) {
+  if (payload?.localStorage && typeof payload.localStorage === "object") return payload.localStorage;
+  return Object.fromEntries(Object.entries(payload || {}).filter(([key]) => key.startsWith("marginflow.")));
+}
+
 function storedStateUpdater(setState, key) {
   return (value) => {
     setState((current) => {
@@ -4516,34 +4557,40 @@ function SettingsPanel({
     setEditingDepartmentId("");
   };
 
-  const backup = {
-    companySettings,
-    financialSettings,
-    departmentSettings,
-    menuSettings,
-    invoiceSettings,
-    aiSettings,
-    exportedAt: new Date().toISOString(),
-  };
-  const backupHref = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(backup, null, 2))}`;
   const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
   const genericSalesTemplate = "Date,Sales Type,Gross Sales,Net Sales,VAT Amount,Service Charge,Discounts,Refunds\n2026-06-10,Kitchen Made,2053.75,1821.49,232.26,0,0,0";
   const squareSalesTemplate = "Date,Category,Gross Sales,Net Sales,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Square Food - Make in,2053.75,1821.49,232.26,0,0,0";
   const lightspeedSalesTemplate = "Date,Category,Gross,Net,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Food,2053.75,1821.49,232.26,0,0,0";
 
-  const importBackup = async (file) => {
+  const exportFullBackup = () => {
+    const payload = buildFullBackupPayload();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    downloadJsonFile(`marginflow-full-backup-${stamp}.json`, payload);
+    setDataStatus(`Exported ${Object.keys(payload.localStorage).length} MarginFlow localStorage key(s).`);
+  };
+
+  const importFullBackup = async (file) => {
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
-      if (payload.companySettings) setCompanySettings({ ...defaultCompanySettings, ...payload.companySettings });
-      if (payload.financialSettings) setFinancialSettings({ ...defaultFinancialSettings, ...payload.financialSettings });
-      if (Array.isArray(payload.departmentSettings)) setDepartmentSettings(payload.departmentSettings);
-      if (payload.menuSettings) setMenuSettings({ ...defaultMenuSettings, ...payload.menuSettings });
-      if (payload.invoiceSettings) setInvoiceSettings({ ...defaultInvoiceSettings, ...payload.invoiceSettings });
-      if (payload.aiSettings) setAiSettings({ ...defaultAiSettings, ...payload.aiSettings });
-      setDataStatus("Backup imported.");
+      const backupStorage = extractBackupLocalStorage(payload);
+      const entries = Object.entries(backupStorage).filter(([key]) => key.startsWith("marginflow."));
+      if (!entries.length) {
+        setDataStatus("Import failed. This file does not contain MarginFlow localStorage keys.");
+        return;
+      }
+      const confirmed = window.confirm(`Import Full Backup will replace ${entries.length} existing MarginFlow browser data key(s) with values from this file. This does not clear other browser data. Continue?`);
+      if (!confirmed) {
+        setDataStatus("Full backup import cancelled.");
+        return;
+      }
+      entries.forEach(([key, value]) => {
+        localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
+      });
+      setDataStatus(`Imported ${entries.length} MarginFlow localStorage key(s). Reloading app...`);
+      window.setTimeout(() => window.location.reload(), 350);
     } catch {
-      setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
+      setDataStatus("Import failed. Choose a valid MarginFlow full backup JSON file.");
     }
   };
 
@@ -4675,8 +4722,8 @@ function SettingsPanel({
 
       <Panel title="Data settings">
         <div className="button-row left">
-          <a className="file-button secondary" download="marginflow-backup.json" href={backupHref}>Export backup</a>
-          <label className="file-button secondary">Import backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
+          <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
+          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
           <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
         </div>
