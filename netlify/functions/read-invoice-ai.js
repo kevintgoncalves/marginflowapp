@@ -677,8 +677,15 @@ function imageContentParts(invoiceImages) {
   }));
 }
 
-function buildPrompt(invoiceText, suppliers = [], products = [], hasImages = false, departments = [], supplierLearning = []) {
-  const knownSuppliers = suppliers.map((supplier) => supplier.name || supplier).filter(Boolean).join(", ");
+function buildPrompt(invoiceText, suppliers = [], products = [], hasImages = false, departments = [], supplierLearning = [], fileNames = []) {
+  const knownSuppliers = suppliers
+    .map((supplier) => {
+      if (typeof supplier === "string") return supplier;
+      const aliases = Array.isArray(supplier.aliases) ? supplier.aliases.join("/") : asString(supplier.aliases);
+      return `${supplier.name || supplier.supplier || ""}${aliases ? ` aliases: ${aliases}` : ""}`;
+    })
+    .filter(Boolean)
+    .join(", ");
   const knownProducts = products
     .map((product) => `${product.productName || product.name}${product.supplier ? ` (${product.supplier})` : ""}${product.packSize ? ` - ${product.packSize}` : ""}${product.aliases?.length ? ` aliases: ${product.aliases.join("/")}` : ""}`)
     .filter(Boolean)
@@ -746,6 +753,9 @@ ${learningText || "none provided"}
 Uploaded invoice image(s):
 ${hasImages ? "Provided in this request. Use them as the source of truth if text is empty or incomplete." : "none provided"}
 
+Uploaded file names:
+${(fileNames || []).filter(Boolean).join(", ") || "none provided"}
+
 Invoice text/OCR:
 ${invoiceText || "No OCR text supplied. Read the uploaded invoice image(s) directly."}`;
 }
@@ -806,7 +816,7 @@ export async function handler(event) {
             content: [
               {
                 type: "input_text",
-                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || [], invoiceImages.length > 0, payload.departments || [], payload.supplierLearning || []),
+                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || [], invoiceImages.length > 0, payload.departments || [], payload.supplierLearning || [], payload.fileNames || []),
               },
               ...imageContentParts(invoiceImages),
             ],

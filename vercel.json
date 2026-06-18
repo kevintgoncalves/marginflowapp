@@ -3,6 +3,10 @@
     {
       "source": "/.netlify/functions/read-invoice-ai",
       "destination": "/api/read-invoice-ai"
+    },
+    {
+      "source": "/.netlify/functions/import-sales-ai",
+      "destination": "/api/import-sales-ai"
     }
   ]
 }

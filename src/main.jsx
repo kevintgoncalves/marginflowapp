@@ -1158,6 +1158,203 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
   return salesRowsFromCsvMapping(dataRows, fallbackMapping, defaultVatRate, salesInputMethod).validRows;
 }
 
+function filenameDateInfo(fileName) {
+  const dates = [...String(fileName || "").matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)].map((match) => match[1]);
+  if (dates.length >= 2 && dates[0] !== dates[1]) return { date: "", dateRange: { start: dates[0], end: dates[1] } };
+  if (dates.length) return { date: dates[0], dateRange: null };
+  return { date: "", dateRange: null };
+}
+
+function smartImportDateLabel(importPreview) {
+  if (importPreview?.dateRange?.start && importPreview?.dateRange?.end) {
+    return `${formatRangeDate(importPreview.dateRange.start)} - ${formatRangeDate(importPreview.dateRange.end)}`;
+  }
+  return importPreview?.date ? formatRangeDate(importPreview.date) : "Not detected";
+}
+
+function displayReportType(value) {
+  const raw = String(value || "Generic CSV").replace(/[_-]+/g, " ").trim();
+  return raw ? raw.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Generic CSV";
+}
+
+function squareCategoryDepartment(category) {
+  const key = normalizeHeader(category);
+  if (key.includes("drink") || key.includes("bar") || key.includes("beverage")) return "Bar";
+  if (key.includes("boughtin") || key.includes("buyin") || key.includes("resale") || key.includes("retail")) return "Bought In";
+  if (key.includes("makein") || key.includes("madein") || key.includes("kitchen") || key.includes("foodmake")) return "Kitchen Made";
+  if (key.includes("other") || key.includes("excluded") || key.includes("nonfood")) return "Non-food";
+  return canonicalSalesDepartmentName(category);
+}
+
+function salesImportRow({
+  date,
+  department,
+  sourceCategory = "",
+  grossSales,
+  netSales,
+  vatAmount,
+  discounts = 0,
+  refunds = 0,
+  serviceCharge = 0,
+  importStatus = "Ready",
+}, defaultVatRate = 20) {
+  const gross = Number(numberValue(grossSales, 0).toFixed(2));
+  const net = Number(numberValue(netSales, 0).toFixed(2));
+  const vat = Number(numberValue(vatAmount, gross - net).toFixed(2));
+  const vatRate = net ? Number(((vat / net) * 100).toFixed(2)) : defaultVatRate;
+  return {
+    id: uid(),
+    date,
+    day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
+    department: canonicalSalesDepartmentName(department),
+    sourceCategory,
+    grossSales: gross,
+    sales: net,
+    vatRate,
+    vatAmount: vat,
+    effectiveVatRate: effectiveVatRate(gross, net),
+    discounts: Number(Math.abs(numberValue(discounts, 0)).toFixed(2)),
+    refunds: Number(Math.abs(numberValue(refunds, 0)).toFixed(2)),
+    serviceCharge: Number(numberValue(serviceCharge, 0).toFixed(2)),
+    importStatus,
+  };
+}
+
+function squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate = 20) {
+  const headers = csvRowsRaw[0] || [];
+  const dataRows = csvRowsRaw.slice(1);
+  const categoryIndex = findHeaderIndex(headers, ["categoryrollup"]);
+  const netIndex = findHeaderIndex(headers, ["netsales"]);
+  const grossIndex = findHeaderIndex(headers, ["grosssales"]);
+  const taxesIndex = findHeaderIndex(headers, ["taxes", "tax", "vat", "vatamount"]);
+  const discountsIndex = findHeaderIndex(headers, ["discountsandcomps", "discountscomps", "discounts", "discount"]);
+  const refundsIndex = findHeaderIndex(headers, ["refunds", "refund"]);
+  const dateIndex = findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]);
+  const requiredFields = [categoryIndex, netIndex, grossIndex];
+  if (requiredFields.some((index) => index < 0)) return null;
+
+  const dateInfo = filenameDateInfo(fileName);
+  const warnings = [];
+  if (dateIndex < 0 && !dateInfo.date && !dateInfo.dateRange) {
+    warnings.push("No date was detected in the CSV or filename. Review the import date before confirming.");
+  }
+  if (dateInfo.dateRange) {
+    warnings.push(`This file covers ${dateInfo.dateRange.start} to ${dateInfo.dateRange.end}. Rows will be posted against the range start date for dashboard filtering.`);
+  }
+
+  const fallbackDate = dateInfo.date || dateInfo.dateRange?.start || today();
+  const rows = dataRows
+    .map((cells) => {
+      const sourceCategory = cells[categoryIndex] || "Uncategorised";
+      const rowDate = dateIndex >= 0 ? normalizeImportDate(cells[dateIndex]) : fallbackDate;
+      return salesImportRow({
+        date: rowDate || fallbackDate,
+        department: squareCategoryDepartment(sourceCategory),
+        sourceCategory,
+        grossSales: parseCurrencyCell(cells[grossIndex]),
+        netSales: parseCurrencyCell(cells[netIndex]),
+        vatAmount: taxesIndex >= 0 ? parseCurrencyCell(cells[taxesIndex]) : undefined,
+        discounts: discountsIndex >= 0 ? parseCurrencyCell(cells[discountsIndex]) : 0,
+        refunds: refundsIndex >= 0 ? parseCurrencyCell(cells[refundsIndex]) : 0,
+      }, defaultVatRate);
+    })
+    .filter((row) => row.department !== "Total" && (row.grossSales || row.sales || row.vatAmount));
+
+  if (!rows.length) return null;
+
+  const optionalHits = [taxesIndex, discountsIndex, refundsIndex].filter((index) => index >= 0).length;
+  const confidence = Math.min(0.98, 0.9 + (optionalHits * 0.025));
+  return {
+    fileName,
+    source: "Square",
+    reportType: "Category roll-up",
+    reportTypeCode: "category_rollup",
+    confidence,
+    date: dateInfo.date || (dateInfo.dateRange ? "" : fallbackDate),
+    dateRange: dateInfo.dateRange,
+    departments: [...new Set(rows.map((row) => row.department))],
+    categories: [...new Set(rows.map((row) => row.sourceCategory).filter(Boolean))],
+    grossSalesTotal: rows.reduce((sum, row) => sum + row.grossSales, 0),
+    netSalesTotal: rows.reduce((sum, row) => sum + row.sales, 0),
+    vatTotal: rows.reduce((sum, row) => sum + row.vatAmount, 0),
+    rows,
+    warnings,
+    headers,
+    rawRows: dataRows,
+    csvRowsRaw,
+  };
+}
+
+function analyzeSalesCsvLocally(fileName, text, defaultVatRate = 20) {
+  const csvRowsRaw = parseCsvText(text);
+  if (!csvRowsRaw.length) return { csvRowsRaw, preview: null };
+  const headers = csvRowsRaw[0] || [];
+  const normalizedHeaders = headers.map(normalizeHeader);
+  const hasSquareCategoryRollup = ["categoryrollup", "netsales", "grosssales"].every((header) => normalizedHeaders.includes(header));
+  if (hasSquareCategoryRollup) return { csvRowsRaw, preview: squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate) };
+  return { csvRowsRaw, preview: null };
+}
+
+function normalizeSmartSalesImportFromAi(payload, fileName, csvRowsRaw, defaultVatRate = 20) {
+  const rowsInput = Array.isArray(payload?.rows) ? payload.rows : [];
+  const dateInfo = payload?.dateRange?.start && payload?.dateRange?.end
+    ? { date: "", dateRange: payload.dateRange }
+    : payload?.date
+      ? { date: normalizeImportDate(payload.date), dateRange: null }
+      : filenameDateInfo(fileName);
+  const fallbackDate = dateInfo.date || dateInfo.dateRange?.start || today();
+  const rows = rowsInput.map((row) => {
+    const sourceCategory = row.sourceCategory || row.category || "";
+    const department = canonicalSalesDepartmentName(row.department || squareCategoryDepartment(sourceCategory));
+    return salesImportRow({
+      date: normalizeImportDate(row.date) || fallbackDate,
+      department,
+      sourceCategory,
+      grossSales: row.grossSales,
+      netSales: row.netSales ?? row.sales,
+      vatAmount: row.vatAmount ?? row.tax ?? row.taxes,
+      discounts: row.discounts,
+      refunds: row.refunds,
+      serviceCharge: row.serviceCharge,
+      importStatus: "AI ready",
+    }, defaultVatRate);
+  }).filter((row) => row.department !== "Total" && row.grossSales > 0 && row.sales >= 0);
+  const confidence = Math.max(0, Math.min(1, numberValue(payload?.confidence, 0)));
+  if (confidence < 0.82 || !rows.length) return null;
+  return {
+    fileName,
+    source: payload.source || "Generic CSV",
+    reportType: displayReportType(payload.reportType || "Sales summary"),
+    reportTypeCode: payload.reportType || "sales_summary",
+    confidence,
+    date: dateInfo.date,
+    dateRange: dateInfo.dateRange,
+    departments: [...new Set(rows.map((row) => row.department))],
+    categories: [...new Set(rows.map((row) => row.sourceCategory).filter(Boolean))],
+    grossSalesTotal: rows.reduce((sum, row) => sum + row.grossSales, 0),
+    netSalesTotal: rows.reduce((sum, row) => sum + row.sales, 0),
+    vatTotal: rows.reduce((sum, row) => sum + row.vatAmount, 0),
+    rows,
+    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+    headers: csvRowsRaw[0] || [],
+    rawRows: csvRowsRaw.slice(1),
+    csvRowsRaw,
+  };
+}
+
+async function readSalesCsvWithAi(fileName, csvRowsRaw, defaultVatRate = 20) {
+  const headers = csvRowsRaw[0] || [];
+  const sampleRows = csvRowsRaw.slice(1, 21);
+  const response = await fetch("/.netlify/functions/import-sales-ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileName, headers, sampleRows }),
+  });
+  const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
+  if (!response.ok) throw new Error(payload.detail || payload.error || "AI sales import failed");
+  return normalizeSmartSalesImportFromAi(payload, fileName, csvRowsRaw, defaultVatRate);
+}
+
 function csvRows(text) {
   return text
     .split(/\r?\n/)
@@ -2723,6 +2920,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         body: JSON.stringify({
           invoiceText,
           invoiceImages,
+          fileNames: draft.files.map((file) => file.name),
           suppliers,
           departments: departmentNames,
           supplierLearning: invoices
@@ -5360,6 +5558,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
   const [pendingImport, setPendingImport] = useState([]);
   const [importFileKey, setImportFileKey] = useState(0);
   const [csvWizard, setCsvWizard] = useState(null);
+  const [smartSalesImport, setSmartSalesImport] = useState(null);
   const departmentOptions = ["Total", ...departmentNames];
   const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
   const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
@@ -5412,10 +5611,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     setStatus("Sales saved");
   };
 
-  const importSales = async (file) => {
-    if (!file) return;
-    const text = await file.text();
-    const csvRowsRaw = parseCsvText(text);
+  const openCsvWizardFromRows = (fileName, csvRowsRaw, statusPrefix = "CSV") => {
     if (!csvRowsRaw.length) {
       setStatus("CSV import found no readable rows.");
       return;
@@ -5435,8 +5631,41 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       saveTemplate: false,
     });
     setStatus(preview.validRows.length
-      ? `${preview.validRows.length} CSV row(s) detected. Review mapping before import.`
+      ? `${preview.validRows.length} ${statusPrefix} row(s) detected. Review mapping before import.`
       : `CSV headers detected: ${headers.join(", ") || "No headers"}. Map the columns manually.`);
+  };
+
+  const importSales = async (file) => {
+    if (!file) return;
+    setCsvWizard(null);
+    setSmartSalesImport(null);
+    setStatus("Analysing sales CSV...");
+    const text = await file.text();
+    const { csvRowsRaw, preview } = analyzeSalesCsvLocally(file.name, text, defaultVatRate);
+    if (!csvRowsRaw.length) {
+      setStatus("CSV import found no readable rows.");
+      return;
+    }
+
+    if (preview?.confidence >= 0.85 && preview.rows.length) {
+      setSmartSalesImport(preview);
+      setStatus(`${preview.source} ${preview.reportType.toLowerCase()} detected. Review the clean preview before confirming.`);
+      return;
+    }
+
+    try {
+      setStatus("Asking AI to analyse this sales CSV...");
+      const aiPreview = await readSalesCsvWithAi(file.name, csvRowsRaw, defaultVatRate);
+      if (aiPreview?.confidence >= 0.82 && aiPreview.rows.length) {
+        setSmartSalesImport(aiPreview);
+        setStatus(`AI detected ${aiPreview.rows.length} sales row(s). Review before confirming.`);
+        return;
+      }
+      openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
+    } catch (error) {
+      openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
+      setStatus(`AI could not confidently read this CSV. Advanced mapping is open. ${error.message}`);
+    }
   };
 
   const updateCsvMapping = (field, value) => {
@@ -5473,6 +5702,30 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       : `${preview.validRows.length} sales row(s) ready for review.`);
   };
 
+  const openAdvancedOptions = () => {
+    if (!smartSalesImport) return;
+    openCsvWizardFromRows(smartSalesImport.fileName, smartSalesImport.csvRowsRaw || [smartSalesImport.headers, ...smartSalesImport.rawRows], "CSV");
+    setSmartSalesImport(null);
+  };
+
+  const confirmSmartSalesImport = () => {
+    if (!smartSalesImport?.rows?.length) {
+      setStatus("No smart import rows are ready yet.");
+      return;
+    }
+    const rowsToImport = smartSalesImport.rows.map((row) => ({ ...row, id: uid() }));
+    setSales((current) => [...rowsToImport, ...current]);
+    setSmartSalesImport(null);
+    setImportFileKey((current) => current + 1);
+    setStatus(`${rowsToImport.length} sales row(s) imported from ${smartSalesImport.source}.`);
+  };
+
+  const cancelSmartSalesImport = () => {
+    setSmartSalesImport(null);
+    setImportFileKey((current) => current + 1);
+    setStatus("Sales import cancelled.");
+  };
+
   const confirmImport = () => {
     setSales((current) => [...pendingImport, ...current]);
     setPendingImport([]);
@@ -5490,9 +5743,17 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     <Panel title="Sales input" action="Manual or CSV">
       <div className="button-row left">
         <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>
-        <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
+        <label className="file-button secondary">Smart CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
+      {smartSalesImport && (
+        <SmartSalesImportPreview
+          onAdvanced={openAdvancedOptions}
+          onCancel={cancelSmartSalesImport}
+          onConfirm={confirmSmartSalesImport}
+          preview={smartSalesImport}
+        />
+      )}
       {csvWizard && (
         <SalesCsvImportWizard
           defaultVatRate={defaultVatRate}
@@ -5659,6 +5920,53 @@ function SalesComparisonBars({ title, current, previous, currentRange, previousR
           <small className="comparison-date">{currentRangeLabel}</small>
           <strong>{money(current)}</strong>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SmartSalesImportPreview({ onAdvanced, onCancel, onConfirm, preview }) {
+  const confidence = Math.round(numberValue(preview.confidence, 0) * 100);
+  return (
+    <div className="import-review smart-import-preview">
+      <div className="panel-head">
+        <h2>Smart sales import preview</h2>
+        <span>{confidence}% confidence</span>
+      </div>
+      <div className="wizard-summary">
+        <div><span>Detected source</span><strong>{preview.source}</strong></div>
+        <div><span>Report type</span><strong>{displayReportType(preview.reportType)}</strong></div>
+        <div><span>Date / range</span><strong>{smartImportDateLabel(preview)}</strong></div>
+        <div><span>Rows ready</span><strong>{preview.rows.length}</strong></div>
+        <div><span>Gross sales</span><strong>{money(preview.grossSalesTotal)}</strong></div>
+        <div><span>Net sales</span><strong>{money(preview.netSalesTotal)}</strong></div>
+        <div><span>VAT / tax</span><strong>{money(preview.vatTotal)}</strong></div>
+        <div><span>Departments</span><strong>{preview.departments.join(", ") || "None"}</strong></div>
+      </div>
+      {preview.categories?.length > 0 && (
+        <div className="stocktake-summary">
+          <span>Categories detected</span>
+          <strong>{preview.categories.join(", ")}</strong>
+        </div>
+      )}
+      {preview.warnings?.length > 0 && <div className="invoice-status warn">{preview.warnings.join(" ")}</div>}
+      <DataTable
+        columns={[
+          { key: "date", label: "Date" },
+          { key: "department", label: "Department" },
+          { key: "sourceCategory", label: "Source category" },
+          { key: "grossSales", label: "Gross", render: money },
+          { key: "sales", label: "Net", render: money },
+          { key: "vatAmount", label: "VAT", render: money },
+          { key: "discounts", label: "Discounts", render: money },
+          { key: "refunds", label: "Refunds", render: money },
+        ]}
+        rows={preview.rows.slice(0, 50)}
+      />
+      <div className="button-row left">
+        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Import</button>
+        <button className="secondary" onClick={onAdvanced} type="button"><Settings size={16} />Advanced options</button>
+        <button className="ghost danger" onClick={onCancel} type="button"><X size={16} />Cancel</button>
       </div>
     </div>
   );

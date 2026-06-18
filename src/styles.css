@@ -454,6 +454,10 @@ label {
   border-color: rgba(59, 130, 246, 0.28);
   color: #bfdbfe;
 }
+.invoice-status.warn {
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -1201,6 +1205,18 @@ code {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #111c31;
+}
+
+.smart-import-preview {
+  overflow: hidden;
+}
+
+.smart-import-preview .wizard-summary,
+.smart-import-preview .stocktake-summary,
+.smart-import-preview .table-toolbar,
+.smart-import-preview .table-wrap {
+  margin-left: 18px;
+  margin-right: 18px;
 }
 
 .modal-header {
