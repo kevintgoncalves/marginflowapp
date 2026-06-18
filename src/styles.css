@@ -659,6 +659,25 @@ td input, td select { min-width: 110px; }
   gap: 7px;
 }
 
+.modal-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 14px;
+}
+
+.modal-tabs button {
+  min-height: 36px;
+  padding: 0 12px;
+  background: #142035;
+  color: var(--muted);
+}
+
+.modal-tabs button.active {
+  background: var(--primary);
+  color: white;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -740,12 +759,12 @@ td input, td select { min-width: 110px; }
 .actual-line {
   fill: none;
   stroke: url("#gpLineGradient");
-  stroke-width: 3;
+  stroke-width: 2;
   vector-effect: non-scaling-stroke;
 }
 
 .smooth-line {
-  filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.35));
+  filter: none;
 }
 
 .gp-area {
@@ -759,10 +778,9 @@ td input, td select { min-width: 110px; }
   vector-effect: non-scaling-stroke;
 }
 
-.chart-point {
-  fill: var(--primary);
-  stroke: #dbeafe;
-  stroke-width: 0.7;
+.chart-hover-line {
+  stroke: transparent;
+  stroke-width: 7;
   vector-effect: non-scaling-stroke;
 }
 

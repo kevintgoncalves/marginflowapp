@@ -310,6 +310,19 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function canonicalDepartmentName(value, fallback = "Kitchen Made") {
+  const raw = String(value || fallback || "").trim();
+  if (!raw) return fallback;
+  const key = raw.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "");
+  if (["alldepartments", "all"].includes(key)) return "All departments";
+  if (["total", "totalsales", "allvenue", "venue"].includes(key)) return "Total";
+  if (["kitchenmade", "kitchen", "food", "foods"].includes(key)) return "Kitchen Made";
+  if (["boughtin", "bought", "buyin", "boughtinfood"].includes(key)) return "Bought In";
+  if (key === "bar") return "Bar";
+  if (["nonfood", "nonfoods", "nonfoodexcluded", "excluded"].includes(key)) return "Non-food";
+  return raw;
+}
+
 function netFromGross(gross, vatRate = 20) {
   const divisor = 1 + (numberValue(vatRate, 0) / 100);
   return divisor ? Number((numberValue(gross, 0) / divisor).toFixed(2)) : numberValue(gross, 0);
@@ -336,6 +349,13 @@ function netSalesForRow(row) {
 
 function salesBaseForRow(row, gpCalculationBase = "Net Sales") {
   return gpCalculationBase === "Gross Sales" ? numberValue(row?.grossSales) : netSalesForRow(row);
+}
+
+function hasDepartmentSpecificSalesRows(salesRows) {
+  return salesRows.some((row) => {
+    const department = canonicalDepartmentName(row.department, "Total");
+    return department && department !== "Total";
+  });
 }
 
 function lineTotal(item) {
@@ -718,7 +738,7 @@ function normalizeInvoiceUnitCost(item) {
 }
 
 function defaultDepartmentSplits(department = "Kitchen Made") {
-  return [{ id: uid(), department: department || "Kitchen Made", percentage: 100 }];
+  return [{ id: uid(), department: canonicalDepartmentName(department, "Kitchen Made"), percentage: 100 }];
 }
 
 function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
@@ -728,7 +748,7 @@ function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
 
   return source.map((split) => ({
     id: split.id || uid(),
-    department: split.department || fallbackDepartment,
+    department: canonicalDepartmentName(split.department, fallbackDepartment),
     percentage: numberValue(split.percentage, 0),
   }));
 }
@@ -764,7 +784,8 @@ function invoiceTotal(invoice) {
 }
 
 function departmentMatches(rowDepartment, selectedDepartment) {
-  return selectedDepartment === "All departments" || rowDepartment === selectedDepartment;
+  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
+  return selected === "All departments" || canonicalDepartmentName(rowDepartment, "") === selected;
 }
 
 function compactPlural(token) {
@@ -1022,7 +1043,7 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
         id: uid(),
         date,
         day: new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-        department: departmentNames.includes(department) ? department : department || "Total",
+        department: canonicalDepartmentName(department, "Total"),
         grossSales,
         sales,
         vatRate,
@@ -1109,7 +1130,7 @@ function normalizeSalesRows(rows) {
     return {
       ...row,
       id: row.id || uid(),
-      department: row.department || "Total",
+      department: canonicalDepartmentName(row.department, "Total"),
       grossSales,
       vatRate,
       sales,
@@ -1289,10 +1310,39 @@ function creditNotesForInvoice(invoice) {
       product: item.productName,
       quantity: numberValue(item.quantity, 0),
       value: originalLineTotal(item),
+      grossValue: originalLineTotal(item),
+      netValue: originalLineTotal(item),
       reason: item.creditReason || invoiceLineStatus(item),
       status: "To chase",
       notes: "",
     }));
+}
+
+function issueValue(note) {
+  return numberValue(note.netValue, numberValue(note.grossValue, numberValue(note.value, 0)));
+}
+
+function isOpenSupplierIssue(note) {
+  return ["To chase", "Chased"].includes(note.status || "To chase");
+}
+
+function supplierIssueSummary(creditNotes, supplierName) {
+  const issues = creditNotes.filter((note) => note.supplier === supplierName);
+  const openIssues = issues.filter(isOpenSupplierIssue);
+  return {
+    issues,
+    openIssues: openIssues.length,
+    valueToChase: openIssues.reduce((sum, note) => sum + issueValue(note), 0),
+  };
+}
+
+function syncCreditNotesForInvoice(current, invoice) {
+  const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
+  const generated = creditNotesForInvoice(invoice).map((note) => {
+    const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
+    return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
+  });
+  return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
 }
 
 function extractInvoiceTotals(invoiceText = "") {
@@ -1334,11 +1384,11 @@ function extractInvoiceDateFromText(invoiceText = "") {
   return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
 }
 
-function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
+function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
   return suppliers.map((supplier) => {
     const spend = invoices
       .filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange))
-      .reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+      .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
     return { ...supplier, spend };
   });
 }
@@ -1374,39 +1424,46 @@ function openingStockValue(stocktakes, selectedDepartment, departmentNames = def
 }
 
 function salesForDepartment(salesRows, selectedDepartment, gpCalculationBase = "Net Sales") {
+  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  if (selectedDepartment === "All departments") {
+  if (selected === "All departments") {
     return totalRows.length
       ? totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0)
       : salesRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
   }
 
-  const departmentRows = salesRows.filter((row) => row.department === selectedDepartment);
-  return departmentRows.length
-    ? departmentRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0)
-    : totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
+  const departmentRows = salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+  if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
+    return totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
+  }
+  return departmentRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
 }
 
 function grossSalesForDepartment(salesRows, selectedDepartment) {
+  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  if (selectedDepartment === "All departments") {
+  if (selected === "All departments") {
     return totalRows.length
       ? totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
       : salesRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
   }
-  const departmentRows = salesRows.filter((row) => row.department === selectedDepartment);
-  return departmentRows.length
-    ? departmentRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
-    : totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+  const departmentRows = salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+  if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
+    return totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+  }
+  return departmentRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
 }
 
 function vatForDepartment(salesRows, selectedDepartment) {
+  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  const rows = selectedDepartment === "All departments"
+  const rows = selected === "All departments"
     ? (totalRows.length ? totalRows : salesRows)
-    : salesRows.filter((row) => row.department === selectedDepartment);
-  const fallbackRows = rows.length ? rows : totalRows;
-  return fallbackRows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
+    : salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+  if (!rows.length && selected !== "All departments" && !hasDepartmentSpecificSalesRows(salesRows)) {
+    return totalRows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
+  }
+  return rows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
 }
 
 function purchasesForDepartment(invoices, selectedDepartment) {
@@ -1424,8 +1481,8 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
   const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
-  const salesTotal = salesForDepartment(salesRows, selectedDepartment, financialSettings.gpCalculationBase || "Net Sales");
   const netSales = salesForDepartment(salesRows, selectedDepartment, "Net Sales");
+  const salesTotal = netSales;
   const grossSales = grossSalesForDepartment(salesRows, selectedDepartment);
   const vat = vatForDepartment(salesRows, selectedDepartment);
   const purchases = purchasesForDepartment(filteredInvoices, selectedDepartment);
@@ -1944,6 +2001,7 @@ function App() {
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
+  const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
@@ -2004,14 +2062,7 @@ function App() {
         ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
         : [invoice, ...current]
     ));
-    setCreditNotes((current) => {
-      const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
-      const generated = creditNotesForInvoice(invoice).map((note) => {
-        const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
-        return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
-      });
-      return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
-    });
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
     setDraft(emptyInvoiceDraft());
@@ -2089,7 +2140,7 @@ function App() {
             setDateRangeState={setDateRangeState}
             stocktakes={stocktakes}
             suppliers={suppliers}
-            supplierSpend={supplierSpend}
+            supplierSpend={departmentSupplierSpend}
             wasteItems={wasteItems}
           />
         )}
@@ -2113,7 +2164,7 @@ function App() {
           />
         )}
         {active === "products" && <Products departmentNames={departmentNames} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers requestDelete={requestDelete} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
+        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
         {active === "stocktake" && (
           <Stocktake
             department={department}
@@ -2145,7 +2196,7 @@ function App() {
             setSales={setSales}
             stocktakes={stocktakes}
             suppliers={suppliers}
-            supplierSpend={supplierSpend}
+            supplierSpend={departmentSupplierSpend}
             wasteItems={wasteItems}
           />
         )}
@@ -2247,11 +2298,11 @@ function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn
   return { current: currentCustom, previous: previousCustom };
 }
 
-function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget, gpCalculationBase }) {
+function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
   return (
     <div className="metric-grid performance-grid">
       <Metric label="Gross Sales" value={money(metrics.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-      <Metric label="Net Sales" value={money(metrics.netSales)} delta={gpCalculationBase === "Net Sales" ? "Used for GP" : "Reference only"} />
+      <Metric label="Net Sales" value={money(metrics.netSales)} delta="Used for GP" />
       <Metric label="Purchases" value={money(metrics.purchases)} delta={department} />
       <Metric label="Invoice GP %" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
       <Metric label="Stocktake GP %" value={percent(metrics.stocktakeGp)} delta="Opening + purchases - closing" tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
@@ -2271,7 +2322,7 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
         <EmptyState />
       ) : (
         <div className="metric-grid compact">
-          <Metric label="Net Sales change" value={percent(changePercent(metrics.sales, comparisonMetrics.sales))} delta={`${money(comparisonMetrics.sales)} comparison`} tone={metrics.sales >= comparisonMetrics.sales ? "good" : "warn"} />
+          <Metric label="Net Sales change" value={percent(changePercent(metrics.netSales, comparisonMetrics.netSales))} delta={`${money(comparisonMetrics.netSales)} comparison`} tone={metrics.netSales >= comparisonMetrics.netSales ? "good" : "warn"} />
           <Metric label="Purchases change" value={percent(changePercent(metrics.purchases, comparisonMetrics.purchases))} delta={`${money(comparisonMetrics.purchases)} comparison`} tone={metrics.purchases <= comparisonMetrics.purchases ? "good" : "warn"} />
           <Metric label="GP change" value={percent(metrics.invoiceGp - comparisonMetrics.invoiceGp)} delta={`${percent(comparisonMetrics.invoiceGp)} comparison`} tone={metrics.invoiceGp >= comparisonMetrics.invoiceGp ? "good" : "warn"} />
           <Metric label="Waste change" value={percent(changePercent(metrics.waste, comparisonMetrics.waste))} delta={`${money(comparisonMetrics.waste)} comparison`} tone={metrics.waste <= comparisonMetrics.waste ? "good" : "warn"} />
@@ -2324,7 +2375,7 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
       <Panel title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
-      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} gpCalculationBase={financialSettings.gpCalculationBase || "Net Sales"} />
+      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
       <PerformanceCharts departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
       {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
@@ -2333,7 +2384,10 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
 }
 
 function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
-  const recentInvoices = [...metrics.invoices].sort((a, b) => b.date.localeCompare(a.date));
+  const recentInvoices = [...metrics.invoices]
+    .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, department, invoice), 0) }))
+    .filter((invoice) => department === "All departments" || invoice.departmentTotal > 0)
+    .sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <>
@@ -2345,7 +2399,7 @@ function Dashboard({ dateRange, dateRangeState, department, departmentNames, dep
               { key: "invoiceNumber", label: "Invoice" },
               { key: "supplier", label: "Supplier" },
               { key: "date", label: "Date" },
-              { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
+              { key: "total", label: "Total", render: (_, row) => money(row.departmentTotal) },
             ]}
             rows={recentInvoices}
           />
@@ -2742,7 +2796,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       items: normalizedItems,
     });
     setInvoices((current) => [invoice, ...current]);
-    setCreditNotes((current) => [...current, ...creditNotesForInvoice(invoice)]);
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
     setDraft(emptyInvoiceDraft());
@@ -2807,14 +2861,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       items: normalizedItems,
     });
     setInvoices((current) => current.map((item) => (item.id === invoice.id ? invoice : item)));
-    setCreditNotes((current) => {
-      const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
-      const generated = creditNotesForInvoice(invoice).map((note) => {
-        const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
-        return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
-      });
-      return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
-    });
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
     setEditInvoiceModal(null);
@@ -2837,6 +2884,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       ...creditNoteModal,
       quantity: numberValue(creditNoteModal.quantity, 0),
       value: numberValue(creditNoteModal.value, 0),
+      grossValue: numberValue(creditNoteModal.grossValue, numberValue(creditNoteModal.value, 0)),
+      netValue: numberValue(creditNoteModal.netValue, numberValue(creditNoteModal.value, 0)),
     };
     setCreditNotes((current) => current.map((note) => (note.id === payload.id ? payload : note)));
     setCreditNoteModal(null);
@@ -3074,7 +3123,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
             { key: "date", label: "Date" },
             { key: "product", label: "Product" },
             { key: "quantity", label: "Quantity" },
-            { key: "value", label: "Value", render: (value) => money(value) },
+            { key: "value", label: "Value", render: (_, row) => money(issueValue(row)) },
             { key: "reason", label: "Reason" },
             { key: "status", label: "Status", render: (value) => <Badge tone={value === "Credit received" ? "green" : value === "Rejected" ? "red" : "amber"}>{value}</Badge> },
             { key: "notes", label: "Notes" },
@@ -3615,7 +3664,7 @@ function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRo
   );
 }
 
-function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
+function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNotes, suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -3625,10 +3674,42 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
   const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [activeSupplierTab, setActiveSupplierTab] = useState("Details");
+  const supplierRows = supplierSpend.map((supplier) => {
+    const summary = supplierIssueSummary(creditNotes, supplier.name);
+    return { ...supplier, openIssues: summary.openIssues, valueToChase: summary.valueToChase };
+  });
+  const supplierTabs = ["Details", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
+  const selectedSupplierName = form.name;
+  const selectedSupplierIssues = creditNotes.filter((note) => note.supplier === selectedSupplierName);
+  const selectedSupplierInvoices = invoices
+    .filter((invoice) => invoice.supplier === selectedSupplierName)
+    .map((invoice) => ({ ...invoice, issueCount: creditNotes.filter((note) => note.invoiceId === invoice.id).length }));
+  const selectedSupplierProducts = products.filter((product) => product.supplier === selectedSupplierName);
+  const selectedSupplierPriceHistory = products.flatMap((product) => (
+    (product.priceHistory || [])
+      .filter((entry) => entry.supplier === selectedSupplierName)
+      .map((entry, index) => ({
+        id: `${product.id}-${entry.date}-${index}`,
+        product: product.name,
+        date: entry.date,
+        supplier: entry.supplier,
+        price: entry.price,
+      }))
+  ));
 
   const saveSupplier = () => {
     if (!form.name.trim()) return;
-    setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...form } : supplier)));
+    const payload = {
+      id: editingId,
+      name: form.name,
+      category: form.category,
+      contact: form.contact,
+      email: form.email,
+      phone: form.phone,
+      active: Boolean(form.active),
+    };
+    setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...payload } : supplier)));
     setForm(empty);
     setEditingId("");
     setModalOpen(false);
@@ -3678,8 +3759,9 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
 
   const openSupplierModal = (row = null) => {
     if (row) {
-      setForm(row);
+      setForm({ ...empty, ...row });
       setEditingId(row.id);
+      setActiveSupplierTab("Details");
       setModalOpen(true);
       return;
     }
@@ -3687,7 +3769,12 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
     setPendingImport([]);
     setStatus("");
     setEditingId("");
+    setActiveSupplierTab("Details");
     setModalOpen(true);
+  };
+
+  const updateIssue = (id, patch) => {
+    setCreditNotes((current) => current.map((note) => (note.id === id ? { ...note, ...patch } : note)));
   };
 
   return (
@@ -3701,11 +3788,13 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
             { key: "email", label: "Email" },
             { key: "phone", label: "Phone" },
             { key: "spend", label: "Spend total", render: (value) => money(value) },
+            { key: "openIssues", label: "Open issues", render: (value) => value > 0 ? <Badge tone="amber">{value} open</Badge> : <Badge tone="green">0</Badge> },
+            { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
           onDelete={(id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) })}
           onEdit={openSupplierModal}
-          rows={supplierSpend}
+          rows={supplierRows}
           toolbarAction={<button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button>}
         />
       </Panel>
@@ -3748,14 +3837,81 @@ function Suppliers({ requestDelete, suppliers, setSuppliers, supplierSpend }) {
       )}
       {modalOpen && editingId && (
         <EditModal title="Edit supplier" onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
-          <div className="form-grid six">
-            <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
-            <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
-            <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-            <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
-            <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+          <div className="modal-tabs">
+            {supplierTabs.map((tab) => (
+              <button className={activeSupplierTab === tab ? "active" : ""} key={tab} onClick={() => setActiveSupplierTab(tab)} type="button">{tab}</button>
+            ))}
           </div>
+          {activeSupplierTab === "Details" && (
+            <div className="form-grid six">
+              <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+              <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
+              <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
+              <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+              <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
+              <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+            </div>
+          )}
+          {activeSupplierTab === "Invoices" && (
+            <DataTable
+              columns={[
+                { key: "invoiceNumber", label: "Invoice" },
+                { key: "date", label: "Date" },
+                { key: "items", label: "Lines", render: (items) => items.length },
+                { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
+                { key: "issueCount", label: "Issues", render: (value) => value > 0 ? <Badge tone="amber">{value}</Badge> : <Badge tone="green">0</Badge> },
+              ]}
+              rows={selectedSupplierInvoices}
+            />
+          )}
+          {activeSupplierTab === "Products" && (
+            <DataTable
+              columns={[
+                { key: "name", label: "Product" },
+                { key: "packSize", label: "Pack size" },
+                { key: "quantity", label: "Quantity" },
+                { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
+                { key: "department", label: "Department" },
+              ]}
+              rows={selectedSupplierProducts}
+            />
+          )}
+          {activeSupplierTab === "Credit Notes / Issues" && (
+            <DataTable
+              columns={[
+                { key: "invoiceNumber", label: "Invoice" },
+                { key: "date", label: "Invoice date" },
+                { key: "product", label: "Product" },
+                { key: "quantity", label: "Quantity" },
+                { key: "value", label: "Value", render: (_, row) => money(issueValue(row)) },
+                { key: "reason", label: "Reason" },
+                { key: "status", label: "Status", render: (_, row) => (
+                  <select value={row.status || "To chase"} onChange={(event) => updateIssue(row.id, { status: event.target.value })}>
+                    {creditNoteStatuses.map((statusOption) => <option key={statusOption}>{statusOption}</option>)}
+                  </select>
+                ) },
+                { key: "notes", label: "Notes", render: (_, row) => <input value={row.notes || ""} onChange={(event) => updateIssue(row.id, { notes: event.target.value })} /> },
+                { key: "actions", label: "Actions", render: (_, row) => (
+                  <div className="row-actions">
+                    <button className="ghost" onClick={() => updateIssue(row.id, { status: "Chased" })} type="button">Chased</button>
+                    <button className="ghost" onClick={() => updateIssue(row.id, { status: "Credit received" })} type="button">Received</button>
+                    <button className="ghost danger" onClick={() => updateIssue(row.id, { status: "Rejected" })} type="button">Reject</button>
+                  </div>
+                ) },
+              ]}
+              rows={selectedSupplierIssues}
+            />
+          )}
+          {activeSupplierTab === "Price History" && (
+            <DataTable
+              columns={[
+                { key: "date", label: "Date" },
+                { key: "product", label: "Product" },
+                { key: "price", label: "Price", render: (value) => money(value) },
+              ]}
+              rows={selectedSupplierPriceHistory}
+            />
+          )}
         </EditModal>
       )}
     </div>
@@ -5104,6 +5260,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       ...form,
       id: editingId || uid(),
       day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
+      department: canonicalDepartmentName(form.department, "Total"),
       grossSales,
       sales: netSales,
       vatRate,
@@ -5795,9 +5952,6 @@ function DailyGpChart({ rows, targetGp }) {
     const controlOffset = (point.x - previous.x) / 2;
     return `${path} C ${previous.x + controlOffset} ${previous.y}, ${point.x - controlOffset} ${point.y}, ${point.x} ${point.y}`;
   }, "");
-  const areaPath = points.length
-    ? `${smoothPath} L ${points.at(-1).x} 92 L ${points[0].x} 92 Z`
-    : "";
   const targetY = y(targetGp);
 
   return (
@@ -5808,18 +5962,13 @@ function DailyGpChart({ rows, targetGp }) {
             <stop offset="0%" stopColor="#38bdf8" />
             <stop offset="100%" stopColor="#60a5fa" />
           </linearGradient>
-          <linearGradient id="gpAreaGradient" x1="0%" x2="0%" y1="0%" y2="100%">
-            <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.26" />
-            <stop offset="100%" stopColor="#60a5fa" stopOpacity="0" />
-          </linearGradient>
         </defs>
-        {areaPath && <path className="gp-area" d={areaPath} fill="url(#gpAreaGradient)" />}
         <line className="target-line" x1="8" x2="92" y1={targetY} y2={targetY} />
         <path className="actual-line smooth-line" d={smoothPath} stroke="url(#gpLineGradient)" />
         {validRows.map((row, index) => (
-          <circle className="chart-point" cx={x(index)} cy={y(row.invoiceGp)} key={row.id} r="1.6">
+          <line className="chart-hover-line" key={row.id} x1={x(index)} x2={x(index)} y1="8" y2="92">
             <title>{`${row.date}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
-          </circle>
+          </line>
         ))}
       </svg>
       <div className="chart-legend"><span><i className="legend-actual" />Actual GP %</span><span><i className="legend-target" />Target GP %</span></div>
