@@ -1,6 +1,6 @@
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-const DEFAULT_MODEL = "gpt-4o-mini";
-const FUNCTION_VERSION = "read-invoice-ai-image-input-2026-06-17";
+const DEFAULT_MODEL = "gpt-4o";
+const FUNCTION_VERSION = "read-invoice-ai-agent-2026-06-18";
 const MAX_IMAGE_INPUTS = 8;
 const SUPPORTED_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp|gif);base64,/i;
 
@@ -257,6 +257,75 @@ function cleanProductName(productName = "") {
     .trim();
 }
 
+
+function extractTotalsFromText(sourceText) {
+  const text = String(sourceText || "").replace(/\r/g, "\n");
+  const compact = text.replace(/\s+/g, " ");
+  const money = "£?\\s*(-?\\d+(?:[.,]\\d{1,3})?)";
+  const subtotalPatterns = [
+    new RegExp(`\\b(?:subtotal|sub total|goods total|net value)\\b\\s*[:=-]?\\s*${money}`, "i"),
+    new RegExp(`\\b(?:total before discount)\\b\\s*[:=-]?\\s*${money}`, "i"),
+  ];
+  const discountPatterns = [
+    new RegExp(`\\b(?:less discount|discount|discounts? & comps)\\b\\s*[:=-]?\\s*${money}`, "i"),
+  ];
+  const totalPatterns = [
+    new RegExp(`\\b(?:invoice total|grand total|amount due|total)\\b\\s*[:=-]?\\s*${money}`, "i"),
+  ];
+
+  const firstMatch = (patterns) => {
+    for (const pattern of patterns) {
+      const match = compact.match(pattern);
+      if (match?.[1]) return Math.abs(asNumber(match[1].replace(",", "."), 0));
+    }
+    return 0;
+  };
+
+  let subtotalBeforeDiscount = firstMatch(subtotalPatterns);
+  let discountAmount = firstMatch(discountPatterns);
+  let finalInvoiceTotal = firstMatch(totalPatterns);
+
+  // Coburn & Baker style: product lines, then a subtotal, then "Less Discount", then TOTAL on following line.
+  const coburnTotal = compact.match(/(?:\n|\s)(\d+(?:[.,]\d{2,3}))\s+Less Discount\s+(\d+(?:[.,]\d{2,3}))\s+TOTAL\s+(\d+(?:[.,]\d{2,3}))/i);
+  if (coburnTotal) {
+    subtotalBeforeDiscount = asNumber(coburnTotal[1].replace(",", "."), subtotalBeforeDiscount);
+    discountAmount = asNumber(coburnTotal[2].replace(",", "."), discountAmount);
+    finalInvoiceTotal = asNumber(coburnTotal[3].replace(",", "."), finalInvoiceTotal);
+  }
+
+  if (!discountAmount && subtotalBeforeDiscount && finalInvoiceTotal && subtotalBeforeDiscount > finalInvoiceTotal) {
+    discountAmount = Number((subtotalBeforeDiscount - finalInvoiceTotal).toFixed(3));
+  }
+
+  const discountPercent = subtotalBeforeDiscount > 0 && discountAmount > 0
+    ? Number(((discountAmount / subtotalBeforeDiscount) * 100).toFixed(3))
+    : 0;
+
+  return { subtotalBeforeDiscount, discountAmount, discountPercent, finalInvoiceTotal };
+}
+
+function parseCoburnBakeryRows(sourceText) {
+  const rows = [];
+  const lines = String(sourceText || "").replace(/\r/g, "\n").split(/\n+/);
+  const rowPattern = /^\s*(\d{3,6})\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2,3}))\s+(\d+(?:[.,]\d{2,3}))(?:\s+.*)?$/i;
+  for (const line of lines) {
+    const trimmed = line.replace(/\s+/g, " ").trim();
+    const match = trimmed.match(rowPattern);
+    if (!match) continue;
+    const [, , descriptionRaw, qtyRaw, unitRaw, totalRaw] = match;
+    const quantity = asNumber(qtyRaw.replace(",", "."), 0);
+    const unitCost = asNumber(unitRaw.replace(",", "."), 0);
+    const lineTotal = asNumber(totalRaw.replace(",", "."), 0);
+    if (!quantity || !unitCost || !lineTotal || !almostEqual(quantity * unitCost, lineTotal)) continue;
+    const description = descriptionRaw.replace(/\s+(?:D|DAIRY|V|SL|NONE)\b/g, " ").replace(/\s+/g, " ").trim();
+    const { productName, packSize } = splitProductAndPack(description);
+    const cleanProduct = cleanProductName(productName);
+    if (!cleanProduct || /^(code|description)$/i.test(cleanProduct)) continue;
+    rows.push({ raw: trimmed, productName: cleanProduct, packSize: cleanPackSize(packSize), quantity, unitCost, vat: 0, lineTotal });
+  }
+  return rows;
+}
+
 function parseCurrencyProductRow(rowText) {
   const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
   const match = row.match(/^(.+?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))(?:\s|$)/i);
@@ -349,6 +418,7 @@ function extractInvoiceTableRows(sourceText) {
   const normalizedText = sourceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
   const candidates = new Set();
   const albionRows = /albion/i.test(sourceText) ? parseAlbionOrderRows(sourceText) : [];
+  const coburnRows = /coburn|baker/i.test(sourceText) ? parseCoburnBakeryRows(sourceText) : [];
 
   sourceText.split(/\r?\n/).forEach((line) => {
     const trimmed = line.trim();
@@ -370,7 +440,7 @@ function extractInvoiceTableRows(sourceText) {
   const codePattern = /(?:^|\s)([A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z][A-Za-z0-9 '&().,/+-]{4,}?\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z]|$)/g;
   [...normalizedText.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
 
-  const rows = [...albionRows, ...[...candidates].map(parseTableRow).filter(Boolean)];
+  const rows = [...albionRows, ...coburnRows, ...[...candidates].map(parseTableRow).filter(Boolean)];
   const seen = new Set();
   return rows.filter((row) => {
     const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
@@ -532,16 +602,36 @@ function normalizeInvoice(invoice, sourceText) {
       confidence: 0.78,
     }));
 
+  const detectedTotals = extractTotalsFromText(sourceText);
+  const lineSubtotal = repairedLines.reduce((sum, line) => sum + asNumber(line.lineTotal, line.quantity * line.unitCost), 0);
+  const subtotalBeforeDiscount = asNumber(invoice.subtotalBeforeDiscount || invoice.subtotal, detectedTotals.subtotalBeforeDiscount || lineSubtotal);
+  const discountAmount = asNumber(invoice.discountAmount || invoice.discount, detectedTotals.discountAmount);
+  const discountPercent = asNumber(invoice.discountPercent, detectedTotals.discountPercent || (subtotalBeforeDiscount > 0 && discountAmount > 0 ? Number(((discountAmount / subtotalBeforeDiscount) * 100).toFixed(3)) : 0));
+  const finalInvoiceTotal = asNumber(invoice.finalInvoiceTotal || invoice.total, detectedTotals.finalInvoiceTotal || Math.max(0, subtotalBeforeDiscount - discountAmount));
+  const validationDifference = Number((lineSubtotal - discountAmount - finalInvoiceTotal).toFixed(2));
+  const warnings = [];
+  if (repairedLines.length && finalInvoiceTotal > 0 && !almostEqual(lineSubtotal - discountAmount, finalInvoiceTotal)) {
+    warnings.push(`Line totals minus discount differ from invoice total by ${validationDifference}`);
+  }
+
   return {
     supplier,
     invoiceDate: asString(invoice.invoiceDate || invoice.date, inferInvoiceDate(sourceText)),
     invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
-    subtotalBeforeDiscount: asNumber(invoice.subtotalBeforeDiscount || invoice.subtotal, 0),
-    discountAmount: asNumber(invoice.discountAmount || invoice.discount, 0),
-    discountPercent: asNumber(invoice.discountPercent, 0),
-    finalInvoiceTotal: asNumber(invoice.finalInvoiceTotal || invoice.total, 0),
+    subtotalBeforeDiscount,
+    discountAmount,
+    discountPercent,
+    finalInvoiceTotal,
     confidence: clampConfidence(invoice.confidence),
     lines: repairedLines,
+    warnings,
+    validation: {
+      lineSubtotal: Number(lineSubtotal.toFixed(2)),
+      expectedTotal: Number((lineSubtotal - discountAmount).toFixed(2)),
+      finalInvoiceTotal,
+      difference: validationDifference,
+      ok: !finalInvoiceTotal || almostEqual(lineSubtotal - discountAmount, finalInvoiceTotal),
+    },
   };
 }
 
@@ -587,19 +677,28 @@ function imageContentParts(invoiceImages) {
   }));
 }
 
-function buildPrompt(invoiceText, suppliers = [], products = [], hasImages = false) {
+function buildPrompt(invoiceText, suppliers = [], products = [], hasImages = false, departments = [], supplierLearning = []) {
   const knownSuppliers = suppliers.map((supplier) => supplier.name || supplier).filter(Boolean).join(", ");
   const knownProducts = products
-    .map((product) => product.productName || product.name)
+    .map((product) => `${product.productName || product.name}${product.supplier ? ` (${product.supplier})` : ""}${product.packSize ? ` - ${product.packSize}` : ""}${product.aliases?.length ? ` aliases: ${product.aliases.join("/")}` : ""}`)
     .filter(Boolean)
-    .slice(0, 200)
-    .join(", ");
+    .slice(0, 300)
+    .join("; ");
+  const knownDepartments = departments.length ? departments.join(", ") : "Kitchen Made, Bought In, Bar, Non-food, Excluded";
+  const learningText = (supplierLearning || []).slice(0, 20).map((rule) => JSON.stringify(rule)).join("\n");
 
   return `You are MarginFlow AI, an expert hospitality invoice parser.
 
 Task:
-Extract REAL invoice line items from messy PDF/OCR invoice text or uploaded invoice image(s) from any foodservice supplier.
-Different suppliers use different layouts, column order and terminology. You must infer the structure from the text.
+Act like an experienced hospitality accounts assistant. Extract REAL invoice line items from messy PDF/OCR invoice text or uploaded invoice image(s) from any foodservice supplier.
+Different suppliers use different layouts, column order and terminology. First identify the supplier and layout, then identify the product table start/end, then extract rows, then validate maths.
+
+Extraction process you must follow internally:
+1. Read the header: supplier, customer, invoice/delivery note number, date.
+2. Locate the product table by headers such as CODE/DESCRIPTION/QTY/COST/TOTAL, PRODUCT/UNIT PRICE/ORDER QTY/INVOICED QTY/SUBTOTAL, or DATE/PRODUCT/SIZE/QTY/PRICE/VAT/TOTAL.
+3. Stop reading rows before subtotal, discount, VAT summary, total, bank details, allergen notes, delivery notes and footer text.
+4. For each row, decide quantity, unitCost and lineTotal using the column headers and multiplication check.
+5. Extract discounts/returns/shortages separately and validate the invoice total.
 
 Rules:
 - Return ONLY invoice products/chargeable items, not addresses, emails, account codes, customer names, handling notes, ticket references or totals.
@@ -622,18 +721,27 @@ Rules:
 - Line total should be quantity × unit cost when possible.
 - Supplier may be inferred from invoice header.
 - Invoice date should be ISO format YYYY-MM-DD.
-- Suggested department defaults to Kitchen Made unless clearly Bar, Bought In, Non-food or Excluded.
+- Suggested department must be one of the MarginFlow departments below. If unsure, default to Kitchen Made.
+- Bought-in bakery, retail cakes, bottled drinks or finished resale items should usually be Bought In or Bar depending on item.
+- Food ingredients/raw meat/fish/veg/dairy for cooking should usually be Kitchen Made.
 
 Supplier-specific guidance:
 - TG Fruits invoices often contain lines like: DATE PRODUCT SIZE QTY PRICE VAT TOTAL, and PDF extraction may merge many rows onto one line.
 - Albion Fine Foods, Woods, BNFS, Cheese Man and Coburn & Baker may use different column layouts. Detect rows by product description plus numeric values.
+- Coburn & Baker example layout: CODE DESCRIPTION QTY COST TOTAL RETURNS. For this layout quantity is QTY, unitCost is COST, lineTotal is TOTAL. Ignore allergy/footer notes.
 - Products may have dates before them; ignore repeated dates unless it is the invoice date.
 
 Known suppliers in this MarginFlow database:
 ${knownSuppliers || "none provided"}
 
-Known product names for matching/reference only, do not force them if invoice says something different:
+Known MarginFlow departments:
+${knownDepartments}
+
+Known product names and aliases for matching/reference only, do not force them if invoice says something different:
 ${knownProducts || "none provided"}
+
+Previously learned supplier/layout hints:
+${learningText || "none provided"}
 
 Uploaded invoice image(s):
 ${hasImages ? "Provided in this request. Use them as the source of truth if text is empty or incomplete." : "none provided"}
@@ -689,7 +797,7 @@ export async function handler(event) {
             content: [
               {
                 type: "input_text",
-                text: "You extract restaurant supplier invoices into strict JSON. You understand messy OCR/PDF text and many supplier layouts. Never return demo data. Never invent products.",
+                text: "You are a careful senior hospitality invoice extraction agent. Return strict JSON only. Read messy OCR/PDF/images, infer supplier layouts, validate quantity x unit cost = line total, extract discounts/returns, and never invent products or demo rows.",
               },
             ],
           },
@@ -698,7 +806,7 @@ export async function handler(event) {
             content: [
               {
                 type: "input_text",
-                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || [], invoiceImages.length > 0),
+                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || [], invoiceImages.length > 0, payload.departments || [], payload.supplierLearning || []),
               },
               ...imageContentParts(invoiceImages),
             ],

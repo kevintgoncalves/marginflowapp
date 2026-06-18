@@ -1017,62 +1017,145 @@ function normalizeHeader(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function parseCsvText(text) {
+  const rows = [];
+  let current = [];
+  let cell = "";
+  let inQuotes = false;
+  for (let index = 0; index < String(text || "").length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      current.push(cell.trim());
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") index += 1;
+      current.push(cell.trim());
+      if (current.some(Boolean)) rows.push(current);
+      current = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  current.push(cell.trim());
+  if (current.some(Boolean)) rows.push(current);
+  return rows;
+}
+
+function findHeaderIndex(headers, names) {
+  const normalized = headers.map(normalizeHeader);
+  return normalized.findIndex((header) => names.includes(header));
+}
+
+function salesCsvTemplateKey(name) {
+  return `marginflow.salesCsvTemplate.${normalizeHeader(name || "manual")}`;
+}
+
+function defaultSalesCsvMapping(headers = []) {
+  return {
+    date: findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]),
+    department: findHeaderIndex(headers, ["department", "salestype", "type", "category", "itemcategory", "reportingcategory"]),
+    grossSales: findHeaderIndex(headers, ["grosssales", "gross", "totalsales", "totalgross", "grossamount"]),
+    netSales: findHeaderIndex(headers, ["netsales", "net", "netrevenue", "netamount", "nettotal"]),
+    vatAmount: findHeaderIndex(headers, ["vat", "vatamount", "tax", "taxamount", "taxes"]),
+    vatRate: findHeaderIndex(headers, ["vatrate", "vatpercent", "taxrate", "taxpercent"]),
+    serviceCharge: findHeaderIndex(headers, ["servicecharge", "servicecharges", "gratuity", "tips"]),
+    discounts: findHeaderIndex(headers, ["discounts", "discount"]),
+    refunds: findHeaderIndex(headers, ["refunds", "refund", "returns"]),
+  };
+}
+
+function loadSalesCsvTemplate(name, headers) {
+  try {
+    const stored = localStorage.getItem(salesCsvTemplateKey(name));
+    return stored ? { ...defaultSalesCsvMapping(headers), ...JSON.parse(stored) } : defaultSalesCsvMapping(headers);
+  } catch {
+    return defaultSalesCsvMapping(headers);
+  }
+}
+
+function saveSalesCsvTemplate(name, mapping) {
+  try {
+    localStorage.setItem(salesCsvTemplateKey(name), JSON.stringify(mapping));
+  } catch {
+    // best effort only
+  }
+}
+
+function normalizeImportDate(value) {
+  const raw = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const uk = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (uk) {
+    const year = uk[3].length === 2 ? `20${uk[3]}` : uk[3];
+    return `${year}-${uk[2].padStart(2, "0")}-${uk[1].padStart(2, "0")}`;
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? "" : toIsoDate(parsed);
+}
+
+function salesRowsFromCsvMapping(rawRows, mapping, defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
+  const errors = [];
+  const rows = rawRows.map((cells, index) => {
+    const at = (field) => Number(mapping[field]) >= 0 ? cells[Number(mapping[field])] : "";
+    const date = normalizeImportDate(at("date"));
+    const department = canonicalSalesDepartmentName(at("department") || "Total");
+    const grossSales = parseCurrencyCell(at("grossSales"));
+    const vatRate = numberValue(at("vatRate"), defaultVatRate);
+    const importedNet = parseCurrencyCell(at("netSales"));
+    const vatAmount = parseCurrencyCell(at("vatAmount"));
+    const sales = importedNet || (vatAmount ? grossSales - vatAmount : (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0));
+    const rowErrors = [];
+    if (!date) rowErrors.push("missing date");
+    if (!grossSales) rowErrors.push("missing gross sales");
+    if (!sales) rowErrors.push("missing net sales");
+    if (rowErrors.length) errors.push(`Row ${index + 2}: ${rowErrors.join(", ")}`);
+    return {
+      id: uid(),
+      date,
+      day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
+      department,
+      grossSales,
+      sales,
+      vatRate,
+      vatAmount: sales ? vatAmountFromGrossNet(grossSales, sales) : vatAmount,
+      effectiveVatRate: effectiveVatRate(grossSales, sales),
+      discounts: parseCurrencyCell(at("discounts")),
+      refunds: parseCurrencyCell(at("refunds")),
+      serviceCharge: parseCurrencyCell(at("serviceCharge")),
+      importStatus: rowErrors.length ? `Needs review: ${rowErrors.join(", ")}` : "Ready",
+    };
+  });
+  return { rows, validRows: rows.filter((row) => row.date && row.grossSales > 0), errors };
+}
+
 function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
-  const rows = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.split(",").map((cell) => cell.trim()));
+  const rows = parseCsvText(text);
   if (!rows.length) return [];
-
-  const header = rows[0].map(normalizeHeader);
-  const hasHeader = header.some((cell) => ["date", "grosssales", "netsales", "gross", "net", "department", "salestype"].includes(cell));
-  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
-  const dateIndex = hasHeader ? findIndex(["date", "businessdate", "day"]) : 0;
-  const departmentIndex = hasHeader ? findIndex(["department", "salestype", "type", "category"]) : -1;
-  const grossIndex = hasHeader ? findIndex(["grosssales", "gross", "totalsales"]) : -1;
-  const netIndex = hasHeader ? findIndex(["netsales", "net", "netrevenue"]) : -1;
-  const vatIndex = hasHeader ? findIndex(["vat", "vatamount", "tax", "taxamount"]) : -1;
-  const vatRateIndex = hasHeader ? findIndex(["vatrate", "vatpercent", "taxrate"]) : -1;
-      const discountIndex = hasHeader ? findIndex(["discounts", "discount"]) : -1;
-      const refundIndex = hasHeader ? findIndex(["refunds", "refund", "returns"]) : -1;
-  const serviceIndex = hasHeader ? findIndex(["servicecharge", "servicecharges", "gratuity"]) : -1;
+  const header = rows[0];
+  const mapping = defaultSalesCsvMapping(header);
+  const hasHeader = Object.values(mapping).some((index) => index >= 0);
   const dataRows = hasHeader ? rows.slice(1) : rows;
-
-  return dataRows
-    .filter((cells) => cells.length >= 2)
-    .map((cells) => {
-      const hasDepartment = !hasHeader && cells.length >= 3;
-      const date = cells[dateIndex >= 0 ? dateIndex : 0];
-      const department = hasHeader
-        ? cells[departmentIndex] || "Total"
-        : hasDepartment ? cells[1] : "Total";
-      const grossSales = hasHeader
-        ? parseCurrencyCell(cells[grossIndex])
-        : parseCurrencyCell(hasDepartment ? cells[2] : cells[1]);
-      const vatRate = hasHeader ? numberValue(cells[vatRateIndex], defaultVatRate) : numberValue(cells[hasDepartment ? 4 : 3], defaultVatRate);
-      const importedNet = hasHeader && netIndex >= 0 ? parseCurrencyCell(cells[netIndex]) : parseCurrencyCell(cells[hasDepartment ? 3 : 2]);
-      const sales = importedNet || (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0);
-      const vatAmount = sales ? vatAmountFromGrossNet(grossSales, sales) : parseCurrencyCell(cells[vatIndex]);
-      const discounts = parseCurrencyCell(cells[discountIndex]);
-      const refunds = parseCurrencyCell(cells[refundIndex]);
-      const serviceCharge = parseCurrencyCell(cells[serviceIndex]);
-      return {
-        id: uid(),
-        date,
-        day: new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-        department: canonicalSalesDepartmentName(department),
-        grossSales,
-        sales,
-        vatRate,
-        vatAmount,
-        effectiveVatRate: effectiveVatRate(grossSales, sales),
-        discounts,
-        refunds,
-        serviceCharge,
-      };
-    })
-    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && row.grossSales > 0);
+  const fallbackMapping = hasHeader ? mapping : {
+    date: 0,
+    department: rows[0]?.length >= 4 ? 1 : -1,
+    grossSales: rows[0]?.length >= 4 ? 2 : 1,
+    netSales: rows[0]?.length >= 4 ? 3 : 2,
+    vatRate: rows[0]?.length >= 5 ? 4 : -1,
+    vatAmount: -1,
+    serviceCharge: -1,
+    discounts: -1,
+    refunds: -1,
+  };
+  return salesRowsFromCsvMapping(dataRows, fallbackMapping, defaultVatRate, salesInputMethod).validRows;
 }
 
 function csvRows(text) {
@@ -1361,6 +1444,21 @@ function syncCreditNotesForInvoice(current, invoice) {
     return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
   });
   return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
+}
+
+function combinedSupplierIssues(creditNotes = [], invoices = []) {
+  const keyed = new Map();
+  const add = (note) => {
+    const key = `${note.invoiceId || note.invoiceNumber || ""}::${note.lineId || note.product || ""}::${note.supplier || ""}`;
+    keyed.set(key, { ...note, id: note.id || key });
+  };
+  creditNotes.forEach(add);
+  invoices.flatMap(creditNotesForInvoice).forEach((generated) => {
+    const key = `${generated.invoiceId || generated.invoiceNumber || ""}::${generated.lineId || generated.product || ""}::${generated.supplier || ""}`;
+    const existing = keyed.get(key);
+    keyed.set(key, existing ? { ...generated, ...existing, status: existing.status || generated.status, notes: existing.notes || generated.notes } : generated);
+  });
+  return Array.from(keyed.values());
 }
 
 function extractInvoiceTotals(invoiceText = "") {
@@ -2405,14 +2503,29 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
 }
 
 function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
-  const recentInvoices = [...metrics.invoices]
-    .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, department, invoice), 0) }))
-    .filter((invoice) => department === "All departments" || invoice.departmentTotal > 0)
+  const allDepartmentMetrics = useMemo(
+    () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
+    [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
+  );
+  const selectedHasGpBase = numberValue(metrics.netSales) > 0;
+  const shouldUseAllDepartments = department !== "All departments" && !selectedHasGpBase && numberValue(allDepartmentMetrics.netSales) > 0;
+  const dashboardDepartment = shouldUseAllDepartments ? "All departments" : department;
+  const dashboardMetrics = shouldUseAllDepartments ? allDepartmentMetrics : metrics;
+  const dashboardTarget = shouldUseAllDepartments ? numberValue(financialSettings.targetGp, gpTarget) : gpTarget;
+  const dashboardSupplierSpend = shouldUseAllDepartments ? supplierSpend : spendBySupplier(invoices, suppliers, dateRange, dashboardDepartment);
+  const recentInvoices = [...dashboardMetrics.invoices]
+    .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
+    .filter((invoice) => dashboardDepartment === "All departments" || invoice.departmentTotal > 0)
     .sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <>
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={department} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={gpTarget} invoices={invoices} metrics={metrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={supplierSpend} wasteItems={wasteItems} />
+      {shouldUseAllDepartments && (
+        <div className="notice-card">
+          Dashboard is showing all departments because {department} has no sales in this date range.
+        </div>
+      )}
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -2426,7 +2539,7 @@ function Dashboard({ dateRange, dateRangeState, department, departmentNames, dep
           />
         </Panel>
         <Panel title="Cost alerts">
-          <InsightList metrics={metrics} />
+          <InsightList metrics={dashboardMetrics} />
         </Panel>
       </div>
     </>
@@ -2611,11 +2724,24 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
           invoiceText,
           invoiceImages,
           suppliers,
+          departments: departmentNames,
+          supplierLearning: invoices
+            .filter((invoice) => invoice.supplier)
+            .slice(-60)
+            .map((invoice) => ({
+              supplier: invoice.supplier,
+              invoiceNumber: invoice.invoiceNumber,
+              date: invoice.date,
+              knownProducts: (invoice.items || []).slice(0, 20).map((item) => item.productName || item.name).filter(Boolean),
+              hasDiscount: numberValue(invoice.discountAmount, 0) > 0,
+            })),
           products: products.map((product) => ({
             name: product.name || product.productName,
             supplier: product.supplier,
             packSize: product.packSize,
+            department: product.department,
             aliases: product.aliases || [],
+            priceHistory: product.priceHistory || [],
           })),
         }),
       });
@@ -2646,7 +2772,11 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         discountPercent: numberValue(payload.discountPercent || current.discountPercent, 0),
         finalInvoiceTotal: numberValue(payload.finalInvoiceTotal || payload.total || detectedTotals.finalInvoiceTotal || current.finalInvoiceTotal, 0),
         items,
-        status: `AI extracted ${items.length} lines. Please review before approving.`,
+        status: payload.warnings?.length
+          ? `AI extracted ${items.length} lines with ${payload.warnings.length} warning(s). Please review before approving.`
+          : payload.validation && payload.validation.ok === false
+            ? `AI extracted ${items.length} lines but totals need review. Please check before approving.`
+            : `AI extracted ${items.length} lines. Please review before approving.`,
       }));
     } catch (error) {
       if (error.name === "AbortError") return;
@@ -3133,25 +3263,6 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
           onEdit={editApprovedInvoice}
           onDelete={deleteApprovedInvoice}
           rows={invoices}
-        />
-      </Panel>
-
-      <Panel title="Credit Notes / Supplier Chasing" action={`${creditNotes.length} record(s)`}>
-        <DataTable
-          columns={[
-            { key: "supplier", label: "Supplier" },
-            { key: "invoiceNumber", label: "Invoice" },
-            { key: "date", label: "Date" },
-            { key: "product", label: "Product" },
-            { key: "quantity", label: "Quantity" },
-            { key: "value", label: "Value", render: (_, row) => money(issueValue(row)) },
-            { key: "reason", label: "Reason" },
-            { key: "status", label: "Status", render: (value) => <Badge tone={value === "Credit received" ? "green" : value === "Rejected" ? "red" : "amber"}>{value}</Badge> },
-            { key: "notes", label: "Notes" },
-          ]}
-          onEdit={(row) => setCreditNoteModal(row)}
-          onDelete={deleteCreditNote}
-          rows={creditNotes}
         />
       </Panel>
 
@@ -3696,16 +3807,17 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [activeSupplierTab, setActiveSupplierTab] = useState("Details");
+  const supplierIssues = combinedSupplierIssues(creditNotes, invoices);
   const supplierRows = supplierSpend.map((supplier) => {
-    const summary = supplierIssueSummary(creditNotes, supplier.name);
+    const summary = supplierIssueSummary(supplierIssues, supplier.name);
     return { ...supplier, openIssues: summary.openIssues, valueToChase: summary.valueToChase };
   });
   const supplierTabs = ["Details", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
   const selectedSupplierName = form.name;
-  const selectedSupplierIssues = creditNotes.filter((note) => note.supplier === selectedSupplierName);
+  const selectedSupplierIssues = supplierIssues.filter((note) => note.supplier === selectedSupplierName);
   const selectedSupplierInvoices = invoices
     .filter((invoice) => invoice.supplier === selectedSupplierName)
-    .map((invoice) => ({ ...invoice, issueCount: creditNotes.filter((note) => note.invoiceId === invoice.id).length }));
+    .map((invoice) => ({ ...invoice, issueCount: supplierIssues.filter((note) => note.invoiceId === invoice.id).length }));
   const selectedSupplierProducts = products.filter((product) => product.supplier === selectedSupplierName);
   const selectedSupplierPriceHistory = products.flatMap((product) => (
     (product.priceHistory || [])
@@ -5247,6 +5359,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
   const [status, setStatus] = useState("");
   const [pendingImport, setPendingImport] = useState([]);
   const [importFileKey, setImportFileKey] = useState(0);
+  const [csvWizard, setCsvWizard] = useState(null);
   const departmentOptions = ["Total", ...departmentNames];
   const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
   const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
@@ -5301,14 +5414,63 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
 
   const importSales = async (file) => {
     if (!file) return;
-    const imported = parseSalesCsv(await file.text(), departmentNames, defaultVatRate, financialSettings.salesInputMethod);
-    if (!imported.length) {
-      setStatus("CSV import found no sales rows. Use date,gross,net or date,department,gross,net.");
+    const text = await file.text();
+    const csvRowsRaw = parseCsvText(text);
+    if (!csvRowsRaw.length) {
+      setStatus("CSV import found no readable rows.");
       return;
     }
-    const missingNet = imported.filter((row) => !numberValue(row.sales)).length;
-    setPendingImport(imported);
-    setStatus(missingNet ? `${imported.length} sales row(s) ready for review. ${missingNet} line(s) need Net Sales entered before GP is accurate.` : `${imported.length} sales row(s) ready for review.`);
+    const headers = csvRowsRaw[0] || [];
+    const mapping = loadSalesCsvTemplate("Manual CSV", headers);
+    const dataRows = csvRowsRaw.slice(1);
+    const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
+    setCsvWizard({
+      fileName: file.name,
+      headers,
+      rows: dataRows,
+      mapping,
+      templateName: "Manual CSV",
+      previewRows: preview.rows,
+      errors: preview.errors,
+      saveTemplate: false,
+    });
+    setStatus(preview.validRows.length
+      ? `${preview.validRows.length} CSV row(s) detected. Review mapping before import.`
+      : `CSV headers detected: ${headers.join(", ") || "No headers"}. Map the columns manually.`);
+  };
+
+  const updateCsvMapping = (field, value) => {
+    setCsvWizard((current) => {
+      if (!current) return current;
+      const mapping = { ...current.mapping, [field]: Number(value) };
+      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
+      return { ...current, mapping, previewRows: preview.rows, errors: preview.errors };
+    });
+  };
+
+  const updateCsvTemplate = (templateName) => {
+    setCsvWizard((current) => {
+      if (!current) return current;
+      const mapping = loadSalesCsvTemplate(templateName, current.headers);
+      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
+      return { ...current, templateName, mapping, previewRows: preview.rows, errors: preview.errors };
+    });
+  };
+
+  const confirmCsvWizard = () => {
+    if (!csvWizard) return;
+    const preview = salesRowsFromCsvMapping(csvWizard.rows, csvWizard.mapping, defaultVatRate, financialSettings.salesInputMethod);
+    if (!preview.validRows.length) {
+      setStatus("No valid sales rows yet. Check the column mapping.");
+      return;
+    }
+    if (csvWizard.saveTemplate) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping);
+    setPendingImport(preview.validRows);
+    setCsvWizard(null);
+    const invalidCount = preview.rows.length - preview.validRows.length;
+    setStatus(invalidCount
+      ? `${preview.validRows.length} sales row(s) ready. ${invalidCount} row(s) were skipped because date/gross sales were missing.`
+      : `${preview.validRows.length} sales row(s) ready for review.`);
   };
 
   const confirmImport = () => {
@@ -5331,6 +5493,18 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
         <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
       </div>
       {status && <div className="invoice-status info">{status}</div>}
+      {csvWizard && (
+        <SalesCsvImportWizard
+          defaultVatRate={defaultVatRate}
+          financialSettings={financialSettings}
+          onCancel={() => { setCsvWizard(null); setImportFileKey((current) => current + 1); setStatus("CSV import cancelled."); }}
+          onConfirm={confirmCsvWizard}
+          updateCsvMapping={updateCsvMapping}
+          updateCsvTemplate={updateCsvTemplate}
+          wizard={csvWizard}
+          setWizard={setCsvWizard}
+        />
+      )}
       {pendingImport.length > 0 && (
         <div className="import-review">
           <div className="panel-head"><h2>Review sales import</h2><span>{pendingImport.length} row(s)</span></div>
@@ -5408,9 +5582,11 @@ function SalesComparison({ financialSettings, sales }) {
   const currentTotals = totalSalesRows(sales, current);
   const previousTotals = totalSalesRows(sales, previous);
   const hasData = currentTotals.rows.length || previousTotals.rows.length;
+  const currentRangeLabel = formatComparisonRange(current);
+  const previousRangeLabel = formatComparisonRange(previous);
 
   return (
-    <Panel title="Sales comparison" action={`${formatRangeDate(current.start)} - ${formatRangeDate(current.end)}`}>
+    <Panel title="Sales comparison" action={`${currentRangeLabel} vs ${previousRangeLabel}`}>
       <div className="form-grid six compact-form">
         <label>Compare<select value={mode} onChange={(event) => setMode(event.target.value)}>
           <option>Today vs Yesterday</option>
@@ -5432,11 +5608,21 @@ function SalesComparison({ financialSettings, sales }) {
         <EmptyState />
       ) : (
         <>
+          <div className="comparison-period-summary">
+            <div>
+              <span>Selected period</span>
+              <strong>{currentRangeLabel}</strong>
+            </div>
+            <div>
+              <span>Compared with</span>
+              <strong>{previousRangeLabel}</strong>
+            </div>
+          </div>
           <div className="metric-grid compact">
-            <Metric label="Gross Sales difference" value={percent(changePercent(currentTotals.grossSales, previousTotals.grossSales))} delta={`${money(currentTotals.grossSales)} vs ${money(previousTotals.grossSales)}`} tone={currentTotals.grossSales >= previousTotals.grossSales ? "good" : "warn"} />
-            <Metric label="Net Sales difference" value={percent(changePercent(currentTotals.netSales, previousTotals.netSales))} delta={`${money(currentTotals.netSales)} vs ${money(previousTotals.netSales)}`} tone={currentTotals.netSales >= previousTotals.netSales ? "good" : "warn"} />
-            <Metric label="Average daily sales" value={money(currentTotals.averageDailySales)} delta={`${money(previousTotals.averageDailySales)} comparison`} tone={currentTotals.averageDailySales >= previousTotals.averageDailySales ? "good" : "warn"} />
-            <Metric label="VAT difference" value={percent(changePercent(currentTotals.vat, previousTotals.vat))} delta={`${money(currentTotals.vat)} vs ${money(previousTotals.vat)}`} tone={currentTotals.vat <= previousTotals.vat ? "good" : "warn"} />
+            <Metric label="Gross Sales difference" value={percent(changePercent(currentTotals.grossSales, previousTotals.grossSales))} delta={`${currentRangeLabel}: ${money(currentTotals.grossSales)} vs ${previousRangeLabel}: ${money(previousTotals.grossSales)}`} tone={currentTotals.grossSales >= previousTotals.grossSales ? "good" : "warn"} />
+            <Metric label="Net Sales difference" value={percent(changePercent(currentTotals.netSales, previousTotals.netSales))} delta={`${currentRangeLabel}: ${money(currentTotals.netSales)} vs ${previousRangeLabel}: ${money(previousTotals.netSales)}`} tone={currentTotals.netSales >= previousTotals.netSales ? "good" : "warn"} />
+            <Metric label="Average daily sales" value={money(currentTotals.averageDailySales)} delta={`${previousRangeLabel}: ${money(previousTotals.averageDailySales)}`} tone={currentTotals.averageDailySales >= previousTotals.averageDailySales ? "good" : "warn"} />
+            <Metric label="VAT difference" value={percent(changePercent(currentTotals.vat, previousTotals.vat))} delta={`${currentRangeLabel}: ${money(currentTotals.vat)} vs ${previousRangeLabel}: ${money(previousTotals.vat)}`} tone={currentTotals.vat <= previousTotals.vat ? "good" : "warn"} />
           </div>
           <div className="dashboard-layout secondary">
             <SalesComparisonBars title="Gross Sales comparison" current={currentTotals.grossSales} previous={previousTotals.grossSales} currentRange={current} previousRange={previous} />
@@ -5448,24 +5634,101 @@ function SalesComparison({ financialSettings, sales }) {
   );
 }
 
+function formatComparisonRange(range) {
+  if (!range?.start || !range?.end) return "Selected dates";
+  return `${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
+}
+
 function SalesComparisonBars({ title, current, previous, currentRange, previousRange }) {
   const max = Math.max(numberValue(current), numberValue(previous), 1);
+  const currentRangeLabel = formatComparisonRange(currentRange);
+  const previousRangeLabel = formatComparisonRange(previousRange);
   return (
     <div className="comparison-chart" aria-label={title}>
       <div className="comparison-title">{title}</div>
       <div className="comparison-bars">
         <div className="comparison-bar">
-          <span style={{ height: `${(numberValue(previous) / max) * 100}%` }} title={`${formatRangeDate(previousRange.start)} - ${formatRangeDate(previousRange.end)}: ${money(previous)}`} />
+          <span style={{ height: `${(numberValue(previous) / max) * 100}%` }} title={`${previousRangeLabel}: ${money(previous)}`} />
+          <small className="comparison-period">Compared period</small>
+          <small className="comparison-date">{previousRangeLabel}</small>
           <strong>{money(previous)}</strong>
-          <small>Comparison</small>
         </div>
         <div className="comparison-bar current">
-          <span style={{ height: `${(numberValue(current) / max) * 100}%` }} title={`${formatRangeDate(currentRange.start)} - ${formatRangeDate(currentRange.end)}: ${money(current)}`} />
+          <span style={{ height: `${(numberValue(current) / max) * 100}%` }} title={`${currentRangeLabel}: ${money(current)}`} />
+          <small className="comparison-period">Selected period</small>
+          <small className="comparison-date">{currentRangeLabel}</small>
           <strong>{money(current)}</strong>
-          <small>Selected</small>
         </div>
       </div>
     </div>
+  );
+}
+
+function SalesCsvImportWizard({ financialSettings, onCancel, onConfirm, setWizard, updateCsvMapping, updateCsvTemplate, wizard }) {
+  const mappingFields = [
+    ["date", "Date"],
+    ["department", "Department / sales type"],
+    ["grossSales", "Gross sales"],
+    ["netSales", "Net sales"],
+    ["vatAmount", "VAT amount"],
+    ["vatRate", "VAT %"],
+    ["serviceCharge", "Service charge"],
+    ["discounts", "Discounts"],
+    ["refunds", "Refunds"],
+  ];
+  const validRows = wizard.previewRows.filter((row) => row.date && row.grossSales > 0);
+  const templates = ["Manual CSV", "Square", "Lightspeed", "EPOS Now", "Toast", "Zettle"];
+  return (
+    <EditModal title="CSV Import Wizard" onCancel={onCancel} onSave={onConfirm} saveLabel="Use these mapped rows">
+      <div className="wizard-summary">
+        <div><span>File</span><strong>{wizard.fileName}</strong></div>
+        <div><span>Headers detected</span><strong>{wizard.headers.length}</strong></div>
+        <div><span>Rows ready</span><strong>{validRows.length}</strong></div>
+        <div><span>Rows needing review</span><strong>{Math.max(0, wizard.previewRows.length - validRows.length)}</strong></div>
+      </div>
+      <div className="form-grid six compact-form">
+        <label>Template
+          <select value={wizard.templateName} onChange={(event) => updateCsvTemplate(event.target.value)}>
+            {templates.map((template) => <option key={template}>{template}</option>)}
+          </select>
+        </label>
+        <CheckboxField checked={wizard.saveTemplate} label="Save this mapping for next time" onChange={(value) => setWizard((current) => ({ ...current, saveTemplate: value }))} />
+      </div>
+      <Panel title="Map CSV columns" action="Change any wrong matches before importing">
+        <div className="form-grid six compact-form">
+          {mappingFields.map(([field, label]) => (
+            <label key={field}>{label}
+              <select value={wizard.mapping[field] ?? -1} onChange={(event) => updateCsvMapping(field, event.target.value)}>
+                <option value={-1}>Not used</option>
+                {wizard.headers.map((header, index) => <option key={`${field}-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
+              </select>
+            </label>
+          ))}
+        </div>
+      </Panel>
+      {wizard.errors.length > 0 && (
+        <div className="invoice-status warn">
+          {wizard.errors.slice(0, 5).join(" · ")}{wizard.errors.length > 5 ? ` · ${wizard.errors.length - 5} more` : ""}
+        </div>
+      )}
+      <Panel title="Import preview" action={`${validRows.length} ready`}>
+        <DataTable
+          columns={[
+            { key: "date", label: "Date" },
+            { key: "department", label: "Sales type" },
+            { key: "grossSales", label: "Gross", render: money },
+            { key: "sales", label: "Net", render: money },
+            { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
+            { key: "importStatus", label: "Status" },
+          ]}
+          rows={wizard.previewRows.slice(0, 50)}
+        />
+      </Panel>
+      <div className="button-row left tight">
+        <button className="ghost" onClick={onCancel} type="button">Cancel</button>
+        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Mapping</button>
+      </div>
+    </EditModal>
   );
 }
 
@@ -5959,7 +6222,8 @@ function EmptyState() {
 }
 
 function DailyGpChart({ rows, targetGp }) {
-  const validRows = rows.filter((row) => row.netSales || row.purchases || row.waste);
+  // GP is only meaningful on days with sales. Purchases-only days used to create a flat 0% line with large-looking markers.
+  const validRows = rows.filter((row) => numberValue(row.netSales) > 0);
   if (!validRows.length) return <EmptyState />;
   const values = validRows.flatMap((row) => [row.invoiceGp, targetGp]);
   const min = Math.min(0, ...values);
