@@ -3001,6 +3001,11 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
                   <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete invoice line", message: "Are you sure you want to delete this invoice line?", onConfirm: () => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) })) })} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
+              <tr className="add-table-row">
+                <td colSpan={14}>
+                  <button className="ghost add-line-inline" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add Line</button>
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>

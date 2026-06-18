@@ -636,6 +636,15 @@ th {
 }
 td { color: #dbeafe; font-weight: 700; }
 td input, td select { min-width: 110px; }
+.add-table-row td {
+  background: rgba(59, 130, 246, 0.06);
+  padding: 10px 15px;
+}
+.add-line-inline {
+  width: 100%;
+  justify-content: center;
+  border-style: dashed;
+}
 .sort-button {
   justify-content: flex-start;
   min-height: 0;
