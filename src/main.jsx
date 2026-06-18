@@ -316,11 +316,29 @@ function canonicalDepartmentName(value, fallback = "Kitchen Made") {
   const key = raw.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "");
   if (["alldepartments", "all"].includes(key)) return "All departments";
   if (["total", "totalsales", "allvenue", "venue"].includes(key)) return "Total";
-  if (["kitchenmade", "kitchen", "food", "foods"].includes(key)) return "Kitchen Made";
-  if (["boughtin", "bought", "buyin", "boughtinfood"].includes(key)) return "Bought In";
-  if (key === "bar") return "Bar";
-  if (["nonfood", "nonfoods", "nonfoodexcluded", "excluded"].includes(key)) return "Non-food";
+  if (key.includes("nonfood") || key.includes("excluded") || key.includes("cleaning") || key.includes("supplies")) return "Non-food";
+  if (key.includes("boughtin") || key.includes("buyin") || key.includes("retail") || key.includes("grabandgo")) return "Bought In";
+  if (
+    key.includes("bar") ||
+    key.includes("drink") ||
+    key.includes("beverage") ||
+    key.includes("beer") ||
+    key.includes("wine") ||
+    key.includes("cocktail") ||
+    key.includes("spirit") ||
+    key.includes("liquor") ||
+    key.includes("softdrink") ||
+    key.includes("juice") ||
+    key.includes("coffee") ||
+    key.includes("tea")
+  ) return "Bar";
+  if (key.includes("kitchenmade") || key.includes("kitchen") || key.includes("food") || key.includes("brunch") || key.includes("breakfast") || key.includes("lunch") || key.includes("dinner")) return "Kitchen Made";
   return raw;
+}
+
+function canonicalSalesDepartmentName(value) {
+  const department = canonicalDepartmentName(value, "Total");
+  return ["Kitchen Made", "Bought In", "Bar", "Non-food", "Total"].includes(department) ? department : "Total";
 }
 
 function netFromGross(gross, vatRate = 20) {
@@ -353,7 +371,7 @@ function salesBaseForRow(row, gpCalculationBase = "Net Sales") {
 
 function hasDepartmentSpecificSalesRows(salesRows) {
   return salesRows.some((row) => {
-    const department = canonicalDepartmentName(row.department, "Total");
+    const department = canonicalSalesDepartmentName(row.department);
     return department && department !== "Total";
   });
 }
@@ -1043,7 +1061,7 @@ function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInp
         id: uid(),
         date,
         day: new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-        department: canonicalDepartmentName(department, "Total"),
+        department: canonicalSalesDepartmentName(department),
         grossSales,
         sales,
         vatRate,
@@ -1130,7 +1148,7 @@ function normalizeSalesRows(rows) {
     return {
       ...row,
       id: row.id || uid(),
-      department: canonicalDepartmentName(row.department, "Total"),
+      department: canonicalSalesDepartmentName(row.department),
       grossSales,
       vatRate,
       sales,
@@ -1432,7 +1450,7 @@ function salesForDepartment(salesRows, selectedDepartment, gpCalculationBase = "
       : salesRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
   }
 
-  const departmentRows = salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+  const departmentRows = salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
   if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
     return totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
   }
@@ -1447,7 +1465,7 @@ function grossSalesForDepartment(salesRows, selectedDepartment) {
       ? totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
       : salesRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
   }
-  const departmentRows = salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+  const departmentRows = salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
   if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
     return totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
   }
@@ -1459,7 +1477,7 @@ function vatForDepartment(salesRows, selectedDepartment) {
   const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
   const rows = selected === "All departments"
     ? (totalRows.length ? totalRows : salesRows)
-    : salesRows.filter((row) => canonicalDepartmentName(row.department, "") === selected);
+    : salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
   if (!rows.length && selected !== "All departments" && !hasDepartmentSpecificSalesRows(salesRows)) {
     return totalRows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
   }
@@ -1820,7 +1838,10 @@ function parseDate(value) {
 }
 
 function toIsoDate(date) {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function addDays(date, days) {
@@ -5260,7 +5281,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       ...form,
       id: editingId || uid(),
       day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-      department: canonicalDepartmentName(form.department, "Total"),
+      department: canonicalSalesDepartmentName(form.department),
       grossSales,
       sales: netSales,
       vatRate,
