@@ -672,6 +672,72 @@ function safeReadLocalStorageArray(key, fallback) {
   }
 }
 
+function safeReadLocalStorageValue(key, fallback) {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function usePersistentState(key, fallback) {
+  const [state, setStateRaw] = useState(() => safeReadLocalStorageValue(key, fallback));
+  const setState = (value) => {
+    setStateRaw((current) => {
+      const next = typeof value === "function" ? value(current) : value;
+      saveLocalStorage(key, next);
+      return next;
+    });
+  };
+  return [state, setState];
+}
+
+function parseBackupValue(value) {
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+function itemCompleteness(item) {
+  if (!item || typeof item !== "object") return 0;
+  return Object.values(item).reduce((score, value) => {
+    if (Array.isArray(value)) return score + value.length;
+    if (value && typeof value === "object") return score + Object.keys(value).length;
+    return score + (value !== undefined && value !== null && value !== "" ? 1 : 0);
+  }, 0);
+}
+
+function dedupeKeyForArrayItem(key, item) {
+  if (!item || typeof item !== "object") return JSON.stringify(item);
+  if (item.id) return `id:${item.id}`;
+  if (key.includes("invoice")) return `invoice:${item.supplier || ""}|${item.invoiceNumber || ""}|${item.date || ""}`.toLowerCase();
+  if (key.includes("supplier")) return `supplier:${item.name || item.supplier || ""}`.toLowerCase();
+  if (key.includes("product")) return `product:${item.masterProductId || item.name || item.product || ""}|${item.supplier || ""}`.toLowerCase();
+  if (item.name) return `name:${item.name}`.toLowerCase();
+  return JSON.stringify(item);
+}
+
+function mergeArraysByIdentity(key, currentValue, importedValue) {
+  const current = Array.isArray(currentValue) ? currentValue : [];
+  const imported = Array.isArray(importedValue) ? importedValue : [];
+  const map = new Map();
+  current.forEach((item) => map.set(dedupeKeyForArrayItem(key, item), item));
+  imported.forEach((item) => {
+    const identity = dedupeKeyForArrayItem(key, item);
+    const existing = map.get(identity);
+    if (!existing || itemCompleteness(item) > itemCompleteness(existing)) {
+      map.set(identity, { ...(existing && typeof existing === "object" ? existing : {}), ...(item && typeof item === "object" ? item : item) });
+    }
+  });
+  return Array.from(map.values());
+}
+
 function saveLocalStorage(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -768,15 +834,15 @@ function App() {
     }
   });
   const [departmentOpen, setDepartmentOpen] = useState(false);
-  const [products, setProducts] = useState(initialProducts);
-  const [suppliers, setSuppliers] = useState(initialSuppliers);
-  const [invoices, setInvoices] = useState(initialInvoices);
+  const [products, setProducts] = usePersistentState("marginflow.products", initialProducts);
+  const [suppliers, setSuppliers] = usePersistentState("marginflow.suppliers", initialSuppliers);
+  const [invoices, setInvoices] = usePersistentState("marginflow.invoices", initialInvoices);
   const [sales] = useState(initialSales);
-  const [openingStockByDept, setOpeningStockByDept] = useState(initialOpeningStock);
-  const [stocktakes, setStocktakes] = useState(initialStocktakes);
-  const [wasteItems, setWasteItems] = useState(initialWaste);
-  const [recipes, setRecipes] = useState(initialRecipes);
-  const [menus, setMenus] = useState(initialMenus);
+  const [openingStockByDept, setOpeningStockByDept] = usePersistentState("marginflow.openingStockByDept", initialOpeningStock);
+  const [stocktakes, setStocktakes] = usePersistentState("marginflow.stocktakes", initialStocktakes);
+  const [wasteItems, setWasteItems] = usePersistentState("marginflow.wasteItems", initialWaste);
+  const [recipes, setRecipes] = usePersistentState("marginflow.recipes", initialRecipes);
+  const [menus, setMenus] = usePersistentState("marginflow.menus", initialMenus);
   const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
   const [financialSettings, setFinancialSettingsState] = useState(() => safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings));
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
@@ -945,6 +1011,22 @@ function App() {
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
             menuSettings={menuSettings}
+            invoices={invoices}
+            products={products}
+            suppliers={suppliers}
+            openingStockByDept={openingStockByDept}
+            stocktakes={stocktakes}
+            wasteItems={wasteItems}
+            recipes={recipes}
+            menus={menus}
+            setInvoices={setInvoices}
+            setProducts={setProducts}
+            setSuppliers={setSuppliers}
+            setOpeningStockByDept={setOpeningStockByDept}
+            setStocktakes={setStocktakes}
+            setWasteItems={setWasteItems}
+            setRecipes={setRecipes}
+            setMenus={setMenus}
             setAiSettings={setAiSettings}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
@@ -1910,6 +1992,22 @@ function SettingsPanel({
   financialSettings,
   invoiceSettings,
   menuSettings,
+  invoices,
+  products,
+  suppliers,
+  openingStockByDept,
+  stocktakes,
+  wasteItems,
+  recipes,
+  menus,
+  setInvoices,
+  setProducts,
+  setSuppliers,
+  setOpeningStockByDept,
+  setStocktakes,
+  setWasteItems,
+  setRecipes,
+  setMenus,
   setAiSettings,
   setCompanySettings,
   setDepartmentSettings,
@@ -1941,29 +2039,105 @@ function SettingsPanel({
   };
 
   const backup = {
-    companySettings,
-    financialSettings,
-    departmentSettings,
-    menuSettings,
-    invoiceSettings,
-    aiSettings,
+    app: "MarginFlow",
+    appVersion: "0.1.0",
     exportedAt: new Date().toISOString(),
+    localStorage: Object.keys(localStorage || {})
+      .filter((key) => key.startsWith("marginflow."))
+      .reduce((result, key) => ({ ...result, [key]: localStorage.getItem(key) }), {}),
+    "marginflow.invoices": JSON.stringify(invoices),
+    "marginflow.products": JSON.stringify(products),
+    "marginflow.suppliers": JSON.stringify(suppliers),
+    "marginflow.openingStockByDept": JSON.stringify(openingStockByDept),
+    "marginflow.stocktakes": JSON.stringify(stocktakes),
+    "marginflow.wasteItems": JSON.stringify(wasteItems),
+    "marginflow.recipes": JSON.stringify(recipes),
+    "marginflow.menus": JSON.stringify(menus),
+    "marginflow.companySettings": JSON.stringify(companySettings),
+    "marginflow.financialSettings": JSON.stringify(financialSettings),
+    "marginflow.departmentSettings": JSON.stringify(departmentSettings),
+    "marginflow.menuSettings": JSON.stringify(menuSettings),
+    "marginflow.invoiceSettings": JSON.stringify(invoiceSettings),
+    "marginflow.aiSettings": JSON.stringify(aiSettings),
   };
   const backupHref = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(backup, null, 2))}`;
   const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
+
+  const applyImportedKey = (key, value) => {
+    if (key === "marginflow.invoices") setInvoices(value);
+    if (key === "marginflow.products") setProducts(value);
+    if (key === "marginflow.suppliers") setSuppliers(value);
+    if (key === "marginflow.openingStockByDept") setOpeningStockByDept(value);
+    if (key === "marginflow.stocktakes") setStocktakes(value);
+    if (key === "marginflow.wasteItems") setWasteItems(value);
+    if (key === "marginflow.recipes") setRecipes(value);
+    if (key === "marginflow.menus") setMenus(value);
+    if (key === "marginflow.companySettings") setCompanySettings({ ...defaultCompanySettings, ...value });
+    if (key === "marginflow.financialSettings") setFinancialSettings({ ...defaultFinancialSettings, ...value });
+    if (key === "marginflow.departmentSettings") setDepartmentSettings(Array.isArray(value) ? value : defaultDepartmentSettings);
+    if (key === "marginflow.menuSettings") setMenuSettings({ ...defaultMenuSettings, ...value });
+    if (key === "marginflow.invoiceSettings") setInvoiceSettings({ ...defaultInvoiceSettings, ...value });
+    if (key === "marginflow.aiSettings") setAiSettings({ ...defaultAiSettings, ...value });
+  };
 
   const importBackup = async (file) => {
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
-      if (payload.companySettings) setCompanySettings({ ...defaultCompanySettings, ...payload.companySettings });
-      if (payload.financialSettings) setFinancialSettings({ ...defaultFinancialSettings, ...payload.financialSettings });
-      if (Array.isArray(payload.departmentSettings)) setDepartmentSettings(payload.departmentSettings);
-      if (payload.menuSettings) setMenuSettings({ ...defaultMenuSettings, ...payload.menuSettings });
-      if (payload.invoiceSettings) setInvoiceSettings({ ...defaultInvoiceSettings, ...payload.invoiceSettings });
-      if (payload.aiSettings) setAiSettings({ ...defaultAiSettings, ...payload.aiSettings });
-      setDataStatus("Backup imported.");
-    } catch {
+      const importedStorage = { ...(payload.localStorage || {}) };
+      Object.keys(payload).forEach((key) => {
+        if (key.startsWith("marginflow.")) importedStorage[key] = payload[key];
+      });
+
+      if (!Object.keys(importedStorage).length) {
+        setDataStatus("Import failed. No MarginFlow data found in this backup.");
+        return;
+      }
+
+      const currentSnapshot = Object.keys(localStorage || {})
+        .filter((key) => key.startsWith("marginflow."))
+        .reduce((result, key) => ({ ...result, [key]: localStorage.getItem(key) }), {});
+      localStorage.setItem("marginflow.preImportBackup", JSON.stringify({ exportedAt: new Date().toISOString(), localStorage: currentSnapshot }));
+
+      const mode = window.prompt('Import backup mode: type "MERGE" to keep existing data and add backup data, or type "REPLACE" to replace current MarginFlow data.', "MERGE");
+      if (!mode) {
+        setDataStatus("Import cancelled.");
+        return;
+      }
+      const normalizedMode = mode.trim().toUpperCase();
+      if (!["MERGE", "REPLACE"].includes(normalizedMode)) {
+        setDataStatus('Import cancelled. Please type "MERGE" or "REPLACE".');
+        return;
+      }
+
+      const summary = { invoicesAdded: 0, productsAdded: 0, suppliersAdded: 0, keysUpdated: 0 };
+      Object.entries(importedStorage).forEach(([key, rawValue]) => {
+        const importedValue = parseBackupValue(rawValue);
+        const currentValue = parseBackupValue(localStorage.getItem(key));
+        let nextValue = importedValue;
+
+        if (normalizedMode === "MERGE" && Array.isArray(importedValue)) {
+          nextValue = mergeArraysByIdentity(key, currentValue, importedValue);
+          const added = Math.max(0, nextValue.length - (Array.isArray(currentValue) ? currentValue.length : 0));
+          if (key.includes("invoice")) summary.invoicesAdded += added;
+          if (key.includes("product")) summary.productsAdded += added;
+          if (key.includes("supplier")) summary.suppliersAdded += added;
+        }
+
+        if (normalizedMode === "MERGE" && !Array.isArray(importedValue) && key.includes("Settings")) {
+          nextValue = { ...(currentValue && typeof currentValue === "object" ? currentValue : {}), ...(importedValue && typeof importedValue === "object" ? importedValue : {}) };
+        }
+
+        localStorage.setItem(key, typeof nextValue === "string" ? nextValue : JSON.stringify(nextValue));
+        applyImportedKey(key, nextValue);
+        summary.keysUpdated += 1;
+      });
+
+      setDataStatus(normalizedMode === "MERGE"
+        ? `Backup merged. Added ${summary.invoicesAdded} invoice(s), ${summary.productsAdded} product(s), ${summary.suppliersAdded} supplier(s).`
+        : `Backup imported. Replaced ${summary.keysUpdated} MarginFlow data key(s).`);
+    } catch (error) {
+      console.error(error);
       setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
     }
   };
@@ -2064,8 +2238,8 @@ function SettingsPanel({
 
       <Panel title="Data settings">
         <div className="button-row left">
-          <a className="file-button secondary" download="marginflow-backup.json" href={backupHref}>Export backup</a>
-          <label className="file-button secondary">Import backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
+          <a className="file-button secondary" download="marginflow-full-backup.json" href={backupHref}>Export Full Backup</a>
+          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
           <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
         </div>
