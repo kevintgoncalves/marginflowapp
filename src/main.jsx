@@ -1098,6 +1098,9 @@ function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, s
 
 function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, setInvoices }) {
   const [dragging, setDragging] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
   const isReading = draft.status === "Reading invoice with AI...";
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
@@ -1227,6 +1230,60 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }));
   };
 
+  const openEditInvoice = (invoice) => {
+    setEditTarget(invoice);
+    setEditDraft({
+      ...invoice,
+      items: (invoice.items || []).map((item) => ({ ...item, id: item.id || uid() })),
+    });
+  };
+
+  const updateEditInvoice = (field, value) => {
+    setEditDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const updateEditLine = (id, field, value) => {
+    const numericFields = ["quantity", "unitCost"];
+    setEditDraft((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? { ...item, [field]: numericFields.includes(field) ? numberValue(value) : value } : item),
+    }));
+  };
+
+  const addEditLine = () => {
+    const supplier = editDraft?.supplier || suppliers[0]?.name || "Unknown Supplier";
+    setEditDraft((current) => ({
+      ...current,
+      items: [
+        ...(current.items || []),
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment },
+      ],
+    }));
+  };
+
+  const saveEditInvoice = () => {
+    if (!editDraft) return;
+    const cleaned = {
+      ...editDraft,
+      status: editDraft.status || "Approved",
+      items: (editDraft.items || []).map((item) => ({
+        ...item,
+        quantity: numberValue(item.quantity, 0),
+        unitCost: numberValue(item.unitCost, 0),
+        supplier: item.supplier || editDraft.supplier,
+      })),
+    };
+    setInvoices((current) => current.map((invoice) => invoice.id === cleaned.id ? cleaned : invoice));
+    setEditTarget(null);
+    setEditDraft(null);
+  };
+
+  const confirmDeleteInvoice = () => {
+    if (!deleteTarget) return;
+    setInvoices((current) => current.filter((invoice) => invoice.id !== deleteTarget.id));
+    setDeleteTarget(null);
+  };
+
   return (
     <div className="page-grid">
       <Panel title="Invoice workflow" action={draft.status}>
@@ -1324,10 +1381,72 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
-          onDelete={(id) => setInvoices((current) => current.filter((invoice) => invoice.id !== id))}
+          onDelete={(id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id))}
+          onEdit={(row) => openEditInvoice(row)}
           rows={invoices}
         />
       </Panel>
+
+      <AppModal
+        title="Delete invoice?"
+        open={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        footer={(
+          <>
+            <button className="ghost" onClick={() => setDeleteTarget(null)} type="button">Cancel</button>
+            <button className="danger-button" onClick={confirmDeleteInvoice} type="button"><Trash2 size={16} />Delete invoice</button>
+          </>
+        )}
+      >
+        <p className="modal-copy">This will remove invoice <strong>{deleteTarget?.invoiceNumber}</strong> from supplier spend, GP calculations, product history and price history.</p>
+      </AppModal>
+
+      <AppModal
+        title="View / Edit invoice"
+        open={Boolean(editDraft)}
+        onClose={() => { setEditTarget(null); setEditDraft(null); }}
+        wide
+        footer={(
+          <>
+            <button className="ghost" onClick={() => { setEditTarget(null); setEditDraft(null); }} type="button">Cancel</button>
+            <button onClick={saveEditInvoice} type="button"><Save size={16} />Save changes</button>
+          </>
+        )}
+      >
+        {editDraft && (
+          <div className="modal-stack">
+            <div className="form-grid six">
+              <label>Supplier<input list="supplier-list-edit" value={editDraft.supplier || ""} onChange={(event) => updateEditInvoice("supplier", event.target.value)} /></label>
+              <datalist id="supplier-list-edit">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
+              <label>Invoice number<input value={editDraft.invoiceNumber || ""} onChange={(event) => updateEditInvoice("invoiceNumber", event.target.value)} /></label>
+              <label>Date<input type="date" value={editDraft.date || today()} onChange={(event) => updateEditInvoice("date", event.target.value)} /></label>
+              <Field label="Invoice total" readOnly value={money(invoiceTotal(editDraft))} />
+            </div>
+            <div className="table-wrap modal-table">
+              <table>
+                <thead>
+                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {(editDraft.items || []).map((item) => (
+                    <tr key={item.id}>
+                      <td><input value={item.productName || ""} onChange={(event) => updateEditLine(item.id, "productName", event.target.value)} /></td>
+                      <td><input value={item.packSize || ""} onChange={(event) => updateEditLine(item.id, "packSize", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateEditLine(item.id, "quantity", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateEditLine(item.id, "unitCost", event.target.value)} /></td>
+                      <td><select value={item.department || invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateEditLine(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
+                      <td><input value={item.supplier || editDraft.supplier || ""} onChange={(event) => updateEditLine(item.id, "supplier", event.target.value)} /></td>
+                      <td>{money(lineTotal(item))}</td>
+                      <td><button className="icon danger" onClick={() => setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="button-row left tight"><button className="ghost" onClick={addEditLine} type="button"><Plus size={16} />Add line</button></div>
+          </div>
+        )}
+      </AppModal>
     </div>
   );
 }
@@ -2019,6 +2138,8 @@ function SettingsPanel({
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
   const [editingDepartmentId, setEditingDepartmentId] = useState("");
   const [dataStatus, setDataStatus] = useState("");
+  const [pendingImport, setPendingImport] = useState(null);
+  const [replaceWarning, setReplaceWarning] = useState(false);
 
   const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
   const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
@@ -2094,29 +2215,51 @@ function SettingsPanel({
         return;
       }
 
+      const getArrayCount = (key, fallback = []) => {
+        const value = parseBackupValue(importedStorage[key]);
+        return Array.isArray(value) ? value.length : fallback.length;
+      };
+
+      setPendingImport({
+        fileName: file.name,
+        importedStorage,
+        summary: {
+          currentInvoices: invoices.length,
+          backupInvoices: getArrayCount("marginflow.invoices"),
+          currentProducts: products.length,
+          backupProducts: getArrayCount("marginflow.products"),
+          currentSuppliers: suppliers.length,
+          backupSuppliers: getArrayCount("marginflow.suppliers"),
+        },
+      });
+      setReplaceWarning(false);
+      setDataStatus("");
+    } catch (error) {
+      console.error(error);
+      setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
+    }
+  };
+
+  const applyPendingImport = (mode) => {
+    if (!pendingImport) return;
+    if (mode === "REPLACE" && !replaceWarning) {
+      setReplaceWarning(true);
+      return;
+    }
+
+    try {
       const currentSnapshot = Object.keys(localStorage || {})
         .filter((key) => key.startsWith("marginflow."))
         .reduce((result, key) => ({ ...result, [key]: localStorage.getItem(key) }), {});
       localStorage.setItem("marginflow.preImportBackup", JSON.stringify({ exportedAt: new Date().toISOString(), localStorage: currentSnapshot }));
 
-      const mode = window.prompt('Import backup mode: type "MERGE" to keep existing data and add backup data, or type "REPLACE" to replace current MarginFlow data.', "MERGE");
-      if (!mode) {
-        setDataStatus("Import cancelled.");
-        return;
-      }
-      const normalizedMode = mode.trim().toUpperCase();
-      if (!["MERGE", "REPLACE"].includes(normalizedMode)) {
-        setDataStatus('Import cancelled. Please type "MERGE" or "REPLACE".');
-        return;
-      }
-
       const summary = { invoicesAdded: 0, productsAdded: 0, suppliersAdded: 0, keysUpdated: 0 };
-      Object.entries(importedStorage).forEach(([key, rawValue]) => {
+      Object.entries(pendingImport.importedStorage).forEach(([key, rawValue]) => {
         const importedValue = parseBackupValue(rawValue);
         const currentValue = parseBackupValue(localStorage.getItem(key));
         let nextValue = importedValue;
 
-        if (normalizedMode === "MERGE" && Array.isArray(importedValue)) {
+        if (mode === "MERGE" && Array.isArray(importedValue)) {
           nextValue = mergeArraysByIdentity(key, currentValue, importedValue);
           const added = Math.max(0, nextValue.length - (Array.isArray(currentValue) ? currentValue.length : 0));
           if (key.includes("invoice")) summary.invoicesAdded += added;
@@ -2124,7 +2267,7 @@ function SettingsPanel({
           if (key.includes("supplier")) summary.suppliersAdded += added;
         }
 
-        if (normalizedMode === "MERGE" && !Array.isArray(importedValue) && key.includes("Settings")) {
+        if (mode === "MERGE" && !Array.isArray(importedValue) && key.includes("Settings")) {
           nextValue = { ...(currentValue && typeof currentValue === "object" ? currentValue : {}), ...(importedValue && typeof importedValue === "object" ? importedValue : {}) };
         }
 
@@ -2133,9 +2276,11 @@ function SettingsPanel({
         summary.keysUpdated += 1;
       });
 
-      setDataStatus(normalizedMode === "MERGE"
+      setDataStatus(mode === "MERGE"
         ? `Backup merged. Added ${summary.invoicesAdded} invoice(s), ${summary.productsAdded} product(s), ${summary.suppliersAdded} supplier(s).`
         : `Backup imported. Replaced ${summary.keysUpdated} MarginFlow data key(s).`);
+      setPendingImport(null);
+      setReplaceWarning(false);
     } catch (error) {
       console.error(error);
       setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
@@ -2239,12 +2384,41 @@ function SettingsPanel({
       <Panel title="Data settings">
         <div className="button-row left">
           <a className="file-button secondary" download="marginflow-full-backup.json" href={backupHref}>Export Full Backup</a>
-          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
+          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" onChange={(event) => { importBackup(event.target.files?.[0]); event.target.value = ""; }} type="file" /></label>
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
           <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
         </div>
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
       </Panel>
+
+      <AppModal
+        title="Import backup"
+        open={Boolean(pendingImport)}
+        onClose={() => { setPendingImport(null); setReplaceWarning(false); }}
+        footer={(
+          <>
+            <button className="ghost" onClick={() => { setPendingImport(null); setReplaceWarning(false); setDataStatus("Import cancelled."); }} type="button">Cancel</button>
+            <button className="ghost" onClick={() => applyPendingImport("REPLACE")} type="button">Replace current data</button>
+            <button onClick={() => applyPendingImport("MERGE")} type="button">Merge with current data</button>
+          </>
+        )}
+      >
+        {pendingImport && (
+          <div className="modal-stack">
+            <p className="modal-copy">Choose how to import <strong>{pendingImport.fileName}</strong>.</p>
+            <div className="import-summary-grid">
+              <div><span>Current invoices</span><strong>{pendingImport.summary.currentInvoices}</strong></div>
+              <div><span>Backup invoices</span><strong>{pendingImport.summary.backupInvoices}</strong></div>
+              <div><span>Current products</span><strong>{pendingImport.summary.currentProducts}</strong></div>
+              <div><span>Backup products</span><strong>{pendingImport.summary.backupProducts}</strong></div>
+              <div><span>Current suppliers</span><strong>{pendingImport.summary.currentSuppliers}</strong></div>
+              <div><span>Backup suppliers</span><strong>{pendingImport.summary.backupSuppliers}</strong></div>
+            </div>
+            <div className="invoice-status info"><strong>Merge</strong> keeps existing data and adds new backup data, skipping duplicates.</div>
+            {replaceWarning && <div className="invoice-status error"><strong>Replace warning:</strong> click Replace current data again to replace current MarginFlow browser data.</div>}
+          </div>
+        )}
+      </AppModal>
     </div>
   );
 }
@@ -2298,6 +2472,23 @@ function DataTable({ columns, rows, onEdit, onDelete }) {
         </table>
       </div>
     </>
+  );
+}
+
+
+function AppModal({ title, open, onClose, footer, children, wide = false }) {
+  if (!open) return null;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className={`app-modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-head">
+          <h2>{title}</h2>
+          <button className="icon" onClick={onClose} type="button"><X size={17} /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
+      </div>
+    </div>
   );
 }
 
