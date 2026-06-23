@@ -178,6 +178,28 @@ function apiKey() {
   return process.env.OPENAI_API_KEY || process.env.Marginflow || process.env.MARGINFLOW_OPENAI_API_KEY || "";
 }
 
+function aiFileContent(file) {
+  if (!file || !file.dataUrl) return null;
+  const mimeType = file.type || "";
+  const name = file.name || "invoice-file";
+
+  if (mimeType.startsWith("image/") || /^data:image\//i.test(file.dataUrl)) {
+    return { type: "input_image", image_url: file.dataUrl };
+  }
+
+  if (mimeType === "application/pdf" || /\.pdf$/i.test(name) || /^data:application\/pdf/i.test(file.dataUrl)) {
+    return { type: "input_file", filename: name, file_data: file.dataUrl };
+  }
+
+  return null;
+}
+
+function buildVisionPrompt(invoiceText, suppliers = [], products = []) {
+  return `${buildPrompt(invoiceText || "The invoice is attached as one or more uploaded files/images.", suppliers, products)}
+
+If invoice files/images are attached, read them directly. Ignore OCR artefacts and handwriting unless it clearly belongs to invoice data. Cake n Stuff Ltd and Reading Room are the customer/billing names, not suppliers.`;
+}
+
 function buildPrompt(invoiceText, suppliers = [], products = []) {
   const knownSuppliers = suppliers.map((supplier) => supplier.name || supplier).filter(Boolean).join(", ");
   const knownProducts = products
@@ -232,7 +254,8 @@ export async function handler(event) {
   }
 
   const invoiceText = asString(payload.invoiceText || payload.text || payload.ocrText);
-  if (!invoiceText) return json(400, { error: "Invoice text is required" });
+  const attachedFiles = Array.isArray(payload.files) ? payload.files.map(aiFileContent).filter(Boolean) : [];
+  if (!invoiceText && !attachedFiles.length) return json(400, { error: "Upload an invoice PDF/photo or provide invoice text" });
 
   const key = apiKey();
   if (!key) {
@@ -266,13 +289,14 @@ export async function handler(event) {
             content: [
               {
                 type: "input_text",
-                text: buildPrompt(invoiceText, payload.suppliers || [], payload.products || []),
+                text: buildVisionPrompt(invoiceText, payload.suppliers || [], payload.products || []),
               },
+              ...attachedFiles,
             ],
           },
         ],
         text: {
-          verbosity: "low",
+          verbosity: "medium",
           format: {
             type: "json_schema",
             name: "invoice_extraction",
@@ -303,7 +327,7 @@ export async function handler(event) {
     if (!normalized.lines.length) {
       return json(422, {
         error: "AI did not find invoice lines",
-        detail: "The invoice text was read, but no chargeable product lines were extracted. Try a clearer PDF or paste OCR text.",
+        detail: "AI could not find chargeable product lines. Try a clearer photo, upload a PDF, or enter the invoice manually.",
         supplier: normalized.supplier,
         invoiceDate: normalized.invoiceDate,
         invoiceNumber: normalized.invoiceNumber,

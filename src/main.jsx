@@ -450,6 +450,28 @@ async function textFromInvoiceFiles(files) {
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Could not read invoice file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function invoiceFilesForAi(files) {
+  const supported = Array.from(files || []).filter((file) => {
+    const name = file.name.toLowerCase();
+    return file.type.startsWith("image/") || file.type === "application/pdf" || name.endsWith(".pdf");
+  });
+
+  return Promise.all(supported.map(async (file) => ({
+    name: file.name,
+    type: file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream"),
+    dataUrl: await fileToDataUrl(file),
+  })));
+}
+
 function cheapestOffer(product, products) {
   const prices = collectSupplierPrices(product, products);
   return prices.sort((a, b) => a.price - b.price)[0] || { supplier: product.supplier, price: numberValue(product.unitCost) };
@@ -1001,13 +1023,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
-    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded` }));
+    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded. Ready for AI reading.` }));
     const uploadedText = await textFromInvoiceFiles(uploaded);
     if (uploadedText) {
       setDraft((current) => ({
         ...current,
         invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
-        status: `${uploaded.length} file(s) uploaded`,
+        status: `${uploaded.length} file(s) uploaded. Ready for AI reading.`,
       }));
     }
   };
@@ -1024,9 +1046,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }
     const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
+    const aiFiles = await invoiceFilesForAi(draft.files);
 
-    if (!invoiceText) {
-      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
+    if (!invoiceText && !aiFiles.length) {
+      setDraft((current) => ({ ...current, status: "AI failed. Please upload a PDF/photo or enter the invoice manually." }));
       return;
     }
 
@@ -1038,6 +1061,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           invoiceText,
+          files: aiFiles,
           suppliers,
           products: products.map((product) => ({
             name: product.productName,
@@ -1079,7 +1103,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         status: `AI extracted ${items.length} lines. Please review before approving.`,
       }));
     } catch (error) {
-      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
+      setDraft((current) => ({ ...current, status: `AI could not read this invoice. Please try a clearer photo, upload a PDF, or enter it manually. ${error.message}` }));
     }
   };
 
@@ -1161,7 +1185,6 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
           </div>
         )}
-        <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
         <div className="file-list">
           {draft.files.map((file, index) => (
             <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) }))} type="button"><X size={14} /></button></span>
