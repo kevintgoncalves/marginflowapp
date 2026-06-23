@@ -22,8 +22,10 @@ import {
   Trash2,
   Upload,
   UtensilsCrossed,
+  Users,
   X,
 } from "lucide-react";
+import { labourImportedSeed } from "./labourSeedData.js";
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -313,6 +315,7 @@ const navItems = [
   { id: "menu", label: "Menu Costing", icon: UtensilsCrossed },
   { id: "waste", label: "Waste", icon: Trash2 },
   { id: "gp", label: "Sales", icon: Gauge },
+  { id: "labour", label: "Labour", icon: Users },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -2639,6 +2642,353 @@ function targetForDepartment(departmentSettings, department, fallback) {
   return numberValue(departmentSettings.find((item) => item.name === department)?.targetGp, fallback);
 }
 
+const labourHolidayAccrualRate = 0.1207;
+const labourFiscalYearStart = "2025-11-01";
+const labourFiscalYearEnd = "2026-10-31";
+const labourBasisLabels = {
+  foodSales: "Food sales",
+  totalSales: "Total sales",
+  serviceCharge: "Service charge",
+};
+
+function stableLabourId(prefix, value) {
+  const token = normalizeHeader(value).slice(0, 70);
+  return token ? `${prefix}-${token}` : uid();
+}
+
+function labourDaysBetween(startDate, endDate) {
+  if (!startDate || !endDate) return 0;
+  return Math.max(0, Math.round((parseDate(endDate) - parseDate(startDate)) / 86400000));
+}
+
+function labourWeeksBetween(startDate, endDate) {
+  return Math.max(1, labourDaysBetween(startDate, endDate) / 7);
+}
+
+function labourEntryInRange(startDate, endDate, range) {
+  const start = startDate || endDate;
+  const end = endDate || startDate;
+  if (!start && !end) return false;
+  return end >= range.start && start <= range.end;
+}
+
+function labourSameText(left, right) {
+  return normalizeHeader(left) === normalizeHeader(right);
+}
+
+function labourSum(rows, key) {
+  return rows.reduce((sum, row) => sum + numberValue(row[key], 0), 0);
+}
+
+function labourRatio(value, total) {
+  return total ? (numberValue(value, 0) / numberValue(total, 0)) * 100 : 0;
+}
+
+function createInitialLabourData() {
+  const departments = (labourImportedSeed.departments || []).map((department) => ({ ...department }));
+  const departmentIdForName = (name) => (departments.find((department) => labourSameText(department.name, name)) || departments[0])?.id || "";
+  const employees = (labourImportedSeed.employees || []).map((employee) => ({
+    id: stableLabourId("emp", employee.name),
+    name: employee.name,
+    departmentId: departmentIdForName(employee.departmentName),
+    payType: employee.payType || "hourly",
+    rate: numberValue(employee.rate, 0),
+    contractedHours: numberValue(employee.contractedHours, 0),
+    manualAverageWeeklyHours: numberValue(employee.manualAverageWeeklyHours, 0),
+    startDate: employee.startDate || "",
+    status: employee.status || "left",
+    holidayType: employee.holidayType || "zero-hours",
+    holidayEntitlementDays: numberValue(employee.holidayEntitlementDays, 28),
+  }));
+  const employeeByName = new Map(employees.map((employee) => [normalizeHeader(employee.name), employee]));
+  const labour = (labourImportedSeed.labour || []).map((row, index) => {
+    const employee = employeeByName.get(normalizeHeader(row.employeeName));
+    return {
+      id: stableLabourId("lab", `${row.date}-${row.employeeName}-${index}`),
+      source: "csv-shifts",
+      date: row.date,
+      dateTo: row.dateTo || row.date,
+      employeeId: employee?.id || "",
+      employeeName: row.employeeName,
+      departmentId: employee?.departmentId || departmentIdForName(row.departmentName),
+      departmentName: row.departmentName,
+      hours: numberValue(row.hours, 0),
+      wages: numberValue(row.wages, 0),
+      serviceCharge: numberValue(row.serviceCharge, 0),
+      tronc: numberValue(row.tronc ?? row.serviceCharge, 0),
+      rate: numberValue(row.rate, 0),
+    };
+  });
+
+  return {
+    departments,
+    employees,
+    sales: (labourImportedSeed.sales || []).map((row) => ({
+      id: stableLabourId("sales", row.dateFrom),
+      source: "csv-items",
+      ...row,
+      bohServiceCharge: numberValue(row.serviceCharge, 0) * 0.4,
+      fohServiceCharge: numberValue(row.serviceCharge, 0) * 0.6,
+    })),
+    labour,
+    holidays: [],
+    rateHistory: (labourImportedSeed.rateHistory || []).map((row) => ({
+      id: stableLabourId("rate", `${row.employeeName}-${row.effectiveDate}-${row.rate}`),
+      ...row,
+      employeeId: employeeByName.get(normalizeHeader(row.employeeName))?.id || "",
+    })),
+    foodCategories: labourImportedSeed.foodCategories || [],
+  };
+}
+
+function normalizeLabourData(data = {}) {
+  const fallback = createInitialLabourData();
+  return {
+    ...fallback,
+    ...data,
+    departments: Array.isArray(data.departments) ? data.departments : fallback.departments,
+    employees: Array.isArray(data.employees) ? data.employees : fallback.employees,
+    sales: Array.isArray(data.sales) ? data.sales : fallback.sales,
+    labour: Array.isArray(data.labour) ? data.labour : fallback.labour,
+    holidays: Array.isArray(data.holidays) ? data.holidays : [],
+    rateHistory: Array.isArray(data.rateHistory) ? data.rateHistory : fallback.rateHistory,
+    foodCategories: Array.isArray(data.foodCategories) ? data.foodCategories : fallback.foodCategories,
+  };
+}
+
+function labourDepartmentName(data, departmentId, fallback = "") {
+  return data.departments.find((department) => department.id === departmentId)?.name || fallback;
+}
+
+function labourEmployeeAverageWeeklyHours(data, employee) {
+  if (!employee) return 0;
+  if (numberValue(employee.manualAverageWeeklyHours, 0)) return numberValue(employee.manualAverageWeeklyHours, 0);
+  const rows = data.labour.filter((row) => labourSameText(row.employeeName, employee.name));
+  const hours = labourSum(rows, "hours");
+  return hours / labourWeeksBetween(employee.startDate || labourFiscalYearStart, today());
+}
+
+function labourRateLabel(employee) {
+  if (employee.payType === "annual") return `${money(employee.rate)}/year (${money(employee.rate / 52)}/week)`;
+  return `${money(employee.rate)}/h`;
+}
+
+function labourSalesInRange(data, range) {
+  return data.sales.filter((row) => labourEntryInRange(row.dateFrom, row.dateTo || row.dateFrom, range));
+}
+
+function labourRowsInRange(data, range) {
+  return data.labour.filter((row) => labourEntryInRange(row.date, row.dateTo || row.date, range));
+}
+
+function labourSalesTotals(rows) {
+  return {
+    totalSales: labourSum(rows, "totalSales"),
+    netSales: labourSum(rows, "netSales"),
+    foodSales: labourSum(rows, "foodSales"),
+    serviceCharge: labourSum(rows, "serviceCharge"),
+  };
+}
+
+function labourTotals(rows) {
+  return {
+    hours: labourSum(rows, "hours"),
+    wages: labourSum(rows, "wages"),
+    serviceCharge: labourSum(rows, "serviceCharge"),
+  };
+}
+
+function aggregateLabourByEmployee(data, rows) {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = row.employeeId || normalizeHeader(row.employeeName);
+    const current = map.get(key) || {
+      id: key || uid(),
+      employeeName: row.employeeName,
+      departmentName: labourDepartmentName(data, row.departmentId, row.departmentName || "-"),
+      hours: 0,
+      wages: 0,
+      serviceCharge: 0,
+    };
+    current.hours += numberValue(row.hours, 0);
+    current.wages += numberValue(row.wages, 0);
+    current.serviceCharge += numberValue(row.serviceCharge, 0);
+    map.set(key, current);
+  });
+  return [...map.values()];
+}
+
+function labourDepartmentBreakdownRows(data, labourRows, salesTotals) {
+  return data.departments.map((department) => {
+    const rows = labourRows.filter((row) => {
+      const departmentName = labourDepartmentName(data, row.departmentId, row.departmentName);
+      return row.departmentId === department.id || labourSameText(departmentName, department.name);
+    });
+    const wages = labourSum(rows, "wages");
+    const basis = department.basis || "totalSales";
+    const basisValue = numberValue(salesTotals[basis], 0);
+    const actual = labourRatio(wages, basisValue);
+    return {
+      id: department.id,
+      department: department.name,
+      basis: labourBasisLabels[basis] || basis,
+      hours: labourSum(rows, "hours"),
+      wages,
+      totalSales: salesTotals.totalSales,
+      foodSales: salesTotals.foodSales,
+      actual,
+      target: numberValue(department.targetPercent, 0),
+      status: department.targetPercent && actual > department.targetPercent ? "Above" : "OK",
+    };
+  });
+}
+
+function labourHolidayRow(data, employee) {
+  const rows = data.labour.filter((row) => labourSameText(row.employeeName, employee.name));
+  const hours = labourSum(rows, "hours");
+  const wages = labourSum(rows, "wages");
+  const avgWeekly = labourEmployeeAverageWeeklyHours(data, employee);
+  const avgDaily = avgWeekly / 5;
+  const used = data.holidays.filter((holiday) => holiday.employeeId === employee.id || labourSameText(holiday.employeeName, employee.name));
+  const usedHours = labourSum(used, "hours");
+  const usedDays = labourSum(used, "days") || (avgDaily ? usedHours / avgDaily : 0);
+  const isAnnual = employee.payType === "annual";
+  if (isAnnual) {
+    const elapsedDays = labourDaysBetween([employee.startDate || labourFiscalYearStart, labourFiscalYearStart].sort().at(-1), today());
+    const yearDays = labourDaysBetween(labourFiscalYearStart, labourFiscalYearEnd) + 1;
+    const accruedDays = numberValue(employee.holidayEntitlementDays, 28) * (elapsedDays / yearDays);
+    const remainingDays = accruedDays - usedDays;
+    return {
+      id: employee.id,
+      name: employee.name,
+      type: "Annual salary",
+      hoursWorked: hours,
+      avgWeekly,
+      avgDaily,
+      accrued: `${numberValue(accruedDays).toFixed(1)} days`,
+      used: `${numberValue(usedDays).toFixed(1)} days`,
+      remaining: `${numberValue(remainingDays).toFixed(1)} days`,
+      projectedHours: 0,
+      projectedAccrued: `${numberValue(employee.holidayEntitlementDays, 28).toFixed(1)} days`,
+      projectedRemaining: `${numberValue(numberValue(employee.holidayEntitlementDays, 28) - usedDays).toFixed(1)} days`,
+      liability: (numberValue(employee.rate, 0) / 260) * (numberValue(employee.holidayEntitlementDays, 28) - usedDays),
+      notes: "Holiday tracked in days",
+    };
+  }
+
+  const accruedHours = hours * labourHolidayAccrualRate;
+  const projectedHours = avgWeekly * labourWeeksBetween(today(), labourFiscalYearEnd);
+  const projectedAccruedHours = (hours + projectedHours) * labourHolidayAccrualRate;
+  const remainingHours = accruedHours - usedHours;
+  const projectedRemainingHours = projectedAccruedHours - usedHours;
+  const averageRate = wages / hours || employee.rate || 0;
+  return {
+    id: employee.id,
+    name: employee.name,
+    type: "Zero-hours",
+    hoursWorked: hours,
+    avgWeekly,
+    avgDaily,
+    accrued: `${numberValue(accruedHours).toFixed(2)}h / ${avgDaily ? (accruedHours / avgDaily).toFixed(1) : "0.0"} days`,
+    used: `${numberValue(usedHours).toFixed(2)}h / ${numberValue(usedDays).toFixed(1)} days`,
+    remaining: `${numberValue(remainingHours).toFixed(2)}h / ${avgDaily ? (remainingHours / avgDaily).toFixed(1) : "0.0"} days`,
+    projectedHours,
+    projectedAccrued: `${numberValue(projectedAccruedHours).toFixed(2)}h / ${avgDaily ? (projectedAccruedHours / avgDaily).toFixed(1) : "0.0"} days`,
+    projectedRemaining: `${numberValue(projectedRemainingHours).toFixed(2)}h / ${avgDaily ? (projectedRemainingHours / avgDaily).toFixed(1) : "0.0"} days`,
+    liability: averageRate * projectedRemainingHours,
+    notes: "12.07% of hours",
+  };
+}
+
+function labourHolidaySummary(data) {
+  const rows = data.employees.filter((employee) => employee.holidayType !== "freelance").map((employee) => labourHolidayRow(data, employee));
+  return {
+    rows,
+    totalLiability: labourSum(rows, "liability"),
+    totalRemainingHours: rows.reduce((sum, row) => {
+      const match = String(row.projectedRemaining).match(/-?\d+(?:\.\d+)?h/);
+      return sum + (match ? numberValue(match[0].replace("h", ""), 0) : 0);
+    }, 0),
+  };
+}
+
+function parseLabourSalesCsv(text) {
+  const rows = parseCsvText(text);
+  if (!rows.length) return [];
+  const headers = rows[0] || [];
+  const mapping = {
+    date: findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day", "datefrom"]),
+    dateTo: findHeaderIndex(headers, ["dateto", "enddate", "periodto"]),
+    totalSales: findHeaderIndex(headers, ["totalsales", "total", "grosssales", "nettotal"]),
+    netSales: findHeaderIndex(headers, ["netsales", "net", "sales"]),
+    foodSales: findHeaderIndex(headers, ["foodsales", "food", "kitchensales"]),
+    serviceCharge: findHeaderIndex(headers, ["servicecharge", "servicecharges", "tips", "gratuity"]),
+  };
+  const hasHeader = Object.values(mapping).some((index) => index >= 0);
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, totalSales: 1, netSales: 1, foodSales: 2, serviceCharge: 3 };
+  return dataRows.map((cells, index) => {
+    const at = (field) => Number(fallback[field]) >= 0 ? cells[Number(fallback[field])] : "";
+    const date = normalizeImportDate(at("date"));
+    const serviceCharge = parseCurrencyCell(at("serviceCharge"));
+    const totalSales = parseCurrencyCell(at("totalSales"));
+    const netSales = parseCurrencyCell(at("netSales")) || totalSales;
+    return {
+      id: uid(),
+      source: "csv-upload",
+      dateFrom: date,
+      dateTo: normalizeImportDate(at("dateTo")) || date,
+      totalSales,
+      netSales,
+      foodSales: parseCurrencyCell(at("foodSales")),
+      serviceCharge,
+      bohServiceCharge: serviceCharge * 0.4,
+      fohServiceCharge: serviceCharge * 0.6,
+      importStatus: date ? "Imported" : `Skipped row ${index + 1}`,
+    };
+  }).filter((row) => row.dateFrom && (row.totalSales || row.netSales || row.foodSales || row.serviceCharge));
+}
+
+function parseLabourCsv(text) {
+  const rows = parseCsvText(text);
+  if (!rows.length) return [];
+  const headers = rows[0] || [];
+  const mapping = {
+    date: findHeaderIndex(headers, ["date", "shiftdate", "weekstart", "datefrom"]),
+    dateTo: findHeaderIndex(headers, ["dateto", "enddate", "weekend"]),
+    employeeName: findHeaderIndex(headers, ["employee", "employeename", "name", "staff", "worker"]),
+    departmentName: findHeaderIndex(headers, ["department", "dept", "role", "team"]),
+    hours: findHeaderIndex(headers, ["hours", "hourstotal", "time", "paidhours"]),
+    wages: findHeaderIndex(headers, ["wages", "wage", "pay", "labourcost", "cost"]),
+    serviceCharge: findHeaderIndex(headers, ["servicecharge", "tronc", "tips", "gratuity"]),
+    rate: findHeaderIndex(headers, ["rate", "hourlyrate", "payrate"]),
+  };
+  const hasHeader = Object.values(mapping).some((index) => index >= 0);
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, employeeName: 1, departmentName: 2, hours: 3, wages: 4, serviceCharge: 5, rate: 6 };
+  return dataRows.map((cells) => {
+    const at = (field) => Number(fallback[field]) >= 0 ? cells[Number(fallback[field])] : "";
+    const date = normalizeImportDate(at("date"));
+    const employeeName = at("employeeName") || "Unknown employee";
+    const hours = parseCurrencyCell(at("hours"));
+    const wages = parseCurrencyCell(at("wages"));
+    const rate = parseCurrencyCell(at("rate")) || (hours ? wages / hours : 0);
+    return {
+      id: uid(),
+      source: "csv-upload",
+      date,
+      dateTo: normalizeImportDate(at("dateTo")) || date,
+      employeeName,
+      departmentName: at("departmentName") || "FOH",
+      hours,
+      wages,
+      serviceCharge: parseCurrencyCell(at("serviceCharge")),
+      tronc: parseCurrencyCell(at("serviceCharge")),
+      rate,
+    };
+  }).filter((row) => row.date && row.employeeName && (row.hours || row.wages || row.serviceCharge));
+}
+
 function App() {
   const [active, setActive] = useState("dashboard");
   const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
@@ -2668,6 +3018,8 @@ function App() {
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
+  const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
+  const [labourData, setLabourDataState] = useState(() => normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const setProducts = storedStateUpdater(setProductsState, "marginflow.products");
@@ -2679,6 +3031,7 @@ function App() {
   const setCreditNotes = storedStateUpdater(setCreditNotesState, "marginflow.creditNotes");
   const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
   const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
+  const setLabourData = storedStateUpdater(setLabourDataState, "marginflow.labour");
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -2709,6 +3062,7 @@ function App() {
   const isWorkEdition = appMode === "Work Edition: Non-AI";
   const visibleNavItems = navItems.filter((item) => !(isWorkEdition && item.id === "ai"));
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
+  const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
   const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
@@ -2900,6 +3254,17 @@ function App() {
             suppliers={suppliers}
             supplierSpend={departmentSupplierSpend}
             wasteItems={wasteItems}
+          />
+        )}
+        {active === "labour" && (
+          <LabourPage
+            dateRange={labourDateRange}
+            dateRangeState={labourDateRangeState}
+            financialSettings={financialSettings}
+            labourData={labourData}
+            requestDelete={requestDelete}
+            setDateRangeState={setLabourDateRangeState}
+            setLabourData={setLabourData}
           />
         )}
         {active === "settings" && (
@@ -5760,6 +6125,613 @@ function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmou
         <Field label="Refunds" type="number" value={form.refunds} onChange={(value) => setForm({ ...form, refunds: value })} />
       </div>
     </EditModal>
+  );
+}
+
+function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setDateRangeState, setLabourData }) {
+  const data = normalizeLabourData(labourData);
+  const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
+  const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
+  const salesTotals = useMemo(() => labourSalesTotals(salesRows), [salesRows]);
+  const labourSummary = useMemo(() => labourTotals(labourRows), [labourRows]);
+  const departmentRows = useMemo(() => labourDepartmentBreakdownRows(data, labourRows, salesTotals), [data, labourRows, salesTotals]);
+  const employeeRows = useMemo(() => [...data.employees].sort((a, b) => a.name.localeCompare(b.name)), [data.employees]);
+  const employeeOptions = useMemo(() => employeeRows.map((employee) => ({ id: employee.id, name: employee.name })), [employeeRows]);
+  const holidaySummary = useMemo(() => labourHolidaySummary(data), [data]);
+  const [status, setStatus] = useState("");
+  const [employeeModal, setEmployeeModal] = useState(null);
+  const [departmentModal, setDepartmentModal] = useState(null);
+  const [salesModal, setSalesModal] = useState(null);
+  const [holidayModal, setHolidayModal] = useState(null);
+  const [rateModal, setRateModal] = useState(null);
+  const [weeklyModal, setWeeklyModal] = useState(null);
+  const [salesImportKey, setSalesImportKey] = useState(0);
+  const [labourImportKey, setLabourImportKey] = useState(0);
+
+  const saveData = (updater) => {
+    setLabourData((current) => normalizeLabourData(typeof updater === "function" ? updater(normalizeLabourData(current)) : updater));
+  };
+
+  const blankEmployee = () => ({
+    id: "",
+    name: "",
+    departmentId: data.departments[0]?.id || "",
+    payType: "hourly",
+    rate: 0,
+    contractedHours: 0,
+    manualAverageWeeklyHours: 0,
+    startDate: today(),
+    status: "active",
+    holidayType: "zero-hours",
+    holidayEntitlementDays: 28,
+  });
+  const blankDepartment = () => ({
+    id: "",
+    name: "",
+    group: "FOH",
+    targetPercent: 30,
+    basis: "totalSales",
+    serviceChargeShare: 1,
+    active: true,
+  });
+  const blankSales = () => ({
+    id: "",
+    dateFrom: today(),
+    dateTo: today(),
+    totalSales: 0,
+    netSales: 0,
+    foodSales: 0,
+    serviceCharge: 0,
+    bohServiceCharge: 0,
+    fohServiceCharge: 0,
+    source: "manual",
+  });
+  const blankHoliday = () => ({
+    id: "",
+    employeeId: data.employees[0]?.id || "",
+    employeeName: data.employees[0]?.name || "",
+    dateFrom: today(),
+    dateTo: today(),
+    days: 1,
+    hours: 0,
+    status: "Booked",
+  });
+  const blankRate = () => ({
+    id: "",
+    employeeId: data.employees[0]?.id || "",
+    employeeName: data.employees[0]?.name || "",
+    effectiveDate: today(),
+    rate: 0,
+    payType: "hourly",
+  });
+
+  const replaceById = (rows, row) => {
+    const id = row.id || uid();
+    const next = { ...row, id };
+    return rows.some((item) => item.id === id) ? rows.map((item) => (item.id === id ? next : item)) : [next, ...rows];
+  };
+
+  const deleteFromCollection = (collection, id, label) => {
+    requestDelete({
+      title: `Delete ${label}`,
+      message: `Remove this ${label.toLowerCase()} from Labour? Existing historical rows are left untouched.`,
+      onConfirm: () => saveData((current) => ({ ...current, [collection]: current[collection].filter((row) => row.id !== id) })),
+    });
+  };
+
+  const openWeeklyInput = () => {
+    const activeEmployees = data.employees.filter((employee) => employee.status !== "left");
+    setWeeklyModal({
+      weekStart: dateRange.start || today(),
+      serviceCharge: 0,
+      salesTotal: 0,
+      netSales: 0,
+      foodSales: 0,
+      rows: activeEmployees.map((employee) => ({
+        employeeId: employee.id,
+        employeeName: employee.name,
+        departmentId: employee.departmentId,
+        departmentName: labourDepartmentName(data, employee.departmentId, "FOH"),
+        hours: 0,
+        rate: employee.payType === "annual" ? 0 : numberValue(employee.rate, 0),
+        wages: 0,
+        serviceChargeWeight: 1,
+        include: true,
+      })),
+    });
+  };
+
+  const saveEmployee = () => {
+    const employee = {
+      ...employeeModal,
+      id: employeeModal.id || uid(),
+      rate: numberValue(employeeModal.rate, 0),
+      contractedHours: numberValue(employeeModal.contractedHours, 0),
+      manualAverageWeeklyHours: numberValue(employeeModal.manualAverageWeeklyHours, 0),
+      holidayEntitlementDays: numberValue(employeeModal.holidayEntitlementDays, 28),
+    };
+    if (!employee.name.trim()) return;
+    saveData((current) => ({ ...current, employees: replaceById(current.employees, employee) }));
+    setEmployeeModal(null);
+  };
+
+  const saveDepartment = () => {
+    const department = {
+      ...departmentModal,
+      id: departmentModal.id || uid(),
+      targetPercent: numberValue(departmentModal.targetPercent, 0),
+      serviceChargeShare: numberValue(departmentModal.serviceChargeShare, 1),
+      active: departmentModal.active !== false && departmentModal.active !== "false",
+    };
+    if (!department.name.trim()) return;
+    saveData((current) => ({ ...current, departments: replaceById(current.departments, department) }));
+    setDepartmentModal(null);
+  };
+
+  const saveSales = () => {
+    const serviceCharge = numberValue(salesModal.serviceCharge, 0);
+    const sales = {
+      ...salesModal,
+      id: salesModal.id || uid(),
+      dateTo: salesModal.dateTo || salesModal.dateFrom,
+      totalSales: numberValue(salesModal.totalSales, 0),
+      netSales: numberValue(salesModal.netSales, 0),
+      foodSales: numberValue(salesModal.foodSales, 0),
+      serviceCharge,
+      bohServiceCharge: numberValue(salesModal.bohServiceCharge, serviceCharge * 0.4),
+      fohServiceCharge: numberValue(salesModal.fohServiceCharge, serviceCharge * 0.6),
+      source: salesModal.source || "manual",
+    };
+    if (!sales.dateFrom) return;
+    saveData((current) => ({ ...current, sales: replaceById(current.sales, sales).sort((a, b) => String(b.dateFrom).localeCompare(String(a.dateFrom))) }));
+    setSalesModal(null);
+  };
+
+  const saveHoliday = () => {
+    const employee = data.employees.find((item) => item.id === holidayModal.employeeId);
+    const holiday = {
+      ...holidayModal,
+      id: holidayModal.id || uid(),
+      employeeName: employee?.name || holidayModal.employeeName,
+      days: numberValue(holidayModal.days, 0),
+      hours: numberValue(holidayModal.hours, 0),
+    };
+    saveData((current) => ({ ...current, holidays: replaceById(current.holidays, holiday) }));
+    setHolidayModal(null);
+  };
+
+  const saveRate = () => {
+    const employee = data.employees.find((item) => item.id === rateModal.employeeId);
+    const rate = {
+      ...rateModal,
+      id: rateModal.id || uid(),
+      employeeName: employee?.name || rateModal.employeeName,
+      rate: numberValue(rateModal.rate, 0),
+    };
+    saveData((current) => ({
+      ...current,
+      rateHistory: replaceById(current.rateHistory, rate),
+      employees: current.employees.map((employeeRow) => (
+        employeeRow.id === rate.employeeId ? { ...employeeRow, rate: rate.rate, payType: rate.payType || employeeRow.payType } : employeeRow
+      )),
+    }));
+    setRateModal(null);
+  };
+
+  const updateWeeklyRow = (index, key, value) => {
+    setWeeklyModal((current) => {
+      const rows = current.rows.map((row, rowIndex) => {
+        if (rowIndex !== index) return row;
+        const next = { ...row, [key]: ["hours", "rate", "wages", "serviceChargeWeight"].includes(key) ? numberValue(value, 0) : value };
+        if (key === "hours" || key === "rate") next.wages = numberValue(next.hours, 0) * numberValue(next.rate, 0);
+        return next;
+      });
+      return { ...current, rows };
+    });
+  };
+
+  const allocateServiceCharge = (rows, pool) => {
+    const weightedHours = rows.reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargeWeight, 1), 0);
+    return new Map(rows.map((row) => [
+      row.employeeId,
+      weightedHours ? (pool * numberValue(row.hours, 0) * numberValue(row.serviceChargeWeight, 1)) / weightedHours : 0,
+    ]));
+  };
+
+  const saveWeeklyInput = () => {
+    const weekEnd = shiftDate(weeklyModal.weekStart, 6);
+    const rows = weeklyModal.rows.filter((row) => row.include && (numberValue(row.hours, 0) || numberValue(row.wages, 0)));
+    const serviceCharge = numberValue(weeklyModal.serviceCharge, 0);
+    const bohRows = rows.filter((row) => ["BOH", "KP"].includes(labourDepartmentName(data, row.departmentId, row.departmentName)));
+    const fohRows = rows.filter((row) => labourDepartmentName(data, row.departmentId, row.departmentName) === "FOH");
+    const bohPool = serviceCharge * 0.4;
+    const fohPool = serviceCharge * 0.6;
+    const bohAllocation = allocateServiceCharge(bohRows, bohPool);
+    const fohAllocation = allocateServiceCharge(fohRows, fohPool);
+    const labour = rows.map((row) => ({
+      id: uid(),
+      source: "manual-week",
+      date: weeklyModal.weekStart,
+      dateTo: weekEnd,
+      employeeId: row.employeeId,
+      employeeName: row.employeeName,
+      departmentId: row.departmentId,
+      departmentName: labourDepartmentName(data, row.departmentId, row.departmentName),
+      hours: numberValue(row.hours, 0),
+      rate: numberValue(row.rate, 0),
+      wages: numberValue(row.wages, 0),
+      serviceCharge: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
+      tronc: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
+    }));
+    const sales = {
+      id: uid(),
+      source: "manual-week",
+      dateFrom: weeklyModal.weekStart,
+      dateTo: weekEnd,
+      totalSales: numberValue(weeklyModal.salesTotal, 0),
+      netSales: numberValue(weeklyModal.netSales, numberValue(weeklyModal.salesTotal, 0)),
+      foodSales: numberValue(weeklyModal.foodSales, 0),
+      serviceCharge,
+      bohServiceCharge: bohPool,
+      fohServiceCharge: fohPool,
+    };
+    saveData((current) => ({
+      ...current,
+      labour: [...labour, ...current.labour],
+      sales: (sales.totalSales || sales.netSales || sales.foodSales || sales.serviceCharge) ? [sales, ...current.sales] : current.sales,
+    }));
+    setWeeklyModal(null);
+  };
+
+  const importSalesFile = async (file) => {
+    if (!file) return;
+    const rows = parseLabourSalesCsv(await file.text());
+    saveData((current) => ({ ...current, sales: [...rows, ...current.sales] }));
+    setStatus(`Imported ${rows.length} Labour sales row(s).`);
+    setSalesImportKey((key) => key + 1);
+  };
+
+  const importLabourFile = async (file) => {
+    if (!file) return;
+    const importedRows = parseLabourCsv(await file.text());
+    saveData((current) => {
+      const departments = [...current.departments];
+      const employees = [...current.employees];
+      const ensureDepartment = (name) => {
+        let department = departments.find((item) => labourSameText(item.name, name));
+        if (!department) {
+          department = { ...blankDepartment(), id: uid(), name: name || "FOH" };
+          departments.push(department);
+        }
+        return department;
+      };
+      const ensureEmployee = (row, department) => {
+        let employee = employees.find((item) => labourSameText(item.name, row.employeeName));
+        if (!employee) {
+          employee = {
+            ...blankEmployee(),
+            id: uid(),
+            name: row.employeeName,
+            departmentId: department.id,
+            rate: numberValue(row.rate, 0),
+          };
+          employees.push(employee);
+        }
+        return employee;
+      };
+      const labour = importedRows.map((row) => {
+        const department = ensureDepartment(row.departmentName);
+        const employee = ensureEmployee(row, department);
+        return { ...row, employeeId: employee.id, departmentId: department.id, departmentName: department.name };
+      });
+      return { ...current, departments, employees, labour: [...labour, ...current.labour] };
+    });
+    setStatus(`Imported ${importedRows.length} Labour row(s).`);
+    setLabourImportKey((key) => key + 1);
+  };
+
+  const resetLabourData = () => {
+    requestDelete({
+      title: "Reset Labour data",
+      message: "Replace Labour data with the imported Labour Cost seed data?",
+      onConfirm: () => {
+        saveData(createInitialLabourData());
+        setStatus("Labour data reset to imported seed data.");
+      },
+    });
+  };
+
+  const weeklyTotals = weeklyModal ? {
+    hours: labourSum(weeklyModal.rows.filter((row) => row.include), "hours"),
+    wages: labourSum(weeklyModal.rows.filter((row) => row.include), "wages"),
+  } : { hours: 0, wages: 0 };
+
+  return (
+    <div className="page-grid">
+      <Panel title="Labour controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
+        <div className="button-row left">
+          <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour week</button>
+          <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Employee</button>
+          <button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Department</button>
+          <label className="file-button secondary">Import labour CSV<input accept=".csv,text/csv" key={labourImportKey} onChange={(event) => importLabourFile(event.target.files?.[0])} type="file" /></label>
+          <label className="file-button secondary">Import sales CSV<input accept=".csv,text/csv" key={salesImportKey} onChange={(event) => importSalesFile(event.target.files?.[0])} type="file" /></label>
+          <button className="ghost danger" onClick={resetLabourData} type="button">Reset Labour seed</button>
+        </div>
+        {status && <div className="invoice-status">{status}</div>}
+      </Panel>
+
+      <div className="metric-grid">
+        <Metric label="Food sales" value={money(salesTotals.foodSales)} delta={`${salesRows.length} sales import row(s)`} tone="good" />
+        <Metric label="Total sales" value={money(salesTotals.totalSales || salesTotals.netSales)} delta="Labour sales data" />
+        <Metric label="Labour cost" value={money(labourSummary.wages)} delta={`${numberValue(labourSummary.hours).toFixed(1)} hours`} />
+        <Metric label="Labour %" value={percent(labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales))} delta="Cost / sales" tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
+        <Metric label="Service charge" value={money(labourSummary.serviceCharge || salesTotals.serviceCharge)} delta="Allocated / imported" />
+        <Metric label="Holiday liability" value={money(holidaySummary.totalLiability)} delta={`${numberValue(holidaySummary.totalRemainingHours).toFixed(1)}h owed`} />
+      </div>
+
+      <Panel title="Department breakdown" action="Actual vs target">
+        <DataTable
+          columns={[
+            { key: "department", label: "Department" },
+            { key: "basis", label: "Basis" },
+            { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
+            { key: "wages", label: "Labour", render: money },
+            { key: "actual", label: "Actual %", render: percent },
+            { key: "target", label: "Target %", render: percent },
+            { key: "status", label: "Status", render: (value) => <Badge tone={value === "OK" ? "green" : "orange"}>{value}</Badge> },
+          ]}
+          rows={departmentRows}
+        />
+      </Panel>
+
+      <Panel title="Labour imports" action={`${labourRows.length} row(s) in period`}>
+        <DataTable
+          columns={[
+            { key: "employeeName", label: "Employee" },
+            { key: "departmentName", label: "Department" },
+            { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
+            { key: "wages", label: "Wages", render: money },
+            { key: "serviceCharge", label: "Service charge", render: money },
+            { key: "total", label: "Total", render: (_, row) => money(numberValue(row.wages) + numberValue(row.serviceCharge)) },
+          ]}
+          rows={aggregateLabourByEmployee(data, labourRows)}
+        />
+      </Panel>
+
+      <Panel title="Employees" action={`${employeeRows.length} employee(s)`}>
+        <DataTable
+          columns={[
+            { key: "name", label: "Employee" },
+            { key: "departmentId", label: "Department", render: (value) => labourDepartmentName(data, value, "-") },
+            { key: "payType", label: "Pay type" },
+            { key: "rate", label: "Rate", render: (_, row) => labourRateLabel(row) },
+            { key: "manualAverageWeeklyHours", label: "Avg hours", render: (value, row) => (numberValue(value) || labourEmployeeAverageWeeklyHours(data, row)).toFixed(1) },
+            { key: "status", label: "Status", render: (value) => <Badge tone={value === "active" ? "green" : "orange"}>{value}</Badge> },
+          ]}
+          onDelete={(id) => deleteFromCollection("employees", id, "Employee")}
+          onEdit={(row) => setEmployeeModal(row)}
+          rows={employeeRows}
+          toolbarAction={<button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add Employee</button>}
+        />
+      </Panel>
+
+      <Panel title="Departments" action={`${data.departments.length} department(s)`}>
+        <DataTable
+          columns={[
+            { key: "name", label: "Department" },
+            { key: "group", label: "Group" },
+            { key: "basis", label: "Target basis", render: (value) => labourBasisLabels[value] || value },
+            { key: "targetPercent", label: "Target %", render: percent },
+            { key: "serviceChargeShare", label: "Service weight" },
+            { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "orange"}>{value ? "Active" : "Inactive"}</Badge> },
+          ]}
+          onDelete={(id) => deleteFromCollection("departments", id, "Department")}
+          onEdit={(row) => setDepartmentModal(row)}
+          rows={data.departments}
+          toolbarAction={<button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Add Department</button>}
+        />
+      </Panel>
+
+      <Panel title="Sales imports" action="Labour-only sales data">
+        <DataTable
+          columns={[
+            { key: "dateFrom", label: "From" },
+            { key: "dateTo", label: "To" },
+            { key: "totalSales", label: "Total sales", render: money },
+            { key: "netSales", label: "Net sales", render: money },
+            { key: "foodSales", label: "Food sales", render: money },
+            { key: "serviceCharge", label: "Service charge", render: money },
+            { key: "source", label: "Source" },
+          ]}
+          onDelete={(id) => deleteFromCollection("sales", id, "Sales row")}
+          onEdit={(row) => setSalesModal(row)}
+          rows={[...data.sales].sort((a, b) => String(b.dateFrom).localeCompare(String(a.dateFrom))).slice(0, 250)}
+          toolbarAction={<button className="ghost" onClick={() => setSalesModal(blankSales())} type="button"><Plus size={16} />Add Sales</button>}
+        />
+      </Panel>
+
+      <Panel title="Holidays" action={`${data.holidays.length} booking(s)`}>
+        <DataTable
+          columns={[
+            { key: "name", label: "Employee" },
+            { key: "type", label: "Type" },
+            { key: "avgWeekly", label: "Avg weekly", render: (value) => numberValue(value).toFixed(1) },
+            { key: "accrued", label: "Accrued" },
+            { key: "used", label: "Used" },
+            { key: "projectedRemaining", label: "Projected left" },
+            { key: "liability", label: "Liability", render: money },
+            { key: "notes", label: "Notes" },
+          ]}
+          rows={holidaySummary.rows}
+          toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Holiday</button>}
+        />
+      </Panel>
+
+      <Panel title="Holiday bookings">
+        <DataTable
+          columns={[
+            { key: "employeeName", label: "Employee" },
+            { key: "dateFrom", label: "From" },
+            { key: "dateTo", label: "To" },
+            { key: "days", label: "Days" },
+            { key: "hours", label: "Hours" },
+            { key: "status", label: "Status" },
+          ]}
+          onDelete={(id) => deleteFromCollection("holidays", id, "Holiday")}
+          onEdit={(row) => setHolidayModal(row)}
+          rows={data.holidays}
+        />
+      </Panel>
+
+      <Panel title="Rate history" action={`${data.rateHistory.length} change(s)`}>
+        <DataTable
+          columns={[
+            { key: "employeeName", label: "Employee" },
+            { key: "effectiveDate", label: "Effective" },
+            { key: "payType", label: "Pay type" },
+            { key: "rate", label: "Rate", render: money },
+          ]}
+          onDelete={(id) => deleteFromCollection("rateHistory", id, "Rate history row")}
+          onEdit={(row) => setRateModal(row)}
+          rows={[...data.rateHistory].sort((a, b) => String(b.effectiveDate).localeCompare(String(a.effectiveDate)))}
+          toolbarAction={<button className="ghost" onClick={() => setRateModal(blankRate())} type="button"><Plus size={16} />Add Rate</button>}
+        />
+      </Panel>
+
+      {employeeModal && (
+        <EditModal title={employeeModal.id ? "Edit Employee" : "Add Employee"} onCancel={() => setEmployeeModal(null)} onSave={saveEmployee} saveLabel="Save Employee">
+          <div className="form-grid six">
+            <Field label="Name" value={employeeModal.name} onChange={(value) => setEmployeeModal({ ...employeeModal, name: value })} />
+            <label>Department<select value={employeeModal.departmentId} onChange={(event) => setEmployeeModal({ ...employeeModal, departmentId: event.target.value })}>{data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+            <label>Pay type<select value={employeeModal.payType} onChange={(event) => setEmployeeModal({ ...employeeModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="annual">Annual salary</option></select></label>
+            <Field label="Rate" type="number" value={employeeModal.rate} onChange={(value) => setEmployeeModal({ ...employeeModal, rate: value })} />
+            <Field label="Contracted hours" type="number" value={employeeModal.contractedHours} onChange={(value) => setEmployeeModal({ ...employeeModal, contractedHours: value })} />
+            <Field label="Average weekly hours" type="number" value={employeeModal.manualAverageWeeklyHours} onChange={(value) => setEmployeeModal({ ...employeeModal, manualAverageWeeklyHours: value })} />
+            <Field label="Start date" type="date" value={employeeModal.startDate} onChange={(value) => setEmployeeModal({ ...employeeModal, startDate: value })} />
+            <label>Status<select value={employeeModal.status} onChange={(event) => setEmployeeModal({ ...employeeModal, status: event.target.value })}><option value="active">Active</option><option value="left">Left</option></select></label>
+            <label>Holiday type<select value={employeeModal.holidayType} onChange={(event) => setEmployeeModal({ ...employeeModal, holidayType: event.target.value })}><option value="zero-hours">Zero-hours</option><option value="annual">Annual</option><option value="freelance">Freelance</option></select></label>
+            <Field label="Holiday entitlement days" type="number" value={employeeModal.holidayEntitlementDays} onChange={(value) => setEmployeeModal({ ...employeeModal, holidayEntitlementDays: value })} />
+          </div>
+        </EditModal>
+      )}
+
+      {departmentModal && (
+        <EditModal title={departmentModal.id ? "Edit Department" : "Add Department"} onCancel={() => setDepartmentModal(null)} onSave={saveDepartment} saveLabel="Save Department">
+          <div className="form-grid six">
+            <Field label="Department" value={departmentModal.name} onChange={(value) => setDepartmentModal({ ...departmentModal, name: value })} />
+            <label>Group<select value={departmentModal.group} onChange={(event) => setDepartmentModal({ ...departmentModal, group: event.target.value })}><option>BOH</option><option>FOH</option><option>KP</option><option>Other</option></select></label>
+            <label>Target basis<select value={departmentModal.basis} onChange={(event) => setDepartmentModal({ ...departmentModal, basis: event.target.value })}>{Object.entries(labourBasisLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+            <Field label="Target %" type="number" value={departmentModal.targetPercent} onChange={(value) => setDepartmentModal({ ...departmentModal, targetPercent: value })} />
+            <Field label="Service charge weight" type="number" value={departmentModal.serviceChargeShare} onChange={(value) => setDepartmentModal({ ...departmentModal, serviceChargeShare: value })} />
+            <label>Status<select value={departmentModal.active ? "true" : "false"} onChange={(event) => setDepartmentModal({ ...departmentModal, active: event.target.value === "true" })}><option value="true">Active</option><option value="false">Inactive</option></select></label>
+          </div>
+        </EditModal>
+      )}
+
+      {salesModal && (
+        <EditModal title={salesModal.id ? "Edit Labour Sales" : "Add Labour Sales"} onCancel={() => setSalesModal(null)} onSave={saveSales} saveLabel="Save Sales">
+          <div className="form-grid six">
+            <Field label="From" type="date" value={salesModal.dateFrom} onChange={(value) => setSalesModal({ ...salesModal, dateFrom: value })} />
+            <Field label="To" type="date" value={salesModal.dateTo} onChange={(value) => setSalesModal({ ...salesModal, dateTo: value })} />
+            <Field label="Total sales" type="number" value={salesModal.totalSales} onChange={(value) => setSalesModal({ ...salesModal, totalSales: value })} />
+            <Field label="Net sales" type="number" value={salesModal.netSales} onChange={(value) => setSalesModal({ ...salesModal, netSales: value })} />
+            <Field label="Food sales" type="number" value={salesModal.foodSales} onChange={(value) => setSalesModal({ ...salesModal, foodSales: value })} />
+            <Field label="Service charge" type="number" value={salesModal.serviceCharge} onChange={(value) => setSalesModal({ ...salesModal, serviceCharge: value, bohServiceCharge: numberValue(value) * 0.4, fohServiceCharge: numberValue(value) * 0.6 })} />
+            <Field label="BOH service charge" type="number" value={salesModal.bohServiceCharge} onChange={(value) => setSalesModal({ ...salesModal, bohServiceCharge: value })} />
+            <Field label="FOH service charge" type="number" value={salesModal.fohServiceCharge} onChange={(value) => setSalesModal({ ...salesModal, fohServiceCharge: value })} />
+          </div>
+        </EditModal>
+      )}
+
+      {holidayModal && (
+        <EditModal title={holidayModal.id ? "Edit Holiday" : "Add Holiday"} onCancel={() => setHolidayModal(null)} onSave={saveHoliday} saveLabel="Save Holiday">
+          <div className="form-grid six">
+            <label>Employee<select value={holidayModal.employeeId} onChange={(event) => {
+              const employee = data.employees.find((item) => item.id === event.target.value);
+              setHolidayModal({ ...holidayModal, employeeId: event.target.value, employeeName: employee?.name || "" });
+            }}>{employeeOptions.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
+            <Field label="From" type="date" value={holidayModal.dateFrom} onChange={(value) => setHolidayModal({ ...holidayModal, dateFrom: value })} />
+            <Field label="To" type="date" value={holidayModal.dateTo} onChange={(value) => setHolidayModal({ ...holidayModal, dateTo: value })} />
+            <Field label="Days" type="number" value={holidayModal.days} onChange={(value) => setHolidayModal({ ...holidayModal, days: value })} />
+            <Field label="Hours" type="number" value={holidayModal.hours} onChange={(value) => setHolidayModal({ ...holidayModal, hours: value })} />
+            <label>Status<select value={holidayModal.status} onChange={(event) => setHolidayModal({ ...holidayModal, status: event.target.value })}><option>Booked</option><option>Taken</option><option>Cancelled</option><option>Paid</option></select></label>
+          </div>
+        </EditModal>
+      )}
+
+      {rateModal && (
+        <EditModal title={rateModal.id ? "Edit Rate" : "Add Rate"} onCancel={() => setRateModal(null)} onSave={saveRate} saveLabel="Save Rate">
+          <div className="form-grid six">
+            <label>Employee<select value={rateModal.employeeId} onChange={(event) => {
+              const employee = data.employees.find((item) => item.id === event.target.value);
+              setRateModal({ ...rateModal, employeeId: event.target.value, employeeName: employee?.name || "" });
+            }}>{employeeOptions.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
+            <Field label="Effective date" type="date" value={rateModal.effectiveDate} onChange={(value) => setRateModal({ ...rateModal, effectiveDate: value })} />
+            <label>Pay type<select value={rateModal.payType} onChange={(event) => setRateModal({ ...rateModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="annual">Annual salary</option></select></label>
+            <Field label="Rate" type="number" value={rateModal.rate} onChange={(value) => setRateModal({ ...rateModal, rate: value })} />
+          </div>
+        </EditModal>
+      )}
+
+      {weeklyModal && (
+        <AppModal
+          footer={(
+            <>
+              <button className="ghost" onClick={() => setWeeklyModal(null)} type="button">Cancel</button>
+              <button onClick={saveWeeklyInput} type="button"><Save size={16} />Save Labour Week</button>
+            </>
+          )}
+          onClose={() => setWeeklyModal(null)}
+          open={Boolean(weeklyModal)}
+          title="Input labour week"
+          wide
+        >
+          <div className="modal-stack">
+            <div className="form-grid six">
+              <Field label="Week start" type="date" value={weeklyModal.weekStart} onChange={(value) => setWeeklyModal({ ...weeklyModal, weekStart: value })} />
+              <Field label="Total sales" type="number" value={weeklyModal.salesTotal} onChange={(value) => setWeeklyModal({ ...weeklyModal, salesTotal: value })} />
+              <Field label="Net sales" type="number" value={weeklyModal.netSales} onChange={(value) => setWeeklyModal({ ...weeklyModal, netSales: value })} />
+              <Field label="Food sales" type="number" value={weeklyModal.foodSales} onChange={(value) => setWeeklyModal({ ...weeklyModal, foodSales: value })} />
+              <Field label="Service charge" type="number" value={weeklyModal.serviceCharge} onChange={(value) => setWeeklyModal({ ...weeklyModal, serviceCharge: value })} />
+              <Field label="Total wages" type="number" readOnly value={weeklyTotals.wages.toFixed(2)} />
+            </div>
+            <div className="table-wrap modal-table">
+              <table>
+                <thead>
+                  <tr>
+                    {["Use", "Employee", "Department", "Hours", "Rate", "Wages", "SC weight"].map((header) => <th key={header}>{header}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {weeklyModal.rows.map((row, index) => (
+                    <tr key={row.employeeId}>
+                      <td><input checked={row.include} onChange={(event) => updateWeeklyRow(index, "include", event.target.checked)} type="checkbox" /></td>
+                      <td>{row.employeeName}</td>
+                      <td>
+                        <select value={row.departmentId} onChange={(event) => updateWeeklyRow(index, "departmentId", event.target.value)}>
+                          {data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+                        </select>
+                      </td>
+                      <td><input min="0" step="0.01" type="number" value={row.hours} onChange={(event) => updateWeeklyRow(index, "hours", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.rate} onChange={(event) => updateWeeklyRow(index, "rate", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.wages} onChange={(event) => updateWeeklyRow(index, "wages", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.serviceChargeWeight} onChange={(event) => updateWeeklyRow(index, "serviceChargeWeight", event.target.value)} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="metric-grid compact">
+              <Metric label="Hours" value={weeklyTotals.hours.toFixed(1)} delta="Selected employees" />
+              <Metric label="Wages" value={money(weeklyTotals.wages)} delta="Before service charge" />
+              <Metric label="BOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.4)} delta="40% pool" />
+              <Metric label="FOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.6)} delta="60% pool" />
+            </div>
+          </div>
+        </AppModal>
+      )}
+    </div>
   );
 }
 
