@@ -850,3 +850,63 @@ code {
 .manual-invoice-table td:first-child input {
   min-width: 190px;
 }
+
+.department-split-editor {
+  display: grid;
+  gap: 8px;
+  min-width: 250px;
+}
+
+.department-split-editor.compact {
+  grid-template-columns: 90px minmax(140px, 1fr);
+  align-items: center;
+}
+
+.split-mode-row,
+.split-line {
+  display: grid;
+  grid-template-columns: 90px 70px 80px 32px;
+  gap: 6px;
+  align-items: center;
+}
+
+.split-line select,
+.split-line input,
+.department-split-editor.compact select {
+  min-width: 0;
+}
+
+.split-total {
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 8px;
+  border-radius: 10px;
+  text-align: center;
+}
+
+.split-total.ok {
+  color: #0bbf83;
+  background: rgba(11, 191, 131, 0.12);
+}
+
+.split-total.warn {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.warn-text {
+  color: #f59e0b;
+}
+
+.mini-button {
+  padding: 7px 10px;
+  width: fit-content;
+  min-height: 0;
+  font-size: 12px;
+}
+
+.icon.small {
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+}
