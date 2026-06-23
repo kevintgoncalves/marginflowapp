@@ -273,7 +273,7 @@ const navItems = [
   { id: "recipes", label: "Recipes", icon: ChefHat },
   { id: "menu", label: "Menu Costing", icon: UtensilsCrossed },
   { id: "waste", label: "Waste", icon: Trash2 },
-  { id: "gp", label: "GP Analysis", icon: Gauge },
+  { id: "gp", label: "Sales", icon: BarChart3 },
   { id: "ai", label: "AI Insights", icon: Bot },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -333,6 +333,49 @@ function departmentLineTotal(item, selectedDepartment, departmentNames = default
   return splits
     .filter((split) => split.department === selectedDepartment)
     .reduce((sum, split) => sum + numberValue(split.amount, 0), 0);
+}
+
+function salesDepartments(row = {}) {
+  return row.departments || row.departmentSales || row.departmentBreakdown || {};
+}
+
+function salesAmountForRow(row = {}, selectedDepartment = "All departments", amountKey = "netSales") {
+  const departments = salesDepartments(row);
+  const departmentNames = Object.keys(departments);
+  const rowFallback = amountKey === "grossSales"
+    ? numberValue(row.grossSales, numberValue(row.netSales, numberValue(row.sales, 0)))
+    : numberValue(row.netSales, numberValue(row.sales, 0));
+
+  if (selectedDepartment === "All departments") {
+    if (departmentNames.length) {
+      const total = departmentNames.reduce((sum, departmentName) => {
+        const values = departments[departmentName] || {};
+        const amount = amountKey === "grossSales"
+          ? numberValue(values.grossSales, numberValue(values.netSales, 0))
+          : numberValue(values.netSales, numberValue(values.sales, 0));
+        return sum + amount;
+      }, 0);
+      return total || rowFallback;
+    }
+    return rowFallback;
+  }
+
+  if (departments[selectedDepartment]) {
+    const values = departments[selectedDepartment] || {};
+    return amountKey === "grossSales"
+      ? numberValue(values.grossSales, numberValue(values.netSales, 0))
+      : numberValue(values.netSales, numberValue(values.sales, 0));
+  }
+  if (row.department && row.department !== selectedDepartment) return 0;
+  return rowFallback;
+}
+
+function salesNetForRow(row, selectedDepartment = "All departments") {
+  return salesAmountForRow(row, selectedDepartment, "netSales");
+}
+
+function salesGrossForRow(row, selectedDepartment = "All departments") {
+  return salesAmountForRow(row, selectedDepartment, "grossSales");
 }
 
 function validDepartmentSplits(item) {
@@ -699,10 +742,19 @@ function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = 
 }
 
 function calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames) {
-  const salesRows = sales.filter((row) => dateInRange(row.date, dateRange));
+  const salesRows = sales
+    .filter((row) => dateInRange(row.date, dateRange))
+    .map((row) => ({
+      ...row,
+      day: row.day || formatRangeDate(row.date),
+      grossSales: salesGrossForRow(row, department),
+      netSales: salesNetForRow(row, department),
+      sales: salesNetForRow(row, department),
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
-  const salesTotal = salesRows.reduce((sum, row) => sum + row.sales, 0);
+  const salesTotal = salesRows.reduce((sum, row) => sum + numberValue(row.netSales, row.sales), 0);
   const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []);
   const purchases = invoiceItems.reduce((sum, item) => sum + departmentLineTotal(item, department, departmentNames), 0);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
@@ -821,6 +873,7 @@ function dedupeKeyForArrayItem(key, item) {
   if (!item || typeof item !== "object") return JSON.stringify(item);
   if (item.id) return `id:${item.id}`;
   if (key.includes("invoice")) return `invoice:${item.supplier || ""}|${item.invoiceNumber || ""}|${item.date || ""}`.toLowerCase();
+  if (key.includes("sales")) return `sales:${item.date || item.id || ""}`.toLowerCase();
   if (key.includes("supplier")) return `supplier:${item.name || item.supplier || ""}`.toLowerCase();
   if (key.includes("product")) return `product:${item.masterProductId || item.name || item.product || ""}|${item.supplier || ""}`.toLowerCase();
   if (item.name) return `name:${item.name}`.toLowerCase();
@@ -906,12 +959,97 @@ function dateInRange(date, range) {
   return date >= range.start && date <= range.end;
 }
 
+function daysBetween(startDate, endDate) {
+  const start = parseDate(startDate);
+  const end = parseDate(endDate);
+  return Math.max(1, Math.round((end - start) / 86400000) + 1);
+}
+
+function shiftDate(date, days) {
+  return toIsoDate(addDays(parseDate(date), days));
+}
+
+function shiftDateByYears(date, years) {
+  const next = parseDate(date);
+  next.setFullYear(next.getFullYear() + years);
+  return toIsoDate(next);
+}
+
+function shiftRangeByDays(range, days) {
+  return { start: shiftDate(range.start, days), end: shiftDate(range.end, days) };
+}
+
+function shiftRangeByYears(range, years) {
+  return { start: shiftDateByYears(range.start, years), end: shiftDateByYears(range.end, years) };
+}
+
+function rangeFromStartAndLength(startDate, lengthDays) {
+  return { start: startDate, end: shiftDate(startDate, Math.max(1, lengthDays) - 1) };
+}
+
 function formatRangeDate(date) {
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(parseDate(date));
 }
 
 function rangeLabel(rangeState, range) {
   return `${rangeState.preset}: ${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
+}
+
+function salesRowsForRange(sales, range, department = "All departments") {
+  return sales
+    .filter((row) => dateInRange(row.date, range))
+    .map((row) => ({
+      ...row,
+      day: row.day || formatRangeDate(row.date),
+      grossSales: salesGrossForRow(row, department),
+      netSales: salesNetForRow(row, department),
+      sales: salesNetForRow(row, department),
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function salesTotalsForRange(sales, range, department = "All departments") {
+  const rows = salesRowsForRange(sales, range, department);
+  const netSales = rows.reduce((sum, row) => sum + numberValue(row.netSales, row.sales), 0);
+  const grossSales = rows.reduce((sum, row) => sum + numberValue(row.grossSales, row.netSales), 0);
+  const dayCount = daysBetween(range.start, range.end);
+  return {
+    rows,
+    netSales,
+    grossSales,
+    vat: Math.max(0, grossSales - netSales),
+    dayCount,
+    averageDailyNet: netSales / dayCount,
+  };
+}
+
+function salesByDepartment(sales, range, departmentNames = defaultDepartments) {
+  return departmentNames.map((departmentName) => {
+    const rows = sales.filter((row) => dateInRange(row.date, range));
+    const totals = rows.reduce((sum, row) => {
+      const departments = salesDepartments(row);
+      const hasDepartmentBreakdown = Object.keys(departments).length > 0;
+      const includeLegacyRow = !hasDepartmentBreakdown && (!row.department || row.department === departmentName) && departmentName === departmentNames[0];
+      const includeSingleDepartmentRow = !hasDepartmentBreakdown && row.department === departmentName;
+      const netSales = hasDepartmentBreakdown
+        ? salesNetForRow(row, departmentName)
+        : (includeLegacyRow || includeSingleDepartmentRow ? salesNetForRow(row, "All departments") : 0);
+      const grossSales = hasDepartmentBreakdown
+        ? salesGrossForRow(row, departmentName)
+        : (includeLegacyRow || includeSingleDepartmentRow ? salesGrossForRow(row, "All departments") : 0);
+      return {
+        netSales: sum.netSales + netSales,
+        grossSales: sum.grossSales + grossSales,
+      };
+    }, { netSales: 0, grossSales: 0 });
+    return {
+      id: departmentName,
+      department: departmentName,
+      netSales: totals.netSales,
+      grossSales: totals.grossSales,
+      vat: Math.max(0, totals.grossSales - totals.netSales),
+    };
+  });
 }
 
 function activeDepartmentNames(departmentSettings) {
@@ -941,7 +1079,7 @@ function App() {
   const [products, setProducts] = usePersistentState("marginflow.products", initialProducts);
   const [suppliers, setSuppliers] = usePersistentState("marginflow.suppliers", initialSuppliers);
   const [invoices, setInvoices] = usePersistentState("marginflow.invoices", initialInvoices);
-  const [sales] = useState(initialSales);
+  const [sales, setSales] = usePersistentState("marginflow.sales", initialSales);
   const [openingStockByDept, setOpeningStockByDept] = usePersistentState("marginflow.openingStockByDept", initialOpeningStock);
   const [stocktakes, setStocktakes] = usePersistentState("marginflow.stocktakes", initialStocktakes);
   const [wasteItems, setWasteItems] = usePersistentState("marginflow.wasteItems", initialWaste);
@@ -1072,7 +1210,7 @@ function App() {
               <span>Viewing {department}</span>
               <span aria-hidden="true">▼</span>
             </button>
-            {active === "dashboard" && <span className="range-chip">{rangeLabel(dateRangeState, dateRange)}</span>}
+            {["dashboard", "gp"].includes(active) && <span className="range-chip">{rangeLabel(dateRangeState, dateRange)}</span>}
             {departmentOpen && (
               <div className="department-menu">
                 {departmentOptions.map((option) => (
@@ -1118,7 +1256,18 @@ function App() {
         {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && <GpAnalysis dateRange={dateRange} department={department} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} />}
+        {active === "gp" && (
+          <SalesAnalysis
+            dateRange={dateRange}
+            dateRangeState={dateRangeState}
+            department={department}
+            departmentNames={departmentNames}
+            sales={sales}
+            setDateRangeState={setDateRangeState}
+            setSales={setSales}
+            weekStartsOn={financialSettings.weekStartsOn}
+          />
+        )}
         {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
@@ -1130,6 +1279,7 @@ function App() {
             menuSettings={menuSettings}
             invoices={invoices}
             products={products}
+            sales={sales}
             suppliers={suppliers}
             openingStockByDept={openingStockByDept}
             stocktakes={stocktakes}
@@ -1138,6 +1288,7 @@ function App() {
             menus={menus}
             setInvoices={setInvoices}
             setProducts={setProducts}
+            setSales={setSales}
             setSuppliers={setSuppliers}
             setOpeningStockByDept={setOpeningStockByDept}
             setStocktakes={setStocktakes}
@@ -2462,49 +2613,196 @@ function Waste({ department, departmentNames, products, wasteItems, setWasteItem
   );
 }
 
-function GpAnalysis({ dateRange, department, gpTarget, metrics, supplierSpend }) {
-  const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
-  const monthlyRows = [
-    { day: "Apr", sales: metrics.sales * 0.82 },
-    { day: "May", sales: metrics.sales * 0.91 },
-    { day: "Jun", sales: metrics.sales },
-  ];
+function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, sales, setDateRangeState, setSales, weekStartsOn }) {
+  const makeSalesDraft = (date = today()) => {
+    const existing = sales.find((row) => row.date === date);
+    const departments = salesDepartments(existing);
+    const hasDepartmentBreakdown = Object.keys(departments).length > 0;
+    return {
+      date,
+      rows: departmentNames.map((departmentName, index) => {
+        const existingDepartment = departments[departmentName] || {};
+        const legacyValues = existing && !hasDepartmentBreakdown && index === 0 ? existing : {};
+        return {
+          department: departmentName,
+          grossSales: existingDepartment.grossSales ?? legacyValues.grossSales ?? legacyValues.sales ?? "",
+          netSales: existingDepartment.netSales ?? legacyValues.netSales ?? legacyValues.sales ?? "",
+        };
+      }),
+    };
+  };
+  const defaultCompareStart = toIsoDate(addDays(startOfWeek(parseDate(dateRange.start), weekStartsOn), -7));
+  const [inputOpen, setInputOpen] = useState(false);
+  const [salesDraft, setSalesDraft] = useState(() => makeSalesDraft(today()));
+  const [compareWeekStart, setCompareWeekStart] = useState(defaultCompareStart);
+  const selectedTotals = salesTotalsForRange(sales, dateRange, department);
+  const periodLength = daysBetween(dateRange.start, dateRange.end);
+  const customWeekRange = rangeFromStartAndLength(compareWeekStart, 7);
+  const comparisonRows = [
+    { id: "previous-day", period: "Previous day", range: shiftRangeByDays(dateRange, -1) },
+    { id: "previous-week", period: "Previous week", range: shiftRangeByDays(dateRange, -7) },
+    { id: "previous-year", period: "Previous year", range: shiftRangeByYears(dateRange, -1) },
+    { id: "chosen-week", period: "Chosen week", range: customWeekRange },
+  ].map((row) => {
+    const totals = salesTotalsForRange(sales, row.range, department);
+    const variance = selectedTotals.netSales - totals.netSales;
+    return {
+      ...row,
+      rangeText: `${formatRangeDate(row.range.start)} - ${formatRangeDate(row.range.end)}`,
+      netSales: totals.netSales,
+      grossSales: totals.grossSales,
+      variance,
+      change: totals.netSales ? (variance / totals.netSales) * 100 : 0,
+    };
+  });
+  const dailyRows = selectedTotals.rows.map((row) => ({
+    id: row.id || row.date,
+    date: row.date,
+    day: row.day || formatRangeDate(row.date),
+    netSales: row.netSales,
+    grossSales: row.grossSales,
+    vat: Math.max(0, numberValue(row.grossSales, row.netSales) - numberValue(row.netSales)),
+  }));
+  const departmentRows = salesByDepartment(sales, dateRange, departmentNames);
+
+  const openInputSales = () => {
+    setSalesDraft(makeSalesDraft(today()));
+    setInputOpen(true);
+  };
+  const updateDraftDate = (date) => setSalesDraft(makeSalesDraft(date || today()));
+  const updateDraftLine = (departmentName, field, value) => {
+    setSalesDraft((current) => ({
+      ...current,
+      rows: current.rows.map((row) => (row.department === departmentName ? { ...row, [field]: value } : row)),
+    }));
+  };
+  const saveSalesDraft = () => {
+    const departments = {};
+    salesDraft.rows.forEach((row) => {
+      const grossSales = numberValue(row.grossSales, 0);
+      const netSales = numberValue(row.netSales, 0);
+      if (!grossSales && !netSales) return;
+      departments[row.department] = {
+        grossSales: grossSales || netSales,
+        netSales: netSales || grossSales,
+      };
+    });
+    const departmentValues = Object.values(departments);
+    if (!departmentValues.length) return;
+    const netSales = departmentValues.reduce((sum, row) => sum + numberValue(row.netSales), 0);
+    const grossSales = departmentValues.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+    const existing = sales.find((row) => row.date === salesDraft.date);
+    const nextRow = {
+      id: existing?.id || uid(),
+      date: salesDraft.date,
+      day: new Intl.DateTimeFormat("en-GB", { weekday: "short" }).format(parseDate(salesDraft.date)),
+      sales: netSales,
+      netSales,
+      grossSales,
+      departments,
+    };
+    setSales((current) => [nextRow, ...current.filter((row) => row.date !== salesDraft.date)].sort((a, b) => a.date.localeCompare(b.date)));
+    setInputOpen(false);
+  };
 
   return (
     <>
-      <div className="metric-grid">
-        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
-        <Metric label="Waste %" value={percent(metrics.wastePercent)} delta={money(metrics.waste)} tone="warn" />
-        <Metric label="Stock variance" value={money(metrics.stockVariance)} delta="Closing - opening" />
-      </div>
-      <div className="dashboard-layout secondary">
-        <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
-        <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
-      </div>
-      <div className="dashboard-layout secondary">
-        <Panel title="Top suppliers">
-          <DataTable
-            columns={[
-              { key: "name", label: "Supplier" },
-              { key: "category", label: "Category" },
-              { key: "spend", label: "Spend", render: (value) => money(value) },
-            ]}
-            rows={[...supplierSpend].sort((a, b) => b.spend - a.spend)}
-          />
-        </Panel>
-        <Panel title="Top cost increases">
-          <DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} />
-        </Panel>
-      </div>
-      <Panel title="Formula checks" action="Restaurant GP logic">
-        <div className="code-card">
-          <p>Invoice GP = (food sales - purchases) / food sales x 100</p>
-          <p>Stocktake real cost = opening stock + purchases - closing stock</p>
-          <p>Real GP including waste = (food sales - (stocktake real cost + waste)) / food sales x 100</p>
+      <Panel title="Sales controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+        <div className="form-grid six">
+          <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
+          <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom range", startDate: value })} />
+          <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom range", endDate: value })} />
+          <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
+        </div>
+        <div className="button-row left">
+          <button onClick={openInputSales} type="button"><Plus size={16} />Input sales</button>
         </div>
       </Panel>
+
+      <div className="metric-grid">
+        <Metric label="Net sales" value={money(selectedTotals.netSales)} delta={`${selectedTotals.rows.length} sales day(s)`} tone="good" />
+        <Metric label="Gross sales" value={money(selectedTotals.grossSales)} delta={department} />
+        <Metric label="VAT / tax" value={money(selectedTotals.vat)} delta="Gross - net" />
+        <Metric label="Daily average" value={money(selectedTotals.averageDailyNet)} delta={`${periodLength} day period`} />
+        <Metric label="Entries" value={selectedTotals.rows.length} delta="Days with sales input" />
+      </div>
+
+      <div className="dashboard-layout secondary">
+        <Panel title="Daily net sales"><LineSeries rows={dailyRows} valueKey="netSales" /></Panel>
+        <Panel title="Comparison">
+          <DataTable
+            columns={[
+              { key: "period", label: "Compare" },
+              { key: "rangeText", label: "Period" },
+              { key: "netSales", label: "Net sales", render: money },
+              { key: "grossSales", label: "Gross sales", render: money },
+              { key: "variance", label: "Variance", render: (value) => money(value) },
+              { key: "change", label: "Change", render: percent },
+            ]}
+            rows={comparisonRows}
+          />
+        </Panel>
+      </div>
+
+      <div className="dashboard-layout secondary">
+        <Panel title="Department sales">
+          <DataTable
+            columns={[
+              { key: "department", label: "Department" },
+              { key: "netSales", label: "Net sales", render: money },
+              { key: "grossSales", label: "Gross sales", render: money },
+              { key: "vat", label: "VAT / tax", render: money },
+            ]}
+            rows={departmentRows}
+          />
+        </Panel>
+        <Panel title="Daily sales">
+          <DataTable
+            columns={[
+              { key: "date", label: "Date" },
+              { key: "netSales", label: "Net sales", render: money },
+              { key: "grossSales", label: "Gross sales", render: money },
+              { key: "vat", label: "VAT / tax", render: money },
+            ]}
+            rows={dailyRows}
+          />
+        </Panel>
+      </div>
+
+      <AppModal
+        footer={(
+          <>
+            <button className="ghost" onClick={() => setInputOpen(false)} type="button">Cancel</button>
+            <button onClick={saveSalesDraft} type="button"><Save size={16} />Save sales</button>
+          </>
+        )}
+        onClose={() => setInputOpen(false)}
+        open={inputOpen}
+        title="Input sales"
+        wide
+      >
+        <div className="modal-stack">
+          <div className="form-grid six">
+            <Field label="Sales date" type="date" value={salesDraft.date} onChange={updateDraftDate} />
+          </div>
+          <div className="table-wrap modal-table sales-input-table">
+            <table>
+              <thead>
+                <tr>{["Department", "Gross sales", "Net sales"].map((header) => <th key={header}>{header}</th>)}</tr>
+              </thead>
+              <tbody>
+                {salesDraft.rows.map((row) => (
+                  <tr key={row.department}>
+                    <td>{row.department}</td>
+                    <td><input min="0" step="0.01" type="number" value={row.grossSales} onChange={(event) => updateDraftLine(row.department, "grossSales", event.target.value)} /></td>
+                    <td><input min="0" step="0.01" type="number" value={row.netSales} onChange={(event) => updateDraftLine(row.department, "netSales", event.target.value)} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </AppModal>
     </>
   );
 }
@@ -2568,6 +2866,7 @@ function SettingsPanel({
   menuSettings,
   invoices,
   products,
+  sales,
   suppliers,
   openingStockByDept,
   stocktakes,
@@ -2576,6 +2875,7 @@ function SettingsPanel({
   menus,
   setInvoices,
   setProducts,
+  setSales,
   setSuppliers,
   setOpeningStockByDept,
   setStocktakes,
@@ -2623,6 +2923,7 @@ function SettingsPanel({
       .reduce((result, key) => ({ ...result, [key]: localStorage.getItem(key) }), {}),
     "marginflow.invoices": JSON.stringify(invoices),
     "marginflow.products": JSON.stringify(products),
+    "marginflow.sales": JSON.stringify(sales),
     "marginflow.suppliers": JSON.stringify(suppliers),
     "marginflow.openingStockByDept": JSON.stringify(openingStockByDept),
     "marginflow.stocktakes": JSON.stringify(stocktakes),
@@ -2642,6 +2943,7 @@ function SettingsPanel({
   const applyImportedKey = (key, value) => {
     if (key === "marginflow.invoices") setInvoices(value);
     if (key === "marginflow.products") setProducts(value);
+    if (key === "marginflow.sales") setSales(value);
     if (key === "marginflow.suppliers") setSuppliers(value);
     if (key === "marginflow.openingStockByDept") setOpeningStockByDept(value);
     if (key === "marginflow.stocktakes") setStocktakes(value);
@@ -3004,7 +3306,7 @@ function LineSeries({ rows, valueKey }) {
       <svg viewBox="0 0 100 100" preserveAspectRatio="none">
         <polyline points={points} />
       </svg>
-      <div className="chart-labels">{rows.map((row) => <span key={row.day}>{row.day}</span>)}</div>
+      <div className="chart-labels" style={{ gridTemplateColumns: `repeat(${Math.max(rows.length, 1)}, 1fr)` }}>{rows.map((row) => <span key={`${row.day}-${row.date || ""}`}>{row.day}</span>)}</div>
     </div>
   );
 }

@@ -859,6 +859,19 @@ code {
 .modal-stack { display: grid; gap: 16px; }
 .modal-table { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
 
+.sales-input-table table {
+  min-width: 620px;
+}
+
+.sales-input-table td:first-child {
+  color: var(--text);
+  font-weight: 900;
+}
+
+.sales-input-table input {
+  min-width: 160px;
+}
+
 .danger-button {
   background: rgba(239, 68, 68, 0.18);
   color: #fecaca;
