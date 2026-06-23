@@ -1180,6 +1180,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const [editDraft, setEditDraft] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualMode, setManualMode] = useState("Simple Mode");
+  const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
   const defaultManualSupplier = suppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
   const createManualDraft = () => ({
@@ -1200,6 +1202,21 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const isReading = draft.status === "Reading invoice with AI...";
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
+  const hasUploadDraft = Boolean(draft.files.length || draft.items.length || draft.invoiceText || draft.status !== "Idle" || draft.supplier || draft.invoiceNumber);
+
+  const resetUploadDraft = () => {
+    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+    setUploadInputKey((current) => current + 1);
+    setCancelUploadOpen(false);
+  };
+
+  const requestCancelUpload = () => {
+    if (!hasUploadDraft) {
+      resetUploadDraft();
+      return;
+    }
+    setCancelUploadOpen(true);
+  };
 
   const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
@@ -1552,7 +1569,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           <label className="file-button">
             Choose invoice
-            <input accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
+            <input key={uploadInputKey} accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
           </label>
         </div>
         <div className="invoice-meta">
@@ -1581,6 +1598,9 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
           <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
+          {hasUploadDraft && (
+            <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
+          )}
         </div>
       </Panel>
 
@@ -1646,6 +1666,20 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           rows={invoices}
         />
       </Panel>
+
+      <AppModal
+        title="Cancel upload?"
+        open={cancelUploadOpen}
+        onClose={() => setCancelUploadOpen(false)}
+        footer={(
+          <>
+            <button className="ghost" onClick={() => setCancelUploadOpen(false)} type="button">Keep editing</button>
+            <button className="danger-button" onClick={resetUploadDraft} type="button"><X size={16} />Cancel upload</button>
+          </>
+        )}
+      >
+        <p className="modal-copy">This will clear the uploaded file, extracted invoice lines and current review draft. Approved invoices will not be deleted.</p>
+      </AppModal>
 
       <AppModal
         title="Delete invoice?"
