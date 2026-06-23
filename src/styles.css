@@ -818,3 +818,88 @@ code {
 }
 
 .import-summary-grid strong { display: block; margin-top: 7px; font-size: 22px; }
+
+/* Invoice line split + discount controls */
+.discount-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 110px;
+}
+
+.discount-cell label {
+  display: grid;
+  grid-template-columns: 16px minmax(70px, 1fr);
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.discount-cell input {
+  width: 100%;
+}
+
+.split-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 270px;
+}
+
+.split-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mini-button {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text);
+  border-radius: 9px;
+  padding: 6px 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mini-button:hover {
+  border-color: rgba(59, 130, 246, 0.65);
+}
+
+.split-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.25fr) 64px minmax(70px, 0.75fr) 30px;
+  gap: 6px;
+  align-items: center;
+}
+
+.split-row select,
+.split-row input {
+  width: 100%;
+}
+
+.split-row span {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+.icon.tiny {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.split-total {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.split-total.ok { color: #22c55e; }
+.split-total.warn { color: #f59e0b; }
+
+@media (max-width: 900px) {
+  .split-cell { min-width: 240px; }
+  .split-row { grid-template-columns: minmax(110px, 1fr) 56px minmax(60px, 0.7fr) 28px; }
+}

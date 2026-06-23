@@ -291,12 +291,49 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function lineTotal(item) {
+function originalLineTotal(item) {
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
+}
+
+function lineDiscountAmount(item) {
+  const original = originalLineTotal(item);
+  const amount = Number(item.discountAmount);
+  if (Number.isFinite(amount) && amount > 0) return Math.min(amount, original);
+  const percentAmount = original * ((Number(item.discountPercent) || 0) / 100);
+  return Math.min(Math.max(percentAmount, 0), original);
+}
+
+function lineTotal(item) {
+  return Math.max(originalLineTotal(item) - lineDiscountAmount(item), 0);
 }
 
 function invoiceTotal(invoice) {
   return (invoice.items || []).reduce((sum, item) => sum + lineTotal(item), 0);
+}
+
+function normalizeLineSplits(item, fallbackDepartment = "Kitchen Made") {
+  const total = lineTotal(item);
+  const existing = Array.isArray(item.departmentSplits) && item.departmentSplits.length
+    ? item.departmentSplits
+    : [{ department: item.department || fallbackDepartment, percentage: 100 }];
+
+  return existing.map((split) => {
+    const percentage = numberValue(split.percentage, 0);
+    return {
+      department: split.department || fallbackDepartment,
+      percentage,
+      amount: Number((total * percentage / 100).toFixed(2)),
+    };
+  });
+}
+
+function splitPercentTotal(item) {
+  const splits = Array.isArray(item.departmentSplits) && item.departmentSplits.length ? item.departmentSplits : [{ percentage: 100 }];
+  return splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);
+}
+
+function splitsAreValid(item) {
+  return Math.abs(splitPercentTotal(item) - 100) < 0.01;
 }
 
 function departmentMatches(rowDepartment, selectedDepartment) {
@@ -895,8 +932,25 @@ function App() {
 
   const approveInvoice = () => {
     if (!draft.items.length) return;
+    const invalidSplit = draft.items.find((item) => !splitsAreValid(item));
+    if (invalidSplit) {
+      window.alert(`Department split for ${invalidSplit.productName || "this line"} must total 100%.`);
+      return;
+    }
+    const invalidDiscount = draft.items.find((item) => lineTotal(item) < 0);
+    if (invalidDiscount) {
+      window.alert(`Discount for ${invalidDiscount.productName || "this line"} cannot be higher than the line total.`);
+      return;
+    }
     const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
-    const normalizedItems = draft.items.map((item) => ({ ...item, supplier: item.supplier || supplier }));
+    const normalizedItems = draft.items.map((item) => ({
+      ...item,
+      supplier: item.supplier || supplier,
+      originalLineTotal: originalLineTotal(item),
+      discountAmount: lineDiscountAmount(item),
+      netLineTotal: lineTotal(item),
+      departmentSplits: normalizeLineSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
+    }));
     const invoice = {
       id: uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
@@ -1164,16 +1218,23 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         const quantity = numberValue(line.quantity, 1);
         const unitCost = numberValue(line.unitCost, 0);
         return enrichInvoiceLine(
-          {
-            id: uid(),
-            productName: line.productName || "Unknown product",
-            packSize: line.packSize || "",
-            quantity,
-            unitCost,
-            supplier,
-            department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
-            source: "OpenAI",
-          },
+          (() => {
+            const department = line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment);
+            const invoiceLine = {
+              id: uid(),
+              productName: line.productName || "Unknown product",
+              packSize: line.packSize || "",
+              quantity,
+              unitCost,
+              discountAmount: numberValue(line.discountAmount, 0),
+              discountPercent: numberValue(line.discountPercent, 0),
+              supplier,
+              department,
+              source: "OpenAI",
+            };
+            invoiceLine.departmentSplits = normalizeLineSplits(invoiceLine, department);
+            return invoiceLine;
+          })(),
           products,
           aiSettings
         );
@@ -1193,15 +1254,87 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateDraftItem = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost"];
+    const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent"];
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
+        let updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
+        if (field === "department") {
+          updated.departmentSplits = [{ department: value, percentage: 100, amount: lineTotal(updated) }];
+        }
+        if (field === "discountAmount") {
+          const original = originalLineTotal(updated);
+          updated.discountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
+        }
+        if (field === "discountPercent") {
+          updated.discountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
+        }
+        updated.departmentSplits = normalizeLineSplits(updated, invoiceSettings.defaultInvoiceDepartment);
         return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
       }),
     }));
+  };
+
+  const updateDraftSplit = (lineId, splitIndex, field, value) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => {
+        if (item.id !== lineId) return item;
+        const splits = normalizeLineSplits(item, invoiceSettings.defaultInvoiceDepartment);
+        const nextSplits = splits.map((split, index) => index === splitIndex
+          ? { ...split, [field]: field === "percentage" ? Number(value) : value }
+          : split);
+        return { ...item, departmentSplits: normalizeLineSplits({ ...item, departmentSplits: nextSplits }, invoiceSettings.defaultInvoiceDepartment) };
+      }),
+    }));
+  };
+
+  const addDraftSplit = (lineId) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === lineId
+        ? { ...item, departmentSplits: normalizeLineSplits({ ...item, departmentSplits: [...normalizeLineSplits(item, invoiceSettings.defaultInvoiceDepartment), { department: departmentNames[0] || invoiceSettings.defaultInvoiceDepartment, percentage: 0 }] }, invoiceSettings.defaultInvoiceDepartment) }
+        : item),
+    }));
+  };
+
+  const removeDraftSplit = (lineId, splitIndex) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => {
+        if (item.id !== lineId) return item;
+        const splits = normalizeLineSplits(item, invoiceSettings.defaultInvoiceDepartment).filter((_, index) => index !== splitIndex);
+        return { ...item, departmentSplits: normalizeLineSplits({ ...item, departmentSplits: splits.length ? splits : [{ department: item.department || invoiceSettings.defaultInvoiceDepartment, percentage: 100 }] }, invoiceSettings.defaultInvoiceDepartment) };
+      }),
+    }));
+  };
+
+  const enableDraftSplit = (lineId) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === lineId
+        ? { ...item, departmentSplits: normalizeLineSplits({ ...item, departmentSplits: [
+          { department: item.department || invoiceSettings.defaultInvoiceDepartment, percentage: 50 },
+          { department: departmentNames.find((dept) => dept !== (item.department || invoiceSettings.defaultInvoiceDepartment)) || item.department || invoiceSettings.defaultInvoiceDepartment, percentage: 50 },
+        ] }, invoiceSettings.defaultInvoiceDepartment) }
+        : item),
+    }));
+  };
+
+  const resetDraftLineDepartment = (lineId, department) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === lineId
+        ? { ...item, department, departmentSplits: [{ department, percentage: 100, amount: lineTotal(item) }] }
+        : item),
+    }));
+  };
+
+  const cancelUpload = () => {
+    const hasReview = draft.items.length || draft.files.length || draft.status !== "Idle";
+    if (hasReview && !window.confirm("Cancel upload? This will clear the current extracted invoice lines.")) return;
+    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
   };
 
   const applySuggestion = (id) => {
@@ -1224,7 +1357,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       supplier,
       items: [
         ...current.items,
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, matchStatus: "Create new product", matchConfidence: 0 },
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, discountAmount: 0, discountPercent: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, departmentSplits: [{ department: invoiceSettings.defaultInvoiceDepartment, percentage: 100, amount: 0 }], matchStatus: "Create new product", matchConfidence: 0 },
       ],
       status: "Manual review",
     }));
@@ -1243,10 +1376,23 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateEditLine = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost"];
+    const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent"];
     setEditDraft((current) => ({
       ...current,
-      items: (current.items || []).map((item) => item.id === id ? { ...item, [field]: numericFields.includes(field) ? numberValue(value) : value } : item),
+      items: (current.items || []).map((item) => {
+        if (item.id !== id) return item;
+        let updated = { ...item, [field]: numericFields.includes(field) ? numberValue(value) : value };
+        if (field === "discountAmount") {
+          const original = originalLineTotal(updated);
+          updated.discountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
+        }
+        if (field === "discountPercent") {
+          updated.discountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
+        }
+        if (field === "department") updated.departmentSplits = [{ department: value, percentage: 100, amount: lineTotal(updated) }];
+        updated.departmentSplits = normalizeLineSplits(updated, invoiceSettings.defaultInvoiceDepartment);
+        return updated;
+      }),
     }));
   };
 
@@ -1256,7 +1402,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       ...current,
       items: [
         ...(current.items || []),
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment },
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, discountAmount: 0, discountPercent: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, departmentSplits: [{ department: invoiceSettings.defaultInvoiceDepartment, percentage: 100, amount: 0 }] },
       ],
     }));
   };
@@ -1270,6 +1416,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         ...item,
         quantity: numberValue(item.quantity, 0),
         unitCost: numberValue(item.unitCost, 0),
+        discountAmount: lineDiscountAmount(item),
+        discountPercent: numberValue(item.discountPercent, 0),
+        originalLineTotal: originalLineTotal(item),
+        netLineTotal: lineTotal(item),
+        departmentSplits: normalizeLineSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
         supplier: item.supplier || editDraft.supplier,
       })),
     };
@@ -1333,7 +1484,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         <div className="button-row left">
           <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
           <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
-          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
+          <button className="danger-button" disabled={!draft.items.length && !draft.files.length && draft.status === "Idle"} onClick={cancelUpload} type="button"><X size={16} />Cancel Upload</button>
+          <button disabled={!draft.items.length || isReading || draft.items.some((item) => !splitsAreValid(item))} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
         </div>
       </Panel>
 
@@ -1342,7 +1494,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           <table>
             <thead>
               <tr>
-                {["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
+                {["Product", "Pack size", "Quantity", "Unit cost", "Discount", "Department / split", "Supplier", "Net total", ""].map((header) => <th key={header}>{header}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -1360,9 +1512,35 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                   <td><input value={item.packSize} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
-                  <td><select value={item.department} onChange={(event) => updateDraftItem(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
+                  <td>
+                    <div className="discount-cell">
+                      <label>£<input min="0" step="0.01" type="number" value={item.discountAmount ?? 0} onChange={(event) => updateDraftItem(item.id, "discountAmount", event.target.value)} /></label>
+                      <label>%<input min="0" step="0.01" type="number" value={item.discountPercent ?? 0} onChange={(event) => updateDraftItem(item.id, "discountPercent", event.target.value)} /></label>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="split-cell">
+                      <div className="split-actions">
+                        <button className="mini-button" onClick={() => resetDraftLineDepartment(item.id, item.department || invoiceSettings.defaultInvoiceDepartment)} type="button">Single</button>
+                        <button className="mini-button" onClick={() => enableDraftSplit(item.id)} type="button">Split</button>
+                      </div>
+                      {normalizeLineSplits(item, invoiceSettings.defaultInvoiceDepartment).map((split, splitIndex) => (
+                        <div className="split-row" key={`${item.id}-${splitIndex}`}>
+                          <select value={split.department} onChange={(event) => updateDraftSplit(item.id, splitIndex, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select>
+                          <input min="0" max="100" step="1" type="number" value={split.percentage} onChange={(event) => updateDraftSplit(item.id, splitIndex, "percentage", event.target.value)} />
+                          <span>{money(split.amount)}</span>
+                          {normalizeLineSplits(item, invoiceSettings.defaultInvoiceDepartment).length > 1 && <button className="icon tiny" onClick={() => removeDraftSplit(item.id, splitIndex)} type="button"><X size={12} /></button>}
+                        </div>
+                      ))}
+                      <div className={splitsAreValid(item) ? "split-total ok" : "split-total warn"}>Total {splitPercentTotal(item).toFixed(0)}%</div>
+                      <button className="mini-button" onClick={() => addDraftSplit(item.id)} type="button">+ split row</button>
+                    </div>
+                  </td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
-                  <td>{money(lineTotal(item))}</td>
+                  <td>
+                    <strong>{money(lineTotal(item))}</strong>
+                    {lineDiscountAmount(item) > 0 && <small className="line-note">was {money(originalLineTotal(item))}</small>}
+                  </td>
                   <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
@@ -1425,7 +1603,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             <div className="table-wrap modal-table">
               <table>
                 <thead>
-                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
+                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Discount", "Department", "Supplier", "Net total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
                 </thead>
                 <tbody>
                   {(editDraft.items || []).map((item) => (
@@ -1434,6 +1612,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                       <td><input value={item.packSize || ""} onChange={(event) => updateEditLine(item.id, "packSize", event.target.value)} /></td>
                       <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateEditLine(item.id, "quantity", event.target.value)} /></td>
                       <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateEditLine(item.id, "unitCost", event.target.value)} /></td>
+                      <td><div className="discount-cell"><label>£<input min="0" step="0.01" type="number" value={item.discountAmount ?? 0} onChange={(event) => updateEditLine(item.id, "discountAmount", event.target.value)} /></label><label>%<input min="0" step="0.01" type="number" value={item.discountPercent ?? 0} onChange={(event) => updateEditLine(item.id, "discountPercent", event.target.value)} /></label></div></td>
                       <td><select value={item.department || invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateEditLine(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
                       <td><input value={item.supplier || editDraft.supplier || ""} onChange={(event) => updateEditLine(item.id, "supplier", event.target.value)} /></td>
                       <td>{money(lineTotal(item))}</td>
