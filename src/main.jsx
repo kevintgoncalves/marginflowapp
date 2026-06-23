@@ -1,18 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
   ArrowDownUp,
-  BarChart3,
   Boxes,
   ChefHat,
   Edit3,
   Eye,
   Gauge,
   Home,
-  LineChart,
   PackageSearch,
   Plus,
   ReceiptText,
@@ -469,11 +467,6 @@ function netLineTotal(item, invoice = {}) {
   return Number(Math.max(0, net).toFixed(2));
 }
 
-function invoiceDiscountPercent(invoice = {}) {
-  const subtotal = receivedLineSubtotal(invoice.items || []);
-  return subtotal ? (invoiceDiscountAmount(invoice) / subtotal) * 100 : 0;
-}
-
 function invoiceFinalTotal(invoice = {}) {
   return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0);
 }
@@ -806,10 +799,6 @@ function splitIsValid(item) {
   return Math.abs(departmentSplitTotal(item) - 100) < 0.01;
 }
 
-function validDepartmentSplits(item) {
-  return splitIsValid(item);
-}
-
 function normalizedDepartmentSplits(item, departmentNames = defaultDepartments) {
   const netTotal = netLineTotal(
     { ...item, lineDiscountAmount: item.lineDiscountAmount ?? item.discountAmount, lineDiscountPercent: item.lineDiscountPercent ?? item.discountPercent },
@@ -976,12 +965,6 @@ function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
     status: "Received",
     lineStatus: "Received",
   };
-}
-
-function splitSummary(item) {
-  return normalizeDepartmentSplits(item, item.department)
-    .map((split) => `${split.department} ${numberValue(split.percentage).toFixed(0)}%`)
-    .join(" / ");
 }
 
 function lineTotalForDepartment(item, selectedDepartment, invoice = {}) {
@@ -2938,10 +2921,11 @@ function App() {
           />
         )}
         {deleteConfirmation && (
-          <DeleteConfirmationModal
+          <ConfirmDeleteModal
+            open={Boolean(deleteConfirmation)}
             message={deleteConfirmation.message}
             onCancel={() => setDeleteConfirmation(null)}
-            onDelete={confirmDelete}
+            onConfirm={confirmDelete}
             title={deleteConfirmation.title}
           />
         )}
@@ -3226,7 +3210,6 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
 function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, setCreditNotes, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
-  const [editTarget, setEditTarget] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualMode, setManualMode] = useState("Simple Mode");
@@ -3523,7 +3506,6 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const openEditInvoice = (invoice) => {
-    setEditTarget(invoice);
     setEditDraft({
       ...invoice,
       items: (invoice.items || []).map((item) => ({ ...item, id: item.id || uid() })),
@@ -3595,7 +3577,6 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
-    setEditTarget(null);
     setEditDraft(null);
   };
 
@@ -3632,13 +3613,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           </label>
         </div>
         <div className="invoice-meta">
-          <label>
-            Supplier
-            <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
-            <datalist id="supplier-list">
-              {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
-            </datalist>
-          </label>
+          <SupplierSelector id="supplier-list" suppliers={suppliers} value={draft.supplier} onChange={(value) => setDraft({ ...draft, supplier: value })} />
           <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
           <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
         </div>
@@ -3664,7 +3639,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       </Panel>
 
       <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
-        <InvoiceLineEditorTable
+        <InvoiceLineEditor
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
           departmentNames={departmentNames}
@@ -3707,28 +3682,25 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         <p className="modal-copy">This will clear the uploaded file, extracted invoice lines and current review draft. Approved invoices will not be deleted.</p>
       </AppModal>
 
-      <AppModal
-        title="Delete invoice?"
+      <ConfirmDeleteModal
         open={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
-        footer={(
-          <>
-            <button className="ghost" onClick={() => setDeleteTarget(null)} type="button">Cancel</button>
-            <button className="danger-button" onClick={confirmDeleteInvoice} type="button"><Trash2 size={16} />Delete invoice</button>
-          </>
-        )}
-      >
-        <p className="modal-copy">This will remove invoice <strong>{deleteTarget?.invoiceNumber}</strong> from supplier spend, GP calculations, product history and price history.</p>
-      </AppModal>
+        title="Delete invoice?"
+        message={<span>This will remove invoice <strong>{deleteTarget?.invoiceNumber}</strong> from supplier spend, GP calculations, product history and price history.</span>}
+        confirmLabel="Delete invoice"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={confirmDeleteInvoice}
+        confirmIcon={<Trash2 size={16} />}
+        dangerButtonClassName="danger-button"
+      />
 
       <AppModal
         title="View / Edit invoice"
         open={Boolean(editDraft)}
-        onClose={() => { setEditTarget(null); setEditDraft(null); }}
+        onClose={() => { setEditDraft(null); }}
         wide
         footer={(
           <>
-            <button className="ghost" onClick={() => { setEditTarget(null); setEditDraft(null); }} type="button">Cancel</button>
+            <button className="ghost" onClick={() => { setEditDraft(null); }} type="button">Cancel</button>
             <button onClick={saveEditInvoice} type="button"><Save size={16} />Save changes</button>
           </>
         )}
@@ -3736,13 +3708,12 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         {editDraft && (
           <div className="modal-stack">
             <div className="form-grid six">
-              <label>Supplier<input list="supplier-list-edit" value={editDraft.supplier || ""} onChange={(event) => updateEditInvoice("supplier", event.target.value)} /></label>
-              <datalist id="supplier-list-edit">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
+              <SupplierSelector id="supplier-list-edit" suppliers={suppliers} value={editDraft.supplier || ""} onChange={(value) => updateEditInvoice("supplier", value)} />
               <label>Invoice number<input value={editDraft.invoiceNumber || ""} onChange={(event) => updateEditInvoice("invoiceNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={editDraft.date || today()} onChange={(event) => updateEditInvoice("date", event.target.value)} /></label>
               <Field label="Invoice total" readOnly value={money(invoiceTotal(editDraft))} />
             </div>
-            <InvoiceLineEditorTable
+            <InvoiceLineEditor
               addSplit={addEditSplit}
               departmentNames={departmentNames}
               items={editDraft.items || []}
@@ -3779,10 +3750,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
           {manualMode === "Simple Mode" ? (
             <div className="form-grid five">
-              <label>Supplier
-                <input list="supplier-list-manual" value={manualDraft.supplier} onChange={(event) => updateManualField("supplier", event.target.value)} />
-              </label>
-              <datalist id="supplier-list-manual">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
+              <SupplierSelector id="supplier-list-manual" suppliers={suppliers} value={manualDraft.supplier} onChange={(value) => updateManualField("supplier", value)} />
               <label>Invoice number<input value={manualDraft.invoiceNumber} onChange={(event) => updateManualField("invoiceNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={manualDraft.date} onChange={(event) => updateManualField("date", event.target.value)} /></label>
               <label>Total price<input min="0" step="0.01" type="number" value={manualDraft.total} onChange={(event) => updateManualField("total", event.target.value)} /></label>
@@ -3791,16 +3759,19 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           ) : (
             <>
               <div className="form-grid five">
-                <label>Supplier
-                  <input list="supplier-list-manual-complete" value={manualDraft.supplier} onChange={(event) => updateManualField("supplier", event.target.value)} />
-                </label>
-                <datalist id="supplier-list-manual-complete">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
+                <SupplierSelector id="supplier-list-manual-complete" suppliers={suppliers} value={manualDraft.supplier} onChange={(value) => updateManualField("supplier", value)} />
                 <label>Invoice number<input value={manualDraft.invoiceNumber} onChange={(event) => updateManualField("invoiceNumber", event.target.value)} /></label>
                 <label>Date<input type="date" value={manualDraft.date} onChange={(event) => updateManualField("date", event.target.value)} /></label>
-                <label>Invoice discount £<input min="0" step="0.01" type="number" value={manualDraft.invoiceDiscountAmount} onChange={(event) => updateManualField("invoiceDiscountAmount", event.target.value)} /></label>
-                <label>Invoice discount %<input min="0" step="0.01" type="number" value={manualDraft.invoiceDiscountPercent} onChange={(event) => updateManualField("invoiceDiscountPercent", event.target.value)} /></label>
+                <DiscountEditor
+                  amount={manualDraft.invoiceDiscountAmount}
+                  percent={manualDraft.invoiceDiscountPercent}
+                  amountLabel="Invoice discount £"
+                  percentLabel="Invoice discount %"
+                  onAmountChange={(value) => updateManualField("invoiceDiscountAmount", value)}
+                  onPercentChange={(value) => updateManualField("invoiceDiscountPercent", value)}
+                />
               </div>
-              <InvoiceLineEditorTable
+              <InvoiceLineEditor
                 addSplit={addManualSplit}
                 departmentNames={departmentNames}
                 items={manualDraft.items}
@@ -3821,7 +3792,40 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 }
 
 
-function InvoiceLineEditorTable({
+function SupplierSelector({ id, label = "Supplier", suppliers, value, onChange }) {
+  return (
+    <label>
+      {label}
+      <input list={id} value={value || ""} onChange={(event) => onChange(event.target.value)} />
+      <datalist id={id}>
+        {suppliers.map((supplier) => <option key={supplier.id || supplier.name} value={supplier.name} />)}
+      </datalist>
+    </label>
+  );
+}
+
+function DiscountEditor({ amount, percent, onAmountChange, onPercentChange, amountLabel = "Discount £", percentLabel = "Discount %", asCells = false }) {
+  const amountInput = <input min="0" step="0.01" type="number" value={amount ?? 0} onChange={(event) => onAmountChange(event.target.value)} />;
+  const percentInput = <input min="0" max="100" step="0.01" type="number" value={percent ?? 0} onChange={(event) => onPercentChange(event.target.value)} />;
+
+  if (asCells) {
+    return (
+      <>
+        <td>{amountInput}</td>
+        <td>{percentInput}</td>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <label>{amountLabel}{amountInput}</label>
+      <label>{percentLabel}{percentInput}</label>
+    </>
+  );
+}
+
+function InvoiceLineEditor({
   addSplit,
   applySuggestion,
   departmentNames,
@@ -3859,8 +3863,13 @@ function InvoiceLineEditorTable({
                 <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
                 <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
                 <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateLine(item.id, "unitCost", event.target.value)} /></td>
-                <td><input min="0" step="0.01" type="number" value={item.lineDiscountAmount ?? item.discountAmount ?? 0} onChange={(event) => updateLine(item.id, "lineDiscountAmount", event.target.value)} /></td>
-                <td><input min="0" max="100" step="0.01" type="number" value={item.lineDiscountPercent ?? item.discountPercent ?? 0} onChange={(event) => updateLine(item.id, "lineDiscountPercent", event.target.value)} /></td>
+                <DiscountEditor
+                  amount={item.lineDiscountAmount ?? item.discountAmount ?? 0}
+                  percent={item.lineDiscountPercent ?? item.discountPercent ?? 0}
+                  onAmountChange={(value) => updateLine(item.id, "lineDiscountAmount", value)}
+                  onPercentChange={(value) => updateLine(item.id, "lineDiscountPercent", value)}
+                  asCells
+                />
                 <td>
                   <DepartmentSplitEditor
                     addSplit={() => addSplit(item.id)}
@@ -4662,441 +4671,6 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
             {[...(viewingStocktake.openingLines || []), ...(viewingStocktake.lines || [])].map((line) => (
               <div className="compact-row" key={line.id}><span>{line.productName}</span><span>{line.quantity} x {money(line.unitCost)}</span><strong>{money(line.stockValue)}</strong></div>
             ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LegacyStocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
-  const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
-  const emptyForm = {
-    id: "",
-    date: today(),
-    department: stocktakeDepartment,
-    entryMode: "Product List",
-    manualOpeningType: "Manual Total Value",
-    manualOpeningValue: 0,
-    openingProductSearch: "",
-    openingLines: [],
-    productSearch: "",
-    lines: [],
-  };
-  const [form, setForm] = useState(emptyForm);
-  const [status, setStatus] = useState("");
-  const [viewingStocktake, setViewingStocktake] = useState(null);
-  const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-  const openingProductTotal = (form.openingLines || []).reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-  const openingStockValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
-      ? openingProductTotal
-      : numberValue(form.manualOpeningValue);
-  const currentStockValue = form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-  const productSuggestions = form.productSearch
-    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 8)
-    : [];
-  const openingProductSuggestions = form.openingProductSearch
-    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.openingProductSearch.toLowerCase()))).slice(0, 8)
-    : [];
-
-  const newStocktake = () => {
-    setForm({ ...emptyForm, date: today(), department: stocktakeDepartment });
-    setStatus("");
-  };
-
-  const productLineFromProduct = (product, quantity = 1) => {
-    const unitCost = numberValue(product.unitCost);
-    return {
-      id: uid(),
-      productName: product.name,
-      matchedProductId: product.id,
-      supplier: product.supplier || "",
-      packSize: product.packSize || "",
-      department: product.department || form.department,
-      quantity,
-      unitCost,
-      stockValue: numberValue(quantity) * unitCost,
-      matchStatus: "Matched",
-    };
-  };
-
-  const addManualLine = () => {
-    setForm((current) => ({
-      ...current,
-      lines: [
-        ...current.lines,
-        { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual entry" },
-      ],
-    }));
-  };
-
-  const addProductLine = (product) => {
-    if (!product) return;
-    setForm((current) => ({
-      ...current,
-      productSearch: "",
-      department: product.department || current.department,
-      lines: [...current.lines, productLineFromProduct(product)],
-    }));
-  };
-
-  const updateLine = (id, field, value) => {
-    setForm((current) => ({
-      ...current,
-      lines: current.lines.map((line) => {
-        if (line.id !== id) return line;
-        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
-        if (field === "productName") {
-          const match = matchProduct(value, products);
-          if (match) {
-            updated.productName = match.product.name;
-            updated.matchedProductId = match.product.id;
-            updated.supplier = match.product.supplier || "";
-            updated.packSize = match.product.packSize || "";
-            updated.department = match.product.department || current.department;
-            updated.unitCost = match.product.unitCost;
-            updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
-          } else {
-            updated.matchedProductId = "";
-            updated.matchStatus = "Create product on save";
-          }
-        }
-        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        return updated;
-      }),
-    }));
-  };
-
-  const addOpeningLine = (product) => {
-    setForm((current) => ({
-      ...current,
-      openingProductSearch: "",
-      openingLines: [
-        ...(current.openingLines || []),
-        product ? productLineFromProduct(product) : { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual opening" },
-      ],
-    }));
-  };
-
-  const updateOpeningLine = (id, field, value) => {
-    setForm((current) => ({
-      ...current,
-      openingLines: (current.openingLines || []).map((line) => {
-        if (line.id !== id) return line;
-        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
-        if (field === "productName") {
-          const match = matchProduct(value, products);
-          if (match) {
-            updated.productName = match.product.name;
-            updated.matchedProductId = match.product.id;
-            updated.supplier = match.product.supplier || "";
-            updated.packSize = match.product.packSize || "";
-            updated.department = match.product.department || current.department;
-            updated.unitCost = match.product.unitCost;
-            updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
-          } else {
-            updated.matchedProductId = "";
-            updated.matchStatus = "Manual opening";
-          }
-        }
-        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        return updated;
-      }),
-    }));
-  };
-
-  const importCsv = async (file) => {
-    if (!file) return;
-    const text = await file.text();
-    const rows = text.split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
-    const [, ...dataRows] = rows;
-    const imported = dataRows.map(([productName, quantity, unitCost]) => {
-      const match = matchProduct(productName, products);
-      const cost = unitCost ? numberValue(unitCost) : numberValue(match?.product?.unitCost);
-      return {
-        id: uid(),
-        productName: match?.product?.name || productName,
-        matchedProductId: match?.product?.id || "",
-        supplier: match?.product?.supplier || "",
-        packSize: match?.product?.packSize || "",
-        department: match?.product?.department || form.department,
-        quantity: numberValue(quantity),
-        unitCost: cost,
-        stockValue: numberValue(quantity) * cost,
-        matchStatus: match ? (match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`) : "Create product on save",
-      };
-    });
-    setForm((current) => ({ ...current, lines: [...current.lines, ...imported] }));
-    setStatus(`Imported ${imported.length} CSV line(s).`);
-  };
-
-  const importOpeningCsv = async (file) => {
-    if (!file) return;
-    const text = await file.text();
-    const rows = text.split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
-    const [, ...dataRows] = rows;
-    const imported = dataRows.map(([productName, quantity, unitCost]) => {
-      const match = matchProduct(productName, products);
-      const cost = unitCost ? numberValue(unitCost) : numberValue(match?.product?.unitCost);
-      return {
-        id: uid(),
-        productName: match?.product?.name || productName,
-        matchedProductId: match?.product?.id || "",
-        supplier: match?.product?.supplier || "",
-        packSize: match?.product?.packSize || "",
-        department: match?.product?.department || form.department,
-        quantity: numberValue(quantity),
-        unitCost: cost,
-        stockValue: numberValue(quantity) * cost,
-        matchStatus: match ? (match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`) : "Manual opening",
-      };
-    });
-    setForm((current) => ({ ...current, openingLines: [...(current.openingLines || []), ...imported] }));
-    setStatus(`Imported ${imported.length} opening stock CSV line(s).`);
-  };
-
-  const saveStocktake = () => {
-    const incomplete = form.lines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
-    const incompleteOpening = form.manualOpeningType !== "Manual Total Value"
-      ? (form.openingLines || []).some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost))
-      : false;
-    if (!form.lines.length || incomplete) {
-      setStatus("Every line needs product name, quantity and unit cost before saving.");
-      return;
-    }
-    if (incompleteOpening) {
-      setStatus("Every opening stock line needs product name, quantity and unit cost before saving.");
-      return;
-    }
-
-    let nextProducts = [...products];
-    const ensureProduct = (line) => {
-      const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
-      if (match) return line;
-      const product = {
-        id: uid(),
-        name: line.productName,
-        supplier: line.supplier || "Unknown Supplier",
-        packSize: line.packSize || "",
-        quantity: 1,
-        unitCost: numberValue(line.unitCost),
-        department: line.department || form.department,
-        aliases: [],
-        supplierPrices: [],
-        priceHistory: [{ date: form.date, supplier: "Stocktake", price: numberValue(line.unitCost) }],
-      };
-      nextProducts = [...nextProducts, product];
-      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
-    };
-
-    const savedLines = form.lines.map(ensureProduct);
-    const savedOpeningLines = (form.openingLines || []).map(ensureProduct);
-
-    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
-    const normalizedOpeningLines = savedOpeningLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
-    const totalValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-    const savedOpeningValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
-        ? normalizedOpeningLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0)
-        : numberValue(form.manualOpeningValue);
-    const stocktake = {
-      id: form.id || uid(),
-      date: form.date,
-      department: form.department,
-      entryMode: form.entryMode,
-      openingStockMode: "Manual",
-      manualOpeningType: form.manualOpeningType,
-      manualOpeningValue: numberValue(form.manualOpeningValue),
-      openingLines: normalizedOpeningLines,
-      openingStockValue: savedOpeningValue,
-      lines: normalizedLines,
-      totalValue,
-      status: "Saved",
-    };
-    setProducts(nextProducts);
-    setStocktakes((current) => form.id ? current.map((item) => (item.id === form.id ? stocktake : item)) : [stocktake, ...current]);
-    setForm({ ...emptyForm, date: today(), department: form.department, entryMode: form.entryMode });
-    setStatus(`Saved stocktake at ${money(totalValue)}.`);
-  };
-
-  const editStocktake = (stocktake) => {
-    setForm({
-      id: stocktake.id,
-      date: stocktake.date,
-      department: stocktake.department,
-      entryMode: stocktake.entryMode || "Manual Entry",
-      manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
-      manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
-      openingProductSearch: "",
-      openingLines: (stocktake.openingLines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
-      productSearch: "",
-      lines: (stocktake.lines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
-    });
-    setStatus(`Editing stocktake from ${stocktake.date}.`);
-  };
-
-  const csv = ["Product,Quantity,Unit cost,Stock value", ...form.lines.map((line) => `${line.productName},${line.quantity},${line.unitCost},${line.stockValue}`)].join("\n");
-
-  return (
-    <div className="page-grid">
-      <Panel title="Stocktake" action={form.id ? "Editing saved stocktake" : "Create stocktake"}>
-        <div className="form-grid six stocktake-controls">
-          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-          <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
-        </div>
-        <div className="radio-section">
-          <strong>Entry mode</strong>
-          <div className="radio-row">
-            {["Product List", "Manual Entry", "CSV Import"].map((mode) => (
-              <label key={mode}><input checked={form.entryMode === mode} onChange={() => setForm({ ...form, entryMode: mode })} type="radio" />{mode}</label>
-            ))}
-          </div>
-        </div>
-        <div className="radio-section compact">
-          <strong>Opening stock</strong>
-          <div className="radio-row">
-            {["Manual Total Value", "Opening Product List", "CSV Import"].map((mode) => (
-              <label key={mode}><input checked={form.manualOpeningType === mode} onChange={() => setForm({ ...form, manualOpeningType: mode })} type="radio" />{mode === "CSV Import" ? "Opening CSV Import" : mode}</label>
-            ))}
-          </div>
-        </div>
-        {form.manualOpeningType === "Manual Total Value" ? (
-          <div className="form-grid six">
-            <label>Opening Stock<input min="0" step="0.01" type="number" value={form.manualOpeningValue} onChange={(event) => setForm({ ...form, manualOpeningValue: event.target.value })} /></label>
-          </div>
-        ) : (
-          <>
-            {form.manualOpeningType === "Opening Product List" && (
-              <>
-                <div className="form-grid six">
-                  <label>Opening product search<input placeholder="Type product name..." value={form.openingProductSearch} onChange={(event) => setForm({ ...form, openingProductSearch: event.target.value })} /></label>
-                </div>
-                {openingProductSuggestions.length > 0 && (
-                  <div className="suggestion-list">
-                    {openingProductSuggestions.map((product) => <button key={product.id} onClick={() => addOpeningLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
-                  </div>
-                )}
-                <div className="button-row left tight">
-                  <button className="ghost" onClick={() => addOpeningLine()} type="button"><Plus size={16} />Add product</button>
-                </div>
-              </>
-            )}
-            {form.manualOpeningType === "CSV Import" && (
-              <div className="form-grid six">
-                <label>Opening CSV Import<input accept=".csv,text/csv" onChange={(event) => importOpeningCsv(event.target.files?.[0])} type="file" /></label>
-              </div>
-            )}
-            <div className="table-wrap compact-table">
-              <table>
-                <thead><tr>{["Product", "Quantity", "Unit Cost", "Stock Value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-                <tbody>
-                  {(form.openingLines || []).map((line) => (
-                    <tr key={line.id}>
-                      <td><input value={line.productName} onChange={(event) => updateOpeningLine(line.id, "productName", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateOpeningLine(line.id, "quantity", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateOpeningLine(line.id, "unitCost", event.target.value)} /></td>
-                      <td>{money(line.stockValue)}</td>
-                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete opening stock line", message: "Are you sure you want to delete this opening stock line?", onConfirm: () => setForm((current) => ({ ...current, openingLines: (current.openingLines || []).filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-        <div className="stocktake-summary slim"><span>Opening Stock Total</span><strong>{money(openingStockValue)}</strong></div>
-        <div className="button-row left">
-          {form.entryMode === "Manual Entry" && <button onClick={addManualLine} type="button"><Plus size={16} />Add Product</button>}
-          <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
-        </div>
-        {form.entryMode === "Product List" && (
-          <>
-            <div className="form-grid">
-              <label>Search products<input placeholder="Type product name..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} /></label>
-            </div>
-            {productSuggestions.length > 0 && (
-              <div className="suggestion-list">
-                {productSuggestions.map((product) => <button key={product.id} onClick={() => addProductLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
-              </div>
-            )}
-          </>
-        )}
-        {form.entryMode === "CSV Import" && (
-          <div className="form-grid six">
-            <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
-            <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
-          </div>
-        )}
-        {status && <div className="invoice-status info">{status}</div>}
-        <div className="radio-section compact">
-          <strong>Current / Closing stock</strong>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr>{["Product", "Unit", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-            <tbody>
-              {form.lines.map((line) => (
-                <tr key={line.id}>
-                  <td><input readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
-                  <td><input value={line.packSize || ""} onChange={(event) => updateLine(line.id, "packSize", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
-                  <td>{money(line.stockValue)}</td>
-                  <td><small className="line-note">{line.matchStatus}{line.supplier ? ` · ${line.supplier}` : ""}</small></td>
-                  <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete stocktake line", message: "Are you sure you want to delete this stocktake line?", onConfirm: () => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="stocktake-summary slim"><span>Closing Stock</span><strong>{money(currentStockValue)}</strong></div>
-      </Panel>
-      <Panel title="Saved stocktakes">
-        <div className="button-row left tight">
-          <button onClick={newStocktake} type="button"><Plus size={16} />New Stocktake</button>
-        </div>
-        <DataTable
-          columns={[
-            { key: "date", label: "Date" },
-            { key: "department", label: "Department" },
-            { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
-            { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
-            { key: "lines", label: "Lines", render: (lines) => lines.length },
-            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
-            { key: "actions", label: "Actions", render: (_, row) => (
-              <div className="row-actions">
-                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
-                <button className="ghost" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} />Edit</button>
-                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => { setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)); setStatus("Stocktake deleted."); } })} type="button"><Trash2 size={15} />Delete</button>
-              </div>
-            ) },
-          ]}
-          rows={visibleStocktakes}
-        />
-      </Panel>
-      {viewingStocktake && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="View stocktake">
-            <div className="modal-header">
-              <div>
-                <h3>Stocktake</h3>
-                <p>{viewingStocktake.department} · {viewingStocktake.date} · {money(viewingStocktake.totalValue)}</p>
-              </div>
-              <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="compact-row">
-              <span>Opening Stock</span>
-              <span>{viewingStocktake.manualOpeningType || "Manual Total Value"}</span>
-              <strong>{money(viewingStocktake.openingStockValue)}</strong>
-            </div>
-            <div className="split-list">
-              {(viewingStocktake.lines || []).map((line) => (
-                <div className="compact-row" key={line.id}>
-                  <span>{line.productName}</span>
-                  <span>{line.quantity} x {money(line.unitCost)}</span>
-                  <strong>{money(line.stockValue)}</strong>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       )}
@@ -6775,23 +6349,31 @@ function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
   );
 }
 
-function DeleteConfirmationModal({ title, message, onCancel, onDelete }) {
+function ConfirmDeleteModal({
+  open,
+  title,
+  message,
+  onCancel,
+  onConfirm,
+  confirmLabel = "Delete",
+  confirmIcon = null,
+  dangerButtonClassName = "ghost danger",
+}) {
+  if (!open) return null;
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header">
-          <div>
-            <h3>{title}</h3>
-            <p>{message}</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        <div className="button-row left">
+    <AppModal
+      title={title}
+      open={open}
+      onClose={onCancel}
+      footer={(
+        <>
           <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button className="ghost danger" onClick={onDelete} type="button">Delete</button>
-        </div>
-      </div>
-    </div>
+          <button className={dangerButtonClassName} onClick={onConfirm} type="button">{confirmIcon}{confirmLabel}</button>
+        </>
+      )}
+    >
+      <p className="modal-copy">{message}</p>
+    </AppModal>
   );
 }
 
