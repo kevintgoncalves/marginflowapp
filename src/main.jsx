@@ -2865,6 +2865,60 @@ function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, departmen
   );
 }
 
+function dashboardChartGranularity(rows) {
+  if (rows.length > 120) return "Month";
+  if (rows.length > 45) return "Week";
+  return "Day";
+}
+
+function dashboardWeekLabel(date) {
+  const start = startOfWeek(parseDate(date));
+  const end = addDays(start, 6);
+  return `${formatRangeDate(toIsoDate(start))} - ${formatRangeDate(toIsoDate(end))}`;
+}
+
+function dashboardMonthLabel(date) {
+  return new Intl.DateTimeFormat("en-GB", { month: "short", year: "2-digit" }).format(parseDate(date));
+}
+
+function aggregateDashboardRows(rows) {
+  const granularity = dashboardChartGranularity(rows);
+  if (granularity === "Day") return { granularity, rows: rows.map((row) => ({ ...row, label: row.day || formatRangeDate(row.date) })) };
+
+  const buckets = new Map();
+  rows.forEach((row) => {
+    const parsed = parseDate(row.date);
+    const key = granularity === "Month"
+      ? `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}`
+      : toIsoDate(startOfWeek(parsed));
+    const label = granularity === "Month" ? dashboardMonthLabel(row.date) : dashboardWeekLabel(row.date);
+    const existing = buckets.get(key) || {
+      id: key,
+      date: key,
+      day: label,
+      label,
+      grossSales: 0,
+      netSales: 0,
+      purchases: 0,
+      waste: 0,
+    };
+    existing.grossSales += numberValue(row.grossSales);
+    existing.netSales += numberValue(row.netSales);
+    existing.purchases += numberValue(row.purchases);
+    existing.waste += numberValue(row.waste);
+    buckets.set(key, existing);
+  });
+
+  const groupedRows = [...buckets.values()].map((row) => ({
+    ...row,
+    invoiceGp: row.netSales ? ((row.netSales - row.purchases) / row.netSales) * 100 : 0,
+    stocktakeGp: row.netSales ? ((row.netSales - row.purchases) / row.netSales) * 100 : 0,
+    realGp: row.netSales ? ((row.netSales - row.purchases - row.waste) / row.netSales) * 100 : 0,
+  }));
+
+  return { granularity, rows: groupedRows };
+}
+
 function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, metrics }) {
   return (
     <Panel title="Comparison" action={comparisonMode}>
@@ -2889,17 +2943,18 @@ function PerformanceCharts({ departmentRows, dailyRows, gpTarget, metrics, suppl
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
+  const chartData = aggregateDashboardRows(dailyRows);
 
   if (!hasData) return <EmptyState />;
 
   return (
     <>
       <div className="dashboard-layout">
-        <Panel title="Daily GP Chart" action="Actual vs target">
-          <DailyGpChart rows={dailyRows} targetGp={gpTarget} />
+        <Panel title="GP trend" action={`${chartData.granularity} view`}>
+          <DailyGpChart rows={chartData.rows} targetGp={gpTarget} />
         </Panel>
-        <Panel title="Sales vs Purchases Chart" action="Net sales and purchases by day">
-          <SalesPurchasesChart rows={dailyRows} />
+        <Panel title="Sales vs purchases" action={`${chartData.granularity} totals`}>
+          <SalesPurchasesChart rows={chartData.rows} />
         </Panel>
       </div>
       <div className="dashboard-layout secondary">
@@ -6161,6 +6216,7 @@ function SettingsPanel({
   const departmentEmpty = { name: "", type: "Food", targetGp: financialSettings.targetGp, active: true };
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
   const [editingDepartmentId, setEditingDepartmentId] = useState("");
+  const [departmentModalOpen, setDepartmentModalOpen] = useState(false);
   const [dataStatus, setDataStatus] = useState("");
   const [pendingFullBackup, setPendingFullBackup] = useState(null);
   const [backupImportSettingsMode, setBackupImportSettingsMode] = useState("Keep current settings");
@@ -6203,6 +6259,19 @@ function SettingsPanel({
     }
     setDepartmentForm(departmentEmpty);
     setEditingDepartmentId("");
+    setDepartmentModalOpen(false);
+  };
+
+  const openDepartmentModal = (row = null) => {
+    setDepartmentForm(row || departmentEmpty);
+    setEditingDepartmentId(row?.id || "");
+    setDepartmentModalOpen(true);
+  };
+
+  const closeDepartmentModal = () => {
+    setDepartmentForm(departmentEmpty);
+    setEditingDepartmentId("");
+    setDepartmentModalOpen(false);
   };
 
   const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
@@ -6274,6 +6343,7 @@ function SettingsPanel({
     setInvoiceSettings(defaultInvoiceSettings);
     setDepartmentForm(departmentEmpty);
     setEditingDepartmentId("");
+    setDepartmentModalOpen(false);
     setDataStatus("Demo settings restored.");
   };
 
@@ -6338,15 +6408,6 @@ function SettingsPanel({
       </Panel>
 
       <Panel title="Department settings">
-        <div className="form-grid six">
-          <Field label="Department" value={departmentForm.name} onChange={(value) => setDepartmentForm({ ...departmentForm, name: value })} />
-          <label>Department type<select value={departmentForm.type} onChange={(event) => setDepartmentForm({ ...departmentForm, type: event.target.value })}>{departmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
-          <Field label="Department target GP %" type="number" value={departmentForm.targetGp} onChange={(value) => setDepartmentForm({ ...departmentForm, targetGp: value })} />
-          <label>Status<select value={departmentForm.active ? "Active" : "Inactive"} onChange={(event) => setDepartmentForm({ ...departmentForm, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
-        </div>
-        <div className="button-row left">
-          <button onClick={saveDepartment} type="button"><Plus size={16} />{editingDepartmentId ? "Save Department" : "Add Department"}</button>
-        </div>
         <DataTable
           columns={[
             { key: "name", label: "Department" },
@@ -6355,13 +6416,22 @@ function SettingsPanel({
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
           onDelete={(id) => requestDelete({ title: "Delete department", message: "Are you sure you want to delete this department?", onConfirm: () => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id)) })}
-          onEdit={(row) => {
-            setDepartmentForm(row);
-            setEditingDepartmentId(row.id);
-          }}
+          onEdit={openDepartmentModal}
           rows={departmentSettings}
+          toolbarAction={<button onClick={() => openDepartmentModal()} type="button"><Plus size={16} />Add Department</button>}
         />
       </Panel>
+
+      {departmentModalOpen && (
+        <EditModal title={editingDepartmentId ? "Edit department" : "Add department"} onCancel={closeDepartmentModal} onSave={saveDepartment} saveLabel={editingDepartmentId ? "Save Department" : "Add Department"}>
+          <div className="form-grid six">
+            <Field label="Department" value={departmentForm.name} onChange={(value) => setDepartmentForm({ ...departmentForm, name: value })} />
+            <label>Department type<select value={departmentForm.type} onChange={(event) => setDepartmentForm({ ...departmentForm, type: event.target.value })}>{departmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+            <Field label="Department target GP %" type="number" value={departmentForm.targetGp} onChange={(value) => setDepartmentForm({ ...departmentForm, targetGp: value })} />
+            <label>Status<select value={departmentForm.active ? "Active" : "Inactive"} onChange={(event) => setDepartmentForm({ ...departmentForm, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+          </div>
+        </EditModal>
+      )}
 
       <Panel title="Menu costing settings">
         <div className="form-grid six">
@@ -6646,12 +6716,12 @@ function DailyGpChart({ rows, targetGp }) {
         <path className="actual-line smooth-line" d={smoothPath} stroke="url(#gpLineGradient)" />
         {validRows.map((row, index) => (
           <line className="chart-hover-line" key={row.id} x1={x(index)} x2={x(index)} y1="8" y2="92">
-            <title>{`${row.date}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
+            <title>{`${row.label || formatRangeDate(row.date)}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
           </line>
         ))}
       </svg>
       <div className="chart-legend"><span><i className="legend-actual" />Actual GP %</span><span><i className="legend-target" />Target GP %</span></div>
-      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${validRows.length}, 1fr)` }}>{validRows.map((row) => <span key={row.id}>{formatRangeDate(row.date)}</span>)}</div>
+      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${validRows.length}, 1fr)` }}>{validRows.map((row) => <span key={row.id}>{row.label || formatRangeDate(row.date)}</span>)}</div>
     </div>
   );
 }
@@ -6666,10 +6736,10 @@ function SalesPurchasesChart({ rows }) {
       {validRows.map((row) => (
         <div className="grouped-bar" key={row.id}>
           <div className="group-track">
-            <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-            <span className="purchase-bar" style={{ height: `${(row.purchases / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
+            <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
+            <span className="purchase-bar" style={{ height: `${(row.purchases / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
           </div>
-          <small>{formatRangeDate(row.date)}</small>
+          <small>{row.label || formatRangeDate(row.date)}</small>
         </div>
       ))}
       <div className="chart-legend"><span><i className="legend-sales" />Net Sales</span><span><i className="legend-purchases" />Purchases</span></div>
