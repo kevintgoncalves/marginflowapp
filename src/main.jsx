@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
@@ -6,10 +6,10 @@ import {
   AlertTriangle,
   ArrowDownUp,
   BarChart3,
+  Bot,
   Boxes,
   ChefHat,
   Edit3,
-  Eye,
   Gauge,
   Home,
   LineChart,
@@ -32,28 +32,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
-const invoiceLineStatuses = ["Received", "Missing", "Damaged", "Sent back", "Not ordered"];
-const creditNoteStatuses = ["To chase", "Chased", "Credit received", "Rejected"];
-const emptyInvoiceDraft = () => ({
-  files: [],
-  invoiceText: "",
-  items: [],
-  supplier: "",
-  date: today(),
-  invoiceNumber: "",
-  subtotalBeforeDiscount: 0,
-  discountAmount: 0,
-  discountPercent: 0,
-  finalInvoiceTotal: 0,
-  status: "Idle",
-  editingInvoiceId: "",
-});
-const couldNotReadInvoiceMessage = "Could not read this invoice automatically. Please paste OCR text, upload a text-based PDF/TXT/CSV, or enter manually.";
-const imageNeedsOcrMessage = "Image uploaded. Work Edition will run local OCR in your browser. No AI or OpenAI credits are used.";
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
-const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
+const rangePresets = ["Today", "This week", "Last week", "This month", "Last month", "Custom range"];
 
 const defaultDepartmentSettings = [
   { id: uid(), name: "Kitchen Made", type: "Food", targetGp: 75, active: true },
@@ -63,7 +45,6 @@ const defaultDepartmentSettings = [
 ];
 
 const defaultCompanySettings = {
-  appMode: "Work Edition: Non-AI",
   companyName: "Reading Room",
   tradingName: "Reading Room",
   address: "1 Market Street, London",
@@ -80,10 +61,6 @@ const defaultFinancialSettings = {
   weekStartsOn: "Monday",
   targetGp: 75,
   defaultVat: 20,
-  salesInputMethod: "Manual Gross + Net Sales",
-  gpCalculationBase: "Net Sales",
-  posProvider: "Square",
-  salesDataMode: "Gross + Net from POS",
   fiscalYearStartMonth: "April",
   timezone: "Europe/London",
 };
@@ -103,53 +80,35 @@ const defaultInvoiceSettings = {
   autoCreateProductsAfterApproval: true,
 };
 
-const defaultMatchingSettings = {
-  enableProductMatching: true,
+const defaultAiSettings = {
+  enableAiInvoiceReading: true,
+  enableAiProductMatching: true,
   autoMatchConfidenceThreshold: 90,
   requireManualApprovalBelowThreshold: true,
   productMatchingSensitivity: "Medium",
 };
 
-const appModes = ["Work Edition: Non-AI", "Pro Edition: AI optional"];
-
-const supplierParserCatalog = [
-  { name: "Albion Fine Foods", aliases: ["albion fine foods", "albion"], status: "Supported" },
-  { name: "Ashley James Meat Co", aliases: ["ashley james meat co", "ashley james", "aj meat", "ajm"], status: "Supported" },
-  { name: "Brighton & Newhaven Fish Sales", aliases: ["brighton & newhaven fish sales", "brighton newhaven fish sales", "brighton & newhaven fish", "brighton newhaven fish", "bnfs"], status: "Supported" },
-  { name: "Coburn & Baker", aliases: ["coburn & baker", "coburn and baker", "coburn", "coburn baker"], status: "Supported" },
-  { name: "Elite Fine Foods", aliases: ["elite fine foods", "elite sales", "elite"], status: "Supported" },
-  { name: "Real Patisserie", aliases: ["real patisserie"], status: "Supported" },
-  { name: "TG Fruits", aliases: ["tg fruits", "t g fruits"], status: "Supported" },
-  { name: "The Cheese Man", aliases: ["the cheese man", "cheese man", "cheeseman"], status: "Supported" },
-  { name: "The Lady of the Cakes", aliases: ["the lady of the cakes", "lady of the cakes"], status: "Supported" },
-  { name: "Woods", aliases: ["woods foodservice", "woods"], status: "Supported" },
-];
-
 const initialSuppliers = [
   { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "020 7000 0101", active: true },
-  { id: uid(), name: "Ashley James Meat Co", category: "Meat", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "Brighton & Newhaven Fish Sales", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
-  { id: uid(), name: "Coburn & Baker", category: "Bakery", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "Elite Fine Foods", category: "Dry / chilled", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "Real Patisserie", category: "Bakery", contact: "", email: "", phone: "", active: true },
   { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "sales@tgfruits.example", phone: "020 7000 0202", active: true },
-  { id: uid(), name: "The Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "The Lady of the Cakes", category: "Bakery", contact: "", email: "", phone: "", active: true },
   { id: uid(), name: "Woods", category: "Wholesale", contact: "Account manager", email: "orders@woods.example", phone: "020 7000 0303", active: true },
+  { id: uid(), name: "BNFS", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
+  { id: uid(), name: "Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Coburn & Baker", category: "Bakery", contact: "", email: "", phone: "", active: true },
 ];
 
 const initialProducts = [
   {
     id: uid(),
     name: "Eggs Box x180 Large",
-    supplier: "The Cheese Man",
+    supplier: "Cheese Man",
     packSize: "180 each",
     quantity: 1,
     unitCost: 45,
     department: "Kitchen Made",
     aliases: ["Large Eggs Box", "Eggs Large"],
-    supplierPrices: [{ supplier: "The Cheese Man", price: 45, date: "2026-06-01" }],
-    priceHistory: [{ date: "2026-06-01", supplier: "The Cheese Man", price: 45 }],
+    supplierPrices: [{ supplier: "Cheese Man", price: 45, date: "2026-06-01" }],
+    priceHistory: [{ date: "2026-06-01", supplier: "Cheese Man", price: 45 }],
   },
   {
     id: uid(),
@@ -233,25 +192,27 @@ const initialInvoices = [
 ];
 
 const initialSales = [
-  { id: uid(), day: "Mon", date: "2026-06-01", department: "Total", grossSales: 1585.86, vatRate: 20, sales: 1321.55 },
-  { id: uid(), day: "Tue", date: "2026-06-02", department: "Total", grossSales: 980.82, vatRate: 20, sales: 817.35 },
-  { id: uid(), day: "Wed", date: "2026-06-03", department: "Total", grossSales: 806.7, vatRate: 20, sales: 672.25 },
-  { id: uid(), day: "Thu", date: "2026-06-04", department: "Total", grossSales: 1776.42, vatRate: 20, sales: 1480.35 },
-  { id: uid(), day: "Fri", date: "2026-06-05", department: "Total", grossSales: 4018.2, vatRate: 20, sales: 3348.5 },
-  { id: uid(), day: "Sat", date: "2026-06-06", department: "Total", grossSales: 3854.7, vatRate: 20, sales: 3212.25 },
-  { id: uid(), day: "Sun", date: "2026-06-07", department: "Total", grossSales: 1242.95, vatRate: 20, sales: 1035.79 },
+  { day: "Mon", date: "2026-06-01", sales: 1321.55 },
+  { day: "Tue", date: "2026-06-02", sales: 817.35 },
+  { day: "Wed", date: "2026-06-03", sales: 672.25 },
+  { day: "Thu", date: "2026-06-04", sales: 1480.35 },
+  { day: "Fri", date: "2026-06-05", sales: 3348.5 },
+  { day: "Sat", date: "2026-06-06", sales: 3212.25 },
+  { day: "Sun", date: "2026-06-07", sales: 1035.79 },
 ];
+
+const initialOpeningStock = {
+  "Kitchen Made": 3796.31,
+  "Bought In": 410,
+  Bar: 625,
+  "Non-food": 260,
+};
 
 const initialStocktakes = [
   {
     id: uid(),
     date: "2026-06-09",
     department: "Kitchen Made",
-    openingStockMode: "Manual",
-    manualOpeningType: "Manual Total Value",
-    manualOpeningValue: 0,
-    openingStockValue: 0,
-    openingLines: [],
     lines: [
       { id: uid(), productName: "Chestnut Mushrooms", quantity: 6, unitCost: 8.9, stockValue: 53.4 },
       { id: uid(), productName: "Eggs Box x180 Large", quantity: 2, unitCost: 45, stockValue: 90 },
@@ -312,7 +273,8 @@ const navItems = [
   { id: "recipes", label: "Recipes", icon: ChefHat },
   { id: "menu", label: "Menu Costing", icon: UtensilsCrossed },
   { id: "waste", label: "Waste", icon: Trash2 },
-  { id: "gp", label: "Sales", icon: Gauge },
+  { id: "gp", label: "GP Analysis", icon: Gauge },
+  { id: "ai", label: "AI Insights", icon: Bot },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -329,775 +291,21 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function canonicalDepartmentName(value, fallback = "Kitchen Made") {
-  const raw = String(value || fallback || "").trim();
-  if (!raw) return fallback;
-  const key = raw.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "");
-  if (["alldepartments", "all"].includes(key)) return "All departments";
-  if (["total", "totalsales", "allvenue", "venue"].includes(key)) return "Total";
-  if (key.includes("nonfood") || key.includes("excluded") || key.includes("cleaning") || key.includes("supplies")) return "Non-food";
-  if (key.includes("boughtin") || key.includes("buyin") || key.includes("retail") || key.includes("grabandgo")) return "Bought In";
-  if (
-    key.includes("bar") ||
-    key.includes("drink") ||
-    key.includes("beverage") ||
-    key.includes("beer") ||
-    key.includes("wine") ||
-    key.includes("cocktail") ||
-    key.includes("spirit") ||
-    key.includes("liquor") ||
-    key.includes("softdrink") ||
-    key.includes("juice") ||
-    key.includes("coffee") ||
-    key.includes("tea")
-  ) return "Bar";
-  if (key.includes("kitchenmade") || key.includes("kitchen") || key.includes("food") || key.includes("brunch") || key.includes("breakfast") || key.includes("lunch") || key.includes("dinner")) return "Kitchen Made";
-  return raw;
-}
-
-function canonicalSalesDepartmentName(value) {
-  const department = canonicalDepartmentName(value, "Total");
-  return ["Kitchen Made", "Bought In", "Bar", "Non-food", "Total"].includes(department) ? department : "Total";
-}
-
-function netFromGross(gross, vatRate = 20) {
-  const divisor = 1 + (numberValue(vatRate, 0) / 100);
-  return divisor ? Number((numberValue(gross, 0) / divisor).toFixed(2)) : numberValue(gross, 0);
-}
-
-function vatAmountFromGross(gross, vatRate = 20) {
-  return Number((numberValue(gross, 0) - netFromGross(gross, vatRate)).toFixed(2));
-}
-
-function vatAmountFromGrossNet(gross, net) {
-  return Number((numberValue(gross) - numberValue(net)).toFixed(2));
-}
-
-function effectiveVatRate(gross, net) {
-  const netValue = numberValue(net);
-  return netValue ? (vatAmountFromGrossNet(gross, netValue) / netValue) * 100 : 0;
-}
-
-function netSalesForRow(row) {
-  return row?.grossSales !== undefined
-    ? numberValue(row.sales)
-    : numberValue(row?.sales);
-}
-
-function salesBaseForRow(row, gpCalculationBase = "Net Sales") {
-  return gpCalculationBase === "Gross Sales" ? numberValue(row?.grossSales) : netSalesForRow(row);
-}
-
-function hasDepartmentSpecificSalesRows(salesRows) {
-  return salesRows.some((row) => {
-    const department = canonicalSalesDepartmentName(row.department);
-    return department && department !== "Total";
-  });
-}
-
 function lineTotal(item) {
-  const extractedLineTotal = numberValue(item.lineTotal, 0);
-  if (extractedLineTotal > 0) return extractedLineTotal;
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
-function invoiceLineStatus(item) {
-  return invoiceLineStatuses.includes(item?.lineStatus) ? item.lineStatus : "Received";
-}
-
-function isReceivedInvoiceLine(item) {
-  return invoiceLineStatus(item) === "Received";
-}
-
-function originalLineTotal(item) {
-  return lineTotal(item);
-}
-
-function lineLevelDiscount(item) {
-  if (!isReceivedInvoiceLine(item)) return 0;
-  const original = originalLineTotal(item);
-  const amount = numberValue(item.lineDiscountAmount, 0);
-  const percentAmount = original * (numberValue(item.lineDiscountPercent, 0) / 100);
-  const discount = amount > 0 ? amount : percentAmount;
-  return Number(Math.min(original, Math.max(0, discount)).toFixed(2));
-}
-
-function lineAfterLineDiscount(item) {
-  if (!isReceivedInvoiceLine(item)) return 0;
-  return Math.max(0, originalLineTotal(item) - lineLevelDiscount(item));
-}
-
-function receivedLineSubtotal(items = []) {
-  return items.filter(isReceivedInvoiceLine).reduce((sum, item) => sum + lineAfterLineDiscount(item), 0);
-}
-
-function invoiceDiscountAmount(invoice = {}) {
-  const subtotal = receivedLineSubtotal(invoice.items || []);
-  const explicitAmount = numberValue(invoice.discountAmount, 0);
-  const percentAmount = subtotal * (numberValue(invoice.discountPercent, 0) / 100);
-  const discount = explicitAmount > 0 ? explicitAmount : percentAmount;
-  return Number(Math.min(subtotal, Math.max(0, discount)).toFixed(2));
-}
-
-function invoiceSubtotalBeforeDiscount(invoice = {}) {
-  return (invoice.items || []).filter(isReceivedInvoiceLine).reduce((sum, item) => sum + originalLineTotal(item), 0);
-}
-
-function proportionalInvoiceDiscount(item, invoice = {}) {
-  if (!isReceivedInvoiceLine(item)) return 0;
-  const subtotalAfterLineDiscount = receivedLineSubtotal(invoice.items || []);
-  if (!subtotalAfterLineDiscount) return 0;
-  const share = lineAfterLineDiscount(item) / subtotalAfterLineDiscount;
-  return Number((invoiceDiscountAmount(invoice) * share).toFixed(2));
-}
-
-function discountAppliedToLine(item, invoice = {}) {
-  return Number((lineLevelDiscount(item) + proportionalInvoiceDiscount(item, invoice)).toFixed(2));
-}
-
-function netLineTotal(item, invoice = {}) {
-  if (!isReceivedInvoiceLine(item)) return 0;
-  const net = originalLineTotal(item) - discountAppliedToLine(item, invoice);
-  return Number(Math.max(0, net).toFixed(2));
-}
-
-function invoiceDiscountPercent(invoice = {}) {
-  const subtotal = receivedLineSubtotal(invoice.items || []);
-  return subtotal ? (invoiceDiscountAmount(invoice) / subtotal) * 100 : 0;
-}
-
-function invoiceFinalTotal(invoice = {}) {
-  return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0);
-}
-
-function amountsAlmostEqual(a, b) {
-  const left = Number(a);
-  const right = Number(b);
-  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  return Math.abs(left - right) <= Math.max(0.03, Math.abs(right) * 0.015);
-}
-
-function invoiceUnitCostFromExtraction(line) {
-  const quantity = numberValue(line.quantity, 1);
-  const unitCost = numberValue(line.unitCost, 0);
-  const extractedLineTotal = numberValue(line.lineTotal, 0);
-
-  if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
-    return Number((extractedLineTotal / quantity).toFixed(4));
-  }
-
-  return unitCost;
-}
-
-function invoiceDateTokenPattern() {
-  return "\\b(?:\\d{1,2}[-/][A-Z]{3}|\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?|20\\d{2}-\\d{2}-\\d{2})\\b";
-}
-
-function invoiceRowDateTokenPattern() {
-  return "\\b\\d{1,2}[-/][A-Z]{3}\\b";
-}
-
-function invoiceNumberMatches(text) {
-  const spacedText = text.replace(/(\d+[.,]\d{2})(?=\d+[.,]\d{2})/g, "$1 ");
-  const matches = [];
-  const pattern = /(^|\s)[£$]?(-?\d+(?:[.,]\d{1,4})?)(?=\s|$)/g;
-  let match;
-  while ((match = pattern.exec(spacedText))) {
-    const value = numberValue(match[2].replace(",", "."), NaN);
-    if (Number.isFinite(value)) {
-      const rawToken = match[0].slice(match[1].length);
-      const currencyOffset = Math.max(0, rawToken.search(/-?\d/));
-      const index = match.index + match[1].length + currencyOffset;
-      matches.push({ value, index, end: index + match[2].length, raw: match[2] });
-    }
-  }
-  return matches;
-}
-
-function splitInvoiceProductAndPack(description) {
-  const cleaned = description.replace(/\s+/g, " ").trim();
-  const packPattern = /\b(?:(?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:x|\*)\s*\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|X?\d+(?:[.,]\d+)?\s?(?:KG|G|M|CM|LTR|L|ML|CL|OZ|LB)|KILO|BOX(?:\s+[A-Z0-9]+)?|BAG|PUNNET|PNT(?:\s+SINGLE)?|SINGLE(?:\s+(?:KG|MED))?|BUNCH(?:\s*\([^)]+\))?|CASE|EACH|PACK|TRAY|BTL|TIN|CAN)\b/i;
-  const match = cleaned.match(packPattern);
-  if (!match || match.index < 2) return { productName: cleaned, packSize: "" };
-  return {
-    productName: cleaned.slice(0, match.index).trim(),
-    packSize: cleaned.slice(match.index).trim(),
-  };
-}
-
-function parseTgFruitsInvoiceRow(rowText) {
-  const qtyDateMatch = rowText.match(new RegExp(`^\\s*(-?\\d+(?:[.,]\\d{1,2})?)\\s+${invoiceRowDateTokenPattern()}\\s+(.+)$`, "i"));
-  if (qtyDateMatch) {
-    const quantityValue = numberValue(qtyDateMatch[1].replace(",", "."), 0);
-    const rowBody = qtyDateMatch[2].trim();
-    const numbers = invoiceNumberMatches(rowBody);
-    if (quantityValue > 0 && numbers.length >= 3) {
-      for (let index = 0; index <= numbers.length - 3; index += 1) {
-        const vat = numbers[index].value;
-        const lineTotalValue = numbers[index + 1]?.value;
-        const unitCostValue = numbers[index + 2]?.value;
-        if (vat < 0 || unitCostValue <= 0 || lineTotalValue <= 0) continue;
-        if (!amountsAlmostEqual(quantityValue * unitCostValue, lineTotalValue)) continue;
-
-        const description = rowBody.slice(0, numbers[index].index).trim();
-        const { productName, packSize } = splitInvoiceProductAndPack(description);
-        if (!/[A-Za-z]{2}/.test(productName)) return null;
-        return {
-          productName,
-          packSize,
-          quantity: quantityValue,
-          unitCost: unitCostValue,
-          lineTotal: lineTotalValue,
-        };
-      }
-    }
-  }
-
-  const withoutDate = rowText.replace(new RegExp(`^\\s*${invoiceDateTokenPattern()}\\s*`, "i"), "").trim();
-  const numbers = invoiceNumberMatches(withoutDate);
-  if (numbers.length < 4) return null;
-
-  for (let index = numbers.length - 4; index >= 0; index -= 1) {
-    const vat = numbers[index].value;
-    const lineTotalValue = numbers[index + 1]?.value;
-    const unitCostValue = numbers[index + 2]?.value;
-    const quantityValue = numbers[index + 3]?.value;
-    if (vat < 0 || quantityValue <= 0 || unitCostValue <= 0 || lineTotalValue <= 0) continue;
-    if (!amountsAlmostEqual(quantityValue * unitCostValue, lineTotalValue)) continue;
-
-    const description = withoutDate.slice(0, numbers[index].index).trim();
-    const { productName, packSize } = splitInvoiceProductAndPack(description);
-    if (!/[A-Za-z]{2}/.test(productName)) return null;
-    return {
-      productName,
-      packSize,
-      quantity: quantityValue,
-      unitCost: unitCostValue,
-      lineTotal: lineTotalValue,
-    };
-  }
-
-  return null;
-}
-
-function extractTgFruitsInvoiceRows(invoiceText) {
-  const normalizedText = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
-  const qtyDatePattern = new RegExp(`(?:^|\\s)(-?\\d+(?:[.,]\\d{1,2})?)\\s+${invoiceRowDateTokenPattern()}`, "gi");
-  const qtyDateMatches = [...normalizedText.matchAll(qtyDatePattern)];
-  const rows = [];
-
-  qtyDateMatches.forEach((match, index) => {
-    const start = match.index + (match[0].startsWith(" ") ? 1 : 0);
-    const end = qtyDateMatches[index + 1]?.index ?? normalizedText.length;
-    const row = parseTgFruitsInvoiceRow(normalizedText.slice(start, end).trim());
-    if (row) rows.push(row);
-  });
-
-  if (!rows.length) {
-    const datePattern = new RegExp(invoiceDateTokenPattern(), "gi");
-    const dateMatches = [...normalizedText.matchAll(datePattern)];
-    dateMatches.forEach((match, index) => {
-      const start = match.index;
-      const end = dateMatches[index + 1]?.index ?? normalizedText.length;
-      const row = parseTgFruitsInvoiceRow(normalizedText.slice(start, end).trim());
-      if (row) rows.push(row);
-    });
-  }
-
-  const seen = new Set();
-  return rows.filter((row) => {
-    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function singlePackFromCasePack(packSize) {
-  const match = packSize.match(/^\s*(\d+(?:[.,]\d+)?)\s*(?:x|\*)\s*(.+?)\s*$/i);
-  return match ? { caseUnits: numberValue(match[1], 1), singlePackSize: match[2].replace(/\s+/g, " ").trim() } : { caseUnits: 1, singlePackSize: packSize };
-}
-
-function parseEliteInvoiceRows(invoiceText) {
-  const text = invoiceText.replace(/\r/g, "\n").replace(/\s+/g, " ");
-  const rowPattern = /(?:^|\s)\d{1,2}\s+[A-Z0-9]+\s+(?:(?=[A-Z0-9]*\d)[A-Z0-9]+\s+)?(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:x|\*)\s*\d+(?:[.,]\d+)?\s*(?:KG|G|LTR|L|ML|CL|OZ|LB))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s+\d+\b/gi;
-  const rows = [];
-  let match;
-
-  while ((match = rowPattern.exec(text))) {
-    const [, productName, packSizeRaw, quantityRaw, unitPriceRaw, lineValueRaw] = match;
-    const packSize = packSizeRaw.replace(/\s+/g, " ").replace(/\*/g, "x").trim();
-    const splitQuantity = numberValue(quantityRaw.replace(",", "."), 1);
-    const caseUnitPrice = numberValue(unitPriceRaw.replace(",", "."), 0);
-    const lineTotalValue = numberValue(lineValueRaw.replace(",", "."), 0);
-    const { caseUnits, singlePackSize } = singlePackFromCasePack(packSize);
-    const splitUnitCost = splitQuantity > 0 ? Number((lineTotalValue / splitQuantity).toFixed(4)) : caseUnitPrice;
-    const isSplitPack = caseUnits > 1 && lineTotalValue > 0 && !amountsAlmostEqual(splitQuantity * caseUnitPrice, lineTotalValue);
-
-    rows.push({
-      productName: productName.replace(/\s+/g, " ").trim(),
-      packSize: isSplitPack ? singlePackSize : packSize,
-      quantity: splitQuantity,
-      unitCost: isSplitPack ? splitUnitCost : caseUnitPrice,
-      lineTotal: lineTotalValue || splitQuantity * caseUnitPrice,
-    });
-  }
-
-  return rows;
-}
-
-function cleanInvoicePackSize(packSize = "") {
-  return packSize.replace(/\s+\d+(?:\s+\d+)*$/g, "").replace(/\s+/g, " ").trim();
-}
-
-function cleanInvoiceProductName(productName = "") {
-  return productName
-    .replace(/^web\s+ref\.?\s*\d*\s*/i, "")
-    .replace(/^(?:ambient|chilled|frozen|fresh produce)\s+/i, "")
-    .replace(/^\d+\s+/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isInvoiceHeaderOrFooterRow(rowText = "") {
-  const row = rowText.replace(/\s+/g, " ").trim();
-  if (!row || !/[A-Za-z]{2}/.test(row)) return true;
-  const lower = row.toLowerCase();
-  const looksLikeProductMath = /\d+(?:[.,]\d+)?\s+\d+(?:[.,]\d{2,4})\s+\d+(?:[.,]\d{2})/.test(row);
-
-  if (/^(?:product|description|item|code|qty|quantity)\b/.test(lower) && /\b(?:qty|quantity|unit|price|total|amount|vat)\b/.test(lower)) return true;
-  if (/^(?:subtotal|sub total|total|grand total|invoice total|ticket total|vat|tax|net total|gross total|balance|amount due|carriage total)\b/.test(lower)) return true;
-  if (!looksLikeProductMath && /\b(?:invoice\s*(?:no|number|date)|account\s*(?:no|number)|customer|delivery\s*(?:date|address)|payment|sort\s*code|bank|iban|vat\s*(?:no|number|reg)|registered|terms|statement|page\s+\d)\b/.test(lower)) return true;
-
-  return false;
-}
-
-function cleanLooseInvoiceDescription(description = "") {
-  return description
-    .replace(/\b(?:qty|quantity|unit price|unit cost|net|vat|tax|total|amount)\b/gi, " ")
-    .replace(/^[#A-Z0-9/.-]{3,}\s+(?=[A-Za-z])/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function buildParsedInvoiceRow(descriptionRaw, quantityRaw, unitCostRaw, lineTotalRaw) {
-  const quantity = numberValue(String(quantityRaw).replace(",", "."), 0);
-  const unitCost = numberValue(String(unitCostRaw).replace(",", "."), 0);
-  const lineTotalValue = numberValue(String(lineTotalRaw).replace(",", "."), 0);
-  if (!quantity || !unitCost || !lineTotalValue) return null;
-
-  const description = cleanLooseInvoiceDescription(descriptionRaw);
-  if (isInvoiceHeaderOrFooterRow(description)) return null;
-
-  const { productName, packSize } = splitInvoiceProductAndPack(description);
-  const cleanProduct = cleanInvoiceProductName(productName);
-  if (!/[A-Za-z]{2}/.test(cleanProduct) || /^(invoice|total|subtotal|account|payment|operator|balance|vat|tax)$/i.test(cleanProduct)) return null;
-
-  return {
-    productName: cleanProduct,
-    packSize: cleanInvoicePackSize(packSize),
-    quantity,
-    unitCost,
-    lineTotal: lineTotalValue,
-  };
-}
-
-function descriptionBeforeToken(row, token) {
-  return row.slice(0, token.index).trim();
-}
-
-function descriptionForQuantityFirst(row, quantityToken, unitToken) {
-  const between = row.slice(quantityToken.end, unitToken.index).trim();
-  return /[A-Za-z]{2}/.test(between) ? between : descriptionBeforeToken(row, quantityToken);
-}
-
-function parseLooseInvoiceRow(rowText) {
-  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
-  if (isInvoiceHeaderOrFooterRow(row)) return null;
-
-  const numbers = invoiceNumberMatches(row).filter((number) => number.value > 0);
-  if (numbers.length < 3) return null;
-
-  const candidates = [];
-  const addCandidate = (descriptionRaw, quantityToken, unitCostToken, lineTotalToken, scoreBoost = 0) => {
-    if (!amountsAlmostEqual(quantityToken.value * unitCostToken.value, lineTotalToken.value)) return;
-    const parsed = buildParsedInvoiceRow(descriptionRaw, quantityToken.value, unitCostToken.value, lineTotalToken.value);
-    if (!parsed) return;
-    const quantityIsLikely = Number.isInteger(quantityToken.value) || quantityToken.value <= 100;
-    const unitLooksPriced = unitCostToken.value >= 0.01;
-    const score = cleanLooseInvoiceDescription(descriptionRaw).length + scoreBoost + (quantityIsLikely ? 10 : 0) + (unitLooksPriced ? 5 : 0);
-    candidates.push({ ...parsed, _score: score });
-  };
-
-  for (let index = 0; index <= numbers.length - 3; index += 1) {
-    const first = numbers[index];
-    const second = numbers[index + 1];
-    const third = numbers[index + 2];
-    const fourth = numbers[index + 3];
-    const quantityFirstDescription = descriptionForQuantityFirst(row, first, second);
-    const beforeFirstDescription = descriptionBeforeToken(row, first);
-
-    addCandidate(quantityFirstDescription, first, second, third, /[A-Za-z]{2}/.test(row.slice(first.end, second.index)) ? 16 : 6);
-    addCandidate(beforeFirstDescription, second, first, third, 4);
-
-    if (fourth) {
-      addCandidate(quantityFirstDescription, first, second, fourth, /[A-Za-z]{2}/.test(row.slice(first.end, second.index)) ? 12 : 2);
-      addCandidate(beforeFirstDescription, second, first, fourth, 1);
-    }
-  }
-
-  if (!candidates.length) return null;
-  const { _score, ...best } = candidates.sort((a, b) => b._score - a._score)[0];
-  return best;
-}
-
-function parseInvoiceCsvRows(invoiceText = "") {
-  const rows = parseCsvText(invoiceText).filter((row) => row.some((cell) => String(cell || "").trim()));
-  if (rows.length < 2) return [];
-
-  const headers = rows[0].map(normalizeHeader);
-  const findIndex = (names) => headers.findIndex((header) => names.some((name) => header === name || header.includes(name)));
-  const productIndex = findIndex(["product", "productname", "description", "item", "itemdescription", "goods", "name"]);
-  const packIndex = findIndex(["pack", "packsize", "size", "uom", "measure"]);
-  const quantityIndex = findIndex(["qty", "quantity", "invoicedqty", "invoiceqty", "deliveredqty", "units"]);
-  const unitCostIndex = findIndex(["unitcost", "unitprice", "price", "nettprice", "netprice", "rate", "cost"]);
-  const lineTotalIndex = findIndex(["linetotal", "linevalue", "total", "amount", "netamount", "netvalue", "goodsvalue", "value"]);
-
-  if (productIndex < 0 || (unitCostIndex < 0 && lineTotalIndex < 0)) return [];
-
-  return rows.slice(1).map((cells) => {
-    const productName = String(cells[productIndex] || "").trim();
-    if (!productName || isInvoiceHeaderOrFooterRow(productName)) return null;
-    const quantity = quantityIndex >= 0 ? parseCurrencyCell(cells[quantityIndex]) || 1 : 1;
-    const lineTotalValue = lineTotalIndex >= 0 ? parseCurrencyCell(cells[lineTotalIndex]) : 0;
-    const unitCost = unitCostIndex >= 0
-      ? parseCurrencyCell(cells[unitCostIndex])
-      : (quantity > 0 && lineTotalValue > 0 ? Number((lineTotalValue / quantity).toFixed(4)) : 0);
-    const lineTotal = lineTotalValue || Number((quantity * unitCost).toFixed(2));
-    const parsed = buildParsedInvoiceRow(productName, quantity, unitCost, lineTotal);
-    if (!parsed) return null;
-    const csvPackSize = packIndex >= 0 && packIndex !== unitCostIndex ? String(cells[packIndex] || "").trim() : "";
-    return csvPackSize ? { ...parsed, packSize: parsed.packSize || csvPackSize } : parsed;
-  }).filter(Boolean);
-}
-
-function dedupeInvoiceRows(rows) {
-  const seen = new Set();
-  return rows.filter((row) => {
-    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function parseCurrencyProductRow(rowText) {
-  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
-  if (isInvoiceHeaderOrFooterRow(row)) return null;
-  const match = row.match(/^(.+?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))(?:\s|$)/i);
-  if (!match) return null;
-  const [, descriptionRaw, unitRaw, orderQtyRaw, invoicedQtyRaw, totalRaw] = match;
-  const unitCost = numberValue(unitRaw.replace(",", "."), 0);
-  const quantity = numberValue(invoicedQtyRaw.replace(",", "."), numberValue(orderQtyRaw.replace(",", "."), 1));
-  const lineTotalValue = numberValue(totalRaw.replace(",", "."), 0);
-  if (!unitCost || !quantity || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) return null;
-  const { productName, packSize } = splitInvoiceProductAndPack(descriptionRaw);
-  const cleanProduct = cleanInvoiceProductName(productName);
-  if (!/[A-Za-z]{2}/.test(cleanProduct)) return null;
-  return {
-    productName: cleanProduct,
-    packSize: cleanInvoicePackSize(packSize),
-    quantity,
-    unitCost,
-    lineTotal: lineTotalValue,
-  };
-}
-
-function parseCodeLeadingInvoiceRow(rowText) {
-  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
-  if (isInvoiceHeaderOrFooterRow(row)) return null;
-  const match = row.match(/^[A-Z0-9/.-]{3,}\s+(\d+(?:[.,]\d+)?)\s+(.+)$/i);
-  if (!match) return null;
-  const quantity = numberValue(match[1].replace(",", "."), 0);
-  const body = match[2];
-  const moneyMatches = [...body.matchAll(/(?:^|\s)(\d+(?:[.,]\d{2}))(?=\s|$)/g)];
-  if (!quantity || moneyMatches.length < 2) return null;
-  const unitCost = numberValue(moneyMatches[moneyMatches.length - 2][1].replace(",", "."), 0);
-  const lineTotalValue = numberValue(moneyMatches[moneyMatches.length - 1][1].replace(",", "."), 0);
-  if (!unitCost || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) return null;
-  const descriptionRaw = body.slice(0, moneyMatches[moneyMatches.length - 2].index).trim();
-  const { productName, packSize } = splitInvoiceProductAndPack(descriptionRaw);
-  const cleanProduct = cleanInvoiceProductName(productName);
-  if (!/[A-Za-z]{2}/.test(cleanProduct) || /^(invoice|total|account|payment|operator)$/i.test(cleanProduct)) return null;
-  return {
-    productName: cleanProduct,
-    packSize: cleanInvoicePackSize(packSize),
-    quantity,
-    unitCost,
-    lineTotal: lineTotalValue,
-  };
-}
-
-function parseAlbionOrderRows(invoiceText) {
-  const normalized = invoiceText
-    .replace(/\r/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods.*?\b\d+\/\d+\b/gi, " ")
-    .replace(/Web Ref\.?\s*\d+\s*Invoice No\.?\s*\d+/gi, " ")
-    .replace(/\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}\s+Albion Fine Foods/gi, " ")
-    .replace(/\b\d+\/\d+\b/g, " ")
-    .replace(/https?:\/\/\S+/gi, " ");
-  const headerMatch = normalized.match(/PRODUCT\s+UNIT PRICE\s+ORDER QTY\s+INVOICED QTY\s+SUBTOTAL\s+(.+)/i);
-  const tableText = headerMatch?.[1] || normalized;
-  const beforeFooter = tableText.split(/\s+SUBTOTAL\s+£?\d/i)[0] || tableText;
-  const rowPattern = /([A-Za-z][A-Za-z0-9 '&(),./+-]{2,}?)\s+((?:x|\*)\s*\d+|\d+(?:[.,]\d+)?\s?(?:KG|G|LTR|L|ML|CL|OZ|LB)|EACH|EA)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))/gi;
-  const rows = [];
-  let match;
-
-  while ((match = rowPattern.exec(beforeFooter))) {
-    const [, productRaw, packRaw, unitRaw, , invoicedQtyRaw, totalRaw] = match;
-    const quantity = numberValue(invoicedQtyRaw.replace(",", "."), 0);
-    const unitCost = numberValue(unitRaw.replace(",", "."), 0);
-    const lineTotalValue = numberValue(totalRaw.replace(",", "."), 0);
-    const productName = cleanInvoiceProductName(productRaw);
-    if (!productName || !quantity || !unitCost || !lineTotalValue || !amountsAlmostEqual(quantity * unitCost, lineTotalValue)) continue;
-    rows.push({
-      productName,
-      packSize: cleanInvoicePackSize(packRaw),
-      quantity,
-      unitCost,
-      lineTotal: lineTotalValue,
-    });
-  }
-
-  return rows;
-}
-
-
-
-function moneyTokenPattern() {
-  return "£?\\s*([0-9,]+(?:\\.[0-9]{2})?)";
-}
-
-function normalizedInvoiceText(invoiceText = "") {
-  return String(invoiceText || "")
-    .replace(/\r/g, "\n")
-    .replace(/[|]+/g, " | ")
-    .replace(/£\s+/g, "£")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function parseInvoiceMoney(value) {
-  return numberValue(String(value || "").replace(/[£,]/g, ""), 0);
-}
-
-function pushParsedRow(rows, descriptionRaw, quantityRaw, unitCostRaw, lineTotalRaw, packOverride = "") {
-  const quantity = numberValue(String(quantityRaw || "").replace(",", "."), 0);
-  const unitCost = parseInvoiceMoney(unitCostRaw);
-  const lineTotalValue = parseInvoiceMoney(lineTotalRaw) || Number((quantity * unitCost).toFixed(2));
-  if (!quantity || !unitCost || !lineTotalValue) return;
-  const cleanedDescription = String(descriptionRaw || "")
-    .replace(/>{2,}/g, " ")
-    .replace(/[*✓✔\/]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const { productName, packSize } = splitInvoiceProductAndPack(cleanedDescription);
-  const cleanProduct = cleanInvoiceProductName(productName);
-  if (!cleanProduct || !/[A-Za-z]{2}/.test(cleanProduct)) return;
-  rows.push({
-    productName: cleanProduct,
-    packSize: cleanInvoicePackSize(packOverride || packSize),
-    quantity,
-    unitCost,
-    lineTotal: lineTotalValue,
-  });
-}
-
-function parseAshleyJamesRows(invoiceText = "") {
-  const text = normalizedInvoiceText(invoiceText);
-  const rows = [];
-  const table = text.split(/Subtotal/i)[0] || text;
-  const rowPattern = /(?:^|\s)([A-Z0-9][A-Za-z0-9 ,()'&./+-]{4,}?)(?:\s*\(PER\s+KG\))?\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(?:Zero\s+Rated|0(?:\.00)?|20(?:\.00)?%?)\s+(\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9][A-Za-z0-9 ,()'&./+-]{4,}?\s+\d|\s+Subtotal|$)/gi;
-  let match;
-  while ((match = rowPattern.exec(table))) {
-    pushParsedRow(rows, match[1], match[2], match[3], match[4]);
-  }
-  return dedupeInvoiceRows(rows);
-}
-
-function parseBnfsRows(invoiceText = "") {
-  const text = normalizedInvoiceText(invoiceText);
-  const rows = [];
-  const beforeTotals = text.split(/\bNet Amount\s*:/i)[0] || text;
-  const rowPattern = /(?:^|\s)(\d+(?:[.,]\d+)?)\s*(Box|Kg|KG|Each|Unit|Case)?\s+(\d+(?:[.,]\d+)?)\s*(Box|Kg|KG|Each|Unit|Case)?\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{4,}?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))(?=\s+\d+\s*(?:Box|Kg|Each|Unit|Case)?\s+\d|\s+Net Amount|$)/gi;
-  let match;
-  while ((match = rowPattern.exec(beforeTotals))) {
-    const orderedQty = numberValue(match[1], 0);
-    const packedQty = numberValue(match[3], orderedQty);
-    const pack = match[4] || match[2] || "";
-    pushParsedRow(rows, match[5], packedQty, match[6], match[7], pack);
-    const row = rows[rows.length - 1];
-    if (row && orderedQty && packedQty && !amountsAlmostEqual(orderedQty, packedQty)) {
-      row.matchStatus = `Ordered ${orderedQty}, packed ${packedQty}. Check credit/shortage.`;
-    }
-  }
-  return dedupeInvoiceRows(rows);
-}
-
-function parseCheeseManRows(invoiceText = "") {
-  const text = normalizedInvoiceText(invoiceText);
-  const rows = [];
-  let match;
-  const pdfPattern = /(?:^|\s)\d+\s+([A-Z]{2}\d{3})\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+£?\s*(\d+(?:[.,]\d{2}))(?=\s+£|\s+\d+\s+[A-Z]{2}\d{3}|\s+Date:|\s+Sub Total|$)/gi;
-  while ((match = pdfPattern.exec(text))) {
-    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
-  }
-  const receiptText = text.replace(/\s*\|\s*/g, " | ");
-  const receiptPattern = /([A-Z]{2}\d{3})\s*:?\s*([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*(\d+(?:[.,]\d{2}))\s*\|\s*(\d+(?:[.,]\d{2}))/gi;
-  while ((match = receiptPattern.exec(receiptText))) {
-    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
-  }
-  return dedupeInvoiceRows(rows);
-}
-
-function parseRealPatisserieRows(invoiceText = "") {
-  const text = normalizedInvoiceText(invoiceText);
-  const rows = [];
-  const table = text.split(/We are delivering|Many thanks|Page\s+\d/i)[0] || text;
-  const rowPattern = /(?:^|\s)(\d{4,})\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(?:£?\s*)?(\d+(?:[.,]\d{2}))(?=\s+\d{4,}\s+[A-Za-z]|\s+Total|$)/gi;
-  let match;
-  while ((match = rowPattern.exec(table))) {
-    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
-  }
-  return dedupeInvoiceRows(rows);
-}
-
-function parseWoodsRows(invoiceText = "") {
-  const text = normalizedInvoiceText(invoiceText);
-  const rows = [];
-  const body = text.split(/Delivery Window|Total Count|Goods Total/i)[0] || text;
-  const rowPattern = /(?:^|\s)([A-Z0-9/.-]{3,})\s+(\d+(?:[.,]\d+)?)\s+([A-Za-z*][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d|\s+Delivery Window|\s+Total Count|\s+Goods Total|$)/gi;
-  let match;
-  while ((match = rowPattern.exec(body))) {
-    pushParsedRow(rows, `${match[1]} ${match[3]}`, match[2], match[4], match[5]);
-  }
-  return dedupeInvoiceRows(rows);
-}
-
-function parseAlbionPackingSlipRows(invoiceText = "") {
-  const text = String(invoiceText || "").replace(/\r/g, "\n");
-  const rows = [];
-  text.split(/\n+/).forEach((line) => {
-    const row = line.replace(/\s+/g, " ").trim();
-    const match = row.match(/^(\d+(?:[.,]\d+)?)\s+(?:Unit|Case|Each|EA)\s+([A-Z0-9]+)\s+\d+\s+(\d+(?:[.,]\d{2}))\s+(.+)$/i);
-    if (match) pushParsedRow(rows, match[4], match[1], match[3], numberValue(match[1], 0) * parseInvoiceMoney(match[3]));
-  });
-  return dedupeInvoiceRows(rows);
-}
-
-function parseAlbionRows(invoiceText = "") {
-  return dedupeInvoiceRows([...parseAlbionOrderRows(invoiceText), ...parseAlbionPackingSlipRows(invoiceText)]);
-}
-
-function parseLadyOfTheCakesRows(invoiceText = "") {
-  const totals = extractInvoiceTotals(invoiceText);
-  const total = totals.finalInvoiceTotal || totals.subtotalBeforeDiscount;
-  if (!total) return [];
-  return [{
-    productName: "Manual handwritten invoice total",
-    packSize: "manual",
-    quantity: 1,
-    unitCost: total,
-    lineTotal: total,
-    matchStatus: "Handwritten invoice - review manually",
-  }];
-}
-
-function extractGenericInvoiceRows(invoiceText) {
-  const text = invoiceText.replace(/\r/g, "\n");
-  const normalized = text.replace(/\s+/g, " ");
-  const candidates = new Set();
-  const csvRows = parseInvoiceCsvRows(invoiceText);
-
-  text.split(/\n/).forEach((line) => {
-    const trimmed = line.trim();
-    if (trimmed) candidates.add(trimmed);
-  });
-
-  const currencyPattern = /([A-Za-z][A-Za-z0-9 '&().,/+-]{3,}?\s+£?\s*\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d+)?\s+\d+(?:[.,]\d+)?\s+£?\s*\d+(?:[.,]\d{2}))/g;
-  [...normalized.matchAll(currencyPattern)].forEach((match) => candidates.add(match[1].trim()));
-
-  const codePattern = /(?:^|\s)([A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z][A-Za-z0-9 '&().,/+-]{4,}?\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d+(?:[.,]\d+)?\s+[A-Za-z]|$)/g;
-  [...normalized.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
-
-  const rows = [...candidates]
-    .map((candidate) => parseCurrencyProductRow(candidate) || parseCodeLeadingInvoiceRow(candidate) || parseLooseInvoiceRow(candidate))
-    .filter(Boolean);
-  return dedupeInvoiceRows([...csvRows, ...rows]);
-}
-
-function normalizeInvoiceUnitCost(item) {
-  const quantity = numberValue(item.quantity, 1);
-  const unitCost = numberValue(item.unitCost, 0);
-  const extractedLineTotal = numberValue(item.lineTotal, 0);
-
-  if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
-    return Number((extractedLineTotal / quantity).toFixed(4));
-  }
-
-  return unitCost;
-}
-
-function defaultDepartmentSplits(department = "Kitchen Made") {
-  return [{ id: uid(), department: canonicalDepartmentName(department, "Kitchen Made"), percentage: 100 }];
-}
-
-function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
-  const source = Array.isArray(item.departmentSplits) && item.departmentSplits.length
-    ? item.departmentSplits
-    : defaultDepartmentSplits(item.department || fallbackDepartment);
-
-  return source.map((split) => ({
-    id: split.id || uid(),
-    department: canonicalDepartmentName(split.department, fallbackDepartment),
-    percentage: numberValue(split.percentage, 0),
-  }));
-}
-
-function departmentSplitTotal(item) {
-  return normalizeDepartmentSplits(item, item.department).reduce((sum, split) => sum + numberValue(split.percentage), 0);
-}
-
-function splitIsValid(item) {
-  return Math.abs(departmentSplitTotal(item) - 100) < 0.01;
-}
-
-function splitSummary(item) {
-  return normalizeDepartmentSplits(item, item.department)
-    .map((split) => `${split.department} ${numberValue(split.percentage).toFixed(0)}%`)
-    .join(" / ");
-}
-
-function lineTotalForDepartment(item, selectedDepartment, invoice = {}) {
-  const total = netLineTotal(item, invoice.items ? invoice : { items: [item], discountAmount: 0, discountPercent: 0 });
-  if (selectedDepartment === "All departments") return total;
-  return normalizeDepartmentSplits(item, item.department)
-    .filter((split) => split.department === selectedDepartment)
-    .reduce((sum, split) => sum + total * (numberValue(split.percentage) / 100), 0);
-}
-
-function primaryDepartment(item) {
-  return normalizeDepartmentSplits(item, item.department)[0]?.department || item.department || "Kitchen Made";
-}
-
 function invoiceTotal(invoice) {
-  return invoiceFinalTotal(invoice);
+  return (invoice.items || []).reduce((sum, item) => sum + lineTotal(item), 0);
 }
 
 function departmentMatches(rowDepartment, selectedDepartment) {
-  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
-  return selected === "All departments" || canonicalDepartmentName(rowDepartment, "") === selected;
+  return selectedDepartment === "All departments" || rowDepartment === selectedDepartment;
+}
+
+function selectedOpeningStock(openingStockByDept, selectedDepartment) {
+  if (selectedDepartment === "All departments") return Object.values(openingStockByDept).reduce((sum, value) => sum + numberValue(value), 0);
+  return numberValue(openingStockByDept[selectedDepartment]);
 }
 
 function compactPlural(token) {
@@ -1167,32 +375,18 @@ function matchProduct(productName, products) {
   });
 
   if (!best || best.score < 0.45) return null;
-  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "Similarity match" };
+  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "AI similarity" };
 }
 
-function productAutocomplete(products, query, limit = 8) {
-  const term = String(query || "").trim().toLowerCase();
-  if (!term) return [];
-  return products
-    .filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(term)))
-    .slice(0, limit);
-}
-
-function recipeAutocomplete(recipes, query, limit = 8) {
-  const term = String(query || "").trim().toLowerCase();
-  if (!term) return [];
-  return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
-}
-
-function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings) {
-  if (!matchingSettings.enableProductMatching) {
+function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
+  if (!aiSettings.enableAiProductMatching) {
     return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
   const match = matchProduct(line.productName, products);
   if (!match) {
     return { ...line, matchConfidence: 0, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
-  const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(matchingSettings.autoMatchConfidenceThreshold, 90) / 100));
+  const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(aiSettings.autoMatchConfidenceThreshold, 90) / 100));
   if (match.confidence >= autoMatchThreshold) {
     return {
       ...line,
@@ -1204,7 +398,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       suggestedProductName: "",
     };
   }
-  if (match.confidence < 0.6 || !matchingSettings.requireManualApprovalBelowThreshold) {
+  if (match.confidence < 0.6 || !aiSettings.requireManualApprovalBelowThreshold) {
     return { ...line, matchConfidence: match.confidence, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
   return {
@@ -1225,117 +419,6 @@ function canReadFileAsText(file) {
     file.type.includes("csv") ||
     /\.(csv|txt|tsv|json)$/i.test(name)
   );
-}
-
-function isImageInvoiceFile(file) {
-  const name = file.name.toLowerCase();
-  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|heic|heif)$/i.test(name);
-}
-
-function canExtractTextFromInvoiceFile(file) {
-  const name = file.name.toLowerCase();
-  return file.type === "application/pdf" || name.endsWith(".pdf") || canReadFileAsText(file);
-}
-
-function loadBrowserImage(file) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error(`Could not read ${file.name}. Use PNG, JPG, WEBP or GIF images.`));
-    };
-    image.src = objectUrl;
-  });
-}
-
-async function imageFileToInvoiceInput(file) {
-  const maxDimension = 1800;
-  const image = await loadBrowserImage(file);
-  const width = image.naturalWidth || image.width;
-  const height = image.naturalHeight || image.height;
-  const scale = Math.min(1, maxDimension / Math.max(width, height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(width * scale));
-  canvas.height = Math.max(1, Math.round(height * scale));
-
-  const context = canvas.getContext("2d");
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
-
-  return {
-    fileName: file.name,
-    fileType: "image/jpeg",
-    dataUrl: canvas.toDataURL("image/jpeg", 0.82),
-  };
-}
-
-async function invoiceImagesFromFiles(files) {
-  return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
-}
-
-
-let tesseractLoaderPromise = null;
-
-function loadTesseract() {
-  if (window.Tesseract) return Promise.resolve(window.Tesseract);
-  if (tesseractLoaderPromise) return tesseractLoaderPromise;
-
-  tesseractLoaderPromise = new Promise((resolve, reject) => {
-    const existingScript = document.querySelector('script[data-marginflow-tesseract="true"]');
-    if (existingScript) {
-      existingScript.addEventListener("load", () => resolve(window.Tesseract));
-      existingScript.addEventListener("error", () => reject(new Error("Could not load local OCR library.")));
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
-    script.async = true;
-    script.defer = true;
-    script.dataset.marginflowTesseract = "true";
-    script.onload = () => {
-      if (window.Tesseract) resolve(window.Tesseract);
-      else reject(new Error("Local OCR library loaded but did not initialise."));
-    };
-    script.onerror = () => reject(new Error("Could not load local OCR library. Check the internet connection and try again."));
-    document.head.appendChild(script);
-  });
-
-  return tesseractLoaderPromise;
-}
-
-async function extractTextFromImageInvoiceFile(file, onProgress) {
-  const Tesseract = await loadTesseract();
-  const imageInput = await imageFileToInvoiceInput(file);
-  const result = await Tesseract.recognize(imageInput.dataUrl, "eng", {
-    logger: (message) => {
-      if (message?.status === "recognizing text" && typeof message.progress === "number") {
-        onProgress?.(Math.round(message.progress * 100));
-      }
-    },
-  });
-  return String(result?.data?.text || "").trim();
-}
-
-async function ocrTextFromImageFiles(files, onFileProgress) {
-  const chunks = [];
-  const images = Array.from(files || []).filter(isImageInvoiceFile);
-
-  for (let index = 0; index < images.length; index += 1) {
-    const file = images[index];
-    const text = await extractTextFromImageInvoiceFile(file, (progress) => {
-      onFileProgress?.(file, progress, index + 1, images.length);
-    });
-    if (text) chunks.push(`--- OCR ${file.name} ---\n${text}`);
-  }
-
-  return chunks.join("\n\n").trim();
 }
 
 async function extractPdfText(file) {
@@ -1365,393 +448,6 @@ async function textFromInvoiceFiles(files) {
   }
 
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
-}
-
-function parseCurrencyCell(value) {
-  return numberValue(String(value || "").replace(/[£$,]/g, ""));
-}
-
-function normalizeHeader(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function parseCsvText(text) {
-  const rows = [];
-  let current = [];
-  let cell = "";
-  let inQuotes = false;
-  for (let index = 0; index < String(text || "").length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        cell += '"';
-        index += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === "," && !inQuotes) {
-      current.push(cell.trim());
-      cell = "";
-    } else if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && next === "\n") index += 1;
-      current.push(cell.trim());
-      if (current.some(Boolean)) rows.push(current);
-      current = [];
-      cell = "";
-    } else {
-      cell += char;
-    }
-  }
-  current.push(cell.trim());
-  if (current.some(Boolean)) rows.push(current);
-  return rows;
-}
-
-function findHeaderIndex(headers, names) {
-  const normalized = headers.map(normalizeHeader);
-  return normalized.findIndex((header) => names.includes(header));
-}
-
-function salesCsvTemplateKey(name) {
-  return `marginflow.salesCsvTemplate.${normalizeHeader(name || "manual")}`;
-}
-
-function defaultSalesCsvMapping(headers = []) {
-  return {
-    date: findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]),
-    department: findHeaderIndex(headers, ["department", "salestype", "type", "category", "itemcategory", "reportingcategory"]),
-    grossSales: findHeaderIndex(headers, ["grosssales", "gross", "totalsales", "totalgross", "grossamount"]),
-    netSales: findHeaderIndex(headers, ["netsales", "net", "netrevenue", "netamount", "nettotal"]),
-    vatAmount: findHeaderIndex(headers, ["vat", "vatamount", "tax", "taxamount", "taxes"]),
-    vatRate: findHeaderIndex(headers, ["vatrate", "vatpercent", "taxrate", "taxpercent"]),
-    serviceCharge: findHeaderIndex(headers, ["servicecharge", "servicecharges", "gratuity", "tips"]),
-    discounts: findHeaderIndex(headers, ["discounts", "discount"]),
-    refunds: findHeaderIndex(headers, ["refunds", "refund", "returns"]),
-  };
-}
-
-function loadSalesCsvTemplate(name, headers) {
-  try {
-    const stored = localStorage.getItem(salesCsvTemplateKey(name));
-    return stored ? { ...defaultSalesCsvMapping(headers), ...JSON.parse(stored) } : defaultSalesCsvMapping(headers);
-  } catch {
-    return defaultSalesCsvMapping(headers);
-  }
-}
-
-function saveSalesCsvTemplate(name, mapping) {
-  try {
-    localStorage.setItem(salesCsvTemplateKey(name), JSON.stringify(mapping));
-  } catch {
-    // best effort only
-  }
-}
-
-function normalizeImportDate(value) {
-  const raw = String(value || "").trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  const uk = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
-  if (uk) {
-    const year = uk[3].length === 2 ? `20${uk[3]}` : uk[3];
-    return `${year}-${uk[2].padStart(2, "0")}-${uk[1].padStart(2, "0")}`;
-  }
-  const parsed = new Date(raw);
-  return Number.isNaN(parsed.getTime()) ? "" : toIsoDate(parsed);
-}
-
-function salesRowsFromCsvMapping(rawRows, mapping, defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
-  const errors = [];
-  const rows = rawRows.map((cells, index) => {
-    const at = (field) => Number(mapping[field]) >= 0 ? cells[Number(mapping[field])] : "";
-    const date = normalizeImportDate(at("date"));
-    const department = canonicalSalesDepartmentName(at("department") || "Total");
-    const grossSales = parseCurrencyCell(at("grossSales"));
-    const vatRate = numberValue(at("vatRate"), defaultVatRate);
-    const importedNet = parseCurrencyCell(at("netSales"));
-    const vatAmount = parseCurrencyCell(at("vatAmount"));
-    const sales = importedNet || (vatAmount ? grossSales - vatAmount : (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0));
-    const rowErrors = [];
-    if (!date) rowErrors.push("missing date");
-    if (!grossSales) rowErrors.push("missing gross sales");
-    if (!sales) rowErrors.push("missing net sales");
-    if (rowErrors.length) errors.push(`Row ${index + 2}: ${rowErrors.join(", ")}`);
-    return {
-      id: uid(),
-      date,
-      day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
-      department,
-      grossSales,
-      sales,
-      vatRate,
-      vatAmount: sales ? vatAmountFromGrossNet(grossSales, sales) : vatAmount,
-      effectiveVatRate: effectiveVatRate(grossSales, sales),
-      discounts: parseCurrencyCell(at("discounts")),
-      refunds: parseCurrencyCell(at("refunds")),
-      serviceCharge: parseCurrencyCell(at("serviceCharge")),
-      importStatus: rowErrors.length ? `Needs review: ${rowErrors.join(", ")}` : "Ready",
-    };
-  });
-  return { rows, validRows: rows.filter((row) => row.date && row.grossSales > 0), errors };
-}
-
-function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
-  const rows = parseCsvText(text);
-  if (!rows.length) return [];
-  const header = rows[0];
-  const mapping = defaultSalesCsvMapping(header);
-  const hasHeader = Object.values(mapping).some((index) => index >= 0);
-  const dataRows = hasHeader ? rows.slice(1) : rows;
-  const fallbackMapping = hasHeader ? mapping : {
-    date: 0,
-    department: rows[0]?.length >= 4 ? 1 : -1,
-    grossSales: rows[0]?.length >= 4 ? 2 : 1,
-    netSales: rows[0]?.length >= 4 ? 3 : 2,
-    vatRate: rows[0]?.length >= 5 ? 4 : -1,
-    vatAmount: -1,
-    serviceCharge: -1,
-    discounts: -1,
-    refunds: -1,
-  };
-  return salesRowsFromCsvMapping(dataRows, fallbackMapping, defaultVatRate, salesInputMethod).validRows;
-}
-
-function filenameDateInfo(fileName) {
-  const dates = [...String(fileName || "").matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)].map((match) => match[1]);
-  if (dates.length >= 2 && dates[0] !== dates[1]) return { date: "", dateRange: { start: dates[0], end: dates[1] } };
-  if (dates.length) return { date: dates[0], dateRange: null };
-  return { date: "", dateRange: null };
-}
-
-function smartImportDateLabel(importPreview) {
-  if (importPreview?.dateRange?.start && importPreview?.dateRange?.end) {
-    return `${formatRangeDate(importPreview.dateRange.start)} - ${formatRangeDate(importPreview.dateRange.end)}`;
-  }
-  return importPreview?.date ? formatRangeDate(importPreview.date) : "Not detected";
-}
-
-function displayReportType(value) {
-  const raw = String(value || "Generic CSV").replace(/[_-]+/g, " ").trim();
-  return raw ? raw.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Generic CSV";
-}
-
-function squareCategoryDepartment(category) {
-  const key = normalizeHeader(category);
-  if (key.includes("drink") || key.includes("bar") || key.includes("beverage")) return "Bar";
-  if (key.includes("boughtin") || key.includes("buyin") || key.includes("resale") || key.includes("retail")) return "Bought In";
-  if (key.includes("makein") || key.includes("madein") || key.includes("kitchen") || key.includes("foodmake")) return "Kitchen Made";
-  if (key.includes("other") || key.includes("excluded") || key.includes("nonfood")) return "Non-food";
-  return canonicalSalesDepartmentName(category);
-}
-
-function salesImportRow({
-  date,
-  department,
-  sourceCategory = "",
-  grossSales,
-  netSales,
-  vatAmount,
-  discounts = 0,
-  refunds = 0,
-  serviceCharge = 0,
-  importStatus = "Ready",
-}, defaultVatRate = 20) {
-  const gross = Number(numberValue(grossSales, 0).toFixed(2));
-  const net = Number(numberValue(netSales, 0).toFixed(2));
-  const vat = Number(numberValue(vatAmount, gross - net).toFixed(2));
-  const vatRate = net ? Number(((vat / net) * 100).toFixed(2)) : defaultVatRate;
-  return {
-    id: uid(),
-    date,
-    day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
-    department: canonicalSalesDepartmentName(department),
-    sourceCategory,
-    grossSales: gross,
-    sales: net,
-    vatRate,
-    vatAmount: vat,
-    effectiveVatRate: effectiveVatRate(gross, net),
-    discounts: Number(Math.abs(numberValue(discounts, 0)).toFixed(2)),
-    refunds: Number(Math.abs(numberValue(refunds, 0)).toFixed(2)),
-    serviceCharge: Number(numberValue(serviceCharge, 0).toFixed(2)),
-    importStatus,
-  };
-}
-
-function squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate = 20) {
-  const headers = csvRowsRaw[0] || [];
-  const dataRows = csvRowsRaw.slice(1);
-  const categoryIndex = findHeaderIndex(headers, ["categoryrollup"]);
-  const netIndex = findHeaderIndex(headers, ["netsales"]);
-  const grossIndex = findHeaderIndex(headers, ["grosssales"]);
-  const taxesIndex = findHeaderIndex(headers, ["taxes", "tax", "vat", "vatamount"]);
-  const discountsIndex = findHeaderIndex(headers, ["discountsandcomps", "discountscomps", "discounts", "discount"]);
-  const refundsIndex = findHeaderIndex(headers, ["refunds", "refund"]);
-  const dateIndex = findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]);
-  const requiredFields = [categoryIndex, netIndex, grossIndex];
-  if (requiredFields.some((index) => index < 0)) return null;
-
-  const dateInfo = filenameDateInfo(fileName);
-  const warnings = [];
-  if (dateIndex < 0 && !dateInfo.date && !dateInfo.dateRange) {
-    warnings.push("No date was detected in the CSV or filename. Review the import date before confirming.");
-  }
-  if (dateInfo.dateRange) {
-    warnings.push(`This file covers ${dateInfo.dateRange.start} to ${dateInfo.dateRange.end}. Rows will be posted against the range start date for dashboard filtering.`);
-  }
-
-  const fallbackDate = dateInfo.date || dateInfo.dateRange?.start || today();
-  const rows = dataRows
-    .map((cells) => {
-      const sourceCategory = cells[categoryIndex] || "Uncategorised";
-      const rowDate = dateIndex >= 0 ? normalizeImportDate(cells[dateIndex]) : fallbackDate;
-      return salesImportRow({
-        date: rowDate || fallbackDate,
-        department: squareCategoryDepartment(sourceCategory),
-        sourceCategory,
-        grossSales: parseCurrencyCell(cells[grossIndex]),
-        netSales: parseCurrencyCell(cells[netIndex]),
-        vatAmount: taxesIndex >= 0 ? parseCurrencyCell(cells[taxesIndex]) : undefined,
-        discounts: discountsIndex >= 0 ? parseCurrencyCell(cells[discountsIndex]) : 0,
-        refunds: refundsIndex >= 0 ? parseCurrencyCell(cells[refundsIndex]) : 0,
-      }, defaultVatRate);
-    })
-    .filter((row) => row.department !== "Total" && (row.grossSales || row.sales || row.vatAmount));
-
-  if (!rows.length) return null;
-
-  const optionalHits = [taxesIndex, discountsIndex, refundsIndex].filter((index) => index >= 0).length;
-  const confidence = Math.min(0.98, 0.9 + (optionalHits * 0.025));
-  return {
-    fileName,
-    source: "Square",
-    reportType: "Category roll-up",
-    reportTypeCode: "category_rollup",
-    confidence,
-    date: dateInfo.date || (dateInfo.dateRange ? "" : fallbackDate),
-    dateRange: dateInfo.dateRange,
-    departments: [...new Set(rows.map((row) => row.department))],
-    categories: [...new Set(rows.map((row) => row.sourceCategory).filter(Boolean))],
-    grossSalesTotal: rows.reduce((sum, row) => sum + row.grossSales, 0),
-    netSalesTotal: rows.reduce((sum, row) => sum + row.sales, 0),
-    vatTotal: rows.reduce((sum, row) => sum + row.vatAmount, 0),
-    rows,
-    warnings,
-    headers,
-    rawRows: dataRows,
-    csvRowsRaw,
-  };
-}
-
-function analyzeSalesCsvLocally(fileName, text, defaultVatRate = 20) {
-  const csvRowsRaw = parseCsvText(text);
-  if (!csvRowsRaw.length) return { csvRowsRaw, preview: null };
-  const headers = csvRowsRaw[0] || [];
-  const normalizedHeaders = headers.map(normalizeHeader);
-  const hasSquareCategoryRollup = ["categoryrollup", "netsales", "grosssales"].every((header) => normalizedHeaders.includes(header));
-  if (hasSquareCategoryRollup) return { csvRowsRaw, preview: squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate) };
-  return { csvRowsRaw, preview: null };
-}
-
-function csvRows(text) {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.split(",").map((cell) => cell.trim()));
-}
-
-function parseProductsCsv(text, suppliers = [], departmentNames = []) {
-  const rows = csvRows(text);
-  if (!rows.length) return [];
-  const header = rows[0].map(normalizeHeader);
-  const hasHeader = header.some((cell) => ["product", "productname", "supplier", "packsize", "unitcost", "department"].includes(cell));
-  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
-  const dataRows = hasHeader ? rows.slice(1) : rows;
-  const nameIndex = hasHeader ? findIndex(["product", "productname", "name"]) : 0;
-  const supplierIndex = hasHeader ? findIndex(["supplier", "suppliername"]) : 1;
-  const packIndex = hasHeader ? findIndex(["packsize", "pack", "unit"]) : 2;
-  const quantityIndex = hasHeader ? findIndex(["quantity", "qty"]) : 3;
-  const costIndex = hasHeader ? findIndex(["unitcost", "cost", "price"]) : 4;
-  const departmentIndex = hasHeader ? findIndex(["department", "salesdepartment"]) : 5;
-  const aliasesIndex = hasHeader ? findIndex(["aliases", "alias"]) : 6;
-  const defaultSupplier = suppliers[0]?.name || "";
-  const defaultDepartment = departmentNames[0] || "Kitchen Made";
-
-  return dataRows.map((cells) => ({
-    id: uid(),
-    name: cells[nameIndex] || "",
-    supplier: cells[supplierIndex] || defaultSupplier,
-    packSize: cells[packIndex] || "",
-    quantity: parseCurrencyCell(cells[quantityIndex]) || 1,
-    unitCost: parseCurrencyCell(cells[costIndex]),
-    department: cells[departmentIndex] || defaultDepartment,
-    aliases: cells[aliasesIndex] || "",
-  })).filter((row) => row.name.trim());
-}
-
-function parseSuppliersCsv(text) {
-  const rows = csvRows(text);
-  if (!rows.length) return [];
-  const header = rows[0].map(normalizeHeader);
-  const hasHeader = header.some((cell) => ["supplier", "suppliername", "category", "contact", "email", "phone", "status"].includes(cell));
-  const findIndex = (names) => header.findIndex((cell) => names.includes(cell));
-  const dataRows = hasHeader ? rows.slice(1) : rows;
-  const nameIndex = hasHeader ? findIndex(["supplier", "suppliername", "name"]) : 0;
-  const categoryIndex = hasHeader ? findIndex(["category", "type"]) : 1;
-  const contactIndex = hasHeader ? findIndex(["contact", "contactname"]) : 2;
-  const emailIndex = hasHeader ? findIndex(["email", "emailaddress"]) : 3;
-  const phoneIndex = hasHeader ? findIndex(["phone", "telephone", "mobile"]) : 4;
-  const statusIndex = hasHeader ? findIndex(["status", "active"]) : 5;
-
-  return dataRows.map((cells) => {
-    const status = String(cells[statusIndex] || "Active").toLowerCase();
-    return {
-      id: uid(),
-      name: cells[nameIndex] || "",
-      category: cells[categoryIndex] || "",
-      contact: cells[contactIndex] || "",
-      email: cells[emailIndex] || "",
-      phone: cells[phoneIndex] || "",
-      active: !["inactive", "false", "no", "0"].includes(status),
-    };
-  }).filter((row) => row.name.trim());
-}
-
-function normalizeSalesRows(rows) {
-  return rows.map((row) => {
-    const grossSales = numberValue(row.grossSales, numberValue(row.sales));
-    const vatRate = numberValue(row.vatRate, 20);
-    const sales = row.sales !== undefined ? numberValue(row.sales) : netFromGross(grossSales, vatRate);
-    return {
-      ...row,
-      id: row.id || uid(),
-      department: canonicalSalesDepartmentName(row.department),
-      grossSales,
-      vatRate,
-      sales,
-      vatAmount: vatAmountFromGrossNet(grossSales, sales),
-      effectiveVatRate: effectiveVatRate(grossSales, sales),
-      discounts: numberValue(row.discounts),
-      refunds: numberValue(row.refunds),
-      serviceCharge: numberValue(row.serviceCharge),
-    };
-  });
-}
-
-function normalizeStocktakes(rows) {
-  return rows.map((stocktake) => ({
-    ...stocktake,
-    id: stocktake.id || uid(),
-    openingStockMode: "Manual",
-    manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
-    manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
-    openingLines: stocktake.openingLines || [],
-    openingStockValue: numberValue(stocktake.openingStockValue),
-    lines: stocktake.lines || [],
-    totalValue: numberValue(stocktake.totalValue),
-    status: stocktake.status || "Saved",
-  }));
 }
 
 function cheapestOffer(product, products) {
@@ -1806,18 +502,16 @@ function ensureSupplierList(suppliers, name) {
   return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
 }
 
-function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
+function mergeInvoiceProducts(products, items, invoiceDate) {
   const next = [...products];
 
-  items.filter(isReceivedInvoiceLine).forEach((item) => {
-    const quantity = numberValue(item.quantity, 1);
-    const invoiceUnitCost = quantity > 0 ? Number((netLineTotal(item, invoiceContext) / quantity).toFixed(4)) : normalizeInvoiceUnitCost(item);
+  items.forEach((item) => {
     const match = item.matchedProductId
       ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
       : matchProduct(item.productName, next);
     const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
-    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: invoiceUnitCost };
-    const supplierEntry = { supplier: item.supplier, price: invoiceUnitCost, date: invoiceDate };
+    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: numberValue(item.unitCost) };
+    const supplierEntry = { supplier: item.supplier, price: numberValue(item.unitCost), date: invoiceDate };
 
     if (index >= 0 && match.confidence > 0.9) {
       const aliases = new Set([...(next[index].aliases || [])]);
@@ -1828,9 +522,8 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
         supplier: item.supplier,
         packSize: item.packSize,
         quantity: numberValue(item.quantity, 1),
-        unitCost: invoiceUnitCost,
-        department: primaryDepartment(item),
-        departmentSplits: normalizeDepartmentSplits(item, item.department),
+        unitCost: numberValue(item.unitCost),
+        department: item.department,
         aliases: [...aliases],
         supplierPrices,
         priceHistory: [...(next[index].priceHistory || []), historyEntry],
@@ -1844,9 +537,8 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       supplier: item.supplier,
       packSize: item.packSize,
       quantity: numberValue(item.quantity, 1),
-      unitCost: invoiceUnitCost,
-      department: primaryDepartment(item),
-      departmentSplits: normalizeDepartmentSplits(item, item.department),
+      unitCost: numberValue(item.unitCost),
+      department: item.department,
       aliases: [],
       supplierPrices: [supplierEntry],
       priceHistory: [historyEntry],
@@ -1856,253 +548,11 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
   return next;
 }
 
-function normalizeInvoiceDiscountFields(invoice) {
-  const subtotalAfterLineDiscount = receivedLineSubtotal(invoice.items || []);
-  const discountAmountValue = invoiceDiscountAmount(invoice);
-  const discountPercentValue = subtotalAfterLineDiscount ? (discountAmountValue / subtotalAfterLineDiscount) * 100 : 0;
-  return {
-    subtotalBeforeDiscount: invoiceSubtotalBeforeDiscount(invoice),
-    discountAmount: Number(discountAmountValue.toFixed(2)),
-    discountPercent: Number(discountPercentValue.toFixed(2)),
-    finalInvoiceTotal: Number(invoiceFinalTotal({ ...invoice, discountAmount: discountAmountValue, discountPercent: discountPercentValue }).toFixed(2)),
-  };
-}
-
-function prepareApprovedInvoice(invoice) {
-  const discountFields = normalizeInvoiceDiscountFields(invoice);
-  const context = { ...invoice, ...discountFields };
-  const items = (invoice.items || []).map((item) => ({
-    ...item,
-    lineStatus: invoiceLineStatus(item),
-    creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
-    lineDiscountAmount: Number(lineLevelDiscount(item).toFixed(2)),
-    lineDiscountPercent: originalLineTotal(item) ? Number(((lineLevelDiscount(item) / originalLineTotal(item)) * 100).toFixed(2)) : 0,
-    originalLineTotal: Number(originalLineTotal(item).toFixed(2)),
-    discountApplied: Number(discountAppliedToLine(item, context).toFixed(2)),
-    netLineTotal: Number(netLineTotal(item, context).toFixed(2)),
-  }));
-  const finalContext = { ...invoice, ...discountFields, items };
-  return {
-    ...invoice,
-    ...normalizeInvoiceDiscountFields(finalContext),
-    items: items.map((item) => ({
-      ...item,
-      discountApplied: Number(discountAppliedToLine(item, finalContext).toFixed(2)),
-      netLineTotal: Number(netLineTotal(item, finalContext).toFixed(2)),
-    })),
-  };
-}
-
-function creditNotesForInvoice(invoice) {
-  return (invoice.items || [])
-    .filter((item) => !isReceivedInvoiceLine(item))
-    .map((item) => ({
-      id: uid(),
-      invoiceId: invoice.id,
-      lineId: item.id,
-      supplier: item.supplier || invoice.supplier,
-      invoiceNumber: invoice.invoiceNumber,
-      date: invoice.date,
-      product: item.productName,
-      quantity: numberValue(item.quantity, 0),
-      value: originalLineTotal(item),
-      grossValue: originalLineTotal(item),
-      netValue: originalLineTotal(item),
-      reason: item.creditReason || invoiceLineStatus(item),
-      status: "To chase",
-      notes: "",
-    }));
-}
-
-function issueValue(note) {
-  return numberValue(note.netValue, numberValue(note.grossValue, numberValue(note.value, 0)));
-}
-
-function isOpenSupplierIssue(note) {
-  return ["To chase", "Chased"].includes(note.status || "To chase");
-}
-
-function supplierIssueSummary(creditNotes, supplierName) {
-  const issues = creditNotes.filter((note) => note.supplier === supplierName);
-  const openIssues = issues.filter(isOpenSupplierIssue);
-  return {
-    issues,
-    openIssues: openIssues.length,
-    valueToChase: openIssues.reduce((sum, note) => sum + issueValue(note), 0),
-  };
-}
-
-function syncCreditNotesForInvoice(current, invoice) {
-  const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
-  const generated = creditNotesForInvoice(invoice).map((note) => {
-    const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
-    return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
-  });
-  return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
-}
-
-function combinedSupplierIssues(creditNotes = [], invoices = []) {
-  const keyed = new Map();
-  const add = (note) => {
-    const key = `${note.invoiceId || note.invoiceNumber || ""}::${note.lineId || note.product || ""}::${note.supplier || ""}`;
-    keyed.set(key, { ...note, id: note.id || key });
-  };
-  creditNotes.forEach(add);
-  invoices.flatMap(creditNotesForInvoice).forEach((generated) => {
-    const key = `${generated.invoiceId || generated.invoiceNumber || ""}::${generated.lineId || generated.product || ""}::${generated.supplier || ""}`;
-    const existing = keyed.get(key);
-    keyed.set(key, existing ? { ...generated, ...existing, status: existing.status || generated.status, notes: existing.notes || generated.notes } : generated);
-  });
-  return Array.from(keyed.values());
-}
-
-function extractInvoiceTotals(invoiceText = "") {
-  const normalized = invoiceText.replace(/\s+/g, " ");
-  const pickAmount = (patterns) => {
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
-      if (match) return numberValue(String(match[1]).replace(",", "."), 0);
-    }
-    return 0;
-  };
-  return {
-    subtotalBeforeDiscount: pickAmount([/\b(?:subtotal|sub total|goods total|goods|net value|net total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
-    discountAmount: pickAmount([/\b(?:discount|disc)\b\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
-    finalInvoiceTotal: pickAmount([/\b(?:invoice total|ticket total|grand total|total due|amount due|amount due gbp|net amount|gross total|total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
-  };
-}
-
-function extractInvoiceNumberFromText(invoiceText = "") {
-  const normalized = invoiceText.replace(/\s+/g, " ");
-  const patterns = [
-    /(?:Tax\s+)?Invoice\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-    /\bInv\.?\s*(?:No|Number|#)?\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-    /\b(?:Document|Doc)\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-    /\bTicket\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-    /\bD\/?Note\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-    /\bOrder\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
-  ];
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-    if (match?.[1]) return match[1];
-  }
-  return "";
-}
-
-function extractInvoiceDateFromText(invoiceText = "") {
-  const normalized = invoiceText.replace(/\s+/g, " ");
-  const keyword = "(?:DELIVERY DATE|Date\\/Tax Point|Tax Point|Invoice date|Invoice Date|ORDER DATE|Order date|Date)";
-  const numericDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(\\d{1,2})[./-](\\d{1,2})[./-](\\d{2,4})`, "i"));
-  if (numericDate) {
-    const [, day, month, yearRaw] = numericDate;
-    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  }
-
-  const isoDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(20\\d{2})-(\\d{1,2})-(\\d{1,2})`, "i"));
-  if (isoDate) {
-    const [, year, month, day] = isoDate;
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  }
-
-  const monthNames = { jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06", jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12" };
-  const namedDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(\\d{1,2})[-\\s]([A-Z]{3,})[-\\s](\\d{2,4})`, "i"));
-  if (namedDate) {
-    const [, day, monthRaw, yearRaw] = namedDate;
-    const month = monthNames[monthRaw.slice(0, 3).toLowerCase()];
-    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
-    if (month) return `${year}-${month}-${day.padStart(2, "0")}`;
-  }
-
-  return "";
-}
-
-function detectSupplierFromInvoiceText(invoiceText = "", fallback = "") {
-  const key = `${fallback} ${invoiceText}`.toLowerCase().replace(/&/g, "and");
-  const match = supplierParserCatalog.find((parser) => parser.aliases.some((alias) => key.includes(alias.replace(/&/g, "and"))));
-  return match?.name || fallback || "";
-}
-
-function supplierParserStatus(supplierName = "") {
-  const key = supplierName.toLowerCase().replace(/&/g, "and");
-  const match = supplierParserCatalog.find((parser) => (
-    parser.name.toLowerCase().replace(/&/g, "and") === key ||
-    parser.aliases.some((alias) => key.includes(alias.replace(/&/g, "and")) || alias.replace(/&/g, "and").includes(key))
-  ));
-  return match?.status || "Manual only";
-}
-
-function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = "") {
-  const text = invoiceText || "";
-  const key = text.toLowerCase();
-  const detectedSupplier = detectSupplierFromInvoiceText(text, fallbackSupplier);
-  let parserName = detectedSupplier || "Generic parser";
-  let lines = [];
-
-  if (key.includes("tg fruits") || key.includes("tgfruits.com")) {
-    parserName = "TG Fruits parser";
-    lines = extractTgFruitsInvoiceRows(text);
-  } else if (key.includes("albion")) {
-    parserName = "Albion Fine Foods parser";
-    lines = parseAlbionRows(text);
-  } else if (key.includes("woods foodservice") || key.includes("woods sustainable")) {
-    parserName = "Woods parser";
-    lines = parseWoodsRows(text);
-  } else if (key.includes("the cheese man") || key.includes("cheeseman")) {
-    parserName = "The Cheese Man parser";
-    lines = parseCheeseManRows(text);
-  } else if (key.includes("brighton") && key.includes("newhaven") && key.includes("fish")) {
-    parserName = "BNFS parser";
-    lines = parseBnfsRows(text);
-  } else if (key.includes("elite fine foods") || key.includes("elite sales")) {
-    parserName = "Elite Fine Foods parser";
-    lines = parseEliteInvoiceRows(text);
-  } else if (key.includes("real patisserie")) {
-    parserName = "Real Patisserie parser";
-    lines = parseRealPatisserieRows(text);
-  } else if (key.includes("ashley james")) {
-    parserName = "Ashley James parser";
-    lines = parseAshleyJamesRows(text);
-  } else if (key.includes("lady of the cakes") || key.includes("lady cakes")) {
-    parserName = "Lady of the Cakes manual-assisted parser";
-    lines = parseLadyOfTheCakesRows(text);
-  } else {
-    const supported = supplierParserStatus(detectedSupplier) === "Supported";
-    parserName = supported && detectedSupplier ? `${detectedSupplier} parser` : "Generic parser";
-    lines = extractGenericInvoiceRows(text);
-  }
-
-  if (!lines.length) {
-    lines = extractGenericInvoiceRows(text);
-    if (lines.length) parserName = `${parserName} + generic fallback`;
-  }
-
-  const totals = extractInvoiceTotals(text);
-  const subtotal = totals.subtotalBeforeDiscount || lines.reduce((sum, line) => sum + numberValue(line.lineTotal, numberValue(line.quantity, 1) * numberValue(line.unitCost)), 0);
-  const inferredDiscountAmount = totals.discountAmount || (
-    subtotal > 0 && totals.finalInvoiceTotal > 0 && subtotal > totals.finalInvoiceTotal
-      ? Number((subtotal - totals.finalInvoiceTotal).toFixed(2))
-      : 0
-  );
-
-  return {
-    supplier: detectedSupplier || fallbackSupplier,
-    parserName,
-    invoiceNumber: extractInvoiceNumberFromText(text),
-    invoiceDate: extractInvoiceDateFromText(text),
-    subtotalBeforeDiscount: subtotal,
-    discountAmount: inferredDiscountAmount,
-    discountPercent: subtotal ? Number(((inferredDiscountAmount / subtotal) * 100).toFixed(2)) : 0,
-    finalInvoiceTotal: totals.finalInvoiceTotal || Number((subtotal - inferredDiscountAmount).toFixed(2)),
-    lines,
-  };
-}
-
-function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
+function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
   return suppliers.map((supplier) => {
     const spend = invoices
       .filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange))
-      .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
+      .reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
     return { ...supplier, spend };
   });
 }
@@ -2122,95 +572,21 @@ function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = 
   return numberValue(relevant[0]?.totalValue);
 }
 
-function latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
-  const relevant = stocktakes
-    .filter((stocktake) => departmentMatches(stocktake.department, selectedDepartment) && stocktake.date <= dateRange.end)
-    .sort((a, b) => b.date.localeCompare(a.date));
-  if (selectedDepartment === "All departments") {
-    return departmentNames.map((department) => relevant.find((stocktake) => stocktake.department === department)).filter(Boolean);
-  }
-  return relevant[0] ? [relevant[0]] : [];
-}
-
-function openingStockValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
-  return latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames, dateRange)
-    .reduce((sum, stocktake) => sum + numberValue(stocktake.openingStockValue), 0);
-}
-
-function salesForDepartment(salesRows, selectedDepartment, gpCalculationBase = "Net Sales") {
-  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
-  const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  if (selected === "All departments") {
-    return totalRows.length
-      ? totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0)
-      : salesRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
-  }
-
-  const departmentRows = salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
-  if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
-    return totalRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
-  }
-  return departmentRows.reduce((sum, row) => sum + salesBaseForRow(row, gpCalculationBase), 0);
-}
-
-function grossSalesForDepartment(salesRows, selectedDepartment) {
-  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
-  const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  if (selected === "All departments") {
-    return totalRows.length
-      ? totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0)
-      : salesRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
-  }
-  const departmentRows = salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
-  if (!departmentRows.length && !hasDepartmentSpecificSalesRows(salesRows)) {
-    return totalRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
-  }
-  return departmentRows.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
-}
-
-function vatForDepartment(salesRows, selectedDepartment) {
-  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
-  const totalRows = salesRows.filter((row) => !row.department || row.department === "Total");
-  const rows = selected === "All departments"
-    ? (totalRows.length ? totalRows : salesRows)
-    : salesRows.filter((row) => canonicalSalesDepartmentName(row.department) === selected);
-  if (!rows.length && selected !== "All departments" && !hasDepartmentSpecificSalesRows(salesRows)) {
-    return totalRows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
-  }
-  return rows.reduce((sum, row) => sum + vatAmountFromGrossNet(row.grossSales, row.sales), 0);
-}
-
-function purchasesForDepartment(invoices, selectedDepartment) {
-  return invoices
-    .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
-}
-
-function wasteForDepartment(wasteItems, selectedDepartment) {
-  return wasteItems
-    .filter((item) => departmentMatches(item.department, selectedDepartment))
-    .reduce((sum, item) => sum + wasteCost(item), 0);
-}
-
-function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
-  const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
+function calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames) {
+  const salesRows = sales.filter((row) => dateInRange(row.date, dateRange));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
-  const netSales = salesForDepartment(salesRows, selectedDepartment, "Net Sales");
-  const salesTotal = netSales;
-  const grossSales = grossSalesForDepartment(salesRows, selectedDepartment);
-  const vat = vatForDepartment(salesRows, selectedDepartment);
-  const purchases = purchasesForDepartment(filteredInvoices, selectedDepartment);
+  const salesTotal = salesRows.reduce((sum, row) => sum + row.sales, 0);
+  const invoiceItems = filteredInvoices.flatMap((invoice) => invoice.items || []).filter((item) => departmentMatches(item.department, department));
+  const purchases = invoiceItems.reduce((sum, item) => sum + lineTotal(item), 0);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  const openingStock = openingStockValue(stocktakes, selectedDepartment, departmentNames, dateRange);
-  const closingStock = latestStocktakeValue(stocktakes, selectedDepartment, departmentNames, dateRange);
-  const waste = wasteForDepartment(filteredWaste, selectedDepartment);
-  const stocktakeCost = openingStock + purchases - closingStock;
+  const openingStock = selectedOpeningStock(openingStockByDept, department);
+  const closingStock = latestStocktakeValue(stocktakes, department, departmentNames, dateRange);
+  const waste = filteredWaste.filter((item) => departmentMatches(item.department, department)).reduce((sum, item) => sum + wasteCost(item), 0);
+  const stocktakeCost = Math.max(0, openingStock + purchases - closingStock);
   const realCostIncludingWaste = stocktakeCost + waste;
 
   return {
-    grossSales,
-    vat,
-    netSales,
     sales: salesTotal,
     purchases,
     allPurchases,
@@ -2225,49 +601,9 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
     wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
     stockVariance: closingStock - openingStock,
     salesRows,
-    invoiceItems: filteredInvoices.flatMap((invoice) => invoice.items || []),
+    invoiceItems,
     invoices: filteredInvoices,
   };
-}
-
-function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
-  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
-  const days = dateRangeDays(dateRange);
-  const dailyRows = days.map((date) => {
-    const period = { start: date, end: date };
-    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames, financialSettings);
-    return {
-      id: date,
-      date,
-      day: formatRangeDate(date),
-      grossSales: row.grossSales,
-      vat: row.vat,
-      netSales: row.netSales,
-      salesBase: row.sales,
-      purchases: row.purchases,
-      waste: row.waste,
-      invoiceGp: row.invoiceGp,
-      stocktakeGp: row.stocktakeGp,
-      realGp: row.realGp,
-      targetGp: 0,
-    };
-  });
-  const departmentRows = departmentNames.map((name) => {
-    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
-    return {
-      id: name,
-      department: name,
-      grossSales: row.grossSales,
-      netSales: row.netSales,
-      salesBase: row.sales,
-      purchases: row.purchases,
-      waste: row.waste,
-      gp: row.invoiceGp,
-      targetGp: 0,
-      variance: row.invoiceGp,
-    };
-  });
-  return { ...base, dailyRows, departmentRows };
 }
 
 function recipeBatchCost(recipe) {
@@ -2283,8 +619,7 @@ function dishCost(dish, recipes) {
     const recipe = recipes.find((item) => item.id === recipeId);
     return sum + (recipe ? recipeUnitCost(recipe) : 0);
   }, 0);
-  const ingredientCost = (dish.ingredients || []).reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
-  return linkedRecipeCost + ingredientCost + numberValue(dish.manualCost);
+  return linkedRecipeCost + numberValue(dish.manualCost);
 }
 
 function gpFor(cost, price) {
@@ -2323,220 +658,13 @@ function saveLocalStorage(key, value) {
   }
 }
 
-function readMarginFlowLocalStorage() {
-  const data = {};
-  try {
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (key?.startsWith("marginflow.")) data[key] = localStorage.getItem(key);
-    }
-  } catch {
-    return data;
-  }
-  return data;
-}
-
-function buildFullBackupPayload() {
-  const localStorageData = readMarginFlowLocalStorage();
-  return {
-    app: "MarginFlow",
-    appVersion: "0.1.0",
-    exportedAt: new Date().toISOString(),
-    localStorage: localStorageData,
-    ...localStorageData,
-  };
-}
-
-function downloadJsonFile(filename, payload) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function extractBackupLocalStorage(payload) {
-  if (payload?.localStorage && typeof payload.localStorage === "object") return payload.localStorage;
-  return Object.fromEntries(Object.entries(payload || {}).filter(([key]) => key.startsWith("marginflow.")));
-}
-
-function parseBackupValue(value, fallback = null) {
-  if (value === undefined || value === null) return fallback;
-  if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function stringifyStorageValue(value) {
-  return typeof value === "string" ? value : JSON.stringify(value);
-}
-
-function recordCompletenessScore(record) {
-  if (!record || typeof record !== "object") return 0;
-  return Object.values(record).filter((value) => {
-    if (Array.isArray(value)) return value.length > 0;
-    if (value && typeof value === "object") return Object.keys(value).length > 0;
-    return value !== undefined && value !== null && value !== "";
-  }).length + JSON.stringify(record).length / 1000;
-}
-
-function mergeArrayById(current = [], imported = [], fallbackKey = null) {
-  const rows = [];
-  const indexByKey = new Map();
-  const stats = { added: 0, merged: 0, skipped: 0 };
-  const keyFor = (item) => {
-    if (item?.id) return `id:${item.id}`;
-    return fallbackKey ? `fallback:${fallbackKey(item)}` : "";
-  };
-  const addCurrent = (item) => {
-    const key = keyFor(item);
-    if (key) indexByKey.set(key, rows.length);
-    rows.push(item);
-  };
-  current.forEach(addCurrent);
-
-  imported.forEach((item) => {
-    const key = keyFor(item);
-    const existingIndex = key ? indexByKey.get(key) : -1;
-    if (existingIndex === undefined || existingIndex < 0) {
-      addCurrent(item);
-      stats.added += 1;
-      return;
-    }
-    const existing = rows[existingIndex];
-    const merged = mergeRecords(existing, item);
-    const changed = JSON.stringify(merged) !== JSON.stringify(existing);
-    rows[existingIndex] = merged;
-    if (changed) stats.merged += 1;
-    else stats.skipped += 1;
-  });
-
-  return { rows, stats };
-}
-
-function mergeUniqueArray(current = [], imported = [], keyFn = (item) => JSON.stringify(item)) {
-  const byKey = new Map();
-  [...current, ...imported].forEach((item) => {
-    const key = keyFn(item);
-    if (!byKey.has(key)) byKey.set(key, item);
-    else byKey.set(key, mergeRecords(byKey.get(key), item));
-  });
-  return [...byKey.values()];
-}
-
-function mergeRecords(current, imported) {
-  if (!current || typeof current !== "object") return imported;
-  if (!imported || typeof imported !== "object") return current;
-  const preferImported = recordCompletenessScore(imported) > recordCompletenessScore(current);
-  const base = preferImported ? { ...current, ...imported } : { ...imported, ...current };
-  const merged = { ...base };
-
-  ["aliases"].forEach((field) => {
-    if (Array.isArray(current[field]) || Array.isArray(imported[field])) {
-      merged[field] = [...new Set([...(current[field] || []), ...(imported[field] || [])])];
-    }
-  });
-  ["priceHistory", "supplierPrices", "departmentSplits", "items", "lines", "openingLines", "ingredients", "subcategories"].forEach((field) => {
-    if (Array.isArray(current[field]) || Array.isArray(imported[field])) {
-      merged[field] = mergeUniqueArray(current[field] || [], imported[field] || [], (item) => item?.id || JSON.stringify(item));
-    }
-  });
-  return merged;
-}
-
-function invoiceFallbackKey(invoice) {
-  return [invoice?.supplier || "", invoice?.invoiceNumber || "", invoice?.date || ""].join("|").toLowerCase();
-}
-
-function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSettings = false) {
-  const nextStorage = { ...currentStorage };
-  const summary = {
-    invoicesAdded: 0,
-    invoicesSkipped: 0,
-    productsAdded: 0,
-    productsMerged: 0,
-    suppliersAdded: 0,
-    suppliersSkipped: 0,
-  };
-  const arrayKeys = {
-    "marginflow.invoices": invoiceFallbackKey,
-    "marginflow.products": null,
-    "marginflow.suppliers": null,
-    "marginflow.recipes": null,
-    "marginflow.menus": null,
-    "marginflow.stocktakes": null,
-    "marginflow.waste": null,
-    "marginflow.sales": null,
-    "marginflow.creditNotes": null,
-  };
-  const settingsKeys = new Set([
-    "marginflow.companySettings",
-    "marginflow.financialSettings",
-    "marginflow.departmentSettings",
-    "marginflow.menuSettings",
-    "marginflow.invoiceSettings",
-    "marginflow.department",
-  ]);
-
-  Object.entries(importedStorage).forEach(([key, value]) => {
-    if (!key.startsWith("marginflow.") || key === "marginflow.preImportBackup") return;
-    if (arrayKeys.hasOwnProperty(key)) {
-      const currentRows = parseBackupValue(currentStorage[key], []);
-      const importedRows = parseBackupValue(value, []);
-      if (!Array.isArray(currentRows) || !Array.isArray(importedRows)) return;
-      const { rows, stats } = mergeArrayById(currentRows, importedRows, arrayKeys[key]);
-      nextStorage[key] = JSON.stringify(rows);
-      if (key === "marginflow.invoices") {
-        summary.invoicesAdded = stats.added;
-        summary.invoicesSkipped = stats.skipped;
-      }
-      if (key === "marginflow.products") {
-        summary.productsAdded = stats.added;
-        summary.productsMerged = stats.merged;
-      }
-      if (key === "marginflow.suppliers") {
-        summary.suppliersAdded = stats.added;
-        summary.suppliersSkipped = stats.skipped;
-      }
-      return;
-    }
-    if (settingsKeys.has(key)) {
-      if (useImportedSettings) nextStorage[key] = stringifyStorageValue(value);
-      return;
-    }
-    if (!currentStorage[key]) nextStorage[key] = stringifyStorageValue(value);
-  });
-
-  return { nextStorage, summary };
-}
-
-function storedStateUpdater(setState, key) {
-  return (value) => {
-    setState((current) => {
-      const next = typeof value === "function" ? value(current) : value;
-      saveLocalStorage(key, next);
-      return next;
-    });
-  };
-}
-
 function parseDate(value) {
   const date = new Date(`${value}T00:00:00`);
   return Number.isNaN(date.getTime()) ? new Date(`${today()}T00:00:00`) : date;
 }
 
 function toIsoDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return date.toISOString().slice(0, 10);
 }
 
 function addDays(date, days) {
@@ -2555,75 +683,31 @@ function startOfWeek(date, weekStartsOn = "Monday") {
 }
 
 function resolveDateRange(range, weekStartsOn = "Monday") {
-  if (range.preset === "Custom Range" || range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
-  if (range.preset === "Specific Date" || range.preset === "Specific date") {
-    const date = range.specificDate || range.startDate || today();
-    return { start: date, end: date };
-  }
+  if (range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
 
   const current = parseDate(today());
   if (range.preset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
-  if (range.preset === "Yesterday") {
-    const yesterday = addDays(current, -1);
-    return { start: toIsoDate(yesterday), end: toIsoDate(yesterday) };
-  }
 
-  if (range.preset === "This Week" || range.preset === "This week") {
+  if (range.preset === "This week") {
     const start = startOfWeek(current, weekStartsOn);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
 
-  if (range.preset === "Last Week" || range.preset === "Last week") {
+  if (range.preset === "Last week") {
     const thisStart = startOfWeek(current, weekStartsOn);
     const start = addDays(thisStart, -7);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
 
-  if (range.preset === "This Month" || range.preset === "This month") {
+  if (range.preset === "This month") {
     const start = new Date(current.getFullYear(), current.getMonth(), 1);
     const end = new Date(current.getFullYear(), current.getMonth() + 1, 0);
-    return { start: toIsoDate(start), end: toIsoDate(end) };
-  }
-
-  if (range.preset === "This Year" || range.preset === "This year") {
-    const start = new Date(current.getFullYear(), 0, 1);
-    const end = new Date(current.getFullYear(), 11, 31);
     return { start: toIsoDate(start), end: toIsoDate(end) };
   }
 
   const start = new Date(current.getFullYear(), current.getMonth() - 1, 1);
   const end = new Date(current.getFullYear(), current.getMonth(), 0);
   return { start: toIsoDate(start), end: toIsoDate(end) };
-}
-
-function dateRangeDays(range) {
-  const days = [];
-  let cursor = parseDate(range.start);
-  const end = parseDate(range.end);
-  while (cursor <= end && days.length < 370) {
-    days.push(toIsoDate(cursor));
-    cursor = addDays(cursor, 1);
-  }
-  return days;
-}
-
-function dateRangeLength(range) {
-  return dateRangeDays(range).length || 1;
-}
-
-function comparisonDateRange(range, mode) {
-  if (mode === "None") return null;
-  const length = dateRangeLength(range);
-  const start = parseDate(range.start);
-  const end = parseDate(range.end);
-  if (mode === "Same period last year") {
-    return {
-      start: toIsoDate(new Date(start.getFullYear() - 1, start.getMonth(), start.getDate())),
-      end: toIsoDate(new Date(end.getFullYear() - 1, end.getMonth(), end.getDate())),
-    };
-  }
-  const previousEnd = addDays(start, -1);
-  return { start: toIsoDate(addDays(previousEnd, -(length - 1))), end: toIsoDate(previousEnd) };
 }
 
 function dateInRange(date, range) {
@@ -2662,31 +746,22 @@ function App() {
     }
   });
   const [departmentOpen, setDepartmentOpen] = useState(false);
-  const [products, setProductsState] = useState(() => safeReadLocalStorageArray("marginflow.products", initialProducts));
-  const [suppliers, setSuppliersState] = useState(() => safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
-  const [invoices, setInvoicesState] = useState(() => safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
-  const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
-  const [stocktakes, setStocktakesState] = useState(() => normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
-  const [wasteItems, setWasteItemsState] = useState(() => safeReadLocalStorageArray("marginflow.waste", initialWaste));
-  const [creditNotes, setCreditNotesState] = useState(() => safeReadLocalStorageArray("marginflow.creditNotes", []));
-  const [recipes, setRecipesState] = useState(() => safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
-  const [menus, setMenusState] = useState(() => safeReadLocalStorageArray("marginflow.menus", initialMenus));
+  const [products, setProducts] = useState(initialProducts);
+  const [suppliers, setSuppliers] = useState(initialSuppliers);
+  const [invoices, setInvoices] = useState(initialInvoices);
+  const [sales] = useState(initialSales);
+  const [openingStockByDept, setOpeningStockByDept] = useState(initialOpeningStock);
+  const [stocktakes, setStocktakes] = useState(initialStocktakes);
+  const [wasteItems, setWasteItems] = useState(initialWaste);
+  const [recipes, setRecipes] = useState(initialRecipes);
+  const [menus, setMenus] = useState(initialMenus);
   const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
-  const [financialSettings, setFinancialSettingsState] = useState(() => ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
+  const [financialSettings, setFinancialSettingsState] = useState(() => safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings));
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
-  const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
-  const [draft, setDraft] = useState(() => emptyInvoiceDraft());
-  const [deleteConfirmation, setDeleteConfirmation] = useState(null);
-  const setProducts = storedStateUpdater(setProductsState, "marginflow.products");
-  const setSuppliers = storedStateUpdater(setSuppliersState, "marginflow.suppliers");
-  const setInvoices = storedStateUpdater(setInvoicesState, "marginflow.invoices");
-  const setSales = storedStateUpdater(setSalesState, "marginflow.sales");
-  const setStocktakes = storedStateUpdater(setStocktakesState, "marginflow.stocktakes");
-  const setWasteItems = storedStateUpdater(setWasteItemsState, "marginflow.waste");
-  const setCreditNotes = storedStateUpdater(setCreditNotesState, "marginflow.creditNotes");
-  const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
-  const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
+  const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
+  const [dateRangeState, setDateRangeState] = useState({ preset: "This month", startDate: "2026-06-01", endDate: today() });
+  const [draft, setDraft] = useState({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -2704,25 +779,21 @@ function App() {
     setInvoiceSettingsState(value);
     saveLocalStorage("marginflow.invoiceSettings", value);
   };
+  const setAiSettings = (value) => {
+    setAiSettingsState(value);
+    saveLocalStorage("marginflow.aiSettings", value);
+  };
   const setDepartmentSettings = (value) => {
     setDepartmentSettingsState(value);
     saveLocalStorage("marginflow.departmentSettings", value);
   };
 
-  const appMode = companySettings.appMode || defaultCompanySettings.appMode;
-  const isWorkEdition = appMode === "Work Edition: Non-AI";
-  const visibleNavItems = navItems.filter((item) => !(isWorkEdition && item.id === "ai"));
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
-  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
+  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames), [invoices, sales, department, openingStockByDept, stocktakes, wasteItems, dateRange, departmentNames]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
-  const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
-  const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
+  const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
-
-  useEffect(() => {
-    if (isWorkEdition && active === "ai") setActive("dashboard");
-  }, [active, isWorkEdition]);
 
   const setDepartment = (value) => {
     setDepartmentState(value);
@@ -2734,56 +805,22 @@ function App() {
     }
   };
 
-  const requestDelete = ({ title = "Delete item", message = "Are you sure you want to delete this item?", onConfirm }) => {
-    setDeleteConfirmation({ title, message, onConfirm });
-  };
-
-  const confirmDelete = () => {
-    deleteConfirmation?.onConfirm?.();
-    setDeleteConfirmation(null);
-  };
-
   const approveInvoice = () => {
     if (!draft.items.length) return;
-    const invalidSplit = draft.items.find((item) => !splitIsValid(item));
-    if (invalidSplit) {
-      setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
-      return;
-    }
     const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
-    const normalizedItems = draft.items.map((item) => {
-      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
-      return {
-        ...item,
-        lineStatus: invoiceLineStatus(item),
-        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
-        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
-        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
-        supplier: item.supplier || supplier,
-        unitCost: normalizeInvoiceUnitCost(item),
-        department: departmentSplits[0]?.department || item.department,
-        departmentSplits,
-      };
-    });
-    const invoice = prepareApprovedInvoice({
-      id: draft.editingInvoiceId || uid(),
+    const normalizedItems = draft.items.map((item) => ({ ...item, supplier: item.supplier || supplier }));
+    const invoice = {
+      id: uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date: draft.date || today(),
       status: "Approved",
-      discountAmount: numberValue(draft.discountAmount, 0),
-      discountPercent: numberValue(draft.discountPercent, 0),
       items: normalizedItems,
-    });
-    setInvoices((current) => (
-      draft.editingInvoiceId
-        ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
-        : [invoice, ...current]
-    ));
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
+    };
+    setInvoices((current) => [invoice, ...current]);
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
-    setDraft(emptyInvoiceDraft());
+    setProducts((current) => mergeInvoiceProducts(current, normalizedItems, invoice.date));
+    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
   };
 
   return (
@@ -2797,7 +834,7 @@ function App() {
           </div>
         </div>
         <nav>
-          {visibleNavItems.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             return (
               <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => setActive(item.id)} type="button">
@@ -2809,8 +846,8 @@ function App() {
         </nav>
         <div className="sidebar-card">
           <Sparkles size={18} />
-          <strong>Work Edition workflows</strong>
-          <p>Invoices use manual entry, CSV import and supplier parsers with review steps before changes affect GP.</p>
+          <strong>AI assisted workflows</strong>
+          <p>Invoices and stock imports use matching confidence, aliases and review steps before changes affect GP.</p>
         </div>
       </aside>
 
@@ -2818,7 +855,7 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">MarginFlow v3</p>
-            <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
+            <h1>{navItems.find((item) => item.id === active)?.label}</h1>
             <p>Turn invoices, stock, recipes, waste and menus into live hospitality margin control.</p>
           </div>
         </header>
@@ -2843,28 +880,10 @@ function App() {
           </div>
         )}
 
-        {active === "dashboard" && (
-          <Dashboard
-            dateRange={dateRange}
-            dateRangeState={dateRangeState}
-            department={department}
-            departmentNames={departmentNames}
-            departmentSettings={departmentSettings}
-            financialSettings={financialSettings}
-            gpTarget={gpTarget}
-            invoices={invoices}
-            metrics={metrics}
-            sales={sales}
-            setDateRangeState={setDateRangeState}
-            stocktakes={stocktakes}
-            suppliers={suppliers}
-            supplierSpend={departmentSupplierSpend}
-            wasteItems={wasteItems}
-          />
-        )}
+        {active === "dashboard" && <Dashboard dateRange={dateRange} dateRangeState={dateRangeState} department={department} gpTarget={gpTarget} metrics={metrics} setDateRangeState={setDateRangeState} supplierSpend={supplierSpend} />}
         {active === "invoices" && (
           <Invoices
-            creditNotes={creditNotes}
+            aiSettings={aiSettings}
             draft={draft}
             setDraft={setDraft}
             invoices={invoices}
@@ -2872,60 +891,39 @@ function App() {
             suppliers={suppliers}
             setSuppliers={setSuppliers}
             products={products}
-            setProducts={setProducts}
             departmentNames={departmentNames}
             approveInvoice={approveInvoice}
-            requestDelete={requestDelete}
-            setCreditNotes={setCreditNotes}
             setInvoices={setInvoices}
           />
         )}
-        {active === "products" && <Products departmentNames={departmentNames} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
+        {active === "products" && <Products departmentNames={departmentNames} products={products} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "suppliers" && <Suppliers suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
         {active === "stocktake" && (
           <Stocktake
             department={department}
             departmentNames={departmentNames}
+            openingStockByDept={openingStockByDept}
             products={products}
-            requestDelete={requestDelete}
+            setOpeningStockByDept={setOpeningStockByDept}
             setProducts={setProducts}
             setStocktakes={setStocktakes}
             stocktakes={stocktakes}
           />
         )}
-        {active === "recipes" && <Recipes departmentNames={departmentNames} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && (
-          <GpAnalysis
-            dateRange={dateRange}
-            dateRangeState={dateRangeState}
-            department={department}
-            departmentNames={departmentNames}
-            departmentSettings={departmentSettings}
-            financialSettings={financialSettings}
-            gpTarget={gpTarget}
-            invoices={invoices}
-            metrics={metrics}
-            requestDelete={requestDelete}
-            sales={sales}
-            setDateRangeState={setDateRangeState}
-            setSales={setSales}
-            stocktakes={stocktakes}
-            suppliers={suppliers}
-            supplierSpend={departmentSupplierSpend}
-            wasteItems={wasteItems}
-          />
-        )}
+        {active === "recipes" && <Recipes products={products} recipes={recipes} setRecipes={setRecipes} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} recipes={recipes} setMenus={setMenus} />}
+        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "gp" && <GpAnalysis dateRange={dateRange} department={department} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} />}
+        {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
+            aiSettings={aiSettings}
             companySettings={companySettings}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
             menuSettings={menuSettings}
-            suppliers={suppliers}
-            requestDelete={requestDelete}
+            setAiSettings={setAiSettings}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
             setFinancialSettings={setFinancialSettings}
@@ -2933,195 +931,47 @@ function App() {
             setMenuSettings={setMenuSettings}
           />
         )}
-        {deleteConfirmation && (
-          <DeleteConfirmationModal
-            message={deleteConfirmation.message}
-            onCancel={() => setDeleteConfirmation(null)}
-            onDelete={confirmDelete}
-            title={deleteConfirmation.title}
-          />
-        )}
       </main>
     </div>
   );
 }
 
-function targetForRow(departmentSettings, department, fallback) {
-  return targetForDepartment(departmentSettings, department, fallback);
-}
-
-function displayDepartmentName(name) {
-  return name === "Non-food" ? "Non-food / Excluded" : name;
-}
-
-function enrichPerformanceRows(metrics, departmentSettings, gpTarget) {
-  return {
-    dailyRows: metrics.dailyRows.map((row) => ({ ...row, targetGp: gpTarget })),
-    departmentRows: metrics.departmentRows.map((row) => {
-      const targetGp = targetForRow(departmentSettings, row.department, gpTarget);
-      return { ...row, targetGp, variance: row.gp - targetGp };
-    }),
-  };
-}
-
-function changePercent(current, previous) {
-  if (!numberValue(previous)) return numberValue(current) ? 100 : 0;
-  return ((numberValue(current) - numberValue(previous)) / Math.abs(numberValue(previous))) * 100;
-}
-
-function totalSalesRows(rows, range) {
-  const filteredRows = normalizeSalesRows(rows.filter((row) => dateInRange(row.date, range)));
-  const totals = filteredRows.reduce((sum, row) => ({
-    grossSales: sum.grossSales + numberValue(row.grossSales),
-    netSales: sum.netSales + netSalesForRow(row),
-    vat: sum.vat + vatAmountFromGrossNet(row.grossSales, row.sales),
-    discounts: sum.discounts + numberValue(row.discounts),
-    refunds: sum.refunds + numberValue(row.refunds),
-    serviceCharge: sum.serviceCharge + numberValue(row.serviceCharge),
-  }), { grossSales: 0, netSales: 0, vat: 0, discounts: 0, refunds: 0, serviceCharge: 0 });
-  return {
-    ...totals,
-    rows: filteredRows,
-    averageDailySales: totals.netSales / dateRangeLength(range),
-  };
-}
-
-function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn) {
-  if (mode === "Today vs Yesterday") {
-    return {
-      current: resolveDateRange({ preset: "Today" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Yesterday" }, weekStartsOn),
-    };
-  }
-  if (mode === "Today vs Last Week") {
-    const current = resolveDateRange({ preset: "Today" }, weekStartsOn);
-    const previousDate = toIsoDate(addDays(parseDate(current.start), -7));
-    return { current, previous: { start: previousDate, end: previousDate } };
-  }
-  if (mode === "This Week vs Last Week") {
-    return {
-      current: resolveDateRange({ preset: "This Week" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Last Week" }, weekStartsOn),
-    };
-  }
-  if (mode === "This Month vs Last Month") {
-    return {
-      current: resolveDateRange({ preset: "This Month" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Last Month" }, weekStartsOn),
-    };
-  }
-  return { current: currentCustom, previous: previousCustom };
-}
-
-function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
-  return (
-    <div className="metric-grid performance-grid">
-      <Metric label="Gross Sales" value={money(metrics.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-      <Metric label="Net Sales" value={money(metrics.netSales)} delta="Used for GP" />
-      <Metric label="Purchases" value={money(metrics.purchases)} delta={department} />
-      <Metric label="Invoice GP %" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-      <Metric label="Stocktake GP %" value={percent(metrics.stocktakeGp)} delta="Opening + purchases - closing" tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-      <Metric label="Waste Cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of GP base`} tone="warn" />
-      <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
-    </div>
-  );
-}
-
-function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, metrics }) {
-  return (
-    <Panel title="Comparison" action={comparisonMode}>
-      <div className="form-grid six compact-form">
-        <label>Compare with<select value={comparisonMode} onChange={(event) => setComparisonMode(event.target.value)}><option>Previous period</option><option>Same period last year</option><option>None</option></select></label>
-      </div>
-      {comparisonMode === "None" || !comparisonMetrics ? (
-        <EmptyState />
-      ) : (
-        <div className="metric-grid compact">
-          <Metric label="Net Sales change" value={percent(changePercent(metrics.netSales, comparisonMetrics.netSales))} delta={`${money(comparisonMetrics.netSales)} comparison`} tone={metrics.netSales >= comparisonMetrics.netSales ? "good" : "warn"} />
-          <Metric label="Purchases change" value={percent(changePercent(metrics.purchases, comparisonMetrics.purchases))} delta={`${money(comparisonMetrics.purchases)} comparison`} tone={metrics.purchases <= comparisonMetrics.purchases ? "good" : "warn"} />
-          <Metric label="GP change" value={percent(metrics.invoiceGp - comparisonMetrics.invoiceGp)} delta={`${percent(comparisonMetrics.invoiceGp)} comparison`} tone={metrics.invoiceGp >= comparisonMetrics.invoiceGp ? "good" : "warn"} />
-          <Metric label="Waste change" value={percent(changePercent(metrics.waste, comparisonMetrics.waste))} delta={`${money(comparisonMetrics.waste)} comparison`} tone={metrics.waste <= comparisonMetrics.waste ? "good" : "warn"} />
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function PerformanceCharts({ departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
-  const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
-  const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
-  const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
-
-  if (!hasData) return <EmptyState />;
+function Dashboard({ dateRange, dateRangeState, department, gpTarget, metrics, setDateRangeState, supplierSpend }) {
+  const recentInvoices = [...metrics.invoices].sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <>
+      <Panel title="Dashboard date range" action={rangeLabel(dateRangeState, dateRange)}>
+        <div className="form-grid six range-grid">
+          <label>
+            Range
+            <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
+              {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
+            </select>
+          </label>
+          {dateRangeState.preset === "Custom range" && (
+            <>
+              <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
+              <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
+            </>
+          )}
+        </div>
+      </Panel>
+      <div className="metric-grid">
+        <Metric label="Net sales" value={money(metrics.sales)} delta={rangeLabel(dateRangeState, dateRange)} />
+        <Metric label="Invoice spend" value={money(metrics.purchases)} delta={department} />
+        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Waste cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of sales`} tone="warn" />
+      </div>
       <div className="dashboard-layout">
-        <Panel title="Daily GP Chart" action="Actual vs target">
-          <DailyGpChart rows={dailyRows} targetGp={gpTarget} />
+        <Panel title="Profit flow" action={rangeLabel(dateRangeState, dateRange)}>
+          <BarSeries rows={metrics.salesRows} valueKey="sales" />
         </Panel>
-        <Panel title="Sales vs Purchases Chart" action="Net sales and purchases by day">
-          <SalesPurchasesChart rows={dailyRows} />
-        </Panel>
-      </div>
-      <div className="dashboard-layout secondary">
-        <Panel title="Department Breakdown" action="Gross, net, cost and GP">
-          <DepartmentBreakdown rows={departmentRows} />
-        </Panel>
-        <Panel title="Supplier Spend" action="High to low">
-          <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} />
+        <Panel title="Supplier spend" action={rangeLabel(dateRangeState, dateRange)}>
+          <DonutBars rows={supplierSpend} />
         </Panel>
       </div>
-      <Panel title="Daily GP Table">
-        <DailyGpTable rows={dailyRows} />
-      </Panel>
-    </>
-  );
-}
-
-function PerformanceSections({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, requestDelete, setSales }) {
-  const [comparisonMode, setComparisonMode] = useState("Previous period");
-  const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
-  const compareRange = comparisonDateRange(dateRange, comparisonMode);
-  const comparisonMetrics = compareRange ? calculateMetrics(invoices, sales, department, stocktakes, wasteItems, compareRange, departmentNames, financialSettings) : null;
-
-  return (
-    <>
-      <Panel title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-      </Panel>
-      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
-      <PerformanceCharts departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
-      <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
-      {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
-    </>
-  );
-}
-
-function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
-  const allDepartmentMetrics = useMemo(
-    () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
-    [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
-  );
-  const selectedHasGpBase = numberValue(metrics.netSales) > 0;
-  const shouldUseAllDepartments = department !== "All departments" && !selectedHasGpBase && numberValue(allDepartmentMetrics.netSales) > 0;
-  const dashboardDepartment = shouldUseAllDepartments ? "All departments" : department;
-  const dashboardMetrics = shouldUseAllDepartments ? allDepartmentMetrics : metrics;
-  const dashboardTarget = shouldUseAllDepartments ? numberValue(financialSettings.targetGp, gpTarget) : gpTarget;
-  const dashboardSupplierSpend = shouldUseAllDepartments ? supplierSpend : spendBySupplier(invoices, suppliers, dateRange, dashboardDepartment);
-  const recentInvoices = [...dashboardMetrics.invoices]
-    .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
-    .filter((invoice) => dashboardDepartment === "All departments" || invoice.departmentTotal > 0)
-    .sort((a, b) => b.date.localeCompare(a.date));
-
-  return (
-    <>
-      {shouldUseAllDepartments && (
-        <div className="notice-card">
-          Dashboard is showing all departments because {department} has no sales in this date range.
-        </div>
-      )}
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -3129,108 +979,36 @@ function Dashboard({ dateRange, dateRangeState, department, departmentNames, dep
               { key: "invoiceNumber", label: "Invoice" },
               { key: "supplier", label: "Supplier" },
               { key: "date", label: "Date" },
-              { key: "total", label: "Total", render: (_, row) => money(row.departmentTotal) },
+              { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             ]}
             rows={recentInvoices}
           />
         </Panel>
         <Panel title="Cost alerts">
-          <InsightList metrics={dashboardMetrics} />
+          <InsightList metrics={metrics} />
         </Panel>
       </div>
     </>
   );
 }
 
-function DateRangeControls({ dateRangeState, setDateRangeState }) {
-  return (
-    <div className="form-grid six range-grid">
-      <label>
-        Range
-        <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
-          {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
-        </select>
-      </label>
-      {(dateRangeState.preset === "Specific Date" || dateRangeState.preset === "Specific date") && (
-        <Field label="Date" type="date" value={dateRangeState.specificDate || dateRangeState.startDate || today()} onChange={(value) => setDateRangeState({ ...dateRangeState, specificDate: value, startDate: value, endDate: value })} />
-      )}
-      {(dateRangeState.preset === "Custom Range" || dateRangeState.preset === "Custom range") && (
-        <>
-          <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
-          <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
-        </>
-      )}
-    </div>
-  );
-}
-
-function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setCreditNotes, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, approveInvoice, setInvoices }) {
   const [dragging, setDragging] = useState(false);
-  const [splitEditorId, setSplitEditorId] = useState(null);
-  const [manualInvoiceOpen, setManualInvoiceOpen] = useState(false);
-  const [creditNoteModal, setCreditNoteModal] = useState(null);
-  const [editInvoiceModal, setEditInvoiceModal] = useState(null);
-  const [uploadInputKey, setUploadInputKey] = useState(0);
-  const readControllerRef = useRef(null);
-  const uploadRunRef = useRef(0);
-  const isReading = draft.status === "Reading invoice...";
-  const statusTone = draft.status.startsWith("Could not read") ? "error" : draft.status.startsWith("Image uploaded") ? "warn" : draft.status.startsWith("Parser extracted") ? "success" : "info";
-  const hasDraftWork = draft.files.length || draft.invoiceText.trim() || draft.items.length || draft.supplier.trim() || draft.invoiceNumber.trim();
+  const isReading = draft.status === "Reading invoice with AI...";
+  const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
-  const draftDiscountContext = {
-    items: draft.items,
-    discountAmount: numberValue(draft.discountAmount, 0),
-    discountPercent: numberValue(draft.discountPercent, 0),
-  };
-
-  const cancelDraft = () => {
-    readControllerRef.current?.abort();
-    readControllerRef.current = null;
-    uploadRunRef.current += 1;
-    setSplitEditorId(null);
-    setUploadInputKey((current) => current + 1);
-    setDraft(emptyInvoiceDraft());
-  };
 
   const addFiles = async (files) => {
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
-    const uploadRun = uploadRunRef.current + 1;
-    uploadRunRef.current = uploadRun;
-    const hasImageUpload = uploaded.some(isImageInvoiceFile);
-    const uploadStatus = hasImageUpload ? imageNeedsOcrMessage : `${uploaded.length} file(s) uploaded`;
-    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: uploadStatus }));
-
-    try {
-      const uploadedText = await textFromInvoiceFiles(uploaded);
-      if (uploadRunRef.current !== uploadRun) return;
-      if (uploadedText) {
-        setDraft((current) => ({
-          ...current,
-          invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
-          status: hasImageUpload ? "Text files loaded. Running local OCR for image files..." : uploadStatus,
-        }));
-      }
-
-      if (hasImageUpload) {
-        setDraft((current) => ({ ...current, status: "Starting local OCR..." }));
-        const ocrText = await ocrTextFromImageFiles(uploaded, (file, progress, fileIndex, fileCount) => {
-          if (uploadRunRef.current !== uploadRun) return;
-          setDraft((current) => ({
-            ...current,
-            status: `Reading image ${fileIndex}/${fileCount}: ${file.name} ${progress}%...`,
-          }));
-        });
-        if (uploadRunRef.current !== uploadRun) return;
-        setDraft((current) => ({
-          ...current,
-          invoiceText: [current.invoiceText, ocrText].filter(Boolean).join("\n\n"),
-          status: ocrText ? "Local OCR finished. Review the text, then click Read Invoice." : "OCR finished but no text was found. Please paste invoice text manually.",
-        }));
-      }
-    } catch (error) {
-      if (uploadRunRef.current !== uploadRun) return;
-      setDraft((current) => ({ ...current, status: `OCR failed. Please paste invoice text manually. ${error.message}` }));
+    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded` }));
+    const uploadedText = await textFromInvoiceFiles(uploaded);
+    if (uploadedText) {
+      setDraft((current) => ({
+        ...current,
+        invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
+        status: `${uploaded.length} file(s) uploaded`,
+      }));
     }
   };
 
@@ -3240,229 +1018,82 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
   };
 
   const readInvoice = async () => {
+    if (!aiSettings.enableAiInvoiceReading) {
+      setDraft((current) => ({ ...current, status: "AI failed. AI invoice reading is disabled in Settings." }));
+      return;
+    }
     const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
-    readControllerRef.current?.abort();
-    const controller = new AbortController();
-    readControllerRef.current = controller;
-    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice..." }));
-
-    if (readControllerRef.current !== controller) return;
-
     if (!invoiceText) {
-      const hasImageFiles = draft.files.some(isImageInvoiceFile);
-      if (hasImageFiles) {
-        try {
-          setDraft((current) => ({ ...current, status: "Running local OCR before reading invoice..." }));
-          const ocrText = await ocrTextFromImageFiles(draft.files, (file, progress, fileIndex, fileCount) => {
-            setDraft((current) => ({ ...current, status: `Reading image ${fileIndex}/${fileCount}: ${file.name} ${progress}%...` }));
-          });
-          if (ocrText) {
-            setDraft((current) => ({ ...current, invoiceText: ocrText, status: "Reading invoice..." }));
-            const parsed = parseInvoiceWithSupplierParsers(ocrText, draft.supplier);
-            if (!parsed.lines.length) {
-              readControllerRef.current = null;
-              setDraft((current) => ({ ...current, invoiceText: ocrText, status: couldNotReadInvoiceMessage }));
-              return;
-            }
-            const supplier = parsed.supplier || "Unknown Supplier";
-            const buildOcrInvoiceItems = (sourceLines) => sourceLines.map((line) => {
-              const quantity = numberValue(line.quantity, 1);
-              const unitCost = invoiceUnitCostFromExtraction(line);
-              return enrichInvoiceLine({
-                id: uid(),
-                productName: line.productName || "Unknown product",
-                packSize: line.packSize || "",
-                quantity,
-                unitCost,
-                lineTotal: numberValue(line.lineTotal, quantity * unitCost),
-                lineStatus: invoiceLineStatuses.includes(line.lineStatus || line.status) ? (line.lineStatus || line.status) : "Received",
-                creditReason: line.reason || line.creditReason || "",
-                lineDiscountAmount: numberValue(line.lineDiscountAmount || line.discountAmount, 0),
-                lineDiscountPercent: numberValue(line.lineDiscountPercent || line.discountPercent, 0),
-                supplier,
-                department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
-                departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
-                source: "Local OCR + supplier parser",
-              }, products);
-            });
-            setDraft((current) => ({
-              ...current,
-              supplier,
-              invoiceText: ocrText,
-              invoiceNumber: parsed.invoiceNumber || current.invoiceNumber,
-              date: parsed.invoiceDate || current.date || today(),
-              items: buildOcrInvoiceItems(parsed.lines),
-              subtotalBeforeDiscount: parsed.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
-              discountAmount: parsed.discountAmount || current.discountAmount,
-              discountPercent: parsed.discountPercent || current.discountPercent,
-              finalInvoiceTotal: parsed.finalInvoiceTotal || current.finalInvoiceTotal,
-              status: `Parser extracted ${parsed.lines.length} lines using ${parsed.parserName}. Please review before approving.`,
-            }));
-            readControllerRef.current = null;
-            return;
-          }
-        } catch (error) {
-          readControllerRef.current = null;
-          setDraft((current) => ({ ...current, status: `OCR failed. Please paste invoice text manually. ${error.message}` }));
-          return;
-        }
-      }
-      readControllerRef.current = null;
-      setDraft((current) => ({ ...current, status: couldNotReadInvoiceMessage }));
+      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or OCR text first." }));
       return;
     }
 
-    const buildInvoiceItems = (sourceLines, supplier) => sourceLines.map((line) => {
-      const quantity = numberValue(line.quantity, 1);
-      const unitCost = invoiceUnitCostFromExtraction(line);
-      return enrichInvoiceLine(
-        {
-          id: uid(),
-          productName: line.productName || "Unknown product",
-          packSize: line.packSize || "",
-          quantity,
-          unitCost,
-          lineTotal: numberValue(line.lineTotal, quantity * unitCost),
-          lineStatus: invoiceLineStatuses.includes(line.lineStatus || line.status) ? (line.lineStatus || line.status) : "Received",
-          creditReason: line.reason || line.creditReason || "",
-          lineDiscountAmount: numberValue(line.lineDiscountAmount || line.discountAmount, 0),
-          lineDiscountPercent: numberValue(line.lineDiscountPercent || line.discountPercent, 0),
-          supplier,
-          department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
-          departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
-          source: "Supplier parser",
-        },
-        products
-      );
-    });
+    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
 
     try {
-      const parsed = parseInvoiceWithSupplierParsers(invoiceText, draft.supplier);
-      if (!parsed.lines.length) {
-        setDraft((current) => ({ ...current, invoiceText, status: couldNotReadInvoiceMessage }));
-        return;
-      }
-      const supplier = parsed.supplier || "Unknown Supplier";
+      const response = await fetch("/.netlify/functions/read-invoice-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoiceText,
+          suppliers,
+          products: products.map((product) => ({
+            name: product.productName,
+            supplier: product.supplier,
+            packSize: product.packSize,
+            aliases: product.aliases || [],
+          })),
+        }),
+      });
+      const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
+      if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
+
+      const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
+      const items = (payload.lines || []).map((line) => {
+        const quantity = numberValue(line.quantity, 1);
+        const unitCost = numberValue(line.unitCost, 0);
+        return enrichInvoiceLine(
+          {
+            id: uid(),
+            productName: line.productName || "Unknown product",
+            packSize: line.packSize || "",
+            quantity,
+            unitCost,
+            supplier,
+            department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+            source: "OpenAI",
+          },
+          products,
+          aiSettings
+        );
+      });
+
       setDraft((current) => ({
         ...current,
         supplier,
-        invoiceText,
-        invoiceNumber: parsed.invoiceNumber || current.invoiceNumber,
-        date: parsed.invoiceDate || current.date || today(),
-        items: buildInvoiceItems(parsed.lines, supplier),
-        subtotalBeforeDiscount: parsed.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
-        discountAmount: parsed.discountAmount || current.discountAmount,
-        discountPercent: parsed.discountPercent || current.discountPercent,
-        finalInvoiceTotal: parsed.finalInvoiceTotal || current.finalInvoiceTotal,
-        status: `Parser extracted ${parsed.lines.length} lines using ${parsed.parserName}. Please review before approving.`,
+        invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
+        date: payload.invoiceDate || current.date || today(),
+        items,
+        status: `AI extracted ${items.length} lines. Please review before approving.`,
       }));
     } catch (error) {
-      if (error.name === "AbortError") return;
-      setDraft((current) => ({ ...current, status: `${couldNotReadInvoiceMessage} ${error.message}` }));
-    } finally {
-      if (readControllerRef.current === controller) readControllerRef.current = null;
+      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
     }
   };
 
   const updateDraftItem = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost", "lineDiscountAmount", "lineDiscountPercent"];
+    const numericFields = ["quantity", "unitCost"];
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
         const updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
-        if (numericFields.includes(field)) {
-          updated.lineTotal = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        }
-        if (field === "lineStatus" && value === "Received") updated.creditReason = "";
-        if (field === "lineDiscountAmount") {
-          const original = originalLineTotal(updated);
-          updated.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
-        }
-        if (field === "lineDiscountPercent") {
-          updated.lineDiscountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
-        }
-        return field === "productName" ? enrichInvoiceLine(updated, products) : updated;
+        return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
       }),
     }));
   };
-
-  const updateInvoiceDiscount = (field, value) => {
-    setDraft((current) => {
-      const subtotal = receivedLineSubtotal(current.items);
-      const numeric = numberValue(value, 0);
-      if (field === "discountAmount") {
-        return {
-          ...current,
-          discountAmount: numeric,
-          discountPercent: subtotal ? Number(((numeric / subtotal) * 100).toFixed(2)) : 0,
-        };
-      }
-      return {
-        ...current,
-        discountPercent: numeric,
-        discountAmount: Number((subtotal * (numeric / 100)).toFixed(2)),
-      };
-    });
-  };
-
-  const addDraftInvoiceLine = () => {
-    const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-    setDraft((current) => ({
-      ...current,
-      items: [
-        ...current.items,
-        {
-          ...manualInvoiceLine(defaultDepartment, { supplier: current.supplier || suppliers[0]?.name || "" }),
-          matchStatus: "Manual line",
-          matchConfidence: 0,
-        },
-      ],
-      status: current.status === "Idle" ? "Manual line added. Complete the details before confirming." : current.status,
-    }));
-  };
-
-  const updateDraftItemSplit = (itemId, splitId, field, value) => {
-    setDraft((current) => ({
-      ...current,
-      items: current.items.map((item) => {
-        if (item.id !== itemId) return item;
-        const departmentSplits = normalizeDepartmentSplits(item, item.department).map((split) => (
-          split.id === splitId
-            ? { ...split, [field]: field === "percentage" ? Number(value) : value }
-            : split
-        ));
-        return { ...item, department: departmentSplits[0]?.department || item.department, departmentSplits };
-      }),
-    }));
-  };
-
-  const addDraftItemSplit = (itemId) => {
-    setDraft((current) => ({
-      ...current,
-      items: current.items.map((item) => {
-        if (item.id !== itemId) return item;
-        const departmentSplits = normalizeDepartmentSplits(item, item.department);
-        return { ...item, departmentSplits: [...departmentSplits, { id: uid(), department: departmentNames[0] || "Kitchen Made", percentage: 0 }] };
-      }),
-    }));
-  };
-
-  const removeDraftItemSplit = (itemId, splitId) => {
-    setDraft((current) => ({
-      ...current,
-      items: current.items.map((item) => {
-        if (item.id !== itemId) return item;
-        const departmentSplits = normalizeDepartmentSplits(item, item.department).filter((split) => split.id !== splitId);
-        const nextSplits = departmentSplits.length ? departmentSplits : defaultDepartmentSplits(item.department || departmentNames[0]);
-        return { ...item, department: nextSplits[0]?.department || item.department, departmentSplits: nextSplits };
-      }),
-    }));
-  };
-
-  const splitEditorItem = draft.items.find((item) => item.id === splitEditorId);
 
   const applySuggestion = (id) => {
     setDraft((current) => ({
@@ -3477,157 +1108,17 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
     }));
   };
 
-  const saveManualInvoice = (manualDraft) => {
-    const supplier = manualDraft.supplier || suppliers[0]?.name || "Unknown Supplier";
-    const items = manualDraft.items.map((item) => enrichInvoiceLine({
-      ...item,
-      id: item.id || uid(),
+  const addManualLine = () => {
+    const supplier = draft.supplier || suppliers[0]?.name || "Unknown Supplier";
+    setDraft((current) => ({
+      ...current,
       supplier,
-      quantity: numberValue(item.quantity, 1),
-      unitCost: numberValue(item.unitCost),
-      lineTotal: numberValue(item.lineTotal, numberValue(item.quantity, 1) * numberValue(item.unitCost)),
-      lineStatus: invoiceLineStatus(item),
-      creditReason: item.creditReason || "",
-      lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
-      lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
-      department: item.department || invoiceSettings.defaultInvoiceDepartment,
-      departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
-      matchStatus: "Manual invoice",
-      matchConfidence: 0,
-    }, products));
-
-    const invalidSplit = items.find((item) => !splitIsValid(item));
-    if (invalidSplit) {
-      setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
-      return;
-    }
-
-    const normalizedItems = items.map((item) => {
-      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
-      return {
-        ...item,
-        lineStatus: invoiceLineStatus(item),
-        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
-        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
-        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
-        supplier,
-        unitCost: normalizeInvoiceUnitCost(item),
-        department: departmentSplits[0]?.department || item.department,
-        departmentSplits,
-      };
-    });
-    const invoice = prepareApprovedInvoice({
-      id: uid(),
-      invoiceNumber: manualDraft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
-      supplier,
-      date: manualDraft.date || today(),
-      status: "Approved",
-      discountAmount: numberValue(manualDraft.discountAmount, 0),
-      discountPercent: numberValue(manualDraft.discountPercent, 0),
-      items: normalizedItems,
-    });
-    setInvoices((current) => [invoice, ...current]);
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
-    setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
-    setDraft(emptyInvoiceDraft());
-    setManualInvoiceOpen(false);
-  };
-
-  const editApprovedInvoice = (invoice) => {
-    const supplier = invoice.supplier || "Unknown Supplier";
-    setEditInvoiceModal({
-      ...invoice,
-      items: (invoice.items || []).map((item) => ({
-        ...item,
-        id: item.id || uid(),
-        supplier: item.supplier || supplier,
-        lineStatus: invoiceLineStatus(item),
-        creditReason: item.creditReason || "",
-        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
-        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
-        departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
-      })),
-      supplier,
-      date: invoice.date || today(),
-      invoiceNumber: invoice.invoiceNumber || "",
-      subtotalBeforeDiscount: numberValue(invoice.subtotalBeforeDiscount, 0),
-      discountAmount: numberValue(invoice.discountAmount, 0),
-      discountPercent: numberValue(invoice.discountPercent, 0),
-      finalInvoiceTotal: numberValue(invoice.finalInvoiceTotal, 0),
-    });
-  };
-
-  const saveEditedInvoice = (editedInvoice) => {
-    const supplier = editedInvoice.supplier || "Unknown Supplier";
-    const normalizedItems = (editedInvoice.items || []).map((item) => {
-      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
-      return enrichInvoiceLine({
-        ...item,
-        supplier: item.supplier || supplier,
-        quantity: numberValue(item.quantity, 1),
-        unitCost: numberValue(item.unitCost, 0),
-        lineTotal: numberValue(item.lineTotal, numberValue(item.quantity, 1) * numberValue(item.unitCost, 0)),
-        lineStatus: invoiceLineStatus(item),
-        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
-        lineDiscountAmount: numberValue(item.lineDiscountAmount, 0),
-        lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
-        department: departmentSplits[0]?.department || item.department || invoiceSettings.defaultInvoiceDepartment,
-        departmentSplits,
-      }, products);
-    });
-    const invalidSplit = normalizedItems.find((item) => !splitIsValid(item));
-    if (invalidSplit) {
-      setEditInvoiceModal((current) => ({ ...current, modalStatus: `Department split must total 100% for ${invalidSplit.productName}.` }));
-      return;
-    }
-    const invoice = prepareApprovedInvoice({
-      ...editedInvoice,
-      supplier,
-      date: editedInvoice.date || today(),
-      invoiceNumber: editedInvoice.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
-      status: "Approved",
-      discountAmount: numberValue(editedInvoice.discountAmount, 0),
-      discountPercent: numberValue(editedInvoice.discountPercent, 0),
-      items: normalizedItems,
-    });
-    setInvoices((current) => current.map((item) => (item.id === invoice.id ? invoice : item)));
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
-    setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
-    setEditInvoiceModal(null);
-  };
-
-  const deleteApprovedInvoice = (id) => {
-    requestDelete({
-      title: "Delete invoice",
-      message: "Are you sure you want to delete this invoice?",
-      onConfirm: () => {
-        setInvoices((current) => current.filter((item) => item.id !== id));
-        setCreditNotes((current) => current.filter((note) => note.invoiceId !== id));
-      },
-    });
-  };
-
-  const saveCreditNote = () => {
-    if (!creditNoteModal) return;
-    const payload = {
-      ...creditNoteModal,
-      quantity: numberValue(creditNoteModal.quantity, 0),
-      value: numberValue(creditNoteModal.value, 0),
-      grossValue: numberValue(creditNoteModal.grossValue, numberValue(creditNoteModal.value, 0)),
-      netValue: numberValue(creditNoteModal.netValue, numberValue(creditNoteModal.value, 0)),
-    };
-    setCreditNotes((current) => current.map((note) => (note.id === payload.id ? payload : note)));
-    setCreditNoteModal(null);
-  };
-
-  const deleteCreditNote = (id) => {
-    requestDelete({
-      title: "Delete credit note",
-      message: "Are you sure you want to delete this credit note?",
-      onConfirm: () => setCreditNotes((current) => current.filter((note) => note.id !== id)),
-    });
+      items: [
+        ...current.items,
+        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment, matchStatus: "Create new product", matchConfidence: 0 },
+      ],
+      status: "Manual review",
+    }));
   };
 
   return (
@@ -3651,98 +1142,45 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           <label className="file-button">
             Choose invoice
-            <input
-              accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv"
-              key={uploadInputKey}
-              multiple
-              onChange={(event) => {
-                addFiles(event.target.files);
-                event.target.value = "";
-              }}
-              type="file"
-            />
+            <input accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
           </label>
         </div>
-        {hasDraftWork && (
-          <div className="invoice-meta">
-            <label>
-              Supplier
-              <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
-              <datalist id="supplier-list">
-                {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
-              </datalist>
-            </label>
-            <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
-            <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
-          </div>
-        )}
-        {hasDraftWork && (
-          <div className="invoice-meta">
-            <label>Subtotal before discount<input readOnly value={money(invoiceSubtotalBeforeDiscount(draftDiscountContext))} /></label>
-            <Field label="Discount amount" type="number" value={draft.discountAmount || 0} onChange={(value) => updateInvoiceDiscount("discountAmount", value)} />
-            <Field label="Discount %" type="number" value={draft.discountPercent || 0} onChange={(value) => updateInvoiceDiscount("discountPercent", value)} />
-            <label>Final invoice total<input readOnly value={money(invoiceFinalTotal(draftDiscountContext))} /></label>
-          </div>
-        )}
+        <div className="invoice-meta">
+          <label>
+            Supplier
+            <input list="supplier-list" value={draft.supplier} onChange={(event) => setDraft({ ...draft, supplier: event.target.value })} />
+            <datalist id="supplier-list">
+              {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
+            </datalist>
+          </label>
+          <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
+          <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
+        </div>
         {showCreateSupplier && (
           <div className="button-row left tight">
             <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
           </div>
         )}
-        {hasDraftWork && (
-          <label className="invoice-text">
-            Pasted or OCR invoice text <span>(images use local OCR in Work Edition)</span>
-            <textarea
-              placeholder="Paste invoice text here, or upload PDF/TXT/CSV/JPG/PNG/WEBP/HEIC. Images are OCR-read locally in the browser without AI."
-              rows={7}
-              value={draft.invoiceText}
-              onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })}
-            />
-          </label>
-        )}
+        <label className="invoice-text">Pasted or OCR invoice text<textarea rows={7} value={draft.invoiceText} onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })} /></label>
         <div className="file-list">
           {draft.files.map((file, index) => (
-            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => requestDelete({ title: "Delete uploaded file", message: "Are you sure you want to delete this uploaded file?", onConfirm: () => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) })) })} type="button"><X size={14} /></button></span>
+            <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDraft((current) => ({ ...current, files: current.files.filter((_, itemIndex) => itemIndex !== index) }))} type="button"><X size={14} /></button></span>
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
-          <button disabled={isReading} onClick={readInvoice} type="button"><ReceiptText size={16} />Read Invoice</button>
-          <button className="ghost" onClick={() => setManualInvoiceOpen(true)} type="button"><Plus size={16} />Add Manual Invoice</button>
-          <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
-          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />{draft.editingInvoiceId ? "Save Invoice" : "Confirm Invoice"}</button>
+          <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
+          <button className="ghost" onClick={addManualLine} type="button">Add Manual Line</button>
+          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
         </div>
       </Panel>
-
-      {manualInvoiceOpen && (
-        <ManualInvoiceModal
-          departmentNames={departmentNames}
-          invoiceSettings={invoiceSettings}
-          onCancel={() => setManualInvoiceOpen(false)}
-          onSave={saveManualInvoice}
-          products={products}
-          suppliers={suppliers}
-        />
-      )}
-
-      {editInvoiceModal && (
-        <ApprovedInvoiceEditModal
-          departmentNames={departmentNames}
-          invoice={editInvoiceModal}
-          invoiceSettings={invoiceSettings}
-          onCancel={() => setEditInvoiceModal(null)}
-          onSave={saveEditedInvoice}
-          products={products}
-          setInvoice={setEditInvoiceModal}
-        />
-      )}
 
       <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                {["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department split", "Supplier", "Original", "Discount", "Net total", ""].map((header) => <th key={header}>{header}</th>)}
+                {["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -3760,73 +1198,16 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
                   <td><input value={item.packSize} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
-                  <td>
-                    <select value={invoiceLineStatus(item)} onChange={(event) => updateDraftItem(item.id, "lineStatus", event.target.value)}>
-                      {invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}
-                    </select>
-                  </td>
-                  <td><input value={item.creditReason || ""} onChange={(event) => updateDraftItem(item.id, "creditReason", event.target.value)} placeholder={invoiceLineStatus(item) === "Received" ? "" : "Reason"} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.lineDiscountAmount || 0} onChange={(event) => updateDraftItem(item.id, "lineDiscountAmount", event.target.value)} disabled={!isReceivedInvoiceLine(item)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.lineDiscountPercent || 0} onChange={(event) => updateDraftItem(item.id, "lineDiscountPercent", event.target.value)} disabled={!isReceivedInvoiceLine(item)} /></td>
-                  <td>
-                    <button className={`split-button ${splitIsValid(item) ? "" : "invalid"}`} onClick={() => setSplitEditorId(item.id)} type="button">
-                      {splitSummary(item)}
-                    </button>
-                    {!splitIsValid(item) && <small className="line-note error">Split must total 100%</small>}
-                  </td>
+                  <td><select value={item.department} onChange={(event) => updateDraftItem(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
                   <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
-                  <td>{money(originalLineTotal(item))}</td>
-                  <td>{money(discountAppliedToLine(item, draftDiscountContext))}</td>
-                  <td>{money(netLineTotal(item, draftDiscountContext))}</td>
-                  <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete invoice line", message: "Are you sure you want to delete this invoice line?", onConfirm: () => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) })) })} type="button"><Trash2 size={15} /></button></td>
+                  <td>{money(lineTotal(item))}</td>
+                  <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
-              <tr className="add-table-row">
-                <td colSpan={14}>
-                  <button className="ghost add-line-inline" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add Line</button>
-                </td>
-              </tr>
             </tbody>
           </table>
         </div>
-        <div className="button-row left tight">
-          <button className="ghost" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add Line</button>
-        </div>
       </Panel>
-
-      {splitEditorItem && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="Department split">
-            <div className="modal-header">
-              <div>
-                <h3>Department split</h3>
-                <p>{splitEditorItem.productName} · {money(netLineTotal(splitEditorItem, draftDiscountContext))}</p>
-              </div>
-              <button className="icon" onClick={() => setSplitEditorId(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="split-list">
-              {normalizeDepartmentSplits(splitEditorItem, splitEditorItem.department).map((split) => (
-                <div className="split-row" key={split.id}>
-                  <select value={split.department} onChange={(event) => updateDraftItemSplit(splitEditorItem.id, split.id, "department", event.target.value)}>
-                    {departmentNames.map((dept) => <option key={dept}>{dept}</option>)}
-                  </select>
-                  <input min="0" max="100" step="1" type="number" value={split.percentage} onChange={(event) => updateDraftItemSplit(splitEditorItem.id, split.id, "percentage", event.target.value)} />
-                  <span>{money(netLineTotal(splitEditorItem, draftDiscountContext) * (numberValue(split.percentage) / 100))}</span>
-                  <button className="icon danger" onClick={() => requestDelete({ title: "Delete department split", message: "Are you sure you want to delete this department split?", onConfirm: () => removeDraftItemSplit(splitEditorItem.id, split.id) })} type="button"><Trash2 size={14} /></button>
-                </div>
-              ))}
-            </div>
-            <div className={`split-total ${splitIsValid(splitEditorItem) ? "valid" : "invalid"}`}>
-              Total split: {departmentSplitTotal(splitEditorItem).toFixed(0)}%
-              {!splitIsValid(splitEditorItem) && <span>Department split must total 100%</span>}
-            </div>
-            <div className="button-row left">
-              <button className="ghost" onClick={() => addDraftItemSplit(splitEditorItem.id)} type="button"><Plus size={16} />Add split</button>
-              <button disabled={!splitIsValid(splitEditorItem)} onClick={() => setSplitEditorId(null)} type="button">Done</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <Panel title="Approved invoices">
         <DataTable
@@ -3835,450 +1216,56 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
             { key: "supplier", label: "Supplier" },
             { key: "date", label: "Date" },
             { key: "items", label: "Lines", render: (items) => items.length },
-            { key: "subtotalBeforeDiscount", label: "Subtotal", render: (_, row) => money(invoiceSubtotalBeforeDiscount(row)) },
-            { key: "discountAmount", label: "Discount", render: (_, row) => money(invoiceDiscountAmount(row)) },
             { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
-          onEdit={editApprovedInvoice}
-          onDelete={deleteApprovedInvoice}
+          onDelete={(id) => setInvoices((current) => current.filter((invoice) => invoice.id !== id))}
           rows={invoices}
         />
       </Panel>
-
-      {creditNoteModal && (
-        <EditModal onCancel={() => setCreditNoteModal(null)} onSave={saveCreditNote} title="Edit credit note">
-          <div className="form-grid three">
-            <Field label="Supplier" value={creditNoteModal.supplier} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, supplier: value })} />
-            <Field label="Invoice number" value={creditNoteModal.invoiceNumber} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, invoiceNumber: value })} />
-            <Field label="Date" type="date" value={creditNoteModal.date} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, date: value })} />
-            <Field label="Product" value={creditNoteModal.product} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, product: value })} />
-            <Field label="Quantity" type="number" value={creditNoteModal.quantity} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, quantity: value })} />
-            <Field label="Value" type="number" value={creditNoteModal.value} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, value })} />
-            <label>Reason<select value={creditNoteModal.reason} onChange={(event) => setCreditNoteModal({ ...creditNoteModal, reason: event.target.value })}>{invoiceLineStatuses.filter((status) => status !== "Received").map((status) => <option key={status}>{status}</option>)}</select></label>
-            <label>Status<select value={creditNoteModal.status} onChange={(event) => setCreditNoteModal({ ...creditNoteModal, status: event.target.value })}>{creditNoteStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>
-            <Field label="Notes" value={creditNoteModal.notes || ""} onChange={(value) => setCreditNoteModal({ ...creditNoteModal, notes: value })} />
-          </div>
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function manualInvoiceLine(defaultDepartment, product = {}) {
-  const department = product.department || defaultDepartment;
-  const quantity = numberValue(product.quantity, 1) || 1;
-  const unitCost = numberValue(product.unitCost);
-  return {
-    id: uid(),
-    productName: product.name || "",
-    packSize: product.packSize || "",
-    quantity,
-    unitCost,
-    department,
-    departmentSplits: defaultDepartmentSplits(department),
-    lineTotal: quantity * unitCost,
-    lineStatus: "Received",
-    creditReason: "",
-    lineDiscountAmount: 0,
-    lineDiscountPercent: 0,
-    supplier: product.supplier || "",
-  };
-}
-
-function ApprovedInvoiceEditModal({ departmentNames, invoice, invoiceSettings, onCancel, onSave, products, setInvoice }) {
-  const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-  const discountContext = { items: invoice.items || [], discountAmount: numberValue(invoice.discountAmount, 0), discountPercent: numberValue(invoice.discountPercent, 0) };
-
-  const updateHeader = (field, value) => setInvoice((current) => ({ ...current, [field]: value }));
-  const updateDiscount = (field, value) => {
-    setInvoice((current) => {
-      const subtotal = receivedLineSubtotal(current.items || []);
-      const numeric = numberValue(value, 0);
-      return field === "discountAmount"
-        ? { ...current, discountAmount: numeric, discountPercent: subtotal ? Number(((numeric / subtotal) * 100).toFixed(2)) : 0 }
-        : { ...current, discountPercent: numeric, discountAmount: Number((subtotal * (numeric / 100)).toFixed(2)) };
-    });
-  };
-  const updateLine = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost", "lineDiscountAmount", "lineDiscountPercent"];
-    setInvoice((current) => ({
-      ...current,
-      items: (current.items || []).map((item) => {
-        if (item.id !== id) return item;
-        let updated = { ...item, [field]: numericFields.includes(field) ? numberValue(value, 0) : value };
-        if (field === "productName") {
-          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
-          if (product) {
-            updated = {
-              ...updated,
-              productName: product.name,
-              matchedProductId: product.id,
-              packSize: product.packSize || updated.packSize,
-              supplier: product.supplier || updated.supplier,
-              unitCost: numberValue(product.unitCost, updated.unitCost),
-              department: product.department || updated.department || defaultDepartment,
-              departmentSplits: normalizeDepartmentSplits(product, product.department || defaultDepartment),
-            };
-          }
-        }
-        if (field === "lineStatus" && value === "Received") updated.creditReason = "";
-        if (field === "department") updated.departmentSplits = defaultDepartmentSplits(value);
-        if (numericFields.includes(field) || field === "productName") updated.lineTotal = numberValue(updated.quantity, 1) * numberValue(updated.unitCost, 0);
-        if (field === "lineDiscountAmount") {
-          const original = originalLineTotal(updated);
-          updated.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
-        }
-        if (field === "lineDiscountPercent") {
-          updated.lineDiscountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
-        }
-        return updated;
-      }),
-    }));
-  };
-  const addLine = () => setInvoice((current) => ({
-    ...current,
-    items: [...(current.items || []), manualInvoiceLine(defaultDepartment, { supplier: current.supplier || "" })],
-  }));
-  const removeLine = (id) => setInvoice((current) => ({ ...current, items: (current.items || []).filter((item) => item.id !== id) }));
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal wide manual-invoice-modal" role="dialog" aria-modal="true" aria-label="Edit invoice">
-        <div className="modal-header">
-          <div>
-            <h3>Edit invoice</h3>
-            <p>{invoice.invoiceNumber || "Approved invoice"}</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        <div className="form-grid three compact-form">
-          <Field label="Supplier" value={invoice.supplier || ""} onChange={(value) => updateHeader("supplier", value)} />
-          <Field label="Invoice number" value={invoice.invoiceNumber || ""} onChange={(value) => updateHeader("invoiceNumber", value)} />
-          <Field label="Date" type="date" value={invoice.date || today()} onChange={(value) => updateHeader("date", value)} />
-        </div>
-        <div className="invoice-meta">
-          <label>Subtotal before discount<input readOnly value={money(invoiceSubtotalBeforeDiscount(discountContext))} /></label>
-          <Field label="Discount amount" type="number" value={invoice.discountAmount || 0} onChange={(value) => updateDiscount("discountAmount", value)} />
-          <Field label="Discount %" type="number" value={invoice.discountPercent || 0} onChange={(value) => updateDiscount("discountPercent", value)} />
-          <label>Final invoice total<input readOnly value={money(invoiceFinalTotal(discountContext))} /></label>
-        </div>
-        <div className="table-wrap manual-invoice-table">
-          <table>
-            <thead>
-              <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department", "Original", "Discount", "Net total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
-            </thead>
-            <tbody>
-              {(invoice.items || []).map((item) => (
-                <tr key={item.id}>
-                  <td><input list="approved-edit-product-list" value={item.productName || ""} onChange={(event) => updateLine(item.id, "productName", event.target.value)} /></td>
-                  <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.quantity || 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.unitCost || 0} onChange={(event) => updateLine(item.id, "unitCost", event.target.value)} /></td>
-                  <td><select value={invoiceLineStatus(item)} onChange={(event) => updateLine(item.id, "lineStatus", event.target.value)}>{invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}</select></td>
-                  <td><input value={item.creditReason || ""} onChange={(event) => updateLine(item.id, "creditReason", event.target.value)} /></td>
-                  <td><input disabled={!isReceivedInvoiceLine(item)} min="0" step="0.01" type="number" value={item.lineDiscountAmount || 0} onChange={(event) => updateLine(item.id, "lineDiscountAmount", event.target.value)} /></td>
-                  <td><input disabled={!isReceivedInvoiceLine(item)} min="0" step="0.01" type="number" value={item.lineDiscountPercent || 0} onChange={(event) => updateLine(item.id, "lineDiscountPercent", event.target.value)} /></td>
-                  <td><select value={primaryDepartment(item)} onChange={(event) => updateLine(item.id, "department", event.target.value)}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></td>
-                  <td>{money(originalLineTotal(item))}</td>
-                  <td>{money(discountAppliedToLine(item, discountContext))}</td>
-                  <td>{money(netLineTotal(item, discountContext))}</td>
-                  <td><button className="icon danger" onClick={() => removeLine(item.id)} type="button"><Trash2 size={15} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <datalist id="approved-edit-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
-        <div className="button-row left tight">
-          <button className="ghost" onClick={addLine} type="button"><Plus size={16} />Add line</button>
-        </div>
-        {invoice.modalStatus && <div className="invoice-status error">{invoice.modalStatus}</div>}
-        <div className="button-row left">
-          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button onClick={() => onSave(invoice)} type="button"><Save size={16} />Save Invoice</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ManualInvoiceModal({ departmentNames, invoiceSettings, onCancel, onSave, products, suppliers }) {
-  const defaultDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-  const defaultSupplier = suppliers[0]?.name || "";
-  const [mode, setMode] = useState("Simple Mode");
-  const [status, setStatus] = useState("");
-  const [simple, setSimple] = useState({
-    supplier: defaultSupplier,
-    department: defaultDepartment,
-    invoiceNumber: "",
-    date: today(),
-    totalPrice: "",
-  });
-  const [complete, setComplete] = useState({
-    supplier: defaultSupplier,
-    invoiceNumber: "",
-    date: today(),
-    rows: [manualInvoiceLine(defaultDepartment), manualInvoiceLine(defaultDepartment)],
-  });
-
-  const updateCompleteHeader = (field, value) => setComplete((current) => ({ ...current, [field]: value }));
-  const updateRow = (id, field, value) => {
-    setComplete((current) => ({
-      ...current,
-      rows: current.rows.map((row) => {
-        if (row.id !== id) return row;
-        let next = { ...row, [field]: ["quantity", "unitCost", "lineTotal", "splitPercentage", "lineDiscountAmount", "lineDiscountPercent"].includes(field) ? numberValue(value) : value };
-        if (field === "productName") {
-          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
-          if (product) {
-            next = {
-              ...next,
-              productName: product.name,
-              packSize: product.packSize || next.packSize,
-              unitCost: numberValue(product.unitCost),
-              supplier: product.supplier || next.supplier,
-              department: product.department || next.department,
-              departmentSplits: defaultDepartmentSplits(product.department || next.department),
-            };
-          }
-        }
-        if (field === "department") next.departmentSplits = defaultDepartmentSplits(value);
-        if (field === "quantity" || field === "unitCost" || field === "productName" || field === "department") {
-          next.lineTotal = numberValue(next.quantity, 1) * numberValue(next.unitCost);
-        }
-        if (field === "lineTotal") {
-          next.unitCost = numberValue(next.quantity, 1) ? Number((numberValue(value) / numberValue(next.quantity, 1)).toFixed(4)) : next.unitCost;
-        }
-        if (field === "lineStatus" && value === "Received") next.creditReason = "";
-        if (field === "lineDiscountAmount") {
-          const original = originalLineTotal(next);
-          next.lineDiscountPercent = original ? Number(((numberValue(value) / original) * 100).toFixed(2)) : 0;
-        }
-        if (field === "lineDiscountPercent") {
-          next.lineDiscountAmount = Number((originalLineTotal(next) * (numberValue(value) / 100)).toFixed(2));
-        }
-        if (field === "splitPercentage") {
-          next.departmentSplits = [{ ...(normalizeDepartmentSplits(next, next.department)[0] || { id: uid(), department: next.department }), percentage: numberValue(value) }];
-        }
-        return next;
-      }),
-    }));
-  };
-
-  const addRow = () => setComplete((current) => ({ ...current, rows: [...current.rows, manualInvoiceLine(defaultDepartment)] }));
-  const removeRow = (id) => setComplete((current) => ({ ...current, rows: current.rows.length > 1 ? current.rows.filter((row) => row.id !== id) : current.rows }));
-
-  const save = () => {
-    if (mode === "Simple Mode") {
-      if (!simple.supplier.trim() || !simple.date || !numberValue(simple.totalPrice)) {
-        setStatus("Supplier, date and total price are required.");
-        return;
-      }
-      const total = numberValue(simple.totalPrice);
-      onSave({
-        supplier: simple.supplier,
-        invoiceNumber: simple.invoiceNumber,
-        date: simple.date,
-        items: [{
-          id: uid(),
-          productName: "Manual invoice total",
-          packSize: "Summary",
-          quantity: 1,
-          unitCost: total,
-          lineTotal: total,
-          lineStatus: "Received",
-          creditReason: "",
-          lineDiscountAmount: 0,
-          lineDiscountPercent: 0,
-          department: simple.department,
-          departmentSplits: defaultDepartmentSplits(simple.department),
-          supplier: simple.supplier,
-        }],
-      });
-      return;
-    }
-
-    const rows = complete.rows.filter((row) => row.productName.trim() || numberValue(row.lineTotal));
-    const invalid = rows.find((row) => !row.productName.trim() || !numberValue(row.quantity) || !numberValue(row.unitCost) || !splitIsValid(row));
-    if (!complete.supplier.trim() || !complete.date || !rows.length || invalid) {
-      setStatus("Complete every row with product, quantity, unit cost and a 100% department split.");
-      return;
-    }
-    onSave({
-      supplier: complete.supplier,
-      invoiceNumber: complete.invoiceNumber,
-      date: complete.date,
-      items: rows.map((row) => ({ ...row, supplier: complete.supplier, lineTotal: numberValue(row.lineTotal, numberValue(row.quantity) * numberValue(row.unitCost)) })),
-    });
-  };
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal wide manual-invoice-modal" role="dialog" aria-modal="true" aria-label="Add manual invoice">
-        <div className="modal-header">
-          <div>
-            <h3>Add Manual Invoice</h3>
-            <p>{mode}</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        <div className="segmented-control">
-          {["Simple Mode", "Complete Mode"].map((option) => (
-            <button className={mode === option ? "active" : ""} key={option} onClick={() => setMode(option)} type="button">{option}</button>
-          ))}
-        </div>
-        {mode === "Simple Mode" ? (
-          <div className="form-grid five">
-            <label>Supplier<input list="manual-supplier-list" value={simple.supplier} onChange={(event) => setSimple({ ...simple, supplier: event.target.value })} /></label>
-            <label>Department<select value={simple.department} onChange={(event) => setSimple({ ...simple, department: event.target.value })}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></label>
-            <Field label="Invoice number" value={simple.invoiceNumber} onChange={(value) => setSimple({ ...simple, invoiceNumber: value })} />
-            <Field label="Date" type="date" value={simple.date} onChange={(value) => setSimple({ ...simple, date: value })} />
-            <Field label="Total price" type="number" value={simple.totalPrice} onChange={(value) => setSimple({ ...simple, totalPrice: value })} />
-          </div>
-        ) : (
-          <>
-            <div className="form-grid three compact-form">
-              <label>Supplier<input list="manual-supplier-list" value={complete.supplier} onChange={(event) => updateCompleteHeader("supplier", event.target.value)} /></label>
-              <Field label="Invoice number" value={complete.invoiceNumber} onChange={(value) => updateCompleteHeader("invoiceNumber", value)} />
-              <Field label="Date" type="date" value={complete.date} onChange={(value) => updateCompleteHeader("date", value)} />
-            </div>
-            <div className="table-wrap manual-invoice-table">
-              <table>
-                <thead>
-                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Status", "Reason", "Line disc £", "Line disc %", "Department", "Department split", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {complete.rows.map((row) => (
-                    <tr key={row.id}>
-                      <td><input list="manual-product-list" value={row.productName} onChange={(event) => updateRow(row.id, "productName", event.target.value)} /></td>
-                      <td><input value={row.packSize} onChange={(event) => updateRow(row.id, "packSize", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={row.quantity} onChange={(event) => updateRow(row.id, "quantity", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={row.unitCost} onChange={(event) => updateRow(row.id, "unitCost", event.target.value)} /></td>
-                      <td><select value={invoiceLineStatus(row)} onChange={(event) => updateRow(row.id, "lineStatus", event.target.value)}>{invoiceLineStatuses.map((status) => <option key={status}>{status}</option>)}</select></td>
-                      <td><input value={row.creditReason || ""} onChange={(event) => updateRow(row.id, "creditReason", event.target.value)} /></td>
-                      <td><input disabled={!isReceivedInvoiceLine(row)} min="0" step="0.01" type="number" value={row.lineDiscountAmount || 0} onChange={(event) => updateRow(row.id, "lineDiscountAmount", event.target.value)} /></td>
-                      <td><input disabled={!isReceivedInvoiceLine(row)} min="0" step="0.01" type="number" value={row.lineDiscountPercent || 0} onChange={(event) => updateRow(row.id, "lineDiscountPercent", event.target.value)} /></td>
-                      <td><select value={row.department} onChange={(event) => updateRow(row.id, "department", event.target.value)}>{departmentNames.map((department) => <option key={department}>{department}</option>)}</select></td>
-                      <td><input min="0" max="100" step="1" type="number" value={departmentSplitTotal(row)} onChange={(event) => updateRow(row.id, "splitPercentage", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={numberValue(row.lineTotal, numberValue(row.quantity) * numberValue(row.unitCost))} onChange={(event) => updateRow(row.id, "lineTotal", event.target.value)} /></td>
-                      <td><button className="icon danger" onClick={() => removeRow(row.id)} type="button"><Trash2 size={15} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="button-row left tight">
-              <button className="ghost" onClick={addRow} type="button"><Plus size={16} />Add row</button>
-            </div>
-          </>
-        )}
-        <datalist id="manual-supplier-list">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}</datalist>
-        <datalist id="manual-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
-        {status && <div className="invoice-status error">{status}</div>}
-        <div className="button-row left">
-          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button onClick={save} type="button"><Save size={16} />Save Invoice</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Products({ departmentNames, products, requestDelete, setProducts, suppliers }) {
+function Products({ departmentNames, products, setProducts, suppliers }) {
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
-  const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
-  const [bulkRows, setBulkRows] = useState([emptyBulkRow(), emptyBulkRow()]);
-  const [pendingImport, setPendingImport] = useState([]);
-  const [status, setStatus] = useState("");
-  const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
   const rows = useMemo(() => buildProductRows(products), [products]);
-
-  const productPayload = (row) => {
-    const aliases = String(row.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
-    const unitCost = numberValue(row.unitCost);
-    const supplier = row.supplier || suppliers[0]?.name || "";
-    return {
-      ...row,
-      supplier,
-      aliases,
-      unitCost,
-      quantity: numberValue(row.quantity, 1),
-      supplierPrices: [{ supplier, price: unitCost, date: today() }],
-      priceHistory: [{ date: today(), supplier, price: unitCost }],
-    };
-  };
 
   const saveProduct = () => {
     if (!form.name.trim()) return;
-    const payload = productPayload(form);
-    setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, id: editingId, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
+    const aliases = String(form.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
+    const payload = {
+      ...form,
+      aliases,
+      unitCost: numberValue(form.unitCost),
+      quantity: numberValue(form.quantity, 1),
+      supplierPrices: [{ supplier: form.supplier, price: numberValue(form.unitCost), date: today() }],
+    };
+    if (editingId) {
+      setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
+    } else {
+      setProducts((current) => [...current, { ...payload, id: uid(), priceHistory: [{ date: today(), supplier: payload.supplier, price: payload.unitCost }] }]);
+    }
     setForm(empty);
     setEditingId("");
-    setModalOpen(false);
-  };
-
-  const saveBulkProducts = () => {
-    const validRows = bulkRows.filter((row) => row.name.trim());
-    if (!validRows.length) {
-      setStatus("Add at least one product name.");
-      return;
-    }
-    setProducts((current) => [...current, ...validRows.map((row) => ({ ...productPayload(row), id: uid() }))]);
-    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
-    setPendingImport([]);
-    setStatus("");
-    setImportFileKey((current) => current + 1);
-    setModalOpen(false);
-  };
-
-  const updateBulkRow = (id, field, value) => {
-    setBulkRows((current) => current.map((row) => (row.id === id ? { ...row, [field]: ["quantity", "unitCost"].includes(field) ? value : value } : row)));
-  };
-
-  const importProducts = async (file) => {
-    if (!file) return;
-    const imported = parseProductsCsv(await file.text(), suppliers, departmentNames);
-    if (!imported.length) {
-      setStatus("CSV import found no product rows.");
-      return;
-    }
-    setPendingImport(imported);
-    setStatus(`${imported.length} product row(s) ready for review.`);
-  };
-
-  const confirmImport = () => {
-    setProducts((current) => [...current, ...pendingImport.map((row) => ({ ...productPayload(row), id: uid() }))]);
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setModalOpen(false);
-  };
-
-  const cancelImport = () => {
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Product import cancelled.");
-  };
-
-  const openProductModal = (row = null) => {
-    if (row) {
-      setForm({ ...row, aliases: (row.aliases || []).join(", ") });
-      setEditingId(row.id);
-      setModalOpen(true);
-      return;
-    }
-    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
-    setPendingImport([]);
-    setStatus("");
-    setEditingId("");
-    setModalOpen(true);
   };
 
   return (
     <div className="page-grid">
+      <Panel title={editingId ? "Edit product" : "Add product"}>
+        <div className="form-grid six">
+          <Field label="Product" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+          <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
+          <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
+          <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
+          <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
+        </div>
+        <div className="button-row left"><button onClick={saveProduct} type="button"><Plus size={16} />{editingId ? "Save Product" : "Add Product"}</button></div>
+      </Panel>
       <Panel title="Product database" action="Aliases + supplier comparison">
         <DataTable
           columns={[
@@ -4291,207 +1278,44 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
             { key: "department", label: "Department" },
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) })}
-          onEdit={openProductModal}
+          onDelete={(id) => setProducts((current) => current.filter((product) => product.id !== id))}
+          onEdit={(row) => {
+            setForm({ ...row, aliases: (row.aliases || []).join(", ") });
+            setEditingId(row.id);
+          }}
           rows={rows}
-          toolbarAction={<button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
         />
       </Panel>
-      {modalOpen && !editingId && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add products">
-            <div className="modal-header">
-              <div><h3>Add products</h3><p>Bulk create products</p></div>
-              <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
-            </div>
-            <div className="button-row left tight">
-              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importProducts(event.target.files?.[0])} type="file" /></label>
-            </div>
-            {status && <div className="invoice-status info">{status}</div>}
-            {pendingImport.length > 0 && (
-              <div className="import-review">
-                <div className="panel-head"><h2>Review import</h2><span>{pendingImport.length} row(s)</span></div>
-                <DataTable columns={[
-                  { key: "name", label: "Product name" },
-                  { key: "supplier", label: "Supplier" },
-                  { key: "packSize", label: "Pack size" },
-                  { key: "quantity", label: "Quantity" },
-                  { key: "unitCost", label: "Unit cost", render: money },
-                  { key: "department", label: "Department" },
-                  { key: "aliases", label: "Aliases" },
-                ]} rows={pendingImport} />
-                <div className="button-row left">
-                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
-                  <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
-                </div>
-              </div>
-            )}
-            <BulkProductsTable rows={bulkRows} setRows={setBulkRows} suppliers={suppliers} departmentNames={departmentNames} updateRow={updateBulkRow} />
-            <div className="button-row left">
-              <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
-              <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
-              <button onClick={saveBulkProducts} type="button"><Save size={16} />Save Products</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {modalOpen && editingId && (
-        <EditModal title="Edit product" onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
-          <div className="form-grid six">
-            <Field label="Product name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
-            <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
-            <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
-            <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
-            <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-            <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
-          </div>
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRow }) {
-  return (
-    <div className="table-wrap bulk-entry-table">
-      <table>
-        <thead><tr>{["Product name", "Supplier", "Pack size", "Quantity", "Unit cost", "Department", "Aliases", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td><input value={row.name} onChange={(event) => updateRow(row.id, "name", event.target.value)} /></td>
-              <td><select value={row.supplier} onChange={(event) => updateRow(row.id, "supplier", event.target.value)}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></td>
-              <td><input value={row.packSize} onChange={(event) => updateRow(row.id, "packSize", event.target.value)} /></td>
-              <td><input min="0" step="0.01" type="number" value={row.quantity} onChange={(event) => updateRow(row.id, "quantity", event.target.value)} /></td>
-              <td><input min="0" step="0.01" type="number" value={row.unitCost} onChange={(event) => updateRow(row.id, "unitCost", event.target.value)} /></td>
-              <td><select value={row.department} onChange={(event) => updateRow(row.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
-              <td><input value={row.aliases} onChange={(event) => updateRow(row.id, "aliases", event.target.value)} /></td>
-              <td><button className="icon danger" onClick={() => setRows((current) => current.length > 1 ? current.filter((item) => item.id !== row.id) : current)} type="button"><Trash2 size={15} /></button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNotes, suppliers, setSuppliers, supplierSpend }) {
+function Suppliers({ suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
-  const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
-  const [bulkRows, setBulkRows] = useState([emptyBulkRow(), emptyBulkRow()]);
-  const [pendingImport, setPendingImport] = useState([]);
-  const [status, setStatus] = useState("");
-  const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [activeSupplierTab, setActiveSupplierTab] = useState("Details");
-  const supplierIssues = combinedSupplierIssues(creditNotes, invoices);
-  const supplierRows = supplierSpend.map((supplier) => {
-    const summary = supplierIssueSummary(supplierIssues, supplier.name);
-    return { ...supplier, openIssues: summary.openIssues, valueToChase: summary.valueToChase };
-  });
-  const supplierTabs = ["Details", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
-  const selectedSupplierName = form.name;
-  const selectedSupplierIssues = supplierIssues.filter((note) => note.supplier === selectedSupplierName);
-  const selectedSupplierInvoices = invoices
-    .filter((invoice) => invoice.supplier === selectedSupplierName)
-    .map((invoice) => ({ ...invoice, issueCount: supplierIssues.filter((note) => note.invoiceId === invoice.id).length }));
-  const selectedSupplierProducts = products.filter((product) => product.supplier === selectedSupplierName);
-  const selectedSupplierPriceHistory = products.flatMap((product) => (
-    (product.priceHistory || [])
-      .filter((entry) => entry.supplier === selectedSupplierName)
-      .map((entry, index) => ({
-        id: `${product.id}-${entry.date}-${index}`,
-        product: product.name,
-        date: entry.date,
-        supplier: entry.supplier,
-        price: entry.price,
-      }))
-  ));
 
   const saveSupplier = () => {
     if (!form.name.trim()) return;
-    const payload = {
-      id: editingId,
-      name: form.name,
-      category: form.category,
-      contact: form.contact,
-      email: form.email,
-      phone: form.phone,
-      active: Boolean(form.active),
-    };
-    setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...payload } : supplier)));
+    if (editingId) setSuppliers((current) => current.map((supplier) => (supplier.id === editingId ? { ...supplier, ...form } : supplier)));
+    else setSuppliers((current) => [...current, { ...form, id: uid() }]);
     setForm(empty);
     setEditingId("");
-    setModalOpen(false);
-  };
-
-  const saveBulkSuppliers = () => {
-    const validRows = bulkRows.filter((row) => row.name.trim());
-    if (!validRows.length) {
-      setStatus("Add at least one supplier name.");
-      return;
-    }
-    setSuppliers((current) => [...current, ...validRows.map((row) => ({ ...row, id: uid() }))]);
-    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
-    setPendingImport([]);
-    setStatus("");
-    setImportFileKey((current) => current + 1);
-    setModalOpen(false);
-  };
-
-  const updateBulkRow = (id, field, value) => {
-    setBulkRows((current) => current.map((row) => (row.id === id ? { ...row, [field]: field === "active" ? value === "Active" : value } : row)));
-  };
-
-  const importSuppliers = async (file) => {
-    if (!file) return;
-    const imported = parseSuppliersCsv(await file.text());
-    if (!imported.length) {
-      setStatus("CSV import found no supplier rows.");
-      return;
-    }
-    setPendingImport(imported);
-    setStatus(`${imported.length} supplier row(s) ready for review.`);
-  };
-
-  const confirmImport = () => {
-    setSuppliers((current) => [...current, ...pendingImport.map((row) => ({ ...row, id: uid() }))]);
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setModalOpen(false);
-  };
-
-  const cancelImport = () => {
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Supplier import cancelled.");
-  };
-
-  const openSupplierModal = (row = null) => {
-    if (row) {
-      setForm({ ...empty, ...row });
-      setEditingId(row.id);
-      setActiveSupplierTab("Details");
-      setModalOpen(true);
-      return;
-    }
-    setBulkRows([emptyBulkRow(), emptyBulkRow()]);
-    setPendingImport([]);
-    setStatus("");
-    setEditingId("");
-    setActiveSupplierTab("Details");
-    setModalOpen(true);
-  };
-
-  const updateIssue = (id, patch) => {
-    setCreditNotes((current) => current.map((note) => (note.id === id ? { ...note, ...patch } : note)));
   };
 
   return (
     <div className="page-grid">
+      <Panel title={editingId ? "Edit supplier" : "Add supplier"}>
+        <div className="form-grid six">
+          <Field label="Supplier" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+          <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
+          <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
+          <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+          <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
+          <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+        </div>
+        <div className="button-row left"><button onClick={saveSupplier} type="button"><Plus size={16} />{editingId ? "Save Supplier" : "Add Supplier"}</button></div>
+      </Panel>
       <Panel title="Supplier directory" action="Spend totals">
         <DataTable
           columns={[
@@ -4501,490 +1325,37 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
             { key: "email", label: "Email" },
             { key: "phone", label: "Phone" },
             { key: "spend", label: "Spend total", render: (value) => money(value) },
-            { key: "openIssues", label: "Open issues", render: (value) => value > 0 ? <Badge tone="amber">{value} open</Badge> : <Badge tone="green">0</Badge> },
-            { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) })}
-          onEdit={openSupplierModal}
-          rows={supplierRows}
-          toolbarAction={<button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button>}
+          onDelete={(id) => setSuppliers((current) => current.filter((supplier) => supplier.id !== id))}
+          onEdit={(row) => {
+            setForm(row);
+            setEditingId(row.id);
+          }}
+          rows={supplierSpend}
         />
       </Panel>
-      {modalOpen && !editingId && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add suppliers">
-            <div className="modal-header">
-              <div><h3>Add suppliers</h3><p>Bulk create suppliers</p></div>
-              <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
-            </div>
-            <div className="button-row left tight">
-              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSuppliers(event.target.files?.[0])} type="file" /></label>
-            </div>
-            {status && <div className="invoice-status info">{status}</div>}
-            {pendingImport.length > 0 && (
-              <div className="import-review">
-                <div className="panel-head"><h2>Review import</h2><span>{pendingImport.length} row(s)</span></div>
-                <DataTable columns={[
-                  { key: "name", label: "Supplier" },
-                  { key: "category", label: "Category" },
-                  { key: "contact", label: "Contact" },
-                  { key: "email", label: "Email" },
-                  { key: "phone", label: "Phone" },
-                  { key: "active", label: "Status", render: (value) => value ? "Active" : "Inactive" },
-                ]} rows={pendingImport} />
-                <div className="button-row left">
-                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
-                  <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
-                </div>
-              </div>
-            )}
-            <BulkSuppliersTable rows={bulkRows} setRows={setBulkRows} updateRow={updateBulkRow} />
-            <div className="button-row left">
-              <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
-              <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
-              <button onClick={saveBulkSuppliers} type="button"><Save size={16} />Save Suppliers</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {modalOpen && editingId && (
-        <EditModal title="Edit supplier" onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
-          <div className="modal-tabs">
-            {supplierTabs.map((tab) => (
-              <button className={activeSupplierTab === tab ? "active" : ""} key={tab} onClick={() => setActiveSupplierTab(tab)} type="button">{tab}</button>
-            ))}
-          </div>
-          {activeSupplierTab === "Details" && (
-            <div className="form-grid six">
-              <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-              <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
-              <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
-              <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-              <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
-              <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
-            </div>
-          )}
-          {activeSupplierTab === "Invoices" && (
-            <DataTable
-              columns={[
-                { key: "invoiceNumber", label: "Invoice" },
-                { key: "date", label: "Date" },
-                { key: "items", label: "Lines", render: (items) => items.length },
-                { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
-                { key: "issueCount", label: "Issues", render: (value) => value > 0 ? <Badge tone="amber">{value}</Badge> : <Badge tone="green">0</Badge> },
-              ]}
-              rows={selectedSupplierInvoices}
-            />
-          )}
-          {activeSupplierTab === "Products" && (
-            <DataTable
-              columns={[
-                { key: "name", label: "Product" },
-                { key: "packSize", label: "Pack size" },
-                { key: "quantity", label: "Quantity" },
-                { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
-                { key: "department", label: "Department" },
-              ]}
-              rows={selectedSupplierProducts}
-            />
-          )}
-          {activeSupplierTab === "Credit Notes / Issues" && (
-            <DataTable
-              columns={[
-                { key: "invoiceNumber", label: "Invoice" },
-                { key: "date", label: "Invoice date" },
-                { key: "product", label: "Product" },
-                { key: "quantity", label: "Quantity" },
-                { key: "value", label: "Value", render: (_, row) => money(issueValue(row)) },
-                { key: "reason", label: "Reason" },
-                { key: "status", label: "Status", render: (_, row) => (
-                  <select value={row.status || "To chase"} onChange={(event) => updateIssue(row.id, { status: event.target.value })}>
-                    {creditNoteStatuses.map((statusOption) => <option key={statusOption}>{statusOption}</option>)}
-                  </select>
-                ) },
-                { key: "notes", label: "Notes", render: (_, row) => <input value={row.notes || ""} onChange={(event) => updateIssue(row.id, { notes: event.target.value })} /> },
-                { key: "actions", label: "Actions", render: (_, row) => (
-                  <div className="row-actions">
-                    <button className="ghost" onClick={() => updateIssue(row.id, { status: "Chased" })} type="button">Chased</button>
-                    <button className="ghost" onClick={() => updateIssue(row.id, { status: "Credit received" })} type="button">Received</button>
-                    <button className="ghost danger" onClick={() => updateIssue(row.id, { status: "Rejected" })} type="button">Reject</button>
-                  </div>
-                ) },
-              ]}
-              rows={selectedSupplierIssues}
-            />
-          )}
-          {activeSupplierTab === "Price History" && (
-            <DataTable
-              columns={[
-                { key: "date", label: "Date" },
-                { key: "product", label: "Product" },
-                { key: "price", label: "Price", render: (value) => money(value) },
-              ]}
-              rows={selectedSupplierPriceHistory}
-            />
-          )}
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function BulkSuppliersTable({ rows, setRows, updateRow }) {
-  return (
-    <div className="table-wrap bulk-entry-table">
-      <table>
-        <thead><tr>{["Supplier", "Category", "Contact", "Email", "Phone", "Status", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td><input value={row.name} onChange={(event) => updateRow(row.id, "name", event.target.value)} /></td>
-              <td><input value={row.category} onChange={(event) => updateRow(row.id, "category", event.target.value)} /></td>
-              <td><input value={row.contact} onChange={(event) => updateRow(row.id, "contact", event.target.value)} /></td>
-              <td><input value={row.email} onChange={(event) => updateRow(row.id, "email", event.target.value)} /></td>
-              <td><input value={row.phone} onChange={(event) => updateRow(row.id, "phone", event.target.value)} /></td>
-              <td><select value={row.active ? "Active" : "Inactive"} onChange={(event) => updateRow(row.id, "active", event.target.value)}><option>Active</option><option>Inactive</option></select></td>
-              <td><button className="icon danger" onClick={() => setRows((current) => current.length > 1 ? current.filter((item) => item.id !== row.id) : current)} type="button"><Trash2 size={15} /></button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function stocktakeBlankLine(department, product = {}) {
-  const quantity = numberValue(product.quantity, 1) || 1;
-  const unitCost = numberValue(product.unitCost);
-  return {
-    id: uid(),
-    productName: product.name || "",
-    matchedProductId: product.id || "",
-    supplier: product.supplier || "",
-    packSize: product.packSize || "",
-    department: product.department || department,
-    quantity,
-    unitCost,
-    stockValue: quantity * unitCost,
-    matchStatus: product.id ? "Matched" : "Manual entry",
-  };
-}
-
-function Stocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
-  const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
-  const blankModal = (type = "Stocktake") => ({
-    type,
-    id: "",
-    department: defaultDepartment,
-    date: today(),
-    entryMode: "Product List",
-    manualValue: 0,
-    lines: [stocktakeBlankLine(defaultDepartment), stocktakeBlankLine(defaultDepartment)],
-    pendingImport: [],
-    status: "",
-    importFileKey: 0,
-  });
-  const [modal, setModal] = useState(null);
-  const [viewingStocktake, setViewingStocktake] = useState(null);
-  const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-
-  const openModal = (type, stocktake = null) => {
-    if (!stocktake) {
-      setModal(blankModal(type));
-      return;
-    }
-    const isOpening = numberValue(stocktake.openingStockValue) && !numberValue(stocktake.totalValue);
-    setModal({
-      ...blankModal(isOpening ? "Opening Stock" : "Stocktake"),
-      id: stocktake.id,
-      department: stocktake.department,
-      date: stocktake.date,
-      entryMode: stocktake.manualOpeningType === "Manual Value" || stocktake.entryMode === "Manual Value" ? "Manual Value" : "Product List",
-      manualValue: isOpening ? stocktake.openingStockValue : stocktake.totalValue,
-      lines: ((isOpening ? stocktake.openingLines : stocktake.lines) || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
-      pendingImport: [],
-      status: "",
-      importFileKey: 0,
-    });
-  };
-
-  const updateModalLine = (id, field, value) => {
-    setModal((current) => ({
-      ...current,
-      lines: current.lines.map((line) => {
-        if (line.id !== id) return line;
-        let updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-        if (field === "productName") {
-          const match = matchProduct(value, products);
-          if (match) updated = stocktakeBlankLine(current.department, match.product);
-          else updated = { ...updated, matchedProductId: "", supplier: "", packSize: "", matchStatus: "Create product on save" };
-        }
-        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        return updated;
-      }),
-    }));
-  };
-
-  const importStocktakeCsv = async (file) => {
-    if (!file || !modal) return;
-    const rows = (await file.text()).split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
-    const hasHeader = normalizeHeader(rows[0]?.[0]).includes("product");
-    const imported = (hasHeader ? rows.slice(1) : rows).map(([productName, quantity, unitCost]) => {
-      const match = matchProduct(productName, products);
-      const product = match?.product;
-      const line = product ? stocktakeBlankLine(modal.department, product) : stocktakeBlankLine(modal.department, { name: productName, quantity: 1, unitCost: numberValue(unitCost) });
-      const nextQuantity = numberValue(quantity, line.quantity);
-      const nextUnitCost = unitCost ? numberValue(unitCost) : line.unitCost;
-      return { ...line, quantity: nextQuantity, unitCost: nextUnitCost, stockValue: nextQuantity * nextUnitCost };
-    }).filter((line) => line.productName.trim());
-    setModal((current) => ({ ...current, pendingImport: imported, status: `${imported.length} row(s) ready for review.` }));
-  };
-
-  const ensureStocktakeProducts = (lines, selectedDepartment, selectedDate) => {
-    let nextProducts = [...products];
-    const savedLines = lines.map((line) => {
-      const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
-      if (match) return { ...line, matchedProductId: match.id, supplier: match.supplier || line.supplier };
-      const product = {
-        id: uid(),
-        name: line.productName,
-        supplier: line.supplier || "Stocktake",
-        packSize: line.packSize || "",
-        quantity: 1,
-        unitCost: numberValue(line.unitCost),
-        department: selectedDepartment,
-        aliases: [],
-        supplierPrices: [],
-        priceHistory: [{ date: selectedDate, supplier: "Stocktake", price: numberValue(line.unitCost) }],
-      };
-      nextProducts = [...nextProducts, product];
-      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
-    });
-    return { nextProducts, savedLines };
-  };
-
-  const saveModal = () => {
-    if (!modal) return;
-    const isManual = modal.entryMode === "Manual Value";
-    const sourceLines = isManual ? [] : modal.lines.filter((line) => line.productName.trim());
-    const incomplete = sourceLines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
-    if (!isManual && (!sourceLines.length || incomplete)) {
-      setModal((current) => ({ ...current, status: "Every row needs product, quantity and unit cost." }));
-      return;
-    }
-    const { nextProducts, savedLines } = ensureStocktakeProducts(sourceLines, modal.department, modal.date);
-    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
-    const value = isManual ? numberValue(modal.manualValue) : normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-    const isOpening = modal.type === "Opening Stock";
-    const stocktake = {
-      id: modal.id || uid(),
-      date: modal.date,
-      department: modal.department,
-      entryMode: modal.entryMode,
-      openingStockMode: "Manual",
-      manualOpeningType: modal.entryMode,
-      manualOpeningValue: isOpening && isManual ? value : 0,
-      openingLines: isOpening ? normalizedLines : [],
-      openingStockValue: isOpening ? value : 0,
-      lines: isOpening ? [] : normalizedLines,
-      totalValue: isOpening ? 0 : value,
-      status: "Saved",
-    };
-    setProducts(nextProducts);
-    setStocktakes((current) => modal.id ? current.map((item) => (item.id === modal.id ? stocktake : item)) : [stocktake, ...current]);
-    setModal(null);
-  };
-
-  return (
-    <div className="page-grid">
-      <Panel title="Stocktake">
-        <div className="button-row left">
-          <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>
-          <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>
-        </div>
-      </Panel>
-      <Panel title="Saved stocktakes">
-        <DataTable
-          columns={[
-            { key: "date", label: "Date" },
-            { key: "department", label: "Department" },
-            { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
-            { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
-            { key: "lines", label: "Lines", render: (lines, row) => (row.openingLines?.length || 0) + (lines?.length || 0) },
-            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
-            { key: "actions", label: "Actions", render: (_, row) => (
-              <div className="row-actions">
-                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
-                <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>
-                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>
-              </div>
-            ) },
-          ]}
-          rows={visibleStocktakes}
-        />
-      </Panel>
-      {modal && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide stocktake-modal" role="dialog" aria-modal="true" aria-label={modal.type}>
-            <div className="modal-header">
-              <div><h3>{modal.type}</h3><p>{modal.department} · {modal.date}</p></div>
-              <button className="icon" onClick={() => setModal(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="form-grid six">
-              <label>Department<select value={modal.department} onChange={(event) => setModal({ ...modal, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-              <Field label="Date" type="date" value={modal.date} onChange={(value) => setModal({ ...modal, date: value })} />
-            </div>
-            <div className="radio-section">
-              <strong>Entry mode</strong>
-              <div className="radio-row">
-                {["Manual Value", "Product List", "CSV Import"].map((mode) => <label key={mode}><input checked={modal.entryMode === mode} onChange={() => setModal({ ...modal, entryMode: mode })} type="radio" />{mode}</label>)}
-              </div>
-            </div>
-            {modal.entryMode === "Manual Value" ? (
-              <div className="form-grid six">
-                <Field label={modal.type === "Opening Stock" ? "Opening stock value" : "Stock value"} type="number" value={modal.manualValue} onChange={(value) => setModal({ ...modal, manualValue: value })} />
-              </div>
-            ) : (
-              <>
-                {modal.entryMode === "CSV Import" && (
-                  <>
-                    <div className="button-row left tight">
-                      <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeCsv(event.target.files?.[0])} type="file" /></label>
-                    </div>
-                    {modal.pendingImport.length > 0 && (
-                      <div className="import-review">
-                        <div className="panel-head"><h2>Review import</h2><span>{modal.pendingImport.length} row(s)</span></div>
-                        <DataTable columns={[
-                          { key: "productName", label: "Product" },
-                          { key: "quantity", label: "Quantity" },
-                          { key: "unitCost", label: "Unit cost", render: money },
-                          { key: "stockValue", label: "Stock value", render: money },
-                        ]} rows={modal.pendingImport} />
-                        <div className="button-row left">
-                          <button onClick={() => setModal((current) => ({ ...current, lines: current.pendingImport, pendingImport: [], status: "Import confirmed." }))} type="button"><Save size={16} />Confirm Import</button>
-                          <button className="ghost danger" onClick={() => setModal((current) => ({ ...current, pendingImport: [], importFileKey: current.importFileKey + 1, status: "Import cancelled." }))} type="button"><X size={16} />Cancel Import</button>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-                <div className="table-wrap bulk-entry-table stocktake-entry-table">
-                  <table>
-                    <thead><tr>{["Product search", "Quantity", "Unit cost", "Stock value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-                    <tbody>
-                      {modal.lines.map((line) => (
-                        <tr key={line.id}>
-                          <td><input list="stocktake-product-list" value={line.productName} onChange={(event) => updateModalLine(line.id, "productName", event.target.value)} /></td>
-                          <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateModalLine(line.id, "quantity", event.target.value)} /></td>
-                          <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateModalLine(line.id, "unitCost", event.target.value)} /></td>
-                          <td>{money(line.stockValue)}</td>
-                          <td><button className="icon danger" onClick={() => setModal((current) => ({ ...current, lines: current.lines.length > 1 ? current.lines.filter((item) => item.id !== line.id) : current.lines }))} type="button"><Trash2 size={15} /></button></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <datalist id="stocktake-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
-                <div className="button-row left tight">
-                  <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>
-                </div>
-              </>
-            )}
-            {modal.status && <div className="invoice-status info">{modal.status}</div>}
-            <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.entryMode === "Manual Value" ? modal.manualValue : modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
-            <div className="button-row left">
-              <button className="ghost" onClick={() => setModal(null)} type="button">Cancel</button>
-              <button onClick={saveModal} type="button"><Save size={16} />Save</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {viewingStocktake && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="View stocktake">
-            <div className="modal-header">
-              <div><h3>Stocktake</h3><p>{viewingStocktake.department} · {viewingStocktake.date}</p></div>
-              <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
-            </div>
-            {[...(viewingStocktake.openingLines || []), ...(viewingStocktake.lines || [])].map((line) => (
-              <div className="compact-row" key={line.id}><span>{line.productName}</span><span>{line.quantity} x {money(line.unitCost)}</span><strong>{money(line.stockValue)}</strong></div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LegacyStocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ department, departmentNames, openingStockByDept, products, setOpeningStockByDept, setProducts, stocktakes, setStocktakes }) {
   const stocktakeDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
-  const emptyForm = {
-    id: "",
-    date: today(),
-    department: stocktakeDepartment,
-    entryMode: "Product List",
-    manualOpeningType: "Manual Total Value",
-    manualOpeningValue: 0,
-    openingProductSearch: "",
-    openingLines: [],
-    productSearch: "",
-    lines: [],
-  };
-  const [form, setForm] = useState(emptyForm);
+  const [mode, setMode] = useState("Manual total value");
+  const [form, setForm] = useState({ date: today(), department: stocktakeDepartment, lines: [] });
   const [status, setStatus] = useState("");
-  const [viewingStocktake, setViewingStocktake] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
-  const openingProductTotal = (form.openingLines || []).reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-  const openingStockValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
-      ? openingProductTotal
-      : numberValue(form.manualOpeningValue);
-  const currentStockValue = form.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-  const productSuggestions = form.productSearch
-    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 8)
-    : [];
-  const openingProductSuggestions = form.openingProductSearch
-    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.openingProductSearch.toLowerCase()))).slice(0, 8)
-    : [];
+  const currentOpening = selectedOpeningStock(openingStockByDept, department);
+  const currentClosing = latestStocktakeValue(stocktakes, department, departmentNames);
 
-  const newStocktake = () => {
-    setForm({ ...emptyForm, date: today(), department: stocktakeDepartment });
-    setStatus("");
-  };
-
-  const productLineFromProduct = (product, quantity = 1) => {
-    const unitCost = numberValue(product.unitCost);
-    return {
-      id: uid(),
-      productName: product.name,
-      matchedProductId: product.id,
-      supplier: product.supplier || "",
-      packSize: product.packSize || "",
-      department: product.department || form.department,
-      quantity,
-      unitCost,
-      stockValue: numberValue(quantity) * unitCost,
-      matchStatus: "Matched",
-    };
-  };
-
-  const addManualLine = () => {
+  const addLine = (product = products.find((item) => departmentMatches(item.department, form.department)) || products[0]) => {
+    if (!product) return;
     setForm((current) => ({
       ...current,
       lines: [
         ...current.lines,
-        { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual entry" },
+        { id: uid(), productName: product.name, matchedProductId: product.id, quantity: 1, unitCost: numberValue(product.unitCost), stockValue: numberValue(product.unitCost), matchStatus: "Matched" },
       ],
-    }));
-  };
-
-  const addProductLine = (product) => {
-    if (!product) return;
-    setForm((current) => ({
-      ...current,
-      productSearch: "",
-      department: product.department || current.department,
-      lines: [...current.lines, productLineFromProduct(product)],
     }));
   };
 
@@ -4993,58 +1364,17 @@ function LegacyStocktake({ department, departmentNames, products, requestDelete,
       ...current,
       lines: current.lines.map((line) => {
         if (line.id !== id) return line;
-        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
+        const updated = { ...line, [field]: field === "productName" ? value : Number(value) };
         if (field === "productName") {
           const match = matchProduct(value, products);
           if (match) {
             updated.productName = match.product.name;
             updated.matchedProductId = match.product.id;
-            updated.supplier = match.product.supplier || "";
-            updated.packSize = match.product.packSize || "";
-            updated.department = match.product.department || current.department;
             updated.unitCost = match.product.unitCost;
             updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
           } else {
             updated.matchedProductId = "";
             updated.matchStatus = "Create product on save";
-          }
-        }
-        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        return updated;
-      }),
-    }));
-  };
-
-  const addOpeningLine = (product) => {
-    setForm((current) => ({
-      ...current,
-      openingProductSearch: "",
-      openingLines: [
-        ...(current.openingLines || []),
-        product ? productLineFromProduct(product) : { id: uid(), productName: "", matchedProductId: "", supplier: "", packSize: "", department: current.department, quantity: 1, unitCost: 0, stockValue: 0, matchStatus: "Manual opening" },
-      ],
-    }));
-  };
-
-  const updateOpeningLine = (id, field, value) => {
-    setForm((current) => ({
-      ...current,
-      openingLines: (current.openingLines || []).map((line) => {
-        if (line.id !== id) return line;
-        const updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? Number(value) : value };
-        if (field === "productName") {
-          const match = matchProduct(value, products);
-          if (match) {
-            updated.productName = match.product.name;
-            updated.matchedProductId = match.product.id;
-            updated.supplier = match.product.supplier || "";
-            updated.packSize = match.product.packSize || "";
-            updated.department = match.product.department || current.department;
-            updated.unitCost = match.product.unitCost;
-            updated.matchStatus = match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`;
-          } else {
-            updated.matchedProductId = "";
-            updated.matchStatus = "Manual opening";
           }
         }
         updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
@@ -5065,9 +1395,6 @@ function LegacyStocktake({ department, departmentNames, products, requestDelete,
         id: uid(),
         productName: match?.product?.name || productName,
         matchedProductId: match?.product?.id || "",
-        supplier: match?.product?.supplier || "",
-        packSize: match?.product?.packSize || "",
-        department: match?.product?.department || form.department,
         quantity: numberValue(quantity),
         unitCost: cost,
         stockValue: numberValue(quantity) * cost,
@@ -5078,409 +1405,128 @@ function LegacyStocktake({ department, departmentNames, products, requestDelete,
     setStatus(`Imported ${imported.length} CSV line(s).`);
   };
 
-  const importOpeningCsv = async (file) => {
-    if (!file) return;
-    const text = await file.text();
-    const rows = text.split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
-    const [, ...dataRows] = rows;
-    const imported = dataRows.map(([productName, quantity, unitCost]) => {
-      const match = matchProduct(productName, products);
-      const cost = unitCost ? numberValue(unitCost) : numberValue(match?.product?.unitCost);
-      return {
-        id: uid(),
-        productName: match?.product?.name || productName,
-        matchedProductId: match?.product?.id || "",
-        supplier: match?.product?.supplier || "",
-        packSize: match?.product?.packSize || "",
-        department: match?.product?.department || form.department,
-        quantity: numberValue(quantity),
-        unitCost: cost,
-        stockValue: numberValue(quantity) * cost,
-        matchStatus: match ? (match.confidence > 0.9 ? "Matched" : `Possible match: ${match.product.name}`) : "Manual opening",
-      };
-    });
-    setForm((current) => ({ ...current, openingLines: [...(current.openingLines || []), ...imported] }));
-    setStatus(`Imported ${imported.length} opening stock CSV line(s).`);
-  };
-
   const saveStocktake = () => {
-    const incomplete = form.lines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
-    const incompleteOpening = form.manualOpeningType !== "Manual Total Value"
-      ? (form.openingLines || []).some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost))
-      : false;
+    const incomplete = form.lines.some((line) => !numberValue(line.quantity) || !numberValue(line.unitCost) || !numberValue(line.stockValue));
     if (!form.lines.length || incomplete) {
-      setStatus("Every line needs product name, quantity and unit cost before saving.");
-      return;
-    }
-    if (incompleteOpening) {
-      setStatus("Every opening stock line needs product name, quantity and unit cost before saving.");
+      setStatus("Every line needs quantity, unit cost and stock value before saving.");
       return;
     }
 
     let nextProducts = [...products];
-    const ensureProduct = (line) => {
+    const savedLines = form.lines.map((line) => {
       const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
       if (match) return line;
       const product = {
         id: uid(),
         name: line.productName,
-        supplier: line.supplier || "Unknown Supplier",
-        packSize: line.packSize || "",
+        supplier: "Unknown Supplier",
+        packSize: "",
         quantity: 1,
         unitCost: numberValue(line.unitCost),
-        department: line.department || form.department,
+        department: form.department,
         aliases: [],
         supplierPrices: [],
         priceHistory: [{ date: form.date, supplier: "Stocktake", price: numberValue(line.unitCost) }],
       };
       nextProducts = [...nextProducts, product];
-      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
-    };
-
-    const savedLines = form.lines.map(ensureProduct);
-    const savedOpeningLines = (form.openingLines || []).map(ensureProduct);
-
-    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
-    const normalizedOpeningLines = savedOpeningLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
-    const totalValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
-    const savedOpeningValue = form.manualOpeningType === "Opening Product List" || form.manualOpeningType === "CSV Import"
-        ? normalizedOpeningLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0)
-        : numberValue(form.manualOpeningValue);
-    const stocktake = {
-      id: form.id || uid(),
-      date: form.date,
-      department: form.department,
-      entryMode: form.entryMode,
-      openingStockMode: "Manual",
-      manualOpeningType: form.manualOpeningType,
-      manualOpeningValue: numberValue(form.manualOpeningValue),
-      openingLines: normalizedOpeningLines,
-      openingStockValue: savedOpeningValue,
-      lines: normalizedLines,
-      totalValue,
-      status: "Saved",
-    };
-    setProducts(nextProducts);
-    setStocktakes((current) => form.id ? current.map((item) => (item.id === form.id ? stocktake : item)) : [stocktake, ...current]);
-    setForm({ ...emptyForm, date: today(), department: form.department, entryMode: form.entryMode });
-    setStatus(`Saved stocktake at ${money(totalValue)}.`);
-  };
-
-  const editStocktake = (stocktake) => {
-    setForm({
-      id: stocktake.id,
-      date: stocktake.date,
-      department: stocktake.department,
-      entryMode: stocktake.entryMode || "Manual Entry",
-      manualOpeningType: stocktake.manualOpeningType || "Manual Total Value",
-      manualOpeningValue: numberValue(stocktake.manualOpeningValue ?? stocktake.openingStockValue),
-      openingProductSearch: "",
-      openingLines: (stocktake.openingLines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
-      productSearch: "",
-      lines: (stocktake.lines || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
+      return { ...line, matchedProductId: product.id, matchStatus: "Created product" };
     });
-    setStatus(`Editing stocktake from ${stocktake.date}.`);
+
+    const totalValue = savedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    setProducts(nextProducts);
+    setStocktakes((current) => [{ id: uid(), date: form.date, department: form.department, lines: savedLines, totalValue }, ...current]);
+    setForm({ date: today(), department: form.department, lines: [] });
+    setStatus(`Saved stocktake at ${money(totalValue)}.`);
   };
 
   const csv = ["Product,Quantity,Unit cost,Stock value", ...form.lines.map((line) => `${line.productName},${line.quantity},${line.unitCost},${line.stockValue}`)].join("\n");
 
   return (
     <div className="page-grid">
-      <Panel title="Stocktake" action={form.id ? "Editing saved stocktake" : "Create stocktake"}>
-        <div className="form-grid six stocktake-controls">
-          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+      <div className="metric-grid compact">
+        <Metric label="Opening stock" value={money(currentOpening)} delta={mode} />
+        <Metric label="Closing stock" value={money(currentClosing)} delta="Latest saved stocktake" />
+        <Metric label="Real cost used" value={money(Math.max(0, currentOpening - currentClosing))} delta="Before new purchases" />
+      </div>
+      <Panel title="Opening stock">
+        <div className="form-grid">
+          <label>Mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option>Manual total value</option><option>Detailed stocktake</option></select></label>
+          {departmentNames.map((dept) => (
+            <Field key={dept} label={`${dept} opening value`} type="number" value={openingStockByDept[dept]} onChange={(value) => setOpeningStockByDept((current) => ({ ...current, [dept]: Number(value) }))} />
+          ))}
+        </div>
+      </Panel>
+      <Panel title="Create stocktake" action="Future dates allowed">
+        <div className="form-grid six">
           <label>Date<input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></label>
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
         </div>
-        <div className="radio-section">
-          <strong>Entry mode</strong>
-          <div className="radio-row">
-            {["Product List", "Manual Entry", "CSV Import"].map((mode) => (
-              <label key={mode}><input checked={form.entryMode === mode} onChange={() => setForm({ ...form, entryMode: mode })} type="radio" />{mode}</label>
-            ))}
-          </div>
-        </div>
-        <div className="radio-section compact">
-          <strong>Opening stock</strong>
-          <div className="radio-row">
-            {["Manual Total Value", "Opening Product List", "CSV Import"].map((mode) => (
-              <label key={mode}><input checked={form.manualOpeningType === mode} onChange={() => setForm({ ...form, manualOpeningType: mode })} type="radio" />{mode === "CSV Import" ? "Opening CSV Import" : mode}</label>
-            ))}
-          </div>
-        </div>
-        {form.manualOpeningType === "Manual Total Value" ? (
-          <div className="form-grid six">
-            <label>Opening Stock<input min="0" step="0.01" type="number" value={form.manualOpeningValue} onChange={(event) => setForm({ ...form, manualOpeningValue: event.target.value })} /></label>
-          </div>
-        ) : (
-          <>
-            {form.manualOpeningType === "Opening Product List" && (
-              <>
-                <div className="form-grid six">
-                  <label>Opening product search<input placeholder="Type product name..." value={form.openingProductSearch} onChange={(event) => setForm({ ...form, openingProductSearch: event.target.value })} /></label>
-                </div>
-                {openingProductSuggestions.length > 0 && (
-                  <div className="suggestion-list">
-                    {openingProductSuggestions.map((product) => <button key={product.id} onClick={() => addOpeningLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
-                  </div>
-                )}
-                <div className="button-row left tight">
-                  <button className="ghost" onClick={() => addOpeningLine()} type="button"><Plus size={16} />Add product</button>
-                </div>
-              </>
-            )}
-            {form.manualOpeningType === "CSV Import" && (
-              <div className="form-grid six">
-                <label>Opening CSV Import<input accept=".csv,text/csv" onChange={(event) => importOpeningCsv(event.target.files?.[0])} type="file" /></label>
-              </div>
-            )}
-            <div className="table-wrap compact-table">
-              <table>
-                <thead><tr>{["Product", "Quantity", "Unit Cost", "Stock Value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-                <tbody>
-                  {(form.openingLines || []).map((line) => (
-                    <tr key={line.id}>
-                      <td><input value={line.productName} onChange={(event) => updateOpeningLine(line.id, "productName", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateOpeningLine(line.id, "quantity", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateOpeningLine(line.id, "unitCost", event.target.value)} /></td>
-                      <td>{money(line.stockValue)}</td>
-                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete opening stock line", message: "Are you sure you want to delete this opening stock line?", onConfirm: () => setForm((current) => ({ ...current, openingLines: (current.openingLines || []).filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-        <div className="stocktake-summary slim"><span>Opening Stock Total</span><strong>{money(openingStockValue)}</strong></div>
         <div className="button-row left">
-          {form.entryMode === "Manual Entry" && <button onClick={addManualLine} type="button"><Plus size={16} />Add Product</button>}
+          <button onClick={() => addLine()} type="button"><Plus size={16} />Add Product</button>
+          <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
           <button onClick={saveStocktake} type="button"><Save size={16} />Save Stocktake</button>
         </div>
-        {form.entryMode === "Product List" && (
-          <>
-            <div className="form-grid">
-              <label>Search products<input placeholder="Type product name..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} /></label>
-            </div>
-            {productSuggestions.length > 0 && (
-              <div className="suggestion-list">
-                {productSuggestions.map((product) => <button key={product.id} onClick={() => addProductLine(product)} type="button">{product.name}<span>{product.packSize || "Unit"} · {money(product.unitCost)} · {product.supplier}</span></button>)}
-              </div>
-            )}
-          </>
-        )}
-        {form.entryMode === "CSV Import" && (
-          <div className="form-grid six">
-            <label>CSV Import<input accept=".csv,text/csv" onChange={(event) => importCsv(event.target.files?.[0])} type="file" /></label>
-            <a className="file-button secondary" download="stocktake.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`}>CSV Export</a>
-          </div>
-        )}
         {status && <div className="invoice-status info">{status}</div>}
-        <div className="radio-section compact">
-          <strong>Current / Closing stock</strong>
-        </div>
         <div className="table-wrap">
           <table>
-            <thead><tr>{["Product", "Unit", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
+            <thead><tr>{["Product", "Quantity", "Unit cost", "Stock value", "Match", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
             <tbody>
               {form.lines.map((line) => (
                 <tr key={line.id}>
-                  <td><input readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
-                  <td><input value={line.packSize || ""} onChange={(event) => updateLine(line.id, "packSize", event.target.value)} /></td>
+                  <td><input value={line.productName} onChange={(event) => updateLine(line.id, "productName", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateLine(line.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" readOnly={form.entryMode === "Product List" && Boolean(line.matchedProductId) && !form.id} step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
+                  <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateLine(line.id, "unitCost", event.target.value)} /></td>
                   <td>{money(line.stockValue)}</td>
-                  <td><small className="line-note">{line.matchStatus}{line.supplier ? ` · ${line.supplier}` : ""}</small></td>
-                  <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete stocktake line", message: "Are you sure you want to delete this stocktake line?", onConfirm: () => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) })) })} type="button"><Trash2 size={15} /></button></td>
+                  <td><small className="line-note">{line.matchStatus}</small></td>
+                  <td><button className="icon danger" onClick={() => setForm((current) => ({ ...current, lines: current.lines.filter((item) => item.id !== line.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="stocktake-summary slim"><span>Closing Stock</span><strong>{money(currentStockValue)}</strong></div>
       </Panel>
       <Panel title="Saved stocktakes">
-        <div className="button-row left tight">
-          <button onClick={newStocktake} type="button"><Plus size={16} />New Stocktake</button>
-        </div>
         <DataTable
           columns={[
             { key: "date", label: "Date" },
             { key: "department", label: "Department" },
-            { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
-            { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
             { key: "lines", label: "Lines", render: (lines) => lines.length },
-            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
-            { key: "actions", label: "Actions", render: (_, row) => (
-              <div className="row-actions">
-                <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
-                <button className="ghost" onClick={() => editStocktake(row)} type="button"><Edit3 size={15} />Edit</button>
-                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => { setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)); setStatus("Stocktake deleted."); } })} type="button"><Trash2 size={15} />Delete</button>
-              </div>
-            ) },
+            { key: "totalValue", label: "Stock value", render: (value) => money(value) },
           ]}
           rows={visibleStocktakes}
         />
       </Panel>
-      {viewingStocktake && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="View stocktake">
-            <div className="modal-header">
-              <div>
-                <h3>Stocktake</h3>
-                <p>{viewingStocktake.department} · {viewingStocktake.date} · {money(viewingStocktake.totalValue)}</p>
-              </div>
-              <button className="icon" onClick={() => setViewingStocktake(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="compact-row">
-              <span>Opening Stock</span>
-              <span>{viewingStocktake.manualOpeningType || "Manual Total Value"}</span>
-              <strong>{money(viewingStocktake.openingStockValue)}</strong>
-            </div>
-            <div className="split-list">
-              {(viewingStocktake.lines || []).map((line) => (
-                <div className="compact-row" key={line.id}>
-                  <span>{line.productName}</span>
-                  <span>{line.quantity} x {money(line.unitCost)}</span>
-                  <strong>{money(line.stockValue)}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function Recipes({ departmentNames, products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
-  const blankIngredient = () => ({ id: uid(), productId: "", productName: "", supplier: "", quantity: 1, unit: "", unitCost: 0, lineCost: 0 });
-  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", ingredients: [blankIngredient(), blankIngredient()] };
-  const emptyProduct = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
+function Recipes({ products, recipes, setRecipes }) {
+  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", productSearch: "", ingredientQuantity: 1, ingredients: [] };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [createProductForIngredientId, setCreateProductForIngredientId] = useState("");
-  const [productForm, setProductForm] = useState(emptyProduct);
+  const suggestions = form.productSearch
+    ? products.filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(form.productSearch.toLowerCase()))).slice(0, 5)
+    : [];
 
-  const ingredientFromProduct = (ingredient, product) => {
+  const addIngredient = (product = suggestions[0]) => {
+    if (!product) return;
     const cheapest = cheapestOffer(product, products);
-    const quantity = numberValue(ingredient.quantity, 1);
-    const unitCost = numberValue(cheapest.price, product.unitCost);
-    return {
-      ...ingredient,
-      productId: product.id,
-      productName: product.name,
-      supplier: cheapest.supplier || product.supplier || "",
-      unit: ingredient.unit || product.packSize || "",
-      unitCost,
-      lineCost: quantity * unitCost,
-    };
-  };
-
-  const updateIngredient = (id, field, value) => {
     setForm((current) => ({
       ...current,
-      ingredients: current.ingredients.map((ingredient) => {
-        if (ingredient.id !== id) return ingredient;
-        let updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-        if (field === "productName") {
-          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
-          updated = product ? ingredientFromProduct(updated, product) : { ...updated, productId: "", supplier: "", unitCost: 0, lineCost: 0 };
-        }
-        if (field === "quantity" || field === "unitCost") {
-          updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        }
-        return updated;
-      }),
+      productSearch: "",
+      ingredientQuantity: 1,
+      ingredients: [...current.ingredients, { id: uid(), productId: product.id, productName: product.name, supplier: cheapest.supplier, quantity: numberValue(current.ingredientQuantity, 1), unitCost: cheapest.price }],
     }));
-  };
-
-  const openCreateProduct = (ingredient) => {
-    setCreateProductForIngredientId(ingredient.id);
-    setProductForm({
-      ...emptyProduct,
-      name: ingredient.productName || "",
-      unitCost: ingredient.unitCost || 0,
-      packSize: ingredient.unit || "",
-    });
-  };
-
-  const saveCreatedProduct = () => {
-    if (!productForm.name.trim()) return;
-    const aliases = String(productForm.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
-    const unitCost = numberValue(productForm.unitCost);
-    const product = {
-      ...productForm,
-      id: uid(),
-      aliases,
-      quantity: numberValue(productForm.quantity, 1),
-      unitCost,
-      supplierPrices: [{ supplier: productForm.supplier, price: unitCost, date: today() }],
-      priceHistory: [{ date: today(), supplier: productForm.supplier, price: unitCost }],
-    };
-    setProducts((current) => [product, ...current]);
-    setForm((current) => ({
-      ...current,
-      ingredients: current.ingredients.map((ingredient) => (
-        ingredient.id === createProductForIngredientId
-          ? ingredientFromProduct({ ...ingredient, productName: product.name, unit: ingredient.unit || product.packSize }, product)
-          : ingredient
-      )),
-    }));
-    setCreateProductForIngredientId("");
-    setProductForm(emptyProduct);
   };
 
   const saveRecipe = () => {
     if (!form.name.trim()) return;
-    const ingredients = form.ingredients
-      .filter((ingredient) => ingredient.productName.trim())
-      .map((ingredient) => ({
-        ...ingredient,
-        quantity: numberValue(ingredient.quantity, 1),
-        unitCost: numberValue(ingredient.unitCost),
-        lineCost: numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost),
-      }));
-    const batchCost = ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
-    const yieldQuantity = numberValue(form.yieldQuantity, 1);
-    const payload = {
-      id: editingId || uid(),
-      name: form.name,
-      yieldQuantity,
-      yieldUnit: form.yieldUnit,
-      notes: form.notes,
-      method: form.method,
-      ingredients,
-      batchCost,
-      unitCost: yieldQuantity ? batchCost / yieldQuantity : 0,
-    };
+    const payload = { id: editingId || uid(), name: form.name, yieldQuantity: numberValue(form.yieldQuantity, 1), yieldUnit: form.yieldUnit, ingredients: form.ingredients };
     if (editingId) setRecipes((current) => current.map((recipe) => (recipe.id === editingId ? payload : recipe)));
     else setRecipes((current) => [payload, ...current]);
     setForm(empty);
     setEditingId("");
-    setModalOpen(false);
-  };
-
-  const openRecipeModal = (row = null) => {
-    if (row) {
-      const ingredients = (row.ingredients || []).map((ingredient) => ({
-        id: ingredient.id || uid(),
-        productId: ingredient.productId || "",
-        productName: ingredient.productName || ingredient.name || "",
-        supplier: ingredient.supplier || "",
-        quantity: numberValue(ingredient.quantity, 1),
-        unit: ingredient.unit || "",
-        unitCost: numberValue(ingredient.unitCost),
-        lineCost: numberValue(ingredient.lineCost, numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost)),
-      }));
-      setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", ingredients: ingredients.length ? ingredients : [blankIngredient(), blankIngredient()] });
-      setEditingId(row.id);
-    } else {
-      setForm(empty);
-      setEditingId("");
-    }
-    setCreateProductForIngredientId("");
-    setModalOpen(true);
   };
 
   const rows = recipes.map((recipe) => ({
@@ -5490,11 +1536,43 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
     unitCost: recipeUnitCost(recipe),
     linked: recipe.ingredients.length,
   }));
-  const currentBatchCost = form.ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
-  const currentUnitCost = numberValue(form.yieldQuantity, 1) ? currentBatchCost / numberValue(form.yieldQuantity, 1) : 0;
 
   return (
     <div className="page-grid">
+      <Panel title={editingId ? "Edit recipe" : "Create recipe"}>
+        <div className="form-grid six">
+          <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+          <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
+          <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
+          <Field label="Ingredient quantity" type="number" value={form.ingredientQuantity} onChange={(value) => setForm({ ...form, ingredientQuantity: value })} />
+          <label>
+            Ingredients
+            <input placeholder="Type Mush..." value={form.productSearch} onChange={(event) => setForm({ ...form, productSearch: event.target.value })} />
+          </label>
+        </div>
+        {suggestions.length > 0 && (
+          <div className="suggestion-list">
+            {suggestions.map((product) => {
+              const cheapest = cheapestOffer(product, products);
+              return <button key={product.id} onClick={() => addIngredient(product)} type="button">{product.name}<span>{cheapest.supplier} {money(cheapest.price)}</span></button>;
+            })}
+          </div>
+        )}
+        <div className="stack-list tight">
+          {form.ingredients.map((ingredient) => (
+            <div className="compact-row" key={ingredient.id}>
+              <span>{ingredient.productName}</span>
+              <span>{ingredient.supplier}</span>
+              <strong>{ingredient.quantity} x {money(ingredient.unitCost)}</strong>
+              <button className="icon danger" onClick={() => setForm((current) => ({ ...current, ingredients: current.ingredients.filter((item) => item.id !== ingredient.id) }))} type="button"><Trash2 size={15} /></button>
+            </div>
+          ))}
+        </div>
+        <div className="button-row left">
+          <button onClick={() => addIngredient()} type="button"><Plus size={16} />Add Ingredient</button>
+          <button onClick={saveRecipe} type="button"><Save size={16} />{editingId ? "Save Recipe" : "Create Recipe"}</button>
+        </div>
+      </Panel>
       <Panel title="Recipe costing">
         <DataTable
           columns={[
@@ -5504,90 +1582,26 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
             { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
             { key: "linked", label: "Ingredients" },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) })}
-          onEdit={openRecipeModal}
+          onDelete={(id) => setRecipes((current) => current.filter((recipe) => recipe.id !== id))}
+          onEdit={(row) => {
+            setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, productSearch: "", ingredientQuantity: 1, ingredients: row.ingredients });
+            setEditingId(row.id);
+          }}
           rows={rows}
-          toolbarAction={<button onClick={() => openRecipeModal()} type="button"><Plus size={16} />Add Recipe</button>}
         />
       </Panel>
-      {modalOpen && (
-        <EditModal title={editingId ? "Edit recipe" : "Create recipe"} onCancel={() => setModalOpen(false)} onSave={saveRecipe} saveLabel="Save Recipe">
-          <div className="form-grid six">
-            <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
-            <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
-            <label>Recipe notes<textarea rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
-            <label className="wide-field">Method<textarea rows={7} placeholder="large text box" value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} /></label>
-          </div>
-          <div className="table-wrap bulk-entry-table recipe-builder-table">
-            <table>
-              <thead><tr>{["Search ingredient", "Product", "Supplier", "Unit cost", "Quantity", "Unit", "Cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-              <tbody>
-                {form.ingredients.map((ingredient) => {
-                  const productFound = products.some((product) => product.name.toLowerCase() === ingredient.productName.trim().toLowerCase());
-                  const needsProduct = ingredient.productName.trim() && !productFound;
-                  return (
-                    <tr key={ingredient.id}>
-                      <td>
-                        <input list={`recipe-product-${ingredient.id}`} value={ingredient.productName} onChange={(event) => updateIngredient(ingredient.id, "productName", event.target.value)} />
-                        <datalist id={`recipe-product-${ingredient.id}`}>
-                          {productAutocomplete(products, ingredient.productName).map((product) => <option key={product.id} value={product.name} />)}
-                        </datalist>
-                        {needsProduct && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
-                      </td>
-                      <td>{ingredient.productId ? ingredient.productName : "-"}</td>
-                      <td>{ingredient.supplier || "-"}</td>
-                      <td>{money(ingredient.unitCost)}</td>
-                      <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateIngredient(ingredient.id, "quantity", event.target.value)} /></td>
-                      <td><input value={ingredient.unit} onChange={(event) => updateIngredient(ingredient.id, "unit", event.target.value)} /></td>
-                      <td>{money(numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)))}</td>
-                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.length > 1 ? current.ingredients.filter((item) => item.id !== ingredient.id) : current.ingredients })) })} type="button"><Trash2 size={15} /></button></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="button-row left tight">
-            <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Batch cost" value={money(currentBatchCost)} delta={`${form.ingredients.filter((ingredient) => ingredient.productName.trim()).length} ingredient(s)`} />
-            <Metric label="Unit cost" value={money(currentUnitCost)} delta={`Per ${form.yieldUnit || "unit"}`} />
-          </div>
-        </EditModal>
-      )}
-      {createProductForIngredientId && (
-        <EditModal title="Create product" onCancel={() => setCreateProductForIngredientId("")} onSave={saveCreatedProduct} saveLabel="Save Product">
-          <div className="form-grid six">
-            <Field label="Product name" value={productForm.name} onChange={(value) => setProductForm({ ...productForm, name: value })} />
-            <label>Supplier<select value={productForm.supplier} onChange={(event) => setProductForm({ ...productForm, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
-            <Field label="Pack size" value={productForm.packSize} onChange={(value) => setProductForm({ ...productForm, packSize: value })} />
-            <Field label="Quantity" type="number" value={productForm.quantity} onChange={(value) => setProductForm({ ...productForm, quantity: value })} />
-            <Field label="Unit cost" type="number" value={productForm.unitCost} onChange={(value) => setProductForm({ ...productForm, unitCost: value })} />
-            <label>Department<select value={productForm.department} onChange={(event) => setProductForm({ ...productForm, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-            <Field label="Aliases" value={productForm.aliases} onChange={(value) => setProductForm({ ...productForm, aliases: value })} />
-          </div>
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, products, recipes, requestDelete, setMenus }) {
+function MenuCosting({ financialSettings, menuSettings, menus, recipes, setMenus }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
-  const [menuSubcategoryRows, setMenuSubcategoryRows] = useState([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
-  const [dishForm, setDishForm] = useState({ menuId: menus[0]?.id || "", subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" });
-  const [menuModalOpen, setMenuModalOpen] = useState(false);
-  const [dishModalOpen, setDishModalOpen] = useState(false);
-  const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
-  const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
+  const [subcategoryName, setSubcategoryName] = useState("");
+  const [dishForm, setDishForm] = useState({ subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
   const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
   const subcategories = activeMenu?.subcategories || [];
-  const dishMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
-  const dishSubcategories = dishMenu?.subcategories || [];
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
     subcategory.dishes.map((dish) => {
       const cost = dishCost(dish, recipes);
@@ -5613,115 +1627,55 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
 
   const createMenu = () => {
     if (!menuForm.name.trim()) return;
-    const subcategories = menuSubcategoryRows
-      .map((row) => row.name.trim())
-      .filter(Boolean)
-      .map((name) => ({ id: uid(), name, targetGp: numberValue(menuForm.targetGp, defaultTarget), dishes: [] }));
-    const menu = { ...menuForm, id: uid(), targetGp: numberValue(menuForm.targetGp, defaultTarget), subcategories };
+    const menu = { ...menuForm, id: uid(), targetGp: numberValue(menuForm.targetGp, defaultTarget), subcategories: [] };
     setMenus((current) => [menu, ...current]);
     setActiveMenuId(menu.id);
     setMenuForm({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
-    setMenuSubcategoryRows([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
-    setMenuModalOpen(false);
+  };
+
+  const addSubcategory = () => {
+    if (!activeMenu || !subcategoryName.trim()) return;
+    const subcategory = { id: uid(), name: subcategoryName, targetGp: activeMenu.targetGp, dishes: [] };
+    setMenus((current) => current.map((menu) => (menu.id === activeMenu.id ? { ...menu, subcategories: [...menu.subcategories, subcategory] } : menu)));
+    setDishForm((current) => ({ ...current, subcategoryId: subcategory.id }));
+    setSubcategoryName("");
   };
 
   const addDish = () => {
-    const selectedMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
-    if (!selectedMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
-    const dishIngredients = dishIngredientRows
-      .filter((ingredient) => ingredient.name.trim())
-      .map((ingredient) => ({ ...ingredient, lineCost: numberValue(ingredient.quantity) * numberValue(ingredient.unitCost) }));
-    const ingredientCost = dishIngredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
+    if (!activeMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
     const dish = {
       id: uid(),
       name: dishForm.name,
       sellingPrice: numberValue(dishForm.sellingPrice),
-      recipeIds: [],
-      ingredients: dishIngredients,
-      manualCost: 0,
-      targetGp: "",
+      recipeIds: dishForm.recipeId ? [dishForm.recipeId] : [],
+      manualCost: numberValue(dishForm.manualCost),
+      targetGp: dishForm.targetGp === "" ? "" : numberValue(dishForm.targetGp),
       status: dishForm.status,
     };
     setMenus((current) => current.map((menu) => {
-      if (menu.id !== selectedMenu.id) return menu;
+      if (menu.id !== activeMenu.id) return menu;
       return {
         ...menu,
         subcategories: menu.subcategories.map((subcategory) => (subcategory.id === dishForm.subcategoryId ? { ...subcategory, dishes: [...subcategory.dishes, dish] } : subcategory)),
       };
     }));
-    setActiveMenuId(selectedMenu.id);
-    setDishForm({ menuId: selectedMenu.id, subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, status: "Draft" });
-    setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]);
-    setDishModalOpen(false);
-  };
-
-  const updateDishIngredient = (id, field, value) => {
-    setDishIngredientRows((current) => current.map((ingredient) => {
-      if (ingredient.id !== id) return ingredient;
-      const updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-      if (field === "name") {
-        if (updated.type === "Product") {
-          const product = matchProduct(value, products)?.product;
-          if (product) {
-            updated.name = product.name;
-            updated.sourceId = product.id;
-            updated.unitCost = numberValue(product.unitCost);
-            updated.unit = product.packSize || updated.unit;
-          }
-        }
-        if (updated.type === "Recipe") {
-          const recipe = recipes.find((item) => item.name.toLowerCase() === String(value).trim().toLowerCase()) || recipes.find((item) => item.name.toLowerCase().includes(String(value).toLowerCase()));
-          if (recipe) {
-            updated.name = recipe.name;
-            updated.sourceId = recipe.id;
-            updated.unitCost = recipeUnitCost(recipe);
-            updated.unit = recipe.yieldUnit || updated.unit;
-          }
-        }
-      }
-      updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
-      return updated;
-    }));
-  };
-
-  const deleteMenu = () => {
-    if (!activeMenu) return;
-    requestDelete({
-      title: "Delete menu",
-      message: "Are you sure you want to delete this menu?",
-      onConfirm: () => {
-        setMenus((current) => current.filter((menu) => menu.id !== activeMenu.id));
-        const nextMenu = menus.find((menu) => menu.id !== activeMenu.id);
-        setActiveMenuId(nextMenu?.id || "");
-      },
-    });
-  };
-
-  const deleteSubcategory = (subcategoryId) => {
-    requestDelete({
-      title: "Delete subcategory",
-      message: "Are you sure you want to delete this subcategory?",
-      onConfirm: () => setMenus((current) => current.map((menu) => (
-        menu.id === activeMenu?.id
-          ? { ...menu, subcategories: menu.subcategories.filter((subcategory) => subcategory.id !== subcategoryId) }
-          : menu
-      ))),
-    });
-  };
-
-  const deleteDish = (dishId) => {
-    requestDelete({
-      title: "Delete menu dish",
-      message: "Are you sure you want to delete this menu dish?",
-      onConfirm: () => setMenus((current) => current.map((menu) => ({
-        ...menu,
-        subcategories: menu.subcategories.map((subcategory) => ({ ...subcategory, dishes: subcategory.dishes.filter((dish) => dish.id !== dishId) })),
-      }))),
-    });
+    setDishForm({ subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, recipeId: "", manualCost: 0, targetGp: "", status: "Draft" });
   };
 
   return (
     <div className="page-grid">
+      <Panel title="Create menu">
+        <div className="form-grid six">
+          <Field label="Name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
+          <Field label="Season / Type" value={menuForm.season} onChange={(value) => setMenuForm({ ...menuForm, season: value })} />
+          <Field label="Start date" type="date" value={menuForm.startDate} onChange={(value) => setMenuForm({ ...menuForm, startDate: value })} />
+          <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
+          <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
+          <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+        </div>
+        <div className="button-row left"><button onClick={createMenu} type="button"><Plus size={16} />Create Menu</button></div>
+      </Panel>
+
       {activeMenu && (
         <>
           <div className="metric-grid compact">
@@ -5734,11 +1688,18 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
           <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+              <Field label="Add subcategory" value={subcategoryName} onChange={setSubcategoryName} />
+              <label>Dish subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{subcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
+              <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
+              <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
+              <label>Linked recipe<select value={dishForm.recipeId} onChange={(event) => setDishForm({ ...dishForm, recipeId: event.target.value })}><option value="">None</option>{recipes.map((recipe) => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
+              <Field label="Manual ingredients cost" type="number" value={dishForm.manualCost} onChange={(value) => setDishForm({ ...dishForm, manualCost: value })} />
+              <Field label="Dish target GP %" type="number" value={dishForm.targetGp} onChange={(value) => setDishForm({ ...dishForm, targetGp: value })} readOnly={!menuSettings.allowDishTargetOverride} />
+              <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
             </div>
             <div className="button-row left">
-              <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>
-              <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>
-              <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>
+              <button className="ghost" onClick={addSubcategory} type="button"><Plus size={16} />Add Subcategory</button>
+              <button onClick={addDish} type="button"><Plus size={16} />Add Dish</button>
             </div>
           </Panel>
           <Panel title="Subcategory summary">
@@ -5747,7 +1708,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                 const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
                 const gp = average(rows.map((dish) => dish.gp));
                 const target = numberValue(subcategory.targetGp, menuTarget);
-                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span><button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button></div>;
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span></div>;
               })}
             </div>
           </Panel>
@@ -5763,104 +1724,18 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                 { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : value > -5 ? "amber" : "red"}>{percent(value)}</Badge> },
                 { key: "status", label: "Status" },
               ]}
-              onDelete={deleteDish}
               rows={dishRows}
             />
           </Panel>
         </>
       )}
-      {!activeMenu && <Panel title="Menu costing"><div className="button-row left"><button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button></div></Panel>}
-      {menuModalOpen && (
-        <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
-          <div className="form-grid six">
-            <Field label="Menu name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
-            <Field label="Season / type" value={menuForm.season} onChange={(value) => setMenuForm({ ...menuForm, season: value })} />
-            <Field label="Start date" type="date" value={menuForm.startDate} onChange={(value) => setMenuForm({ ...menuForm, startDate: value })} />
-            <Field label="End date" type="date" value={menuForm.endDate} onChange={(value) => setMenuForm({ ...menuForm, endDate: value })} />
-            <Field label="Target GP %" type="number" value={menuForm.targetGp} onChange={(value) => setMenuForm({ ...menuForm, targetGp: value })} readOnly={!menuSettings.allowMenuTargetOverride} />
-            <label>Status<select value={menuForm.status} onChange={(event) => setMenuForm({ ...menuForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
-          </div>
-          <div className="stack-list tight">
-            {menuSubcategoryRows.map((row) => (
-              <div className="compact-row" key={row.id}>
-                <input placeholder="Subcategory name" value={row.name} onChange={(event) => setMenuSubcategoryRows((current) => current.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} />
-              </div>
-            ))}
-          </div>
-          <div className="button-row left tight">
-            <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add Subcategory</button>
-          </div>
-        </EditModal>
-      )}
-      {dishModalOpen && (
-        <EditModal title="Add dish" onCancel={() => setDishModalOpen(false)} onSave={addDish} saveLabel="Save Dish">
-          <div className="form-grid six">
-            <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
-            <label>Menu<select value={dishForm.menuId} onChange={(event) => {
-              const nextMenu = menus.find((menu) => menu.id === event.target.value);
-              setDishForm({ ...dishForm, menuId: event.target.value, subcategoryId: nextMenu?.subcategories?.[0]?.id || "" });
-            }}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
-            <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{dishSubcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
-            <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
-            <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
-          </div>
-          <div className="table-wrap compact-table dish-builder-table">
-            <table>
-              <thead><tr>{["Type", "Search", "Quantity", "Unit", "Cost auto", "Line cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-              <tbody>
-                {dishIngredientRows.map((ingredient) => {
-                  const productMatches = ingredient.type === "Product" ? productAutocomplete(products, ingredient.name, 5) : [];
-                  const recipeMatches = ingredient.type === "Recipe" ? recipeAutocomplete(recipes, ingredient.name, 5) : [];
-                  return (
-                  <tr key={ingredient.id}>
-                    <td><select value={ingredient.type} onChange={(event) => updateDishIngredient(ingredient.id, "type", event.target.value)}><option>Product</option><option>Recipe</option></select></td>
-                    <td>
-                      <input value={ingredient.name} onChange={(event) => updateDishIngredient(ingredient.id, "name", event.target.value)} />
-                      {Boolean(productMatches.length || recipeMatches.length) && (
-                        <div className="inline-suggestion-list">
-                          {productMatches.map((product) => (
-                            <button key={product.id} onClick={() => updateDishIngredient(ingredient.id, "name", product.name)} type="button">
-                              {product.name}<span>{product.supplier || "No supplier"} · {money(product.unitCost)}</span>
-                            </button>
-                          ))}
-                          {recipeMatches.map((recipe) => (
-                            <button key={recipe.id} onClick={() => updateDishIngredient(ingredient.id, "name", recipe.name)} type="button">
-                              {recipe.name}<span>Recipe · {money(recipeUnitCost(recipe))}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </td>
-                    <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateDishIngredient(ingredient.id, "quantity", event.target.value)} /></td>
-                    <td><input value={ingredient.unit} onChange={(event) => updateDishIngredient(ingredient.id, "unit", event.target.value)} /></td>
-                    <td>{money(ingredient.unitCost)}</td>
-                    <td>{money(ingredient.lineCost)}</td>
-                    <td><button className="icon danger" onClick={() => setDishIngredientRows((current) => current.length > 1 ? current.filter((item) => item.id !== ingredient.id) : current)} type="button"><Trash2 size={15} /></button></td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="button-row left tight">
-            <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add Ingredient Row</button>
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Dish cost" value={money(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0))} delta="Sum all ingredients" />
-            <Metric label="GP" value={percent(gpFor(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0), dishForm.sellingPrice))} delta="Selling price vs cost" />
-          </div>
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function Waste({ department, departmentNames, products, requestDelete, wasteItems, setWasteItems }) {
+function Waste({ department, departmentNames, products, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
-  const emptyWaste = { date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" };
-  const [form, setForm] = useState(emptyWaste);
-  const [editingWasteId, setEditingWasteId] = useState("");
-  const [wasteModalOpen, setWasteModalOpen] = useState(false);
+  const [form, setForm] = useState({ date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
 
   const updateProduct = (value) => {
     const match = matchProduct(value, products);
@@ -5869,21 +1744,25 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
 
   const addWaste = () => {
     if (!form.productName.trim()) return;
-    const payload = { ...form, id: editingWasteId || uid(), cost: wasteCost(form) };
-    setWasteItems((current) => editingWasteId ? current.map((item) => (item.id === editingWasteId ? payload : item)) : [payload, ...current]);
-    setForm({ ...emptyWaste, department: form.department });
-    setEditingWasteId("");
-    setWasteModalOpen(false);
-  };
-
-  const openWasteModal = (row = null) => {
-    setForm(row || emptyWaste);
-    setEditingWasteId(row?.id || "");
-    setWasteModalOpen(true);
+    setWasteItems((current) => [{ ...form, id: uid(), cost: wasteCost(form) }, ...current]);
+    setForm({ date: today(), department: form.department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" });
   };
 
   return (
     <div className="page-grid">
+      <Panel title="Create waste">
+        <div className="form-grid six">
+          <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
+          <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
+          <label>Product<input list="product-list" value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
+          <datalist id="product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
+          <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
+          <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+          <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
+          <Field label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
+        </div>
+        <div className="button-row left"><button onClick={addWaste} type="button"><Plus size={16} />Add Waste</button></div>
+      </Panel>
       <Panel title="Waste tracking" action="Separate cost line">
         <DataTable
           columns={[
@@ -5896,555 +1775,119 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
             { key: "notes", label: "Notes" },
             { key: "cost", label: "Waste cost", render: (value) => money(value) },
           ]}
-          onEdit={openWasteModal}
-          onDelete={(id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) })}
+          onDelete={(id) => setWasteItems((current) => current.filter((item) => item.id !== id))}
           rows={visibleWaste}
-          toolbarAction={<button onClick={() => openWasteModal()} type="button"><Plus size={16} />Add Waste</button>}
         />
       </Panel>
-      {wasteModalOpen && (
-        <EditModal title={editingWasteId ? "Edit waste" : "Add waste"} onCancel={() => { setWasteModalOpen(false); setEditingWasteId(""); setForm(emptyWaste); }} onSave={addWaste} saveLabel="Save Waste">
-          <div className="form-grid six">
-            <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-            <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-            <label>Product<input value={form.productName} onChange={(event) => updateProduct(event.target.value)} /></label>
-            {productAutocomplete(products, form.productName, 5).length > 0 && (
-              <div className="inline-suggestion-list wide-field">
-                {productAutocomplete(products, form.productName, 5).map((product) => (
-                  <button key={product.id} onClick={() => updateProduct(product.name)} type="button">
-                    {product.name}<span>{product.supplier || "No supplier"} · {money(product.unitCost)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
-            <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
-            <label>Reason<select value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })}>{["Spoiled", "Overproduction", "FOH mistake", "Kitchen mistake", "Expired", "Other"].map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-            <Field label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
-          </div>
-        </EditModal>
-      )}
     </div>
   );
 }
 
-function SalesManager({ financialSettings, departmentNames, requestDelete, sales, setSales }) {
-  const defaultVatRate = financialSettings.defaultVat;
-  const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
-  const [form, setForm] = useState(empty);
-  const [salesMode, setSalesMode] = useState(financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? "Calculate Net from VAT" : "Gross + Net");
-  const [editingId, setEditingId] = useState("");
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [addModalOpen, setAddModalOpen] = useState(false);
-  const [status, setStatus] = useState("");
-  const [pendingImport, setPendingImport] = useState([]);
-  const [importFileKey, setImportFileKey] = useState(0);
-  const [csvWizard, setCsvWizard] = useState(null);
-  const [smartSalesImport, setSmartSalesImport] = useState(null);
-  const departmentOptions = ["Total", ...departmentNames];
-  const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
-  const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
-
-  const updateGross = (value) => {
-    const grossSales = numberValue(value);
-    setForm((current) => ({
-      ...current,
-      grossSales,
-      sales: salesMode === "Calculate Net from VAT" ? netFromGross(grossSales, current.vatRate) : current.sales,
-    }));
-  };
-
-  const updateVatRate = (value) => {
-    const vatRate = numberValue(value, defaultVatRate);
-    setForm((current) => ({
-      ...current,
-      vatRate,
-      sales: salesMode === "Calculate Net from VAT" ? netFromGross(current.grossSales, vatRate) : current.sales,
-    }));
-  };
-
-  const saveSale = () => {
-    if (!form.date || !numberValue(form.grossSales) || !numberValue(form.sales)) {
-      setStatus("Gross Sales and Net Sales are required.");
-      return;
-    }
-    const grossSales = numberValue(form.grossSales);
-    const netSales = numberValue(form.sales);
-    const vatRate = numberValue(form.vatRate, defaultVatRate);
-    const payload = {
-      ...form,
-      id: editingId || uid(),
-      day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-      department: canonicalSalesDepartmentName(form.department),
-      grossSales,
-      sales: netSales,
-      vatRate,
-      vatAmount: vatAmountFromGrossNet(grossSales, netSales),
-      effectiveVatRate: effectiveVatRate(grossSales, netSales),
-      discounts: numberValue(form.discounts),
-      refunds: numberValue(form.refunds),
-      serviceCharge: numberValue(form.serviceCharge),
-    };
-    setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
-    setForm(empty);
-    setEditingId("");
-    setEditModalOpen(false);
-    setAddModalOpen(false);
-    setStatus("Sales saved");
-  };
-
-  const openCsvWizardFromRows = (fileName, csvRowsRaw, statusPrefix = "CSV") => {
-    if (!csvRowsRaw.length) {
-      setStatus("CSV import found no readable rows.");
-      return;
-    }
-    const headers = csvRowsRaw[0] || [];
-    const mapping = loadSalesCsvTemplate("Manual CSV", headers);
-    const dataRows = csvRowsRaw.slice(1);
-    const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-    setCsvWizard({
-      fileName,
-      headers,
-      rows: dataRows,
-      mapping,
-      templateName: "Manual CSV",
-      previewRows: preview.rows,
-      errors: preview.errors,
-      saveTemplate: false,
-    });
-    setStatus(preview.validRows.length
-      ? `${preview.validRows.length} ${statusPrefix} row(s) detected. Review mapping before import.`
-      : `CSV headers detected: ${headers.join(", ") || "No headers"}. Map the columns manually.`);
-  };
-
-  const importSales = async (file) => {
-    if (!file) return;
-    setCsvWizard(null);
-    setSmartSalesImport(null);
-    setStatus("Analysing sales CSV...");
-    const text = await file.text();
-    const { csvRowsRaw, preview } = analyzeSalesCsvLocally(file.name, text, defaultVatRate);
-    if (!csvRowsRaw.length) {
-      setStatus("CSV import found no readable rows.");
-      return;
-    }
-
-    if (preview?.confidence >= 0.85 && preview.rows.length) {
-      setSmartSalesImport(preview);
-      setStatus(`${preview.source} ${preview.reportType.toLowerCase()} detected. Review the clean preview before confirming.`);
-      return;
-    }
-
-    openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
-  };
-
-  const updateCsvMapping = (field, value) => {
-    setCsvWizard((current) => {
-      if (!current) return current;
-      const mapping = { ...current.mapping, [field]: Number(value) };
-      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-      return { ...current, mapping, previewRows: preview.rows, errors: preview.errors };
-    });
-  };
-
-  const updateCsvTemplate = (templateName) => {
-    setCsvWizard((current) => {
-      if (!current) return current;
-      const mapping = loadSalesCsvTemplate(templateName, current.headers);
-      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-      return { ...current, templateName, mapping, previewRows: preview.rows, errors: preview.errors };
-    });
-  };
-
-  const confirmCsvWizard = () => {
-    if (!csvWizard) return;
-    const preview = salesRowsFromCsvMapping(csvWizard.rows, csvWizard.mapping, defaultVatRate, financialSettings.salesInputMethod);
-    if (!preview.validRows.length) {
-      setStatus("No valid sales rows yet. Check the column mapping.");
-      return;
-    }
-    if (csvWizard.saveTemplate) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping);
-    setPendingImport(preview.validRows);
-    setCsvWizard(null);
-    const invalidCount = preview.rows.length - preview.validRows.length;
-    setStatus(invalidCount
-      ? `${preview.validRows.length} sales row(s) ready. ${invalidCount} row(s) were skipped because date/gross sales were missing.`
-      : `${preview.validRows.length} sales row(s) ready for review.`);
-  };
-
-  const openAdvancedOptions = () => {
-    if (!smartSalesImport) return;
-    openCsvWizardFromRows(smartSalesImport.fileName, smartSalesImport.csvRowsRaw || [smartSalesImport.headers, ...smartSalesImport.rawRows], "CSV");
-    setSmartSalesImport(null);
-  };
-
-  const confirmSmartSalesImport = () => {
-    if (!smartSalesImport?.rows?.length) {
-      setStatus("No smart import rows are ready yet.");
-      return;
-    }
-    const rowsToImport = smartSalesImport.rows.map((row) => ({ ...row, id: uid() }));
-    setSales((current) => [...rowsToImport, ...current]);
-    setSmartSalesImport(null);
-    setImportFileKey((current) => current + 1);
-    setStatus(`${rowsToImport.length} sales row(s) imported from ${smartSalesImport.source}.`);
-  };
-
-  const cancelSmartSalesImport = () => {
-    setSmartSalesImport(null);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import cancelled.");
-  };
-
-  const confirmImport = () => {
-    setSales((current) => [...pendingImport, ...current]);
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import confirmed.");
-  };
-
-  const cancelImport = () => {
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import cancelled.");
-  };
-
-  return (
-    <Panel title="Sales input" action="Manual or CSV">
-      <div className="button-row left">
-        <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>
-        <label className="file-button secondary">Smart CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
-      </div>
-      {status && <div className="invoice-status info">{status}</div>}
-      {smartSalesImport && (
-        <SmartSalesImportPreview
-          onAdvanced={openAdvancedOptions}
-          onCancel={cancelSmartSalesImport}
-          onConfirm={confirmSmartSalesImport}
-          preview={smartSalesImport}
-        />
-      )}
-      {csvWizard && (
-        <SalesCsvImportWizard
-          defaultVatRate={defaultVatRate}
-          financialSettings={financialSettings}
-          onCancel={() => { setCsvWizard(null); setImportFileKey((current) => current + 1); setStatus("CSV import cancelled."); }}
-          onConfirm={confirmCsvWizard}
-          updateCsvMapping={updateCsvMapping}
-          updateCsvTemplate={updateCsvTemplate}
-          wizard={csvWizard}
-          setWizard={setCsvWizard}
-        />
-      )}
-      {pendingImport.length > 0 && (
-        <div className="import-review">
-          <div className="panel-head"><h2>Review sales import</h2><span>{pendingImport.length} row(s)</span></div>
-          <DataTable
-            columns={[
-              { key: "date", label: "Date" },
-              { key: "department", label: "Sales type" },
-              { key: "grossSales", label: "Gross", render: money },
-              { key: "sales", label: "Net", render: money },
-              { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-            ]}
-            rows={pendingImport}
-          />
-          <div className="button-row left">
-            <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
-            <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
-          </div>
-        </div>
-      )}
-      <DataTable
-        columns={[
-          { key: "date", label: "Date" },
-          { key: "department", label: "Sales type" },
-          { key: "grossSales", label: "Gross Sales", render: (value) => money(value) },
-          { key: "sales", label: "Net Sales", render: (_, row) => money(netSalesForRow(row)) },
-          { key: "vatAmount", label: "VAT Amount", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-          { key: "effectiveVatRate", label: "Effective VAT %", render: (_, row) => percent(effectiveVatRate(row.grossSales, row.sales)) },
-          { key: "serviceCharge", label: "Service Charge", render: (value) => money(value) },
-          { key: "discounts", label: "Discounts", render: (value) => money(value) },
-          { key: "refunds", label: "Refunds", render: (value) => money(value) },
-        ]}
-        onDelete={(id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) })}
-        onEdit={(row) => {
-          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, refunds: row.refunds ?? 0, serviceCharge: row.serviceCharge ?? 0 });
-          setEditingId(row.id);
-          setEditModalOpen(true);
-        }}
-        rows={sales}
-      />
-      {addModalOpen && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Add sales" updateGross={updateGross} updateVatRate={updateVatRate} />
-      )}
-      {editModalOpen && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Edit sales record" updateGross={updateGross} updateVatRate={updateVatRate} />
-      )}
-    </Panel>
-  );
-}
-
-function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSettings, requestDelete, sales, setDateRangeState, setSales }) {
-  const salesTotals = totalSalesRows(sales, dateRange);
+function GpAnalysis({ dateRange, department, gpTarget, metrics, supplierSpend }) {
+  const costIncreaseRows = metrics.invoiceItems.map((item) => ({ id: item.id, name: item.productName, supplier: item.supplier, increase: item.unitCost > 5 ? 12.4 : 4.2, cost: item.unitCost }));
+  const monthlyRows = [
+    { day: "Apr", sales: metrics.sales * 0.82 },
+    { day: "May", sales: metrics.sales * 0.91 },
+    { day: "Jun", sales: metrics.sales },
+  ];
 
   return (
     <>
-      <Panel title="Sales date range" action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-      </Panel>
-      <div className="metric-grid compact">
-        <Metric label="Gross Sales" value={money(salesTotals.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-        <Metric label="Net Sales" value={money(salesTotals.netSales)} delta="Stored from POS/manual entry" />
-        <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
-        <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
+      <div className="metric-grid">
+        <Metric label="Invoice GP" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Stocktake GP" value={percent(metrics.stocktakeGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
+        <Metric label="Waste %" value={percent(metrics.wastePercent)} delta={money(metrics.waste)} tone="warn" />
+        <Metric label="Stock variance" value={money(metrics.stockVariance)} delta="Closing - opening" />
       </div>
-      <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />
-      <SalesComparison financialSettings={financialSettings} sales={sales} />
+      <div className="dashboard-layout secondary">
+        <Panel title="Weekly trends"><LineSeries rows={metrics.salesRows} valueKey="sales" /></Panel>
+        <Panel title="Monthly trends"><BarSeries rows={monthlyRows} valueKey="sales" /></Panel>
+      </div>
+      <div className="dashboard-layout secondary">
+        <Panel title="Top suppliers">
+          <DataTable
+            columns={[
+              { key: "name", label: "Supplier" },
+              { key: "category", label: "Category" },
+              { key: "spend", label: "Spend", render: (value) => money(value) },
+            ]}
+            rows={[...supplierSpend].sort((a, b) => b.spend - a.spend)}
+          />
+        </Panel>
+        <Panel title="Top cost increases">
+          <DataTable columns={[{ key: "name", label: "Product" }, { key: "supplier", label: "Supplier" }, { key: "cost", label: "Cost", render: money }, { key: "increase", label: "Increase", render: percent }]} rows={costIncreaseRows} />
+        </Panel>
+      </div>
+      <Panel title="Formula checks" action="Restaurant GP logic">
+        <div className="code-card">
+          <p>Invoice GP = (food sales - purchases) / food sales x 100</p>
+          <p>Stocktake real cost = opening stock + purchases - closing stock</p>
+          <p>Real GP including waste = (food sales - (stocktake real cost + waste)) / food sales x 100</p>
+        </div>
+      </Panel>
     </>
   );
 }
 
-function SalesComparison({ financialSettings, sales }) {
-  const [mode, setMode] = useState("Today vs Yesterday");
-  const [currentCustom, setCurrentCustom] = useState(resolveDateRange({ preset: "This Week" }, financialSettings.weekStartsOn));
-  const [previousCustom, setPreviousCustom] = useState(resolveDateRange({ preset: "Last Week" }, financialSettings.weekStartsOn));
-  const { current, previous } = salesComparisonRanges(mode, currentCustom, previousCustom, financialSettings.weekStartsOn);
-  const currentTotals = totalSalesRows(sales, current);
-  const previousTotals = totalSalesRows(sales, previous);
-  const hasData = currentTotals.rows.length || previousTotals.rows.length;
-  const currentRangeLabel = formatComparisonRange(current);
-  const previousRangeLabel = formatComparisonRange(previous);
+function AiInsights({ metrics, products, supplierSpend }) {
+  const [question, setQuestion] = useState("");
+  const [messages, setMessages] = useState([
+    { role: "assistant", text: "Ask MarginFlow AI about GP drops, supplier cost, price increases, or menu pricing. Mock answers are used until the backend is connected to OpenAI." },
+  ]);
 
-  return (
-    <Panel title="Sales comparison" action={`${currentRangeLabel} vs ${previousRangeLabel}`}>
-      <div className="form-grid six compact-form">
-        <label>Compare<select value={mode} onChange={(event) => setMode(event.target.value)}>
-          <option>Today vs Yesterday</option>
-          <option>Today vs Last Week</option>
-          <option>This Week vs Last Week</option>
-          <option>This Month vs Last Month</option>
-          <option>Custom Period vs Custom Period</option>
-        </select></label>
-        {mode === "Custom Period vs Custom Period" && (
-          <>
-            <Field label="Current from" type="date" value={currentCustom.start} onChange={(value) => setCurrentCustom((range) => ({ ...range, start: value }))} />
-            <Field label="Current to" type="date" value={currentCustom.end} onChange={(value) => setCurrentCustom((range) => ({ ...range, end: value }))} />
-            <Field label="Compare from" type="date" value={previousCustom.start} onChange={(value) => setPreviousCustom((range) => ({ ...range, start: value }))} />
-            <Field label="Compare to" type="date" value={previousCustom.end} onChange={(value) => setPreviousCustom((range) => ({ ...range, end: value }))} />
-          </>
-        )}
-      </div>
-      {!hasData ? (
-        <EmptyState />
-      ) : (
-        <>
-          <div className="comparison-period-summary">
-            <div>
-              <span>Selected period</span>
-              <strong>{currentRangeLabel}</strong>
-            </div>
-            <div>
-              <span>Compared with</span>
-              <strong>{previousRangeLabel}</strong>
-            </div>
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Gross Sales difference" value={percent(changePercent(currentTotals.grossSales, previousTotals.grossSales))} delta={`${currentRangeLabel}: ${money(currentTotals.grossSales)} vs ${previousRangeLabel}: ${money(previousTotals.grossSales)}`} tone={currentTotals.grossSales >= previousTotals.grossSales ? "good" : "warn"} />
-            <Metric label="Net Sales difference" value={percent(changePercent(currentTotals.netSales, previousTotals.netSales))} delta={`${currentRangeLabel}: ${money(currentTotals.netSales)} vs ${previousRangeLabel}: ${money(previousTotals.netSales)}`} tone={currentTotals.netSales >= previousTotals.netSales ? "good" : "warn"} />
-            <Metric label="Average daily sales" value={money(currentTotals.averageDailySales)} delta={`${previousRangeLabel}: ${money(previousTotals.averageDailySales)}`} tone={currentTotals.averageDailySales >= previousTotals.averageDailySales ? "good" : "warn"} />
-            <Metric label="VAT difference" value={percent(changePercent(currentTotals.vat, previousTotals.vat))} delta={`${currentRangeLabel}: ${money(currentTotals.vat)} vs ${previousRangeLabel}: ${money(previousTotals.vat)}`} tone={currentTotals.vat <= previousTotals.vat ? "good" : "warn"} />
-          </div>
-          <div className="dashboard-layout secondary">
-            <SalesComparisonBars title="Gross Sales comparison" current={currentTotals.grossSales} previous={previousTotals.grossSales} currentRange={current} previousRange={previous} />
-            <SalesComparisonBars title="Net Sales comparison" current={currentTotals.netSales} previous={previousTotals.netSales} currentRange={current} previousRange={previous} />
-          </div>
-        </>
-      )}
-    </Panel>
-  );
-}
-
-function formatComparisonRange(range) {
-  if (!range?.start || !range?.end) return "Selected dates";
-  return `${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
-}
-
-function SalesComparisonBars({ title, current, previous, currentRange, previousRange }) {
-  const max = Math.max(numberValue(current), numberValue(previous), 1);
-  const currentRangeLabel = formatComparisonRange(currentRange);
-  const previousRangeLabel = formatComparisonRange(previousRange);
-  return (
-    <div className="comparison-chart" aria-label={title}>
-      <div className="comparison-title">{title}</div>
-      <div className="comparison-bars">
-        <div className="comparison-bar">
-          <span style={{ height: `${(numberValue(previous) / max) * 100}%` }} title={`${previousRangeLabel}: ${money(previous)}`} />
-          <small className="comparison-period">Compared period</small>
-          <small className="comparison-date">{previousRangeLabel}</small>
-          <strong>{money(previous)}</strong>
-        </div>
-        <div className="comparison-bar current">
-          <span style={{ height: `${(numberValue(current) / max) * 100}%` }} title={`${currentRangeLabel}: ${money(current)}`} />
-          <small className="comparison-period">Selected period</small>
-          <small className="comparison-date">{currentRangeLabel}</small>
-          <strong>{money(current)}</strong>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SmartSalesImportPreview({ onAdvanced, onCancel, onConfirm, preview }) {
-  const confidence = Math.round(numberValue(preview.confidence, 0) * 100);
-  return (
-    <div className="import-review smart-import-preview">
-      <div className="panel-head">
-        <h2>Smart sales import preview</h2>
-        <span>{confidence}% confidence</span>
-      </div>
-      <div className="wizard-summary">
-        <div><span>Detected source</span><strong>{preview.source}</strong></div>
-        <div><span>Report type</span><strong>{displayReportType(preview.reportType)}</strong></div>
-        <div><span>Date / range</span><strong>{smartImportDateLabel(preview)}</strong></div>
-        <div><span>Rows ready</span><strong>{preview.rows.length}</strong></div>
-        <div><span>Gross sales</span><strong>{money(preview.grossSalesTotal)}</strong></div>
-        <div><span>Net sales</span><strong>{money(preview.netSalesTotal)}</strong></div>
-        <div><span>VAT / tax</span><strong>{money(preview.vatTotal)}</strong></div>
-        <div><span>Departments</span><strong>{preview.departments.join(", ") || "None"}</strong></div>
-      </div>
-      {preview.categories?.length > 0 && (
-        <div className="stocktake-summary">
-          <span>Categories detected</span>
-          <strong>{preview.categories.join(", ")}</strong>
-        </div>
-      )}
-      {preview.warnings?.length > 0 && <div className="invoice-status warn">{preview.warnings.join(" ")}</div>}
-      <DataTable
-        columns={[
-          { key: "date", label: "Date" },
-          { key: "department", label: "Department" },
-          { key: "sourceCategory", label: "Source category" },
-          { key: "grossSales", label: "Gross", render: money },
-          { key: "sales", label: "Net", render: money },
-          { key: "vatAmount", label: "VAT", render: money },
-          { key: "discounts", label: "Discounts", render: money },
-          { key: "refunds", label: "Refunds", render: money },
-        ]}
-        rows={preview.rows.slice(0, 50)}
-      />
-      <div className="button-row left">
-        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Import</button>
-        <button className="secondary" onClick={onAdvanced} type="button"><Settings size={16} />Advanced options</button>
-        <button className="ghost danger" onClick={onCancel} type="button"><X size={16} />Cancel</button>
-      </div>
-    </div>
-  );
-}
-
-function SalesCsvImportWizard({ financialSettings, onCancel, onConfirm, setWizard, updateCsvMapping, updateCsvTemplate, wizard }) {
-  const mappingFields = [
-    ["date", "Date"],
-    ["department", "Department / sales type"],
-    ["grossSales", "Gross sales"],
-    ["netSales", "Net sales"],
-    ["vatAmount", "VAT amount"],
-    ["vatRate", "VAT %"],
-    ["serviceCharge", "Service charge"],
-    ["discounts", "Discounts"],
-    ["refunds", "Refunds"],
-  ];
-  const validRows = wizard.previewRows.filter((row) => row.date && row.grossSales > 0);
-  const templates = ["Manual CSV", "Square", "Lightspeed", "EPOS Now", "Toast", "Zettle"];
-  return (
-    <EditModal title="CSV Import Wizard" onCancel={onCancel} onSave={onConfirm} saveLabel="Use these mapped rows">
-      <div className="wizard-summary">
-        <div><span>File</span><strong>{wizard.fileName}</strong></div>
-        <div><span>Headers detected</span><strong>{wizard.headers.length}</strong></div>
-        <div><span>Rows ready</span><strong>{validRows.length}</strong></div>
-        <div><span>Rows needing review</span><strong>{Math.max(0, wizard.previewRows.length - validRows.length)}</strong></div>
-      </div>
-      <div className="form-grid six compact-form">
-        <label>Template
-          <select value={wizard.templateName} onChange={(event) => updateCsvTemplate(event.target.value)}>
-            {templates.map((template) => <option key={template}>{template}</option>)}
-          </select>
-        </label>
-        <CheckboxField checked={wizard.saveTemplate} label="Save this mapping for next time" onChange={(value) => setWizard((current) => ({ ...current, saveTemplate: value }))} />
-      </div>
-      <Panel title="Map CSV columns" action="Change any wrong matches before importing">
-        <div className="form-grid six compact-form">
-          {mappingFields.map(([field, label]) => (
-            <label key={field}>{label}
-              <select value={wizard.mapping[field] ?? -1} onChange={(event) => updateCsvMapping(field, event.target.value)}>
-                <option value={-1}>Not used</option>
-                {wizard.headers.map((header, index) => <option key={`${field}-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
-              </select>
-            </label>
-          ))}
-        </div>
-      </Panel>
-      {wizard.errors.length > 0 && (
-        <div className="invoice-status warn">
-          {wizard.errors.slice(0, 5).join(" · ")}{wizard.errors.length > 5 ? ` · ${wizard.errors.length - 5} more` : ""}
-        </div>
-      )}
-      <Panel title="Import preview" action={`${validRows.length} ready`}>
-        <DataTable
-          columns={[
-            { key: "date", label: "Date" },
-            { key: "department", label: "Sales type" },
-            { key: "grossSales", label: "Gross", render: money },
-            { key: "sales", label: "Net", render: money },
-            { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-            { key: "importStatus", label: "Status" },
-          ]}
-          rows={wizard.previewRows.slice(0, 50)}
-        />
-      </Panel>
-      <div className="button-row left tight">
-        <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Mapping</button>
-      </div>
-    </EditModal>
-  );
-}
-
-function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmount, onCancel, onSave, salesMode, setForm, setSalesMode, title, updateGross, updateVatRate }) {
-  const changeMode = (mode) => {
-    setSalesMode(mode);
-    if (mode === "Calculate Net from VAT") {
-      setForm((current) => ({ ...current, sales: netFromGross(current.grossSales, current.vatRate) }));
+  const ask = async (preset = question) => {
+    if (!preset.trim()) return;
+    const prompt = preset.trim();
+    setMessages((current) => [...current, { role: "user", text: prompt }]);
+    setQuestion("");
+    try {
+      const response = await fetch("/api/ai/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: prompt, context: { metrics, products, supplierSpend } }),
+      });
+      if (!response.ok) throw new Error("Backend unavailable");
+      const payload = await response.json();
+      setMessages((current) => [...current, { role: "assistant", text: payload.answer }]);
+    } catch {
+      setMessages((current) => [...current, { role: "assistant", text: mockAiAnswer(prompt, metrics, products, supplierSpend) }]);
     }
   };
 
   return (
-    <EditModal title={title} onCancel={onCancel} onSave={onSave} saveLabel="Save Sales">
-      <div className="form-grid six">
-        <label>Mode<select value={salesMode} onChange={(event) => changeMode(event.target.value)}><option>Gross + Net</option><option>Calculate Net from VAT</option><option>Manual Net</option></select></label>
-        <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-        <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-        <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
-        <Field label="VAT %" type="number" value={form.vatRate} onChange={updateVatRate} />
-        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} readOnly={salesMode === "Calculate Net from VAT"} />
-        <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
-        <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
-        <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
-        <Field label="Discounts" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
-        <Field label="Refunds" type="number" value={form.refunds} onChange={(value) => setForm({ ...form, refunds: value })} />
-      </div>
-    </EditModal>
+    <div className="ai-layout">
+      <Panel title="Ask MarginFlow AI" action="Mock mode">
+        <div className="prompt-row">
+          <input placeholder="Ask why GP dropped..." value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => event.key === "Enter" && ask()} />
+          <button onClick={() => ask()} type="button"><Bot size={16} />Ask</button>
+        </div>
+        <div className="quick-prompts">
+          {["Why did GP drop?", "Which products increased most?", "Which supplier costs most?", "What should I increase prices on?"].map((item) => <button className="ghost" key={item} onClick={() => ask(item)} type="button">{item}</button>)}
+        </div>
+        <div className="chat-panel">
+          {messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>)}
+        </div>
+      </Panel>
+      <Panel title="AI backend structure">
+        <div className="code-card">
+          <p>Invoices call <code>POST /.netlify/functions/read-invoice-ai</code>.</p>
+          <p>The backend owns <code>OPENAI_API_KEY</code>. The browser never receives it.</p>
+          <p>Product matching uses exact, normalized and similarity confidence before approval updates products.</p>
+        </div>
+      </Panel>
+    </div>
   );
 }
 
 function SettingsPanel({
+  aiSettings,
   companySettings,
   departmentSettings,
   financialSettings,
   invoiceSettings,
   menuSettings,
-  requestDelete,
-  suppliers,
+  setAiSettings,
   setCompanySettings,
   setDepartmentSettings,
   setFinancialSettings,
@@ -6455,35 +1898,12 @@ function SettingsPanel({
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
   const [editingDepartmentId, setEditingDepartmentId] = useState("");
   const [dataStatus, setDataStatus] = useState("");
-  const [pendingFullBackup, setPendingFullBackup] = useState(null);
-  const [backupImportSettingsMode, setBackupImportSettingsMode] = useState("Keep current settings");
-  const [backupInputKey, setBackupInputKey] = useState(0);
-  const [importSummary, setImportSummary] = useState(null);
-  const [parserSampleText, setParserSampleText] = useState("");
-  const [parserSampleResult, setParserSampleResult] = useState(null);
 
   const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
   const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
   const updateMenu = (field, value) => setMenuSettings({ ...menuSettings, [field]: value });
   const updateInvoice = (field, value) => setInvoiceSettings({ ...invoiceSettings, [field]: value });
-  const savedSupplierParserRows = useMemo(() => {
-    const rows = suppliers.map((supplier) => ({
-      id: supplier.id || supplier.name,
-      name: supplier.name,
-      status: supplierParserStatus(supplier.name),
-    }));
-    supplierParserCatalog.forEach((parser) => {
-      if (!rows.some((row) => row.name.toLowerCase() === parser.name.toLowerCase())) {
-        rows.push({ id: `catalog-${parser.name}`, name: parser.name, status: parser.status });
-      }
-    });
-    return rows.sort((a, b) => a.name.localeCompare(b.name));
-  }, [suppliers]);
-
-  const testSupplierParser = () => {
-    const parsed = parseInvoiceWithSupplierParsers(parserSampleText);
-    setParserSampleResult(parsed.lines.length ? parsed : { ...parsed, error: couldNotReadInvoiceMessage });
-  };
+  const updateAi = (field, value) => setAiSettings({ ...aiSettings, [field]: value });
 
   const saveDepartment = () => {
     if (!departmentForm.name.trim()) return;
@@ -6497,65 +1917,32 @@ function SettingsPanel({
     setEditingDepartmentId("");
   };
 
-  const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
-  const genericSalesTemplate = "Date,Sales Type,Gross Sales,Net Sales,VAT Amount,Service Charge,Discounts,Refunds\n2026-06-10,Kitchen Made,2053.75,1821.49,232.26,0,0,0";
-  const squareSalesTemplate = "Date,Category,Gross Sales,Net Sales,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Square Food - Make in,2053.75,1821.49,232.26,0,0,0";
-  const lightspeedSalesTemplate = "Date,Category,Gross,Net,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Food,2053.75,1821.49,232.26,0,0,0";
-
-  const exportFullBackup = () => {
-    const payload = buildFullBackupPayload();
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    downloadJsonFile(`marginflow-full-backup-${stamp}.json`, payload);
-    setDataStatus(`Exported ${Object.keys(payload.localStorage).length} MarginFlow localStorage key(s).`);
+  const backup = {
+    companySettings,
+    financialSettings,
+    departmentSettings,
+    menuSettings,
+    invoiceSettings,
+    aiSettings,
+    exportedAt: new Date().toISOString(),
   };
+  const backupHref = `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(backup, null, 2))}`;
+  const departmentCsv = ["Department,Type,Target GP,Active", ...departmentSettings.map((department) => `${department.name},${department.type},${department.targetGp},${department.active ? "Active" : "Inactive"}`)].join("\n");
 
-  const importFullBackup = async (file) => {
+  const importBackup = async (file) => {
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
-      const backupStorage = extractBackupLocalStorage(payload);
-      const entries = Object.entries(backupStorage).filter(([key]) => key.startsWith("marginflow."));
-      if (!entries.length) {
-        setDataStatus("Import failed. This file does not contain MarginFlow localStorage keys.");
-        return;
-      }
-      setPendingFullBackup({ payload, storage: Object.fromEntries(entries), keyCount: entries.length });
-      setImportSummary(null);
-      setDataStatus("");
+      if (payload.companySettings) setCompanySettings({ ...defaultCompanySettings, ...payload.companySettings });
+      if (payload.financialSettings) setFinancialSettings({ ...defaultFinancialSettings, ...payload.financialSettings });
+      if (Array.isArray(payload.departmentSettings)) setDepartmentSettings(payload.departmentSettings);
+      if (payload.menuSettings) setMenuSettings({ ...defaultMenuSettings, ...payload.menuSettings });
+      if (payload.invoiceSettings) setInvoiceSettings({ ...defaultInvoiceSettings, ...payload.invoiceSettings });
+      if (payload.aiSettings) setAiSettings({ ...defaultAiSettings, ...payload.aiSettings });
+      setDataStatus("Backup imported.");
     } catch {
-      setDataStatus("Import failed. Choose a valid MarginFlow full backup JSON file.");
-    } finally {
-      setBackupInputKey((current) => current + 1);
+      setDataStatus("Import failed. Choose a MarginFlow backup JSON file.");
     }
-  };
-
-  const savePreImportBackup = () => {
-    const preImportBackup = buildFullBackupPayload();
-    localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
-  };
-
-  const replaceFullBackup = () => {
-    if (!pendingFullBackup) return;
-    savePreImportBackup();
-    Object.entries(pendingFullBackup.storage).forEach(([key, value]) => {
-      if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
-    });
-    setPendingFullBackup(null);
-    setDataStatus(`Replaced ${pendingFullBackup.keyCount} MarginFlow localStorage key(s). Reloading app...`);
-    window.setTimeout(() => window.location.reload(), 500);
-  };
-
-  const mergeFullBackup = () => {
-    if (!pendingFullBackup) return;
-    savePreImportBackup();
-    const { nextStorage, summary } = mergeMarginFlowStorage(readMarginFlowLocalStorage(), pendingFullBackup.storage, backupImportSettingsMode === "Use imported settings");
-    Object.entries(nextStorage).forEach(([key, value]) => {
-      if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
-    });
-    setImportSummary(summary);
-    setPendingFullBackup(null);
-    setDataStatus("Merged full backup. Reloading app...");
-    window.setTimeout(() => window.location.reload(), 1200);
   };
 
   const resetDemoSettings = () => {
@@ -6564,6 +1951,7 @@ function SettingsPanel({
     setDepartmentSettings(defaultDepartmentSettings);
     setMenuSettings(defaultMenuSettings);
     setInvoiceSettings(defaultInvoiceSettings);
+    setAiSettings(defaultAiSettings);
     setDepartmentForm(departmentEmpty);
     setEditingDepartmentId("");
     setDataStatus("Demo settings restored.");
@@ -6573,7 +1961,6 @@ function SettingsPanel({
     <div className="settings-grid">
       <Panel title="Company settings">
         <div className="form-grid six">
-          <label>App mode<select value={companySettings.appMode || defaultCompanySettings.appMode} onChange={(event) => updateCompany("appMode", event.target.value)}>{appModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
           <Field label="Company name" value={companySettings.companyName} onChange={(value) => updateCompany("companyName", value)} />
           <Field label="Trading name" value={companySettings.tradingName} onChange={(value) => updateCompany("tradingName", value)} />
           <Field label="Address" value={companySettings.address} onChange={(value) => updateCompany("address", value)} />
@@ -6597,38 +1984,6 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="POS & Sales Setup">
-        <div className="form-grid six">
-          <label>POS Provider<select value={financialSettings.posProvider || defaultFinancialSettings.posProvider} onChange={(event) => updateFinancial("posProvider", event.target.value)}>{["Square", "Lightspeed", "EPOS Now", "Toast", "Zettle", "Other / Manual"].map((provider) => <option key={provider}>{provider}</option>)}</select></label>
-          <label>Sales input method<select value={financialSettings.salesInputMethod || defaultFinancialSettings.salesInputMethod} onChange={(event) => updateFinancial("salesInputMethod", event.target.value)}><option>Manual Gross + Net Sales</option><option>Auto-calculate Net Sales from VAT %</option><option>CSV/POS import</option></select></label>
-          <label>Sales Data Mode<select value={financialSettings.salesDataMode || defaultFinancialSettings.salesDataMode} onChange={(event) => updateFinancial("salesDataMode", event.target.value)}><option>Gross + Net from POS</option><option>Calculate Net from VAT %</option><option>Manual Net Sales</option></select></label>
-          <label>GP calculation base<select value={financialSettings.gpCalculationBase || defaultFinancialSettings.gpCalculationBase} onChange={(event) => updateFinancial("gpCalculationBase", event.target.value)}><option>Net Sales</option><option>Gross Sales</option></select></label>
-          <label>Date column<input value={financialSettings.csvDateColumn || "Date"} onChange={(event) => updateFinancial("csvDateColumn", event.target.value)} /></label>
-          <label>Category / Sales type column<input value={financialSettings.csvCategoryColumn || "Category"} onChange={(event) => updateFinancial("csvCategoryColumn", event.target.value)} /></label>
-          <label>Gross Sales column<input value={financialSettings.csvGrossColumn || "Gross Sales"} onChange={(event) => updateFinancial("csvGrossColumn", event.target.value)} /></label>
-          <label>Net Sales column<input value={financialSettings.csvNetColumn || "Net Sales"} onChange={(event) => updateFinancial("csvNetColumn", event.target.value)} /></label>
-          <label>VAT / Tax column<input value={financialSettings.csvVatColumn || "Tax"} onChange={(event) => updateFinancial("csvVatColumn", event.target.value)} /></label>
-          <label>Service Charge column<input value={financialSettings.csvServiceColumn || "Service Charge"} onChange={(event) => updateFinancial("csvServiceColumn", event.target.value)} /></label>
-          <label>Discounts column<input value={financialSettings.csvDiscountColumn || "Discounts"} onChange={(event) => updateFinancial("csvDiscountColumn", event.target.value)} /></label>
-          <label>Refunds column<input value={financialSettings.csvRefundColumn || "Refunds"} onChange={(event) => updateFinancial("csvRefundColumn", event.target.value)} /></label>
-          <label>Food category maps to<select value={financialSettings.foodCategoryDepartment || "Kitchen Made"} onChange={(event) => updateFinancial("foodCategoryDepartment", event.target.value)}>{defaultDepartments.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-          <label>Drinks category maps to<select value={financialSettings.drinksCategoryDepartment || "Bar"} onChange={(event) => updateFinancial("drinksCategoryDepartment", event.target.value)}>{defaultDepartments.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-        </div>
-      </Panel>
-
-      <Panel title="CSV Templates / Import Guide">
-        <div className="button-row left">
-          <a className="file-button secondary" download="marginflow-sales-generic-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(genericSalesTemplate)}`}>Generic CSV Template</a>
-          <a className="file-button secondary" download="marginflow-square-sales-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(squareSalesTemplate)}`}>Square CSV Template</a>
-          <a className="file-button secondary" download="marginflow-lightspeed-sales-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(lightspeedSalesTemplate)}`}>Lightspeed CSV Template</a>
-        </div>
-        <div className="code-card">
-          <p>Required columns: Date, Sales Type or Category, Gross Sales and Net Sales. Optional columns: VAT/Tax, Service Charge, Discounts, Refunds and Quantity or Items Sold.</p>
-          <p>Accepted dates should use ISO format such as 2026-06-10. POS categories can be mapped to MarginFlow departments in POS & Sales Setup.</p>
-          <p>CSV imports load into a review state first. Use Confirm Import to save, or Cancel Import to clear temporary rows without changing saved records.</p>
-        </div>
-      </Panel>
-
       <Panel title="Department settings">
         <div className="form-grid six">
           <Field label="Department" value={departmentForm.name} onChange={(value) => setDepartmentForm({ ...departmentForm, name: value })} />
@@ -6646,7 +2001,7 @@ function SettingsPanel({
             { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete department", message: "Are you sure you want to delete this department?", onConfirm: () => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id)) })}
+          onDelete={(id) => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id))}
           onEdit={(row) => {
             setDepartmentForm(row);
             setEditingDepartmentId(row.id);
@@ -6674,81 +2029,30 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Supplier Parser Settings" action="Work Edition">
-        <DataTable
-          columns={[
-            { key: "name", label: "Supplier" },
-            { key: "status", label: "Parser status", render: (value) => <Badge tone={value === "Supported" ? "green" : "amber"}>{value}</Badge> },
-          ]}
-          rows={savedSupplierParserRows}
-        />
-        <div className="form-grid two">
-          <label>Sample invoice text<textarea rows={8} value={parserSampleText} onChange={(event) => setParserSampleText(event.target.value)} placeholder="Paste supplier invoice text here..." /></label>
-          <div className="code-card">
-            <p>Use this to test a supplier parser before saving an invoice.</p>
-            <p>Supported suppliers: {supplierParserCatalog.map((parser) => parser.name).join(", ")}.</p>
-            <label className="file-button secondary">Upload sample text<input accept=".txt,.csv,.tsv,text/plain,text/csv" onChange={async (event) => setParserSampleText(await event.target.files?.[0]?.text() || "")} type="file" /></label>
-            <button onClick={testSupplierParser} type="button"><Search size={16} />Test Parser</button>
-          </div>
+      <Panel title="AI settings">
+        <div className="form-grid six">
+          <CheckboxField checked={aiSettings.enableAiInvoiceReading} label="Enable AI invoice reading" onChange={(value) => updateAi("enableAiInvoiceReading", value)} />
+          <CheckboxField checked={aiSettings.enableAiProductMatching} label="Enable AI product matching" onChange={(value) => updateAi("enableAiProductMatching", value)} />
+          <Field label="Auto-match confidence threshold" type="number" value={aiSettings.autoMatchConfidenceThreshold} onChange={(value) => updateAi("autoMatchConfidenceThreshold", numberValue(value))} />
+          <CheckboxField checked={aiSettings.requireManualApprovalBelowThreshold} label="Require manual approval below threshold" onChange={(value) => updateAi("requireManualApprovalBelowThreshold", value)} />
+          <label>Product matching sensitivity<select value={aiSettings.productMatchingSensitivity} onChange={(event) => updateAi("productMatchingSensitivity", event.target.value)}><option>Low</option><option>Medium</option><option>High</option></select></label>
         </div>
-        {parserSampleResult && (
-          <div className={`invoice-status ${parserSampleResult.error ? "error" : "success"}`}>
-            {parserSampleResult.error || `${parserSampleResult.parserName} found ${parserSampleResult.lines.length} line(s). Supplier: ${parserSampleResult.supplier || "Unknown"}. Invoice: ${parserSampleResult.invoiceNumber || "Not found"}. Date: ${parserSampleResult.invoiceDate || "Not found"}. Total: ${money(parserSampleResult.finalInvoiceTotal)}.`}
-          </div>
-        )}
       </Panel>
 
       <Panel title="Data settings">
         <div className="button-row left">
-          <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
-          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>
+          <a className="file-button secondary" download="marginflow-backup.json" href={backupHref}>Export backup</a>
+          <label className="file-button secondary">Import backup<input accept="application/json,.json" onChange={(event) => importBackup(event.target.files?.[0])} type="file" /></label>
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
           <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
         </div>
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
-        {importSummary && (
-          <div className="code-card">
-            <p>Invoices added: {importSummary.invoicesAdded}</p>
-            <p>Invoices skipped as duplicates: {importSummary.invoicesSkipped}</p>
-            <p>Products added: {importSummary.productsAdded}</p>
-            <p>Products merged: {importSummary.productsMerged}</p>
-            <p>Suppliers added: {importSummary.suppliersAdded}</p>
-            <p>Suppliers skipped: {importSummary.suppliersSkipped}</p>
-          </div>
-        )}
       </Panel>
-      {pendingFullBackup && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="split-modal" role="dialog" aria-modal="true" aria-label="Import full backup">
-            <div className="modal-header">
-              <div>
-                <h3>How do you want to import this backup?</h3>
-                <p>{pendingFullBackup.keyCount} MarginFlow localStorage key(s) found.</p>
-              </div>
-              <button className="icon" onClick={() => setPendingFullBackup(null)} type="button"><X size={16} /></button>
-            </div>
-            <div className="code-card">
-              <p><strong>Replace existing data</strong></p>
-              <p>Warning: this replaces MarginFlow browser data for the keys included in the backup. A pre-import backup will be saved first.</p>
-              <p><strong>Merge with existing data</strong></p>
-              <p>Merges imported invoices, products, suppliers and other saved arrays with current browser data. Existing records are not deleted.</p>
-            </div>
-            <div className="form-grid six">
-              <label>Settings during merge<select value={backupImportSettingsMode} onChange={(event) => setBackupImportSettingsMode(event.target.value)}><option>Keep current settings</option><option>Use imported settings</option></select></label>
-            </div>
-            <div className="button-row left">
-              <button className="ghost danger" onClick={replaceFullBackup} type="button">Replace</button>
-              <button onClick={mergeFullBackup} type="button">Merge</button>
-              <button className="ghost" onClick={() => { setPendingFullBackup(null); setDataStatus("Full backup import cancelled."); }} type="button">Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
+function DataTable({ columns, rows, onEdit, onDelete }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
   const filtered = useMemo(() => {
@@ -6768,7 +2072,6 @@ function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
     <>
       <div className="table-toolbar">
         <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        {toolbarAction}
       </div>
       <div className="table-wrap">
         <table>
@@ -6798,47 +2101,6 @@ function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
         </table>
       </div>
     </>
-  );
-}
-
-function DeleteConfirmationModal({ title, message, onCancel, onDelete }) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header">
-          <div>
-            <h3>{title}</h3>
-            <p>{message}</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        <div className="button-row left">
-          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button className="ghost danger" onClick={onDelete} type="button">Delete</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function EditModal({ title, children, onCancel, onSave, saveLabel = "Save Changes" }) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal wide" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header">
-          <div>
-            <h3>{title}</h3>
-            <p>Review details before saving changes.</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        {children}
-        <div className="button-row left">
-          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button onClick={onSave} type="button"><Save size={16} />{saveLabel}</button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -6874,152 +2136,6 @@ function Panel({ title, action, children }) {
       </div>
       {children}
     </section>
-  );
-}
-
-function EmptyState() {
-  return <div className="empty-state">No data available for this selected period.</div>;
-}
-
-function DailyGpChart({ rows, targetGp }) {
-  // GP is only meaningful on days with sales. Purchases-only days used to create a flat 0% line with large-looking markers.
-  const validRows = rows.filter((row) => numberValue(row.netSales) > 0);
-  if (!validRows.length) return <EmptyState />;
-  const values = validRows.flatMap((row) => [row.invoiceGp, targetGp]);
-  const min = Math.min(0, ...values);
-  const max = Math.max(100, ...values);
-  const y = (value) => 90 - (((numberValue(value) - min) / Math.max(max - min, 1)) * 78);
-  const x = (index) => 8 + (index / Math.max(validRows.length - 1, 1)) * 84;
-  const points = validRows.map((row, index) => ({ x: x(index), y: y(row.invoiceGp) }));
-  const smoothPath = points.reduce((path, point, index) => {
-    if (!index) return `M ${point.x} ${point.y}`;
-    const previous = points[index - 1];
-    const controlOffset = (point.x - previous.x) / 2;
-    return `${path} C ${previous.x + controlOffset} ${previous.y}, ${point.x - controlOffset} ${point.y}, ${point.x} ${point.y}`;
-  }, "");
-  const targetY = y(targetGp);
-
-  return (
-    <div className="performance-chart">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="gpLineGradient" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" stopColor="#38bdf8" />
-            <stop offset="100%" stopColor="#60a5fa" />
-          </linearGradient>
-        </defs>
-        <line className="target-line" x1="8" x2="92" y1={targetY} y2={targetY} />
-        <path className="actual-line smooth-line" d={smoothPath} stroke="url(#gpLineGradient)" />
-        {validRows.map((row, index) => (
-          <line className="chart-hover-line" key={row.id} x1={x(index)} x2={x(index)} y1="8" y2="92">
-            <title>{`${row.date}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
-          </line>
-        ))}
-      </svg>
-      <div className="chart-legend"><span><i className="legend-actual" />Actual GP %</span><span><i className="legend-target" />Target GP %</span></div>
-      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${validRows.length}, 1fr)` }}>{validRows.map((row) => <span key={row.id}>{formatRangeDate(row.date)}</span>)}</div>
-    </div>
-  );
-}
-
-function SalesPurchasesChart({ rows }) {
-  const validRows = rows.filter((row) => row.netSales || row.purchases);
-  if (!validRows.length) return <EmptyState />;
-  const max = Math.max(...validRows.flatMap((row) => [row.netSales, row.purchases]), 1);
-
-  return (
-    <div className="grouped-bars">
-      {validRows.map((row) => (
-        <div className="grouped-bar" key={row.id}>
-          <div className="group-track">
-            <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-            <span className="purchase-bar" style={{ height: `${(row.purchases / max) * 100}%` }} title={`${row.date}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-          </div>
-          <small>{formatRangeDate(row.date)}</small>
-        </div>
-      ))}
-      <div className="chart-legend"><span><i className="legend-sales" />Net Sales</span><span><i className="legend-purchases" />Purchases</span></div>
-    </div>
-  );
-}
-
-function DepartmentBreakdown({ rows }) {
-  const visibleRows = rows.filter((row) => row.grossSales || row.netSales || row.purchases || row.waste);
-  const chartRows = visibleRows.length ? visibleRows : rows;
-  const max = Math.max(...chartRows.map((row) => Math.abs(row.gp)), 1);
-  if (!visibleRows.length) return <EmptyState />;
-
-  return (
-    <div className="breakdown-layout">
-      <div className="donut-list compact">
-        {chartRows.map((row) => (
-          <div key={row.department} title={`${displayDepartmentName(row.department)}: GP ${percent(row.gp)}, target ${percent(row.targetGp)}, variance ${percent(row.variance)}`}>
-            <span>{displayDepartmentName(row.department)}</span>
-            <strong>{percent(row.gp)}</strong>
-            <i style={{ width: `${Math.min(100, (Math.abs(row.gp) / max) * 100)}%` }} />
-          </div>
-        ))}
-      </div>
-      <div className="table-wrap compact-table">
-        <table>
-          <thead><tr>{["Department", "Gross Sales", "Net Sales", "Purchases", "Waste", "GP %", "Target GP %", "Variance"].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-          <tbody>
-            {visibleRows.map((row) => (
-              <tr key={row.department}>
-                <td>{displayDepartmentName(row.department)}</td>
-                <td>{money(row.grossSales)}</td>
-                <td>{money(row.netSales)}</td>
-                <td>{money(row.purchases)}</td>
-                <td>{money(row.waste)}</td>
-                <td>{percent(row.gp)}</td>
-                <td>{percent(row.targetGp)}</td>
-                <td><Badge tone={row.variance >= 0 ? "green" : row.variance > -5 ? "amber" : "red"}>{percent(row.variance)}</Badge></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function SupplierSpendChart({ rows, total }) {
-  const visibleRows = rows.filter((row) => row.spend > 0);
-  if (!visibleRows.length) return <EmptyState />;
-  const max = Math.max(...visibleRows.map((row) => row.spend), 1);
-  return (
-    <div className="donut-list">
-      {visibleRows.map((row) => {
-        const share = total ? (row.spend / total) * 100 : 0;
-        return (
-          <div key={row.id || row.name} title={`${row.name}\nSpend: ${money(row.spend)}\n${percent(share)} of total purchases`}>
-            <span>{row.name}</span>
-            <strong>{money(row.spend)} · {percent(share)}</strong>
-            <i style={{ width: `${(row.spend / max) * 100}%` }} />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function DailyGpTable({ rows }) {
-  const visibleRows = rows.filter((row) => row.grossSales || row.netSales || row.purchases || row.waste);
-  if (!visibleRows.length) return <EmptyState />;
-  return (
-    <DataTable
-      columns={[
-        { key: "date", label: "Date" },
-        { key: "grossSales", label: "Gross Sales", render: (value) => money(value) },
-        { key: "netSales", label: "Net Sales", render: (value) => money(value) },
-        { key: "purchases", label: "Purchases", render: (value) => money(value) },
-        { key: "waste", label: "Waste", render: (value) => money(value) },
-        { key: "invoiceGp", label: "Invoice GP %", render: (value) => percent(value) },
-        { key: "stocktakeGp", label: "Stocktake GP %", render: (value) => percent(value) },
-        { key: "realGp", label: "Real GP including waste", render: (value) => percent(value) },
-      ]}
-      rows={visibleRows}
-    />
   );
 }
 
@@ -7080,6 +2196,22 @@ function departmentForProduct(name = "", departmentNames = defaultDepartments, f
   if (lower.includes("blue roll") || lower.includes("napkin") || lower.includes("clean")) return pick("Non-food");
   if (lower.includes("croissant") || lower.includes("cake") || lower.includes("bread")) return pick("Bought In");
   return pick(fallback);
+}
+
+function mockAiAnswer(question, metrics, products, supplierSpend) {
+  const lower = question.toLowerCase();
+  if (lower.includes("supplier")) {
+    const top = [...supplierSpend].sort((a, b) => b.spend - a.spend)[0];
+    return `${top?.name || "No supplier"} is currently the highest-cost supplier at ${money(top?.spend || 0)}. Review high-value invoice lines before the next order.`;
+  }
+  if (lower.includes("product") || lower.includes("increased")) {
+    const top = [...products].sort((a, b) => b.unitCost - a.unitCost)[0];
+    return `${top?.name || "No product"} is one of the highest-cost products at ${money(top?.unitCost || 0)}. Check its latest invoice against previous price history.`;
+  }
+  if (lower.includes("price")) {
+    return "Start with dishes below 75% GP or dishes using products that recently increased. Increase selling price only where volume and guest perception can support it.";
+  }
+  return `Real GP including waste is currently ${percent(metrics.realGp)}. Check invoice spend, stock variance and waste by department.`;
 }
 
 const rootElement = document.getElementById("root");
