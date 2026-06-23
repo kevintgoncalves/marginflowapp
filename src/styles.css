@@ -533,9 +533,39 @@ td input, td select { min-width: 110px; }
   min-width: 1420px;
 }
 
+.invoice-review-table-wrap {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}
+
 .invoice-review-table th,
 .invoice-review-table td {
   white-space: nowrap;
+}
+
+.invoice-review-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: var(--card);
+  box-shadow: 0 1px 0 var(--line);
+}
+
+.invoice-review-table th:first-child,
+.invoice-review-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: var(--card);
+  box-shadow: 1px 0 0 var(--line);
+}
+
+.invoice-review-table thead th:first-child {
+  z-index: 5;
+}
+
+.invoice-review-table td:first-child {
+  white-space: normal;
 }
 
 .invoice-review-table td:first-child input {
@@ -543,6 +573,16 @@ td input, td select { min-width: 110px; }
   width: 260px;
   min-height: 46px;
   font-size: 15px;
+}
+
+.invoice-review-table td:first-child .match-hint {
+  display: flex;
+  width: 260px;
+}
+
+.invoice-review-table td:first-child .line-note {
+  width: 260px;
+  white-space: normal;
 }
 
 .invoice-review-table td:nth-child(2) input {
