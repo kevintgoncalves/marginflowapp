@@ -1319,7 +1319,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             departmentSplits: [{ department: value, percentage: 100, amount: lineTotal(updated) }],
           };
         }
-        return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
+        if (field === "productName") {
+          const enriched = enrichInvoiceLine(updated, products, aiSettings);
+          return { ...enriched, productName: value };
+        }
+        return updated;
       }),
     }));
   };
@@ -1605,8 +1609,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       </Panel>
 
       <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
-        <div className="table-wrap">
-          <table>
+        <div className="table-wrap invoice-review-table-wrap">
+          <table className="invoice-review-table">
             <thead>
               <tr>
                 {["Product", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
@@ -1616,7 +1620,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
               {draft.items.map((item) => (
                 <tr key={item.id}>
                   <td>
-                    <input value={item.productName} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} />
+                    <input title={item.productName || ""} value={item.productName || ""} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} />
                     {item.suggestedProductName && (
                       <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
                         Did you mean: {item.suggestedProductName}?
@@ -1624,7 +1628,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                     )}
                     {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
                   </td>
-                  <td><input value={item.packSize} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
+                  <td><input value={item.packSize || ""} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
                   <td><input min="0" step="0.01" type="number" value={item.discountAmount || 0} onChange={(event) => updateDraftItem(item.id, "discountAmount", event.target.value)} /></td>
@@ -1641,7 +1645,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                       updateSplit={(splitIndex, field, value) => updateDraftSplit(item.id, splitIndex, field, value)}
                     />
                   </td>
-                  <td><input value={item.supplier} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
+                  <td><input value={item.supplier || ""} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
                   <td>{money(lineTotal(item))}</td>
                   <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
                 </tr>

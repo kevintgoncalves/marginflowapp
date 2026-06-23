@@ -505,7 +505,10 @@ label {
   color: var(--muted);
 }
 .table-toolbar input { padding-left: 34px; }
-.table-wrap { overflow: auto; }
+.table-wrap {
+  overflow-x: auto;
+  overflow-y: visible;
+}
 table {
   width: 100%;
   min-width: 1120px;
@@ -525,6 +528,32 @@ th {
 }
 td { color: #dbeafe; font-weight: 700; }
 td input, td select { min-width: 110px; }
+
+.invoice-review-table {
+  min-width: 1420px;
+}
+
+.invoice-review-table th,
+.invoice-review-table td {
+  white-space: nowrap;
+}
+
+.invoice-review-table td:first-child input {
+  min-width: 260px;
+  width: 260px;
+  min-height: 46px;
+  font-size: 15px;
+}
+
+.invoice-review-table td:nth-child(2) input {
+  min-width: 160px;
+  width: 160px;
+}
+
+.invoice-review-table td:nth-child(8) input {
+  min-width: 180px;
+  width: 180px;
+}
 .sort-button {
   justify-content: flex-start;
   min-height: 0;
