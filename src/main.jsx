@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   ArrowDownUp,
   BarChart3,
-  Bot,
   Boxes,
   ChefHat,
   Edit3,
@@ -62,6 +61,7 @@ const defaultDepartmentSettings = [
 ];
 
 const defaultCompanySettings = {
+  appMode: "Work Edition: Non-AI",
   companyName: "Reading Room",
   tradingName: "Reading Room",
   address: "1 Market Street, London",
@@ -101,13 +101,27 @@ const defaultInvoiceSettings = {
   autoCreateProductsAfterApproval: true,
 };
 
-const defaultAiSettings = {
-  enableAiInvoiceReading: true,
-  enableAiProductMatching: true,
+const defaultMatchingSettings = {
+  enableProductMatching: true,
   autoMatchConfidenceThreshold: 90,
   requireManualApprovalBelowThreshold: true,
   productMatchingSensitivity: "Medium",
 };
+
+const appModes = ["Work Edition: Non-AI", "Pro Edition: AI optional"];
+
+const supplierParserCatalog = [
+  { name: "TG Fruits", aliases: ["tg fruits"], status: "Supported" },
+  { name: "Coburn & Baker", aliases: ["coburn", "coburn baker"], status: "Supported" },
+  { name: "Albion Fine Foods", aliases: ["albion fine foods", "albion"], status: "Supported" },
+  { name: "Woods", aliases: ["woods foodservice", "woods"], status: "Supported" },
+  { name: "BNFS", aliases: ["bnfs", "brighton newhaven fish", "brighton & newhaven fish"], status: "Supported" },
+  { name: "Cheeseman", aliases: ["cheeseman", "cheese man"], status: "Supported" },
+  { name: "Ashley James Meat Co", aliases: ["ashley james"], status: "Supported" },
+  { name: "Real Patisserie", aliases: ["real patisserie"], status: "Supported" },
+  { name: "Lady of the Cakes", aliases: ["lady of the cakes"], status: "Supported" },
+  { name: "Brighton Sausage Co", aliases: ["brighton sausage"], status: "Supported" },
+];
 
 const initialSuppliers = [
   { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "020 7000 0101", active: true },
@@ -293,7 +307,6 @@ const navItems = [
   { id: "menu", label: "Menu Costing", icon: UtensilsCrossed },
   { id: "waste", label: "Waste", icon: Trash2 },
   { id: "gp", label: "Sales", icon: Gauge },
-  { id: "ai", label: "AI Insights", icon: Bot },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -873,7 +886,7 @@ function matchProduct(productName, products) {
   });
 
   if (!best || best.score < 0.45) return null;
-  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "AI similarity" };
+  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "Similarity match" };
 }
 
 function productAutocomplete(products, query, limit = 8) {
@@ -890,15 +903,15 @@ function recipeAutocomplete(recipes, query, limit = 8) {
   return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
 }
 
-function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
-  if (!aiSettings.enableAiProductMatching) {
+function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings) {
+  if (!matchingSettings.enableProductMatching) {
     return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
   const match = matchProduct(line.productName, products);
   if (!match) {
     return { ...line, matchConfidence: 0, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
-  const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(aiSettings.autoMatchConfidenceThreshold, 90) / 100));
+  const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(matchingSettings.autoMatchConfidenceThreshold, 90) / 100));
   if (match.confidence >= autoMatchThreshold) {
     return {
       ...line,
@@ -910,7 +923,7 @@ function enrichInvoiceLine(line, products, aiSettings = defaultAiSettings) {
       suggestedProductName: "",
     };
   }
-  if (match.confidence < 0.6 || !aiSettings.requireManualApprovalBelowThreshold) {
+  if (match.confidence < 0.6 || !matchingSettings.requireManualApprovalBelowThreshold) {
     return { ...line, matchConfidence: match.confidence, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
   }
   return {
@@ -1295,66 +1308,6 @@ function analyzeSalesCsvLocally(fileName, text, defaultVatRate = 20) {
   return { csvRowsRaw, preview: null };
 }
 
-function normalizeSmartSalesImportFromAi(payload, fileName, csvRowsRaw, defaultVatRate = 20) {
-  const rowsInput = Array.isArray(payload?.rows) ? payload.rows : [];
-  const dateInfo = payload?.dateRange?.start && payload?.dateRange?.end
-    ? { date: "", dateRange: payload.dateRange }
-    : payload?.date
-      ? { date: normalizeImportDate(payload.date), dateRange: null }
-      : filenameDateInfo(fileName);
-  const fallbackDate = dateInfo.date || dateInfo.dateRange?.start || today();
-  const rows = rowsInput.map((row) => {
-    const sourceCategory = row.sourceCategory || row.category || "";
-    const department = canonicalSalesDepartmentName(row.department || squareCategoryDepartment(sourceCategory));
-    return salesImportRow({
-      date: normalizeImportDate(row.date) || fallbackDate,
-      department,
-      sourceCategory,
-      grossSales: row.grossSales,
-      netSales: row.netSales ?? row.sales,
-      vatAmount: row.vatAmount ?? row.tax ?? row.taxes,
-      discounts: row.discounts,
-      refunds: row.refunds,
-      serviceCharge: row.serviceCharge,
-      importStatus: "AI ready",
-    }, defaultVatRate);
-  }).filter((row) => row.department !== "Total" && row.grossSales > 0 && row.sales >= 0);
-  const confidence = Math.max(0, Math.min(1, numberValue(payload?.confidence, 0)));
-  if (confidence < 0.82 || !rows.length) return null;
-  return {
-    fileName,
-    source: payload.source || "Generic CSV",
-    reportType: displayReportType(payload.reportType || "Sales summary"),
-    reportTypeCode: payload.reportType || "sales_summary",
-    confidence,
-    date: dateInfo.date,
-    dateRange: dateInfo.dateRange,
-    departments: [...new Set(rows.map((row) => row.department))],
-    categories: [...new Set(rows.map((row) => row.sourceCategory).filter(Boolean))],
-    grossSalesTotal: rows.reduce((sum, row) => sum + row.grossSales, 0),
-    netSalesTotal: rows.reduce((sum, row) => sum + row.sales, 0),
-    vatTotal: rows.reduce((sum, row) => sum + row.vatAmount, 0),
-    rows,
-    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
-    headers: csvRowsRaw[0] || [],
-    rawRows: csvRowsRaw.slice(1),
-    csvRowsRaw,
-  };
-}
-
-async function readSalesCsvWithAi(fileName, csvRowsRaw, defaultVatRate = 20) {
-  const headers = csvRowsRaw[0] || [];
-  const sampleRows = csvRowsRaw.slice(1, 21);
-  const response = await fetch("/.netlify/functions/import-sales-ai", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fileName, headers, sampleRows }),
-  });
-  const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
-  if (!response.ok) throw new Error(payload.detail || payload.error || "AI sales import failed");
-  return normalizeSmartSalesImportFromAi(payload, fileName, csvRowsRaw, defaultVatRate);
-}
-
 function csvRows(text) {
   return text
     .split(/\r?\n/)
@@ -1695,6 +1648,68 @@ function extractInvoiceDateFromText(invoiceText = "") {
   const [, day, month, yearRaw] = match;
   const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
   return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+function detectSupplierFromInvoiceText(invoiceText = "", fallback = "") {
+  const key = `${fallback} ${invoiceText}`.toLowerCase().replace(/&/g, "and");
+  const match = supplierParserCatalog.find((parser) => parser.aliases.some((alias) => key.includes(alias.replace(/&/g, "and"))));
+  return match?.name || fallback || "";
+}
+
+function supplierParserStatus(supplierName = "") {
+  const key = supplierName.toLowerCase().replace(/&/g, "and");
+  const match = supplierParserCatalog.find((parser) => (
+    parser.name.toLowerCase().replace(/&/g, "and") === key ||
+    parser.aliases.some((alias) => key.includes(alias.replace(/&/g, "and")) || alias.replace(/&/g, "and").includes(key))
+  ));
+  return match?.status || "Manual only";
+}
+
+function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = "") {
+  const text = invoiceText || "";
+  const key = text.toLowerCase();
+  const detectedSupplier = detectSupplierFromInvoiceText(text, fallbackSupplier);
+  let parserName = detectedSupplier || "Generic parser";
+  let lines = [];
+
+  if (key.includes("tg fruits")) {
+    parserName = "TG Fruits parser";
+    lines = extractTgFruitsInvoiceRows(text);
+  } else if (key.includes("albion")) {
+    parserName = "Albion Fine Foods parser";
+    lines = parseAlbionOrderRows(text);
+  } else if (key.includes("elite fine foods") || key.includes("elite sales")) {
+    parserName = "Elite Fine Foods parser";
+    lines = parseEliteInvoiceRows(text);
+  } else {
+    const supported = supplierParserStatus(detectedSupplier) === "Supported";
+    parserName = supported && detectedSupplier ? `${detectedSupplier} parser` : "Generic parser";
+    lines = extractGenericInvoiceRows(text);
+  }
+
+  if (!lines.length && !["TG Fruits parser", "Albion Fine Foods parser", "Elite Fine Foods parser"].includes(parserName)) {
+    lines = extractGenericInvoiceRows(text);
+  }
+
+  const totals = extractInvoiceTotals(text);
+  const subtotal = totals.subtotalBeforeDiscount || lines.reduce((sum, line) => sum + numberValue(line.lineTotal, numberValue(line.quantity, 1) * numberValue(line.unitCost)), 0);
+  const inferredDiscountAmount = totals.discountAmount || (
+    subtotal > 0 && totals.finalInvoiceTotal > 0 && subtotal > totals.finalInvoiceTotal
+      ? Number((subtotal - totals.finalInvoiceTotal).toFixed(2))
+      : 0
+  );
+
+  return {
+    supplier: detectedSupplier || fallbackSupplier,
+    parserName,
+    invoiceNumber: extractInvoiceNumberFromText(text),
+    invoiceDate: extractInvoiceDateFromText(text),
+    subtotalBeforeDiscount: subtotal,
+    discountAmount: inferredDiscountAmount,
+    discountPercent: subtotal ? Number(((inferredDiscountAmount / subtotal) * 100).toFixed(2)) : 0,
+    finalInvoiceTotal: totals.finalInvoiceTotal || Number((subtotal - inferredDiscountAmount).toFixed(2)),
+    lines,
+  };
 }
 
 function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
@@ -2081,7 +2096,6 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
     "marginflow.departmentSettings",
     "marginflow.menuSettings",
     "marginflow.invoiceSettings",
-    "marginflow.aiSettings",
     "marginflow.department",
   ]);
 
@@ -2275,7 +2289,6 @@ function App() {
   const [financialSettings, setFinancialSettingsState] = useState(() => ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
   const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
-  const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
@@ -2305,22 +2318,25 @@ function App() {
     setInvoiceSettingsState(value);
     saveLocalStorage("marginflow.invoiceSettings", value);
   };
-  const setAiSettings = (value) => {
-    setAiSettingsState(value);
-    saveLocalStorage("marginflow.aiSettings", value);
-  };
   const setDepartmentSettings = (value) => {
     setDepartmentSettingsState(value);
     saveLocalStorage("marginflow.departmentSettings", value);
   };
 
+  const appMode = companySettings.appMode || defaultCompanySettings.appMode;
+  const isWorkEdition = appMode === "Work Edition: Non-AI";
+  const visibleNavItems = navItems.filter((item) => !(isWorkEdition && item.id === "ai"));
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
   const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
-  const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Home;
+  const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
+
+  useEffect(() => {
+    if (isWorkEdition && active === "ai") setActive("dashboard");
+  }, [active, isWorkEdition]);
 
   const setDepartment = (value) => {
     setDepartmentState(value);
@@ -2395,7 +2411,7 @@ function App() {
           </div>
         </div>
         <nav>
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => setActive(item.id)} type="button">
@@ -2407,8 +2423,8 @@ function App() {
         </nav>
         <div className="sidebar-card">
           <Sparkles size={18} />
-          <strong>AI assisted workflows</strong>
-          <p>Invoices and stock imports use matching confidence, aliases and review steps before changes affect GP.</p>
+          <strong>Work Edition workflows</strong>
+          <p>Invoices use manual entry, CSV import and supplier parsers with review steps before changes affect GP.</p>
         </div>
       </aside>
 
@@ -2416,7 +2432,7 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">MarginFlow v3</p>
-            <h1>{navItems.find((item) => item.id === active)?.label}</h1>
+            <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
             <p>Turn invoices, stock, recipes, waste and menus into live hospitality margin control.</p>
           </div>
         </header>
@@ -2462,7 +2478,6 @@ function App() {
         )}
         {active === "invoices" && (
           <Invoices
-            aiSettings={aiSettings}
             creditNotes={creditNotes}
             draft={draft}
             setDraft={setDraft}
@@ -2516,17 +2531,15 @@ function App() {
             wasteItems={wasteItems}
           />
         )}
-        {active === "ai" && <AiInsights metrics={metrics} products={products} supplierSpend={supplierSpend} />}
         {active === "settings" && (
           <SettingsPanel
-            aiSettings={aiSettings}
             companySettings={companySettings}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
             menuSettings={menuSettings}
+            suppliers={suppliers}
             requestDelete={requestDelete}
-            setAiSettings={setAiSettings}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
             setFinancialSettings={setFinancialSettings}
@@ -2765,7 +2778,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setCreditNotes, setInvoices }) {
+function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, requestDelete, setCreditNotes, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [splitEditorId, setSplitEditorId] = useState(null);
   const [manualInvoiceOpen, setManualInvoiceOpen] = useState(false);
@@ -2774,8 +2787,8 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const readControllerRef = useRef(null);
   const uploadRunRef = useRef(0);
-  const isReading = draft.status === "Reading invoice with AI...";
-  const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
+  const isReading = draft.status === "Reading invoice...";
+  const statusTone = draft.status.startsWith("Could not read") ? "error" : draft.status.startsWith("Parser extracted") ? "success" : "info";
   const hasDraftWork = draft.files.length || draft.invoiceText.trim() || draft.items.length || draft.supplier.trim() || draft.invoiceNumber.trim();
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
   const draftDiscountContext = {
@@ -2800,7 +2813,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
     uploadRunRef.current = uploadRun;
     const hasImageUpload = uploaded.some(isImageInvoiceFile);
     const uploadStatus = hasImageUpload
-      ? `${uploaded.length} file(s) uploaded. Image invoices will be read directly by AI.`
+      ? `${uploaded.length} file(s) uploaded. Paste OCR text or upload a text-based PDF to use Work Edition parsers.`
       : `${uploaded.length} file(s) uploaded`;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: uploadStatus }));
     const uploadedText = await textFromInvoiceFiles(uploaded);
@@ -2820,32 +2833,19 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
   };
 
   const readInvoice = async () => {
-    if (!aiSettings.enableAiInvoiceReading) {
-      setDraft((current) => ({ ...current, status: "AI failed. AI invoice reading is disabled in Settings." }));
-      return;
-    }
     const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
 
     readControllerRef.current?.abort();
     const controller = new AbortController();
     readControllerRef.current = controller;
-    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
-
-    let invoiceImages = [];
-    try {
-      invoiceImages = await invoiceImagesFromFiles(draft.files);
-    } catch (error) {
-      if (readControllerRef.current === controller) readControllerRef.current = null;
-      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
-      return;
-    }
+    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice..." }));
 
     if (readControllerRef.current !== controller) return;
 
-    if (!invoiceText && !invoiceImages.length) {
+    if (!invoiceText) {
       readControllerRef.current = null;
-      setDraft((current) => ({ ...current, status: "AI failed. Paste invoice text or upload a PDF/image invoice first." }));
+      setDraft((current) => ({ ...current, status: "Could not read this invoice automatically. Please enter manually or import CSV." }));
       return;
     }
 
@@ -2867,118 +2867,35 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
           supplier,
           department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
           departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
-          source: "OpenAI",
+          source: "Supplier parser",
         },
-        products,
-        aiSettings
+        products
       );
     });
 
-    const invoiceKey = invoiceText.toLowerCase();
-    const detectedTotals = extractInvoiceTotals(invoiceText);
-    const detectedInvoiceNumber = extractInvoiceNumberFromText(invoiceText);
-    const detectedInvoiceDate = extractInvoiceDateFromText(invoiceText);
-    const inferredDiscountAmount = detectedTotals.discountAmount || (
-      detectedTotals.subtotalBeforeDiscount > 0 && detectedTotals.finalInvoiceTotal > 0 && detectedTotals.subtotalBeforeDiscount > detectedTotals.finalInvoiceTotal
-        ? Number((detectedTotals.subtotalBeforeDiscount - detectedTotals.finalInvoiceTotal).toFixed(2))
-        : 0
-    );
-    const draftSupplier = draft.supplier || (invoiceKey.includes("tg fruits") ? "TG Fruits" : invoiceKey.includes("elite") ? "Elite Fine Foods Ltd" : invoiceKey.includes("albion") ? "Albion Fine Foods" : "");
-    const specificParsedLines = invoiceKey.includes("tg fruits")
-      ? extractTgFruitsInvoiceRows(invoiceText)
-      : invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
-        ? parseEliteInvoiceRows(invoiceText)
-        : invoiceKey.includes("albion")
-          ? parseAlbionOrderRows(invoiceText)
-        : [];
-    const genericParsedLines = extractGenericInvoiceRows(invoiceText);
-    const preParsedLines = specificParsedLines.length >= 2 ? specificParsedLines : genericParsedLines;
-
-    if (preParsedLines.length >= 2) {
-      const supplier = draftSupplier || "Unknown Supplier";
+    try {
+      const parsed = parseInvoiceWithSupplierParsers(invoiceText, draft.supplier);
+      if (!parsed.lines.length) {
+        setDraft((current) => ({ ...current, invoiceText, status: "Could not read this invoice automatically. Please enter manually or import CSV." }));
+        return;
+      }
+      const supplier = parsed.supplier || "Unknown Supplier";
       setDraft((current) => ({
         ...current,
         supplier,
         invoiceText,
-        invoiceNumber: detectedInvoiceNumber || current.invoiceNumber,
-        date: detectedInvoiceDate || current.date || today(),
-        items: buildInvoiceItems(preParsedLines, supplier),
-        subtotalBeforeDiscount: detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
-        discountAmount: inferredDiscountAmount || current.discountAmount,
-        finalInvoiceTotal: detectedTotals.finalInvoiceTotal || current.finalInvoiceTotal,
-        status: `AI extracted ${preParsedLines.length} lines. Please review before approving.`,
-      }));
-      readControllerRef.current = null;
-      return;
-    }
-
-    try {
-      const response = await fetch("/.netlify/functions/read-invoice-ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          invoiceText,
-          invoiceImages,
-          fileNames: draft.files.map((file) => file.name),
-          suppliers,
-          departments: departmentNames,
-          supplierLearning: invoices
-            .filter((invoice) => invoice.supplier)
-            .slice(-60)
-            .map((invoice) => ({
-              supplier: invoice.supplier,
-              invoiceNumber: invoice.invoiceNumber,
-              date: invoice.date,
-              knownProducts: (invoice.items || []).slice(0, 20).map((item) => item.productName || item.name).filter(Boolean),
-              hasDiscount: numberValue(invoice.discountAmount, 0) > 0,
-            })),
-          products: products.map((product) => ({
-            name: product.name || product.productName,
-            supplier: product.supplier,
-            packSize: product.packSize,
-            department: product.department,
-            aliases: product.aliases || [],
-            priceHistory: product.priceHistory || [],
-          })),
-        }),
-      });
-      const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
-      if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
-      if (readControllerRef.current !== controller) return;
-
-      const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
-      const supplierKey = supplier.toLowerCase();
-      const specificDeterministicLines = supplierKey.includes("tg fruits") || invoiceKey.includes("tg fruits")
-        ? extractTgFruitsInvoiceRows(invoiceText)
-        : supplierKey.includes("elite") || invoiceKey.includes("elite fine foods") || invoiceKey.includes("elite sales")
-          ? parseEliteInvoiceRows(invoiceText)
-          : supplierKey.includes("albion") || invoiceKey.includes("albion")
-            ? parseAlbionOrderRows(invoiceText)
-          : [];
-      const deterministicLines = specificDeterministicLines.length >= 2 ? specificDeterministicLines : extractGenericInvoiceRows(invoiceText);
-      const sourceLines = deterministicLines.length >= 2 ? deterministicLines : (payload.lines || []);
-      const items = buildInvoiceItems(sourceLines, supplier);
-
-      setDraft((current) => ({
-        ...current,
-        supplier,
-        invoiceNumber: payload.invoiceNumber || detectedInvoiceNumber || current.invoiceNumber,
-        date: payload.invoiceDate || detectedInvoiceDate || current.date || today(),
-        subtotalBeforeDiscount: numberValue(payload.subtotalBeforeDiscount || payload.subtotal || detectedTotals.subtotalBeforeDiscount || current.subtotalBeforeDiscount, 0),
-        discountAmount: numberValue(payload.discountAmount || inferredDiscountAmount || current.discountAmount, 0),
-        discountPercent: numberValue(payload.discountPercent || current.discountPercent, 0),
-        finalInvoiceTotal: numberValue(payload.finalInvoiceTotal || payload.total || detectedTotals.finalInvoiceTotal || current.finalInvoiceTotal, 0),
-        items,
-        status: payload.warnings?.length
-          ? `AI extracted ${items.length} lines with ${payload.warnings.length} warning(s). Please review before approving.`
-          : payload.validation && payload.validation.ok === false
-            ? `AI extracted ${items.length} lines but totals need review. Please check before approving.`
-            : `AI extracted ${items.length} lines. Please review before approving.`,
+        invoiceNumber: parsed.invoiceNumber || current.invoiceNumber,
+        date: parsed.invoiceDate || current.date || today(),
+        items: buildInvoiceItems(parsed.lines, supplier),
+        subtotalBeforeDiscount: parsed.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
+        discountAmount: parsed.discountAmount || current.discountAmount,
+        discountPercent: parsed.discountPercent || current.discountPercent,
+        finalInvoiceTotal: parsed.finalInvoiceTotal || current.finalInvoiceTotal,
+        status: `Parser extracted ${parsed.lines.length} lines using ${parsed.parserName}. Please review before approving.`,
       }));
     } catch (error) {
       if (error.name === "AbortError") return;
-      setDraft((current) => ({ ...current, status: `AI failed. ${error.message}` }));
+      setDraft((current) => ({ ...current, status: `Could not read this invoice automatically. Please enter manually or import CSV. ${error.message}` }));
     } finally {
       if (readControllerRef.current === controller) readControllerRef.current = null;
     }
@@ -3002,7 +2919,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         if (field === "lineDiscountPercent") {
           updated.lineDiscountAmount = Number((originalLineTotal(updated) * (numberValue(value) / 100)).toFixed(2));
         }
-        return field === "productName" ? enrichInvoiceLine(updated, products, aiSettings) : updated;
+        return field === "productName" ? enrichInvoiceLine(updated, products) : updated;
       }),
     }));
   };
@@ -3112,7 +3029,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
       departmentSplits: normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment),
       matchStatus: "Manual invoice",
       matchConfidence: 0,
-    }, products, aiSettings));
+    }, products));
 
     const invalidSplit = items.find((item) => !splitIsValid(item));
     if (invalidSplit) {
@@ -3192,7 +3109,7 @@ function Invoices({ aiSettings, creditNotes, departmentNames, draft, setDraft, i
         lineDiscountPercent: numberValue(item.lineDiscountPercent, 0),
         department: departmentSplits[0]?.department || item.department || invoiceSettings.defaultInvoiceDepartment,
         departmentSplits,
-      }, products, aiSettings);
+      }, products);
     });
     const invalidSplit = normalizedItems.find((item) => !splitIsValid(item));
     if (invalidSplit) {
@@ -5621,7 +5538,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
     const dataRows = csvRowsRaw.slice(1);
     const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
     setCsvWizard({
-      fileName: file.name,
+      fileName,
       headers,
       rows: dataRows,
       mapping,
@@ -5653,19 +5570,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
       return;
     }
 
-    try {
-      setStatus("Asking AI to analyse this sales CSV...");
-      const aiPreview = await readSalesCsvWithAi(file.name, csvRowsRaw, defaultVatRate);
-      if (aiPreview?.confidence >= 0.82 && aiPreview.rows.length) {
-        setSmartSalesImport(aiPreview);
-        setStatus(`AI detected ${aiPreview.rows.length} sales row(s). Review before confirming.`);
-        return;
-      }
-      openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
-    } catch (error) {
-      openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
-      setStatus(`AI could not confidently read this CSV. Advanced mapping is open. ${error.message}`);
-    }
+    openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
   };
 
   const updateCsvMapping = (field, value) => {
@@ -6067,65 +5972,14 @@ function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmou
   );
 }
 
-function AiInsights({ metrics, products, supplierSpend }) {
-  const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState([
-    { role: "assistant", text: "Ask MarginFlow AI about GP drops, supplier cost, price increases, or menu pricing. Mock answers are used until the backend is connected to OpenAI." },
-  ]);
-
-  const ask = async (preset = question) => {
-    if (!preset.trim()) return;
-    const prompt = preset.trim();
-    setMessages((current) => [...current, { role: "user", text: prompt }]);
-    setQuestion("");
-    try {
-      const response = await fetch("/api/ai/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: prompt, context: { metrics, products, supplierSpend } }),
-      });
-      if (!response.ok) throw new Error("Backend unavailable");
-      const payload = await response.json();
-      setMessages((current) => [...current, { role: "assistant", text: payload.answer }]);
-    } catch {
-      setMessages((current) => [...current, { role: "assistant", text: mockAiAnswer(prompt, metrics, products, supplierSpend) }]);
-    }
-  };
-
-  return (
-    <div className="ai-layout">
-      <Panel title="Ask MarginFlow AI" action="Mock mode">
-        <div className="prompt-row">
-          <input placeholder="Ask why GP dropped..." value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => event.key === "Enter" && ask()} />
-          <button onClick={() => ask()} type="button"><Bot size={16} />Ask</button>
-        </div>
-        <div className="quick-prompts">
-          {["Why did GP drop?", "Which products increased most?", "Which supplier costs most?", "What should I increase prices on?"].map((item) => <button className="ghost" key={item} onClick={() => ask(item)} type="button">{item}</button>)}
-        </div>
-        <div className="chat-panel">
-          {messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>)}
-        </div>
-      </Panel>
-      <Panel title="AI backend structure">
-        <div className="code-card">
-          <p>Invoices call <code>POST /.netlify/functions/read-invoice-ai</code>.</p>
-          <p>The backend owns <code>OPENAI_API_KEY</code>. The browser never receives it.</p>
-          <p>Product matching uses exact, normalized and similarity confidence before approval updates products.</p>
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
 function SettingsPanel({
-  aiSettings,
   companySettings,
   departmentSettings,
   financialSettings,
   invoiceSettings,
   menuSettings,
   requestDelete,
-  setAiSettings,
+  suppliers,
   setCompanySettings,
   setDepartmentSettings,
   setFinancialSettings,
@@ -6140,12 +5994,31 @@ function SettingsPanel({
   const [backupImportSettingsMode, setBackupImportSettingsMode] = useState("Keep current settings");
   const [backupInputKey, setBackupInputKey] = useState(0);
   const [importSummary, setImportSummary] = useState(null);
+  const [parserSampleText, setParserSampleText] = useState("");
+  const [parserSampleResult, setParserSampleResult] = useState(null);
 
   const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
   const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
   const updateMenu = (field, value) => setMenuSettings({ ...menuSettings, [field]: value });
   const updateInvoice = (field, value) => setInvoiceSettings({ ...invoiceSettings, [field]: value });
-  const updateAi = (field, value) => setAiSettings({ ...aiSettings, [field]: value });
+  const savedSupplierParserRows = useMemo(() => {
+    const rows = suppliers.map((supplier) => ({
+      id: supplier.id || supplier.name,
+      name: supplier.name,
+      status: supplierParserStatus(supplier.name),
+    }));
+    supplierParserCatalog.forEach((parser) => {
+      if (!rows.some((row) => row.name.toLowerCase() === parser.name.toLowerCase())) {
+        rows.push({ id: `catalog-${parser.name}`, name: parser.name, status: parser.status });
+      }
+    });
+    return rows.sort((a, b) => a.name.localeCompare(b.name));
+  }, [suppliers]);
+
+  const testSupplierParser = () => {
+    const parsed = parseInvoiceWithSupplierParsers(parserSampleText);
+    setParserSampleResult(parsed.lines.length ? parsed : { ...parsed, error: "Could not read this invoice automatically. Please enter manually or import CSV." });
+  };
 
   const saveDepartment = () => {
     if (!departmentForm.name.trim()) return;
@@ -6226,7 +6099,6 @@ function SettingsPanel({
     setDepartmentSettings(defaultDepartmentSettings);
     setMenuSettings(defaultMenuSettings);
     setInvoiceSettings(defaultInvoiceSettings);
-    setAiSettings(defaultAiSettings);
     setDepartmentForm(departmentEmpty);
     setEditingDepartmentId("");
     setDataStatus("Demo settings restored.");
@@ -6236,6 +6108,7 @@ function SettingsPanel({
     <div className="settings-grid">
       <Panel title="Company settings">
         <div className="form-grid six">
+          <label>App mode<select value={companySettings.appMode || defaultCompanySettings.appMode} onChange={(event) => updateCompany("appMode", event.target.value)}>{appModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
           <Field label="Company name" value={companySettings.companyName} onChange={(value) => updateCompany("companyName", value)} />
           <Field label="Trading name" value={companySettings.tradingName} onChange={(value) => updateCompany("tradingName", value)} />
           <Field label="Address" value={companySettings.address} onChange={(value) => updateCompany("address", value)} />
@@ -6336,14 +6209,28 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="AI settings">
-        <div className="form-grid six">
-          <CheckboxField checked={aiSettings.enableAiInvoiceReading} label="Enable AI invoice reading" onChange={(value) => updateAi("enableAiInvoiceReading", value)} />
-          <CheckboxField checked={aiSettings.enableAiProductMatching} label="Enable AI product matching" onChange={(value) => updateAi("enableAiProductMatching", value)} />
-          <Field label="Auto-match confidence threshold" type="number" value={aiSettings.autoMatchConfidenceThreshold} onChange={(value) => updateAi("autoMatchConfidenceThreshold", numberValue(value))} />
-          <CheckboxField checked={aiSettings.requireManualApprovalBelowThreshold} label="Require manual approval below threshold" onChange={(value) => updateAi("requireManualApprovalBelowThreshold", value)} />
-          <label>Product matching sensitivity<select value={aiSettings.productMatchingSensitivity} onChange={(event) => updateAi("productMatchingSensitivity", event.target.value)}><option>Low</option><option>Medium</option><option>High</option></select></label>
+      <Panel title="Supplier Parser Settings" action="Work Edition">
+        <DataTable
+          columns={[
+            { key: "name", label: "Supplier" },
+            { key: "status", label: "Parser status", render: (value) => <Badge tone={value === "Supported" ? "green" : "amber"}>{value}</Badge> },
+          ]}
+          rows={savedSupplierParserRows}
+        />
+        <div className="form-grid two">
+          <label>Sample invoice text<textarea rows={8} value={parserSampleText} onChange={(event) => setParserSampleText(event.target.value)} placeholder="Paste supplier invoice text here..." /></label>
+          <div className="code-card">
+            <p>Use this to test a supplier parser before saving an invoice.</p>
+            <p>Supported suppliers: {supplierParserCatalog.map((parser) => parser.name).join(", ")}.</p>
+            <label className="file-button secondary">Upload sample text<input accept=".txt,.csv,.tsv,text/plain,text/csv" onChange={async (event) => setParserSampleText(await event.target.files?.[0]?.text() || "")} type="file" /></label>
+            <button onClick={testSupplierParser} type="button"><Search size={16} />Test Parser</button>
+          </div>
         </div>
+        {parserSampleResult && (
+          <div className={`invoice-status ${parserSampleResult.error ? "error" : "success"}`}>
+            {parserSampleResult.error || `${parserSampleResult.parserName} found ${parserSampleResult.lines.length} line(s). Supplier: ${parserSampleResult.supplier || "Unknown"}. Invoice: ${parserSampleResult.invoiceNumber || "Not found"}. Date: ${parserSampleResult.invoiceDate || "Not found"}. Total: ${money(parserSampleResult.finalInvoiceTotal)}.`}
+          </div>
+        )}
       </Panel>
 
       <Panel title="Data settings">
@@ -6728,22 +6615,6 @@ function departmentForProduct(name = "", departmentNames = defaultDepartments, f
   if (lower.includes("blue roll") || lower.includes("napkin") || lower.includes("clean")) return pick("Non-food");
   if (lower.includes("croissant") || lower.includes("cake") || lower.includes("bread")) return pick("Bought In");
   return pick(fallback);
-}
-
-function mockAiAnswer(question, metrics, products, supplierSpend) {
-  const lower = question.toLowerCase();
-  if (lower.includes("supplier")) {
-    const top = [...supplierSpend].sort((a, b) => b.spend - a.spend)[0];
-    return `${top?.name || "No supplier"} is currently the highest-cost supplier at ${money(top?.spend || 0)}. Review high-value invoice lines before the next order.`;
-  }
-  if (lower.includes("product") || lower.includes("increased")) {
-    const top = [...products].sort((a, b) => b.unitCost - a.unitCost)[0];
-    return `${top?.name || "No product"} is one of the highest-cost products at ${money(top?.unitCost || 0)}. Check its latest invoice against previous price history.`;
-  }
-  if (lower.includes("price")) {
-    return "Start with dishes below 75% GP or dishes using products that recently increased. Increase selling price only where volume and guest perception can support it.";
-  }
-  return `Real GP including waste is currently ${percent(metrics.realGp)}. Check invoice spend, stock variance and waste by department.`;
 }
 
 const rootElement = document.getElementById("root");
