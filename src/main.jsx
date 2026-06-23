@@ -32,7 +32,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
-const invoiceLineStatuses = ["Received", "Missing", "Damaged", "Sent back", "Not ordered"];
+const invoiceLineStatuses = ["Received", "Missing", "Damaged", "Sent back", "Not ordered", "Credit note received"];
 const creditNoteStatuses = ["To chase", "Chased", "Credit received", "Rejected"];
 const emptyInvoiceDraft = () => ({
   files: [],
@@ -398,15 +398,13 @@ function hasDepartmentSpecificSalesRows(salesRows) {
 }
 
 function grossLineTotal(item) {
-  const extractedLineTotal = numberValue(item.lineTotal, 0);
-  if (extractedLineTotal > 0) return extractedLineTotal;
   return (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
 }
 
 function lineTotal(item) {
   const original = grossLineTotal(item);
-  const amount = numberValue(item.discountAmount, 0);
-  const percent = numberValue(item.discountPercent, 0);
+  const amount = numberValue(item.lineDiscountAmount ?? item.discountAmount, 0);
+  const percent = numberValue(item.lineDiscountPercent ?? item.discountPercent, 0);
   if (amount > 0) return Math.max(0, original - Math.min(amount, original));
   if (percent > 0) return Math.max(0, original - Math.min((original * percent) / 100, original));
   return original;
@@ -426,7 +424,6 @@ function originalLineTotal(item) {
 }
 
 function lineLevelDiscount(item) {
-  if (!isReceivedInvoiceLine(item)) return 0;
   const original = originalLineTotal(item);
   const amount = numberValue(item.lineDiscountAmount ?? item.discountAmount, 0);
   const percentAmount = original * (numberValue(item.lineDiscountPercent ?? item.discountPercent, 0) / 100);
@@ -435,7 +432,6 @@ function lineLevelDiscount(item) {
 }
 
 function lineAfterLineDiscount(item) {
-  if (!isReceivedInvoiceLine(item)) return 0;
   return Math.max(0, originalLineTotal(item) - lineLevelDiscount(item));
 }
 
@@ -832,6 +828,138 @@ function normalizedDepartmentSplits(item, departmentNames = defaultDepartments) 
   });
 }
 
+function invoiceEditorNetLineTotal(item) {
+  return lineTotal(item);
+}
+
+function clampLineDiscountAmount(amount, grossTotal) {
+  return Number(Math.min(Math.max(numberValue(amount, 0), 0), Math.max(numberValue(grossTotal, 0), 0)).toFixed(2));
+}
+
+function clampLineDiscountPercent(percent) {
+  return Number(Math.min(Math.max(numberValue(percent, 0), 0), 100).toFixed(2));
+}
+
+function syncInvoiceLineDiscounts(item, changedField = "") {
+  const grossTotal = grossLineTotal(item);
+  let discountAmount = numberValue(item.lineDiscountAmount ?? item.discountAmount, 0);
+  let discountPercent = numberValue(item.lineDiscountPercent ?? item.discountPercent, 0);
+
+  if (changedField === "lineDiscountAmount" || changedField === "discountAmount") {
+    discountAmount = clampLineDiscountAmount(discountAmount, grossTotal);
+    discountPercent = grossTotal ? Number(((discountAmount / grossTotal) * 100).toFixed(2)) : 0;
+  } else if (changedField === "lineDiscountPercent" || changedField === "discountPercent") {
+    discountPercent = clampLineDiscountPercent(discountPercent);
+    discountAmount = Number((grossTotal * (discountPercent / 100)).toFixed(2));
+  } else if (discountPercent > 0) {
+    discountPercent = clampLineDiscountPercent(discountPercent);
+    discountAmount = Number((grossTotal * (discountPercent / 100)).toFixed(2));
+  } else {
+    discountAmount = clampLineDiscountAmount(discountAmount, grossTotal);
+    discountPercent = grossTotal ? Number(((discountAmount / grossTotal) * 100).toFixed(2)) : 0;
+  }
+
+  return {
+    ...item,
+    discountAmount,
+    discountPercent,
+    lineDiscountAmount: discountAmount,
+    lineDiscountPercent: discountPercent,
+  };
+}
+
+function withCalculatedSplitAmounts(item, departmentNames = defaultDepartments) {
+  const netTotal = invoiceEditorNetLineTotal(item);
+  const splits = normalizedDepartmentSplits(item, departmentNames).map((split) => ({
+    ...split,
+    amount: Number(((netTotal * numberValue(split.percentage, 0)) / 100).toFixed(2)),
+  }));
+  return {
+    ...item,
+    department: splits[0]?.department || item.department || departmentNames[0] || "Kitchen Made",
+    departmentMode: splits.length > 1 ? "Split" : "Single",
+    departmentSplits: splits,
+  };
+}
+
+function normalizeInvoiceLineForEditor(item, departmentNames = defaultDepartments) {
+  const status = invoiceLineStatus(item);
+  const grossTotal = grossLineTotal(item);
+  return withCalculatedSplitAmounts(syncInvoiceLineDiscounts({
+    ...item,
+    id: item.id || uid(),
+    quantity: numberValue(item.quantity, 1),
+    unitCost: numberValue(item.unitCost, 0),
+    lineTotal: grossTotal,
+    status,
+    lineStatus: status,
+  }), departmentNames);
+}
+
+function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments } = {}) {
+  const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent", "lineDiscountAmount", "lineDiscountPercent"];
+  const nextValue = numericFields.includes(field) ? numberValue(value, 0) : value;
+  let updated = { ...item, [field]: nextValue };
+
+  if (field === "quantity" || field === "unitCost") {
+    updated.lineTotal = numberValue(updated.quantity, 0) * numberValue(updated.unitCost, 0);
+  }
+
+  if (field === "status" || field === "lineStatus") {
+    updated.status = value;
+    updated.lineStatus = value;
+    updated.creditReason = value === "Received" ? "" : (updated.creditReason || value);
+  }
+
+  if (field === "department") {
+    updated.department = value;
+    updated.departmentMode = "Single";
+    updated.departmentSplits = [{ id: uid(), department: value, percentage: 100 }];
+  }
+
+  if (field === "productName") {
+    const enriched = enrichInvoiceLine(updated, products, matchingSettings);
+    updated = { ...enriched, productName: value };
+  }
+
+  return normalizeInvoiceLineForEditor(syncInvoiceLineDiscounts(updated, field), departmentNames);
+}
+
+function setInvoiceLineDepartmentMode(item, mode, departmentNames = defaultDepartments, fallbackDepartment = "Kitchen Made") {
+  if (mode === "Split") {
+    const first = item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
+    const second = departmentNames.find((dept) => dept !== first) || first;
+    return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: [
+      { id: uid(), department: first, percentage: 50 },
+      { id: uid(), department: second, percentage: 50 },
+    ] }, departmentNames);
+  }
+
+  const department = item.department || normalizeDepartmentSplits(item, fallbackDepartment)[0]?.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
+  return withCalculatedSplitAmounts({ ...item, departmentMode: "Single", department, departmentSplits: [{ id: uid(), department, percentage: 100 }] }, departmentNames);
+}
+
+function updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames = defaultDepartments) {
+  const splits = normalizedDepartmentSplits(item, departmentNames).map((split, index) => (
+    index === splitIndex ? { ...split, [field]: field === "percentage" ? numberValue(value, 0) : value } : split
+  ));
+  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+}
+
+function addInvoiceLineSplit(item, departmentNames = defaultDepartments) {
+  const splits = [...normalizedDepartmentSplits(item, departmentNames), { id: uid(), department: departmentNames[0] || "Kitchen Made", percentage: 0 }];
+  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+}
+
+function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepartments, fallbackDepartment = "Kitchen Made") {
+  const splits = normalizedDepartmentSplits(item, departmentNames).filter((_, index) => index !== splitIndex);
+  if (splits.length <= 1) {
+    const department = splits[0]?.department || item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
+    return setInvoiceLineDepartmentMode({ ...item, department }, "Single", departmentNames, department);
+  }
+  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+}
+
 function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
   return {
     id: uid(),
@@ -844,8 +972,9 @@ function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
     supplier,
     department,
     departmentMode: "Single",
-    departmentSplits: [{ department, percentage: 100, amount: 0 }],
+    departmentSplits: [{ id: uid(), department, percentage: 100, amount: 0 }],
     status: "Received",
+    lineStatus: "Received",
   };
 }
 
@@ -1572,6 +1701,15 @@ function ensureSupplierList(suppliers, name) {
   return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
 }
 
+function removeInvoiceProductHistory(products, invoiceId) {
+  if (!invoiceId) return products;
+  return products.map((product) => {
+    const priceHistory = (product.priceHistory || []).filter((entry) => entry.invoiceId !== invoiceId);
+    const supplierPrices = (product.supplierPrices || []).filter((entry) => entry.invoiceId !== invoiceId);
+    return { ...product, priceHistory, supplierPrices };
+  });
+}
+
 function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
   const next = [...products];
 
@@ -1582,13 +1720,20 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
       : matchProduct(item.productName, next);
     const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
-    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: invoiceUnitCost };
-    const supplierEntry = { supplier: item.supplier, price: invoiceUnitCost, date: invoiceDate };
+    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: invoiceUnitCost, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id };
+    const supplierEntry = { supplier: item.supplier, price: invoiceUnitCost, date: invoiceDate, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id };
 
     if (index >= 0 && match.confidence > 0.9) {
       const aliases = new Set([...(next[index].aliases || [])]);
       if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
-      const supplierPrices = [...(next[index].supplierPrices || []).filter((entry) => entry.supplier !== item.supplier), supplierEntry];
+      const supplierPrices = [
+        ...(next[index].supplierPrices || []).filter((entry) => entry.supplier !== item.supplier && !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+        supplierEntry,
+      ];
+      const priceHistory = [
+        ...(next[index].priceHistory || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+        historyEntry,
+      ];
       next[index] = {
         ...next[index],
         supplier: item.supplier,
@@ -1599,7 +1744,7 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
         departmentSplits: normalizeDepartmentSplits(item, item.department),
         aliases: [...aliases],
         supplierPrices,
-        priceHistory: [...(next[index].priceHistory || []), historyEntry],
+        priceHistory,
       };
       return;
     }
@@ -1659,25 +1804,53 @@ function prepareApprovedInvoice(invoice) {
   };
 }
 
+function normalizeInvoiceLineForSave(item, supplier, fallbackDepartment = "Kitchen Made") {
+  const status = invoiceLineStatus(item);
+  const quantity = numberValue(item.quantity, 1);
+  const unitCost = normalizeInvoiceUnitCost({ ...item, quantity });
+  const discounted = syncInvoiceLineDiscounts({
+    ...item,
+    id: item.id || uid(),
+    quantity,
+    unitCost,
+    supplier: item.supplier || supplier,
+    lineTotal: quantity * unitCost,
+    status,
+    lineStatus: status,
+    creditReason: status === "Received" ? "" : (item.creditReason || status),
+  });
+  const departmentSplits = normalizeDepartmentSplits(discounted, item.department || fallbackDepartment);
+  return {
+    ...discounted,
+    department: departmentSplits[0]?.department || item.department || fallbackDepartment,
+    departmentMode: departmentSplits.length > 1 ? "Split" : "Single",
+    departmentSplits,
+  };
+}
+
 function creditNotesForInvoice(invoice) {
   return (invoice.items || [])
     .filter((item) => !isReceivedInvoiceLine(item))
-    .map((item) => ({
-      id: uid(),
-      invoiceId: invoice.id,
-      lineId: item.id,
-      supplier: item.supplier || invoice.supplier,
-      invoiceNumber: invoice.invoiceNumber,
-      date: invoice.date,
-      product: item.productName,
-      quantity: numberValue(item.quantity, 0),
-      value: originalLineTotal(item),
-      grossValue: originalLineTotal(item),
-      netValue: originalLineTotal(item),
-      reason: item.creditReason || invoiceLineStatus(item),
-      status: "To chase",
-      notes: "",
-    }));
+    .map((item) => {
+      const status = invoiceLineStatus(item);
+      const resolved = status === "Credit note received";
+      return {
+        id: uid(),
+        invoiceId: invoice.id,
+        lineId: item.id,
+        supplier: item.supplier || invoice.supplier,
+        invoiceNumber: invoice.invoiceNumber,
+        date: invoice.date,
+        product: item.productName,
+        quantity: numberValue(item.quantity, 0),
+        value: lineAfterLineDiscount(item),
+        grossValue: originalLineTotal(item),
+        netValue: lineAfterLineDiscount(item),
+        reason: item.creditReason || status,
+        status: resolved ? "Credit received" : "To chase",
+        notes: "",
+      };
+    });
 }
 
 function issueValue(note) {
@@ -1702,7 +1875,13 @@ function syncCreditNotesForInvoice(current, invoice) {
   const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
   const generated = creditNotesForInvoice(invoice).map((note) => {
     const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
-    return existing ? { ...note, id: existing.id, status: existing.status, notes: existing.notes } : note;
+    if (!existing) return note;
+    return {
+      ...note,
+      id: existing.id,
+      status: note.status === "Credit received" ? "Credit received" : existing.status,
+      notes: existing.notes,
+    };
   });
   return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
 }
@@ -2585,20 +2764,7 @@ function App() {
       return;
     }
     const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
-    const normalizedItems = draft.items.map((item) => {
-      const departmentSplits = normalizeDepartmentSplits(item, item.department || invoiceSettings.defaultInvoiceDepartment);
-      return {
-        ...item,
-        lineStatus: invoiceLineStatus(item),
-        creditReason: invoiceLineStatus(item) === "Received" ? "" : (item.creditReason || invoiceLineStatus(item)),
-        lineDiscountAmount: numberValue(item.lineDiscountAmount ?? item.discountAmount, 0),
-        lineDiscountPercent: numberValue(item.lineDiscountPercent ?? item.discountPercent, 0),
-        supplier: item.supplier || supplier,
-        unitCost: normalizeInvoiceUnitCost(item),
-        department: departmentSplits[0]?.department || item.department,
-        departmentSplits,
-      };
-    });
+    const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const invoice = prepareApprovedInvoice({
       id: draft.editingInvoiceId || uid(),
       invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
@@ -2616,7 +2782,7 @@ function App() {
     ));
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, invoice.items, invoice.date, invoice));
+    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, invoice.date, invoice));
     setDraft(emptyInvoiceDraft());
   };
 
@@ -3057,7 +3223,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, setCreditNotes, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
@@ -3190,87 +3356,37 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateDraftItem = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent"];
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        let updated = { ...item, [field]: numericFields.includes(field) ? Number(value) : value };
-        if (field === "department") {
-          updated = {
-            ...updated,
-            departmentMode: "Single",
-            departmentSplits: [{ department: value, percentage: 100, amount: lineTotal(updated) }],
-          };
-        }
-        if (field === "productName") {
-          const enriched = enrichInvoiceLine(updated, products, aiSettings);
-          return { ...enriched, productName: value };
-        }
-        return updated;
-      }),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
     }));
   };
 
   const setDraftDepartmentMode = (id, mode) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        if (mode === "Split") {
-          const first = item.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-          const second = departmentNames.find((dept) => dept !== first) || first;
-          return {
-            ...item,
-            departmentMode: "Split",
-            departmentSplits: [
-              { department: first, percentage: 50, amount: lineTotal(item) * 0.5 },
-              { department: second, percentage: 50, amount: lineTotal(item) * 0.5 },
-            ],
-          };
-        }
-        const department = item.department || item.departmentSplits?.[0]?.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-        return { ...item, departmentMode: "Single", department, departmentSplits: [{ department, percentage: 100, amount: lineTotal(item) }] };
-      }),
+      items: current.items.map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
     }));
   };
 
   const updateDraftSplit = (id, splitIndex, field, value) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        const departmentSplits = normalizedDepartmentSplits(item, departmentNames).map((split, index) => (
-          index === splitIndex ? { ...split, [field]: field === "percentage" ? Number(value) : value } : split
-        ));
-        return { ...item, departmentMode: "Split", departmentSplits };
-      }),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
     }));
   };
 
   const addDraftSplit = (id) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        const departmentSplits = [...normalizedDepartmentSplits(item, departmentNames), { department: departmentNames[0] || "Kitchen Made", percentage: 0, amount: 0 }];
-        return { ...item, departmentMode: "Split", departmentSplits };
-      }),
+      items: current.items.map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
     }));
   };
 
   const removeDraftSplit = (id, splitIndex) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        const departmentSplits = normalizedDepartmentSplits(item, departmentNames).filter((_, index) => index !== splitIndex);
-        if (departmentSplits.length <= 1) {
-          const department = departmentSplits[0]?.department || item.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
-          return { ...item, departmentMode: "Single", department, departmentSplits: [{ department, percentage: 100, amount: lineTotal(item) }] };
-        }
-        return { ...item, departmentMode: "Split", departmentSplits };
-      }),
+      items: current.items.map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
     }));
   };
 
@@ -3309,10 +3425,37 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateManualLine = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent"];
     setManualDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? { ...item, [field]: numericFields.includes(field) ? numberValue(value) : value } : item),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
+    }));
+  };
+
+  const setManualDepartmentMode = (id, mode) => {
+    setManualDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, current.department || defaultManualDepartment) : item),
+    }));
+  };
+
+  const updateManualSplit = (id, splitIndex, field, value) => {
+    setManualDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
+    }));
+  };
+
+  const addManualSplit = (id) => {
+    setManualDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
+    }));
+  };
+
+  const removeManualSplit = (id, splitIndex) => {
+    setManualDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, current.department || defaultManualDepartment) : item),
     }));
   };
 
@@ -3346,39 +3489,36 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         supplier,
         department: manualDraft.department || defaultManualDepartment,
         status: "Received",
+        lineStatus: "Received",
         matchStatus: "Manual invoice",
         matchConfidence: 1,
       }];
     } else {
       items = manualDraft.items
-        .filter((item) => item.productName?.trim() && lineTotal(item) > 0)
-        .map((item) => ({
-          ...item,
-          id: item.id || uid(),
-          supplier: item.supplier || supplier,
-          department: item.department || manualDraft.department || defaultManualDepartment,
-          quantity: numberValue(item.quantity, 0),
-          unitCost: numberValue(item.unitCost, 0),
-          discountAmount: numberValue(item.discountAmount, 0),
-          discountPercent: numberValue(item.discountPercent, 0),
-          status: item.status || "Received",
-        }));
+        .filter((item) => item.productName?.trim() && invoiceEditorNetLineTotal(item) > 0)
+        .map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment));
       if (!items.length) return;
     }
 
-    const invoice = {
+    items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment));
+    if (items.some((item) => !splitIsValid(item))) return;
+
+    const invoice = prepareApprovedInvoice({
       id: uid(),
       invoiceNumber: manualDraft.invoiceNumber?.trim() || `MAN-${String(invoices.length + 1).padStart(4, "0")}`,
       supplier,
       date,
       status: "Approved",
       source: "Manual invoice",
+      discountAmount: numberValue(manualDraft.invoiceDiscountAmount, 0),
+      discountPercent: numberValue(manualDraft.invoiceDiscountPercent, 0),
       items,
-    };
+    });
 
     setInvoices((current) => [invoice, ...current]);
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(current, items, date));
+    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, date, invoice));
     setManualOpen(false);
   };
 
@@ -3395,10 +3535,37 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateEditLine = (id, field, value) => {
-    const numericFields = ["quantity", "unitCost"];
     setEditDraft((current) => ({
       ...current,
-      items: (current.items || []).map((item) => item.id === id ? { ...item, [field]: numericFields.includes(field) ? numberValue(value) : value } : item),
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
+    }));
+  };
+
+  const setEditDepartmentMode = (id, mode) => {
+    setEditDraft((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    }));
+  };
+
+  const updateEditSplit = (id, splitIndex, field, value) => {
+    setEditDraft((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
+    }));
+  };
+
+  const addEditSplit = (id) => {
+    setEditDraft((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
+    }));
+  };
+
+  const removeEditSplit = (id, splitIndex) => {
+    setEditDraft((current) => ({
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
     }));
   };
 
@@ -3408,24 +3575,26 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       ...current,
       items: [
         ...(current.items || []),
-        { id: uid(), productName: "New Product", packSize: "", quantity: 1, unitCost: 0, supplier, department: invoiceSettings.defaultInvoiceDepartment },
+        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment),
       ],
     }));
   };
 
   const saveEditInvoice = () => {
     if (!editDraft) return;
-    const cleaned = {
+    const supplier = editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
+    const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
+    if (items.some((item) => !splitIsValid(item))) return;
+    const cleaned = prepareApprovedInvoice({
       ...editDraft,
+      supplier,
       status: editDraft.status || "Approved",
-      items: (editDraft.items || []).map((item) => ({
-        ...item,
-        quantity: numberValue(item.quantity, 0),
-        unitCost: numberValue(item.unitCost, 0),
-        supplier: item.supplier || editDraft.supplier,
-      })),
-    };
+      items,
+    });
     setInvoices((current) => current.map((invoice) => invoice.id === cleaned.id ? cleaned : invoice));
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
+    setSuppliers((current) => ensureSupplierList(current, supplier));
+    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
     setEditTarget(null);
     setEditDraft(null);
   };
@@ -3433,6 +3602,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const confirmDeleteInvoice = () => {
     if (!deleteTarget) return;
     setInvoices((current) => current.filter((invoice) => invoice.id !== deleteTarget.id));
+    setCreditNotes((current) => current.filter((note) => note.invoiceId !== deleteTarget.id));
+    setProducts((current) => removeInvoiceProductHistory(current, deleteTarget.id));
     setDeleteTarget(null);
   };
 
@@ -3493,50 +3664,17 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       </Panel>
 
       <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
-        <div className="table-wrap invoice-review-table-wrap">
-          <table className="invoice-review-table">
-            <thead>
-              <tr>
-                {["Product", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {draft.items.map((item) => (
-                <tr key={item.id}>
-                  <td>
-                    <input title={item.productName || ""} value={item.productName || ""} onChange={(event) => updateDraftItem(item.id, "productName", event.target.value)} />
-                    {item.suggestedProductName && (
-                      <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
-                        Did you mean: {item.suggestedProductName}?
-                      </button>
-                    )}
-                    {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
-                  </td>
-                  <td><input value={item.packSize || ""} onChange={(event) => updateDraftItem(item.id, "packSize", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateDraftItem(item.id, "quantity", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateDraftItem(item.id, "unitCost", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.discountAmount || 0} onChange={(event) => updateDraftItem(item.id, "discountAmount", event.target.value)} /></td>
-                  <td><input min="0" step="0.01" type="number" value={item.discountPercent || 0} onChange={(event) => updateDraftItem(item.id, "discountPercent", event.target.value)} /></td>
-                  <td>
-                    <DepartmentSplitEditor
-                      addSplit={() => addDraftSplit(item.id)}
-                      departmentNames={departmentNames}
-                      item={item}
-                      lineTotalValue={lineTotal(item)}
-                      removeSplit={(splitIndex) => removeDraftSplit(item.id, splitIndex)}
-                      setMode={(mode) => setDraftDepartmentMode(item.id, mode)}
-                      updateDepartment={(value) => updateDraftItem(item.id, "department", value)}
-                      updateSplit={(splitIndex, field, value) => updateDraftSplit(item.id, splitIndex, field, value)}
-                    />
-                  </td>
-                  <td><input value={item.supplier || ""} onChange={(event) => updateDraftItem(item.id, "supplier", event.target.value)} /></td>
-                  <td>{money(lineTotal(item))}</td>
-                  <td><button className="icon danger" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <InvoiceLineEditorTable
+          addSplit={addDraftSplit}
+          applySuggestion={applySuggestion}
+          departmentNames={departmentNames}
+          items={draft.items}
+          removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
+          removeSplit={removeDraftSplit}
+          setDepartmentMode={setDraftDepartmentMode}
+          updateLine={updateDraftItem}
+          updateSplit={updateDraftSplit}
+        />
       </Panel>
 
       <Panel title="Approved invoices">
@@ -3604,27 +3742,17 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
               <label>Date<input type="date" value={editDraft.date || today()} onChange={(event) => updateEditInvoice("date", event.target.value)} /></label>
               <Field label="Invoice total" readOnly value={money(invoiceTotal(editDraft))} />
             </div>
-            <div className="table-wrap modal-table">
-              <table>
-                <thead>
-                  <tr>{["Product", "Pack size", "Quantity", "Unit cost", "Department", "Supplier", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {(editDraft.items || []).map((item) => (
-                    <tr key={item.id}>
-                      <td><input value={item.productName || ""} onChange={(event) => updateEditLine(item.id, "productName", event.target.value)} /></td>
-                      <td><input value={item.packSize || ""} onChange={(event) => updateEditLine(item.id, "packSize", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateEditLine(item.id, "quantity", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateEditLine(item.id, "unitCost", event.target.value)} /></td>
-                      <td><select value={item.department || invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateEditLine(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
-                      <td><input value={item.supplier || editDraft.supplier || ""} onChange={(event) => updateEditLine(item.id, "supplier", event.target.value)} /></td>
-                      <td>{money(lineTotal(item))}</td>
-                      <td><button className="icon danger" onClick={() => setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== item.id) }))} type="button"><Trash2 size={15} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <InvoiceLineEditorTable
+              addSplit={addEditSplit}
+              departmentNames={departmentNames}
+              items={editDraft.items || []}
+              removeLine={(id) => setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== id) }))}
+              removeSplit={removeEditSplit}
+              setDepartmentMode={setEditDepartmentMode}
+              updateLine={updateEditLine}
+              updateSplit={updateEditSplit}
+              wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+            />
             <div className="button-row left tight"><button className="ghost" onClick={addEditLine} type="button"><Plus size={16} />Add line</button></div>
           </div>
         )}
@@ -3672,34 +3800,92 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                 <label>Invoice discount £<input min="0" step="0.01" type="number" value={manualDraft.invoiceDiscountAmount} onChange={(event) => updateManualField("invoiceDiscountAmount", event.target.value)} /></label>
                 <label>Invoice discount %<input min="0" step="0.01" type="number" value={manualDraft.invoiceDiscountPercent} onChange={(event) => updateManualField("invoiceDiscountPercent", event.target.value)} /></label>
               </div>
-              <div className="table-wrap modal-table manual-invoice-table">
-                <table>
-                  <thead>
-                    <tr>{["Product", "Pack size", "Qty", "Unit cost", "Department", "Discount £", "Discount %", "Status", "Line total", ""].map((header) => <th key={header}>{header}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {manualDraft.items.map((item) => (
-                      <tr key={item.id}>
-                        <td><input placeholder="Product name" value={item.productName} onChange={(event) => updateManualLine(item.id, "productName", event.target.value)} /></td>
-                        <td><input placeholder="Pack" value={item.packSize} onChange={(event) => updateManualLine(item.id, "packSize", event.target.value)} /></td>
-                        <td><input min="0" step="0.01" type="number" value={item.quantity} onChange={(event) => updateManualLine(item.id, "quantity", event.target.value)} /></td>
-                        <td><input min="0" step="0.01" type="number" value={item.unitCost} onChange={(event) => updateManualLine(item.id, "unitCost", event.target.value)} /></td>
-                        <td><select value={item.department} onChange={(event) => updateManualLine(item.id, "department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></td>
-                        <td><input min="0" step="0.01" type="number" value={item.discountAmount} onChange={(event) => updateManualLine(item.id, "discountAmount", event.target.value)} /></td>
-                        <td><input min="0" step="0.01" type="number" value={item.discountPercent} onChange={(event) => updateManualLine(item.id, "discountPercent", event.target.value)} /></td>
-                        <td><select value={item.status} onChange={(event) => updateManualLine(item.id, "status", event.target.value)}>{["Received", "Missing", "Damaged", "Sent back", "Not ordered"].map((status) => <option key={status}>{status}</option>)}</select></td>
-                        <td>{money(lineTotal(item))}</td>
-                        <td><button className="icon danger" onClick={() => removeManualInvoiceLine(item.id)} type="button"><Trash2 size={15} /></button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <InvoiceLineEditorTable
+                addSplit={addManualSplit}
+                departmentNames={departmentNames}
+                items={manualDraft.items}
+                removeLine={removeManualInvoiceLine}
+                removeSplit={removeManualSplit}
+                setDepartmentMode={setManualDepartmentMode}
+                updateLine={updateManualLine}
+                updateSplit={updateManualSplit}
+                wrapClassName="table-wrap modal-table manual-invoice-table invoice-review-table-wrap"
+              />
               <div className="button-row left tight"><button className="ghost" onClick={addManualInvoiceLine} type="button"><Plus size={16} />Add line</button></div>
             </>
           )}
         </div>
       </AppModal>
+    </div>
+  );
+}
+
+
+function InvoiceLineEditorTable({
+  addSplit,
+  applySuggestion,
+  departmentNames,
+  items,
+  removeLine,
+  removeSplit,
+  setDepartmentMode,
+  updateLine,
+  updateSplit,
+  wrapClassName = "table-wrap invoice-review-table-wrap",
+}) {
+  const headers = ["Product", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", "Net line total", ""];
+
+  return (
+    <div className={wrapClassName}>
+      <table className="invoice-review-table">
+        <thead>
+          <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const status = invoiceLineStatus(item);
+            const netTotal = invoiceEditorNetLineTotal(item);
+            return (
+              <tr key={item.id}>
+                <td>
+                  <input title={item.productName || ""} value={item.productName || ""} onChange={(event) => updateLine(item.id, "productName", event.target.value)} />
+                  {item.suggestedProductName && applySuggestion && (
+                    <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
+                      Did you mean: {item.suggestedProductName}?
+                    </button>
+                  )}
+                  {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
+                </td>
+                <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
+                <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
+                <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateLine(item.id, "unitCost", event.target.value)} /></td>
+                <td><input min="0" step="0.01" type="number" value={item.lineDiscountAmount ?? item.discountAmount ?? 0} onChange={(event) => updateLine(item.id, "lineDiscountAmount", event.target.value)} /></td>
+                <td><input min="0" max="100" step="0.01" type="number" value={item.lineDiscountPercent ?? item.discountPercent ?? 0} onChange={(event) => updateLine(item.id, "lineDiscountPercent", event.target.value)} /></td>
+                <td>
+                  <DepartmentSplitEditor
+                    addSplit={() => addSplit(item.id)}
+                    departmentNames={departmentNames}
+                    item={item}
+                    lineTotalValue={netTotal}
+                    removeSplit={(splitIndex) => removeSplit(item.id, splitIndex)}
+                    setMode={(mode) => setDepartmentMode(item.id, mode)}
+                    updateDepartment={(value) => updateLine(item.id, "department", value)}
+                    updateSplit={(splitIndex, field, value) => updateSplit(item.id, splitIndex, field, value)}
+                  />
+                </td>
+                <td>
+                  <select value={status} onChange={(event) => updateLine(item.id, "lineStatus", event.target.value)}>
+                    {invoiceLineStatuses.map((option) => <option key={option}>{option}</option>)}
+                  </select>
+                </td>
+                <td><input value={item.supplier || ""} onChange={(event) => updateLine(item.id, "supplier", event.target.value)} /></td>
+                <td>{money(netTotal)}</td>
+                <td><button className="icon danger" onClick={() => removeLine(item.id)} type="button"><Trash2 size={15} /></button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

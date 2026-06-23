@@ -1359,7 +1359,7 @@ code {
 
 /* Work Edition invoice and sales compatibility */
 .invoice-review-table {
-  min-width: 1420px;
+  min-width: 1760px;
 }
 
 .invoice-review-table-wrap {
@@ -1419,7 +1419,16 @@ code {
   width: 160px;
 }
 
-.invoice-review-table td:nth-child(8) input {
+.invoice-review-table td:nth-child(7) {
+  min-width: 300px;
+}
+
+.invoice-review-table td:nth-child(8) select {
+  min-width: 170px;
+  width: 170px;
+}
+
+.invoice-review-table td:nth-child(9) input {
   min-width: 180px;
   width: 180px;
 }
@@ -1821,4 +1830,3 @@ code {
   height: 28px;
   padding: 0;
 }
-
