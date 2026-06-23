@@ -873,6 +873,147 @@ function parseAlbionOrderRows(invoiceText) {
   return rows;
 }
 
+
+
+function moneyTokenPattern() {
+  return "£?\\s*([0-9,]+(?:\\.[0-9]{2})?)";
+}
+
+function normalizedInvoiceText(invoiceText = "") {
+  return String(invoiceText || "")
+    .replace(/\r/g, "\n")
+    .replace(/[|]+/g, " | ")
+    .replace(/£\s+/g, "£")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseInvoiceMoney(value) {
+  return numberValue(String(value || "").replace(/[£,]/g, ""), 0);
+}
+
+function pushParsedRow(rows, descriptionRaw, quantityRaw, unitCostRaw, lineTotalRaw, packOverride = "") {
+  const quantity = numberValue(String(quantityRaw || "").replace(",", "."), 0);
+  const unitCost = parseInvoiceMoney(unitCostRaw);
+  const lineTotalValue = parseInvoiceMoney(lineTotalRaw) || Number((quantity * unitCost).toFixed(2));
+  if (!quantity || !unitCost || !lineTotalValue) return;
+  const cleanedDescription = String(descriptionRaw || "")
+    .replace(/>{2,}/g, " ")
+    .replace(/[*✓✔\/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const { productName, packSize } = splitInvoiceProductAndPack(cleanedDescription);
+  const cleanProduct = cleanInvoiceProductName(productName);
+  if (!cleanProduct || !/[A-Za-z]{2}/.test(cleanProduct)) return;
+  rows.push({
+    productName: cleanProduct,
+    packSize: cleanInvoicePackSize(packOverride || packSize),
+    quantity,
+    unitCost,
+    lineTotal: lineTotalValue,
+  });
+}
+
+function parseAshleyJamesRows(invoiceText = "") {
+  const text = normalizedInvoiceText(invoiceText);
+  const rows = [];
+  const table = text.split(/Subtotal/i)[0] || text;
+  const rowPattern = /(?:^|\s)([A-Z0-9][A-Za-z0-9 ,()'&./+-]{4,}?)(?:\s*\(PER\s+KG\))?\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(?:Zero\s+Rated|0(?:\.00)?|20(?:\.00)?%?)\s+(\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9][A-Za-z0-9 ,()'&./+-]{4,}?\s+\d|\s+Subtotal|$)/gi;
+  let match;
+  while ((match = rowPattern.exec(table))) {
+    pushParsedRow(rows, match[1], match[2], match[3], match[4]);
+  }
+  return dedupeInvoiceRows(rows);
+}
+
+function parseBnfsRows(invoiceText = "") {
+  const text = normalizedInvoiceText(invoiceText);
+  const rows = [];
+  const beforeTotals = text.split(/\bNet Amount\s*:/i)[0] || text;
+  const rowPattern = /(?:^|\s)(\d+(?:[.,]\d+)?)\s*(Box|Kg|KG|Each|Unit|Case)?\s+(\d+(?:[.,]\d+)?)\s*(Box|Kg|KG|Each|Unit|Case)?\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{4,}?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))(?=\s+\d+\s*(?:Box|Kg|Each|Unit|Case)?\s+\d|\s+Net Amount|$)/gi;
+  let match;
+  while ((match = rowPattern.exec(beforeTotals))) {
+    const orderedQty = numberValue(match[1], 0);
+    const packedQty = numberValue(match[3], orderedQty);
+    const pack = match[4] || match[2] || "";
+    pushParsedRow(rows, match[5], packedQty, match[6], match[7], pack);
+    const row = rows[rows.length - 1];
+    if (row && orderedQty && packedQty && !amountsAlmostEqual(orderedQty, packedQty)) {
+      row.matchStatus = `Ordered ${orderedQty}, packed ${packedQty}. Check credit/shortage.`;
+    }
+  }
+  return dedupeInvoiceRows(rows);
+}
+
+function parseCheeseManRows(invoiceText = "") {
+  const text = normalizedInvoiceText(invoiceText);
+  const rows = [];
+  let match;
+  const pdfPattern = /(?:^|\s)\d+\s+([A-Z]{2}\d{3})\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+£?\s*(\d+(?:[.,]\d{2}))(?=\s+£|\s+\d+\s+[A-Z]{2}\d{3}|\s+Date:|\s+Sub Total|$)/gi;
+  while ((match = pdfPattern.exec(text))) {
+    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
+  }
+  const receiptText = text.replace(/\s*\|\s*/g, " | ");
+  const receiptPattern = /([A-Z]{2}\d{3})\s*:?\s*([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*(\d+(?:[.,]\d{2}))\s*\|\s*(\d+(?:[.,]\d{2}))/gi;
+  while ((match = receiptPattern.exec(receiptText))) {
+    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
+  }
+  return dedupeInvoiceRows(rows);
+}
+
+function parseRealPatisserieRows(invoiceText = "") {
+  const text = normalizedInvoiceText(invoiceText);
+  const rows = [];
+  const table = text.split(/We are delivering|Many thanks|Page\s+\d/i)[0] || text;
+  const rowPattern = /(?:^|\s)(\d{4,})\s+([A-Za-z][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d{2}))\s+(?:£?\s*)?(\d+(?:[.,]\d{2}))(?=\s+\d{4,}\s+[A-Za-z]|\s+Total|$)/gi;
+  let match;
+  while ((match = rowPattern.exec(table))) {
+    pushParsedRow(rows, `${match[1]} ${match[2]}`, match[3], match[4], match[5]);
+  }
+  return dedupeInvoiceRows(rows);
+}
+
+function parseWoodsRows(invoiceText = "") {
+  const text = normalizedInvoiceText(invoiceText);
+  const rows = [];
+  const body = text.split(/Delivery Window|Total Count|Goods Total/i)[0] || text;
+  const rowPattern = /(?:^|\s)([A-Z0-9/.-]{3,})\s+(\d+(?:[.,]\d+)?)\s+([A-Za-z*][A-Za-z0-9 '&().,\/+-]{3,}?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))(?=\s+[A-Z0-9/.-]{3,}\s+\d|\s+Delivery Window|\s+Total Count|\s+Goods Total|$)/gi;
+  let match;
+  while ((match = rowPattern.exec(body))) {
+    pushParsedRow(rows, `${match[1]} ${match[3]}`, match[2], match[4], match[5]);
+  }
+  return dedupeInvoiceRows(rows);
+}
+
+function parseAlbionPackingSlipRows(invoiceText = "") {
+  const text = String(invoiceText || "").replace(/\r/g, "\n");
+  const rows = [];
+  text.split(/\n+/).forEach((line) => {
+    const row = line.replace(/\s+/g, " ").trim();
+    const match = row.match(/^(\d+(?:[.,]\d+)?)\s+(?:Unit|Case|Each|EA)\s+([A-Z0-9]+)\s+\d+\s+(\d+(?:[.,]\d{2}))\s+(.+)$/i);
+    if (match) pushParsedRow(rows, match[4], match[1], match[3], numberValue(match[1], 0) * parseInvoiceMoney(match[3]));
+  });
+  return dedupeInvoiceRows(rows);
+}
+
+function parseAlbionRows(invoiceText = "") {
+  return dedupeInvoiceRows([...parseAlbionOrderRows(invoiceText), ...parseAlbionPackingSlipRows(invoiceText)]);
+}
+
+function parseLadyOfTheCakesRows(invoiceText = "") {
+  const totals = extractInvoiceTotals(invoiceText);
+  const total = totals.finalInvoiceTotal || totals.subtotalBeforeDiscount;
+  if (!total) return [];
+  return [{
+    productName: "Manual handwritten invoice total",
+    packSize: "manual",
+    quantity: 1,
+    unitCost: total,
+    lineTotal: total,
+    matchStatus: "Handwritten invoice - review manually",
+  }];
+}
+
 function extractGenericInvoiceRows(invoiceText) {
   const text = invoiceText.replace(/\r/g, "\n");
   const normalized = text.replace(/\s+/g, " ");
@@ -1827,7 +1968,7 @@ function extractInvoiceTotals(invoiceText = "") {
   return {
     subtotalBeforeDiscount: pickAmount([/\b(?:subtotal|sub total|goods total|goods|net value|net total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
     discountAmount: pickAmount([/\b(?:discount|disc)\b\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
-    finalInvoiceTotal: pickAmount([/\b(?:invoice total|ticket total|grand total|total due|amount due|gross total|total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    finalInvoiceTotal: pickAmount([/\b(?:invoice total|ticket total|grand total|total due|amount due|amount due gbp|net amount|gross total|total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
   };
 }
 
@@ -1838,6 +1979,8 @@ function extractInvoiceNumberFromText(invoiceText = "") {
     /\bInv\.?\s*(?:No|Number|#)?\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
     /\b(?:Document|Doc)\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
     /\bTicket\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
+    /\bD\/?Note\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
+    /\bOrder\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
   ];
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
@@ -1896,23 +2039,42 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
   let parserName = detectedSupplier || "Generic parser";
   let lines = [];
 
-  if (key.includes("tg fruits")) {
+  if (key.includes("tg fruits") || key.includes("tgfruits.com")) {
     parserName = "TG Fruits parser";
     lines = extractTgFruitsInvoiceRows(text);
   } else if (key.includes("albion")) {
     parserName = "Albion Fine Foods parser";
-    lines = parseAlbionOrderRows(text);
+    lines = parseAlbionRows(text);
+  } else if (key.includes("woods foodservice") || key.includes("woods sustainable")) {
+    parserName = "Woods parser";
+    lines = parseWoodsRows(text);
+  } else if (key.includes("the cheese man") || key.includes("cheeseman")) {
+    parserName = "The Cheese Man parser";
+    lines = parseCheeseManRows(text);
+  } else if (key.includes("brighton") && key.includes("newhaven") && key.includes("fish")) {
+    parserName = "BNFS parser";
+    lines = parseBnfsRows(text);
   } else if (key.includes("elite fine foods") || key.includes("elite sales")) {
     parserName = "Elite Fine Foods parser";
     lines = parseEliteInvoiceRows(text);
+  } else if (key.includes("real patisserie")) {
+    parserName = "Real Patisserie parser";
+    lines = parseRealPatisserieRows(text);
+  } else if (key.includes("ashley james")) {
+    parserName = "Ashley James parser";
+    lines = parseAshleyJamesRows(text);
+  } else if (key.includes("lady of the cakes") || key.includes("lady cakes")) {
+    parserName = "Lady of the Cakes manual-assisted parser";
+    lines = parseLadyOfTheCakesRows(text);
   } else {
     const supported = supplierParserStatus(detectedSupplier) === "Supported";
     parserName = supported && detectedSupplier ? `${detectedSupplier} parser` : "Generic parser";
     lines = extractGenericInvoiceRows(text);
   }
 
-  if (!lines.length && !["TG Fruits parser", "Albion Fine Foods parser", "Elite Fine Foods parser"].includes(parserName)) {
+  if (!lines.length) {
     lines = extractGenericInvoiceRows(text);
+    if (lines.length) parserName = `${parserName} + generic fallback`;
   }
 
   const totals = extractInvoiceTotals(text);
