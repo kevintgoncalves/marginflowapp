@@ -48,6 +48,8 @@ const emptyInvoiceDraft = () => ({
   status: "Idle",
   editingInvoiceId: "",
 });
+const couldNotReadInvoiceMessage = "Could not read this invoice automatically. Please paste OCR text, upload a text-based PDF/TXT/CSV, or enter manually.";
+const imageNeedsOcrMessage = "Image uploaded. Work Edition reads invoices without AI, so JPG/PNG/WEBP files need OCR text pasted here or a text-based PDF/TXT/CSV upload.";
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
@@ -111,39 +113,43 @@ const defaultMatchingSettings = {
 const appModes = ["Work Edition: Non-AI", "Pro Edition: AI optional"];
 
 const supplierParserCatalog = [
-  { name: "TG Fruits", aliases: ["tg fruits"], status: "Supported" },
-  { name: "Coburn & Baker", aliases: ["coburn", "coburn baker"], status: "Supported" },
   { name: "Albion Fine Foods", aliases: ["albion fine foods", "albion"], status: "Supported" },
-  { name: "Woods", aliases: ["woods foodservice", "woods"], status: "Supported" },
-  { name: "BNFS", aliases: ["bnfs", "brighton newhaven fish", "brighton & newhaven fish"], status: "Supported" },
-  { name: "Cheeseman", aliases: ["cheeseman", "cheese man"], status: "Supported" },
-  { name: "Ashley James Meat Co", aliases: ["ashley james"], status: "Supported" },
+  { name: "Ashley James Meat Co", aliases: ["ashley james meat co", "ashley james", "aj meat", "ajm"], status: "Supported" },
+  { name: "Brighton & Newhaven Fish Sales", aliases: ["brighton & newhaven fish sales", "brighton newhaven fish sales", "brighton & newhaven fish", "brighton newhaven fish", "bnfs"], status: "Supported" },
+  { name: "Coburn & Baker", aliases: ["coburn & baker", "coburn and baker", "coburn", "coburn baker"], status: "Supported" },
+  { name: "Elite Fine Foods", aliases: ["elite fine foods", "elite sales", "elite"], status: "Supported" },
   { name: "Real Patisserie", aliases: ["real patisserie"], status: "Supported" },
-  { name: "Lady of the Cakes", aliases: ["lady of the cakes"], status: "Supported" },
-  { name: "Brighton Sausage Co", aliases: ["brighton sausage"], status: "Supported" },
+  { name: "TG Fruits", aliases: ["tg fruits", "t g fruits"], status: "Supported" },
+  { name: "The Cheese Man", aliases: ["the cheese man", "cheese man", "cheeseman"], status: "Supported" },
+  { name: "The Lady of the Cakes", aliases: ["the lady of the cakes", "lady of the cakes"], status: "Supported" },
+  { name: "Woods", aliases: ["woods foodservice", "woods"], status: "Supported" },
 ];
 
 const initialSuppliers = [
   { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "020 7000 0101", active: true },
-  { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "sales@tgfruits.example", phone: "020 7000 0202", active: true },
-  { id: uid(), name: "Woods", category: "Wholesale", contact: "Account manager", email: "orders@woods.example", phone: "020 7000 0303", active: true },
-  { id: uid(), name: "BNFS", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
-  { id: uid(), name: "Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Ashley James Meat Co", category: "Meat", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Brighton & Newhaven Fish Sales", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
   { id: uid(), name: "Coburn & Baker", category: "Bakery", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Elite Fine Foods", category: "Dry / chilled", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Real Patisserie", category: "Bakery", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "sales@tgfruits.example", phone: "020 7000 0202", active: true },
+  { id: uid(), name: "The Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "The Lady of the Cakes", category: "Bakery", contact: "", email: "", phone: "", active: true },
+  { id: uid(), name: "Woods", category: "Wholesale", contact: "Account manager", email: "orders@woods.example", phone: "020 7000 0303", active: true },
 ];
 
 const initialProducts = [
   {
     id: uid(),
     name: "Eggs Box x180 Large",
-    supplier: "Cheese Man",
+    supplier: "The Cheese Man",
     packSize: "180 each",
     quantity: 1,
     unitCost: 45,
     department: "Kitchen Made",
     aliases: ["Large Eggs Box", "Eggs Large"],
-    supplierPrices: [{ supplier: "Cheese Man", price: 45, date: "2026-06-01" }],
-    priceHistory: [{ date: "2026-06-01", supplier: "Cheese Man", price: 45 }],
+    supplierPrices: [{ supplier: "The Cheese Man", price: 45, date: "2026-06-01" }],
+    priceHistory: [{ date: "2026-06-01", supplier: "The Cheese Man", price: 45 }],
   },
   {
     id: uid(),
@@ -494,11 +500,16 @@ function invoiceRowDateTokenPattern() {
 function invoiceNumberMatches(text) {
   const spacedText = text.replace(/(\d+[.,]\d{2})(?=\d+[.,]\d{2})/g, "$1 ");
   const matches = [];
-  const pattern = /(^|\s)(-?\d+(?:[.,]\d{1,2})?)(?=\s|$)/g;
+  const pattern = /(^|\s)[£$]?(-?\d+(?:[.,]\d{1,4})?)(?=\s|$)/g;
   let match;
   while ((match = pattern.exec(spacedText))) {
     const value = numberValue(match[2].replace(",", "."), NaN);
-    if (Number.isFinite(value)) matches.push({ value, index: match.index + match[1].length });
+    if (Number.isFinite(value)) {
+      const rawToken = match[0].slice(match[1].length);
+      const currencyOffset = Math.max(0, rawToken.search(/-?\d/));
+      const index = match.index + match[1].length + currencyOffset;
+      matches.push({ value, index, end: index + match[2].length, raw: match[2] });
+    }
   }
   return matches;
 }
@@ -648,8 +659,141 @@ function cleanInvoiceProductName(productName = "") {
     .trim();
 }
 
+function isInvoiceHeaderOrFooterRow(rowText = "") {
+  const row = rowText.replace(/\s+/g, " ").trim();
+  if (!row || !/[A-Za-z]{2}/.test(row)) return true;
+  const lower = row.toLowerCase();
+  const looksLikeProductMath = /\d+(?:[.,]\d+)?\s+\d+(?:[.,]\d{2,4})\s+\d+(?:[.,]\d{2})/.test(row);
+
+  if (/^(?:product|description|item|code|qty|quantity)\b/.test(lower) && /\b(?:qty|quantity|unit|price|total|amount|vat)\b/.test(lower)) return true;
+  if (/^(?:subtotal|sub total|total|grand total|invoice total|ticket total|vat|tax|net total|gross total|balance|amount due|carriage total)\b/.test(lower)) return true;
+  if (!looksLikeProductMath && /\b(?:invoice\s*(?:no|number|date)|account\s*(?:no|number)|customer|delivery\s*(?:date|address)|payment|sort\s*code|bank|iban|vat\s*(?:no|number|reg)|registered|terms|statement|page\s+\d)\b/.test(lower)) return true;
+
+  return false;
+}
+
+function cleanLooseInvoiceDescription(description = "") {
+  return description
+    .replace(/\b(?:qty|quantity|unit price|unit cost|net|vat|tax|total|amount)\b/gi, " ")
+    .replace(/^[#A-Z0-9/.-]{3,}\s+(?=[A-Za-z])/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildParsedInvoiceRow(descriptionRaw, quantityRaw, unitCostRaw, lineTotalRaw) {
+  const quantity = numberValue(String(quantityRaw).replace(",", "."), 0);
+  const unitCost = numberValue(String(unitCostRaw).replace(",", "."), 0);
+  const lineTotalValue = numberValue(String(lineTotalRaw).replace(",", "."), 0);
+  if (!quantity || !unitCost || !lineTotalValue) return null;
+
+  const description = cleanLooseInvoiceDescription(descriptionRaw);
+  if (isInvoiceHeaderOrFooterRow(description)) return null;
+
+  const { productName, packSize } = splitInvoiceProductAndPack(description);
+  const cleanProduct = cleanInvoiceProductName(productName);
+  if (!/[A-Za-z]{2}/.test(cleanProduct) || /^(invoice|total|subtotal|account|payment|operator|balance|vat|tax)$/i.test(cleanProduct)) return null;
+
+  return {
+    productName: cleanProduct,
+    packSize: cleanInvoicePackSize(packSize),
+    quantity,
+    unitCost,
+    lineTotal: lineTotalValue,
+  };
+}
+
+function descriptionBeforeToken(row, token) {
+  return row.slice(0, token.index).trim();
+}
+
+function descriptionForQuantityFirst(row, quantityToken, unitToken) {
+  const between = row.slice(quantityToken.end, unitToken.index).trim();
+  return /[A-Za-z]{2}/.test(between) ? between : descriptionBeforeToken(row, quantityToken);
+}
+
+function parseLooseInvoiceRow(rowText) {
+  const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  if (isInvoiceHeaderOrFooterRow(row)) return null;
+
+  const numbers = invoiceNumberMatches(row).filter((number) => number.value > 0);
+  if (numbers.length < 3) return null;
+
+  const candidates = [];
+  const addCandidate = (descriptionRaw, quantityToken, unitCostToken, lineTotalToken, scoreBoost = 0) => {
+    if (!amountsAlmostEqual(quantityToken.value * unitCostToken.value, lineTotalToken.value)) return;
+    const parsed = buildParsedInvoiceRow(descriptionRaw, quantityToken.value, unitCostToken.value, lineTotalToken.value);
+    if (!parsed) return;
+    const quantityIsLikely = Number.isInteger(quantityToken.value) || quantityToken.value <= 100;
+    const unitLooksPriced = unitCostToken.value >= 0.01;
+    const score = cleanLooseInvoiceDescription(descriptionRaw).length + scoreBoost + (quantityIsLikely ? 10 : 0) + (unitLooksPriced ? 5 : 0);
+    candidates.push({ ...parsed, _score: score });
+  };
+
+  for (let index = 0; index <= numbers.length - 3; index += 1) {
+    const first = numbers[index];
+    const second = numbers[index + 1];
+    const third = numbers[index + 2];
+    const fourth = numbers[index + 3];
+    const quantityFirstDescription = descriptionForQuantityFirst(row, first, second);
+    const beforeFirstDescription = descriptionBeforeToken(row, first);
+
+    addCandidate(quantityFirstDescription, first, second, third, /[A-Za-z]{2}/.test(row.slice(first.end, second.index)) ? 16 : 6);
+    addCandidate(beforeFirstDescription, second, first, third, 4);
+
+    if (fourth) {
+      addCandidate(quantityFirstDescription, first, second, fourth, /[A-Za-z]{2}/.test(row.slice(first.end, second.index)) ? 12 : 2);
+      addCandidate(beforeFirstDescription, second, first, fourth, 1);
+    }
+  }
+
+  if (!candidates.length) return null;
+  const { _score, ...best } = candidates.sort((a, b) => b._score - a._score)[0];
+  return best;
+}
+
+function parseInvoiceCsvRows(invoiceText = "") {
+  const rows = parseCsvText(invoiceText).filter((row) => row.some((cell) => String(cell || "").trim()));
+  if (rows.length < 2) return [];
+
+  const headers = rows[0].map(normalizeHeader);
+  const findIndex = (names) => headers.findIndex((header) => names.some((name) => header === name || header.includes(name)));
+  const productIndex = findIndex(["product", "productname", "description", "item", "itemdescription", "goods", "name"]);
+  const packIndex = findIndex(["pack", "packsize", "size", "uom", "measure"]);
+  const quantityIndex = findIndex(["qty", "quantity", "invoicedqty", "invoiceqty", "deliveredqty", "units"]);
+  const unitCostIndex = findIndex(["unitcost", "unitprice", "price", "nettprice", "netprice", "rate", "cost"]);
+  const lineTotalIndex = findIndex(["linetotal", "linevalue", "total", "amount", "netamount", "netvalue", "goodsvalue", "value"]);
+
+  if (productIndex < 0 || (unitCostIndex < 0 && lineTotalIndex < 0)) return [];
+
+  return rows.slice(1).map((cells) => {
+    const productName = String(cells[productIndex] || "").trim();
+    if (!productName || isInvoiceHeaderOrFooterRow(productName)) return null;
+    const quantity = quantityIndex >= 0 ? parseCurrencyCell(cells[quantityIndex]) || 1 : 1;
+    const lineTotalValue = lineTotalIndex >= 0 ? parseCurrencyCell(cells[lineTotalIndex]) : 0;
+    const unitCost = unitCostIndex >= 0
+      ? parseCurrencyCell(cells[unitCostIndex])
+      : (quantity > 0 && lineTotalValue > 0 ? Number((lineTotalValue / quantity).toFixed(4)) : 0);
+    const lineTotal = lineTotalValue || Number((quantity * unitCost).toFixed(2));
+    const parsed = buildParsedInvoiceRow(productName, quantity, unitCost, lineTotal);
+    if (!parsed) return null;
+    const csvPackSize = packIndex >= 0 && packIndex !== unitCostIndex ? String(cells[packIndex] || "").trim() : "";
+    return csvPackSize ? { ...parsed, packSize: parsed.packSize || csvPackSize } : parsed;
+  }).filter(Boolean);
+}
+
+function dedupeInvoiceRows(rows) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function parseCurrencyProductRow(rowText) {
   const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  if (isInvoiceHeaderOrFooterRow(row)) return null;
   const match = row.match(/^(.+?)\s+£?\s*(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)\s+£?\s*(\d+(?:[.,]\d{2}))(?:\s|$)/i);
   if (!match) return null;
   const [, descriptionRaw, unitRaw, orderQtyRaw, invoicedQtyRaw, totalRaw] = match;
@@ -671,6 +815,7 @@ function parseCurrencyProductRow(rowText) {
 
 function parseCodeLeadingInvoiceRow(rowText) {
   const row = rowText.replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+  if (isInvoiceHeaderOrFooterRow(row)) return null;
   const match = row.match(/^[A-Z0-9/.-]{3,}\s+(\d+(?:[.,]\d+)?)\s+(.+)$/i);
   if (!match) return null;
   const quantity = numberValue(match[1].replace(",", "."), 0);
@@ -732,6 +877,7 @@ function extractGenericInvoiceRows(invoiceText) {
   const text = invoiceText.replace(/\r/g, "\n");
   const normalized = text.replace(/\s+/g, " ");
   const candidates = new Set();
+  const csvRows = parseInvoiceCsvRows(invoiceText);
 
   text.split(/\n/).forEach((line) => {
     const trimmed = line.trim();
@@ -745,15 +891,9 @@ function extractGenericInvoiceRows(invoiceText) {
   [...normalized.matchAll(codePattern)].forEach((match) => candidates.add(match[1].trim()));
 
   const rows = [...candidates]
-    .map((candidate) => parseCurrencyProductRow(candidate) || parseCodeLeadingInvoiceRow(candidate))
+    .map((candidate) => parseCurrencyProductRow(candidate) || parseCodeLeadingInvoiceRow(candidate) || parseLooseInvoiceRow(candidate))
     .filter(Boolean);
-  const seen = new Set();
-  return rows.filter((row) => {
-    const key = `${row.productName}|${row.packSize}|${row.quantity}|${row.unitCost}|${row.lineTotal}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return dedupeInvoiceRows([...csvRows, ...rows]);
 }
 
 function normalizeInvoiceUnitCost(item) {
@@ -949,6 +1089,11 @@ function canReadFileAsText(file) {
 function isImageInvoiceFile(file) {
   const name = file.name.toLowerCase();
   return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
+function canExtractTextFromInvoiceFile(file) {
+  const name = file.name.toLowerCase();
+  return file.type === "application/pdf" || name.endsWith(".pdf") || canReadFileAsText(file);
 }
 
 function loadBrowserImage(file) {
@@ -1621,18 +1766,19 @@ function extractInvoiceTotals(invoiceText = "") {
     return 0;
   };
   return {
-    subtotalBeforeDiscount: pickAmount([/(?:subtotal|sub total|goods|net value)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
-    discountAmount: pickAmount([/(?:discount|disc)\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
-    finalInvoiceTotal: pickAmount([/(?:invoice total|ticket total|grand total|total)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    subtotalBeforeDiscount: pickAmount([/\b(?:subtotal|sub total|goods total|goods|net value|net total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    discountAmount: pickAmount([/\b(?:discount|disc)\b\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
+    finalInvoiceTotal: pickAmount([/\b(?:invoice total|ticket total|grand total|total due|amount due|gross total|total)\b\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
   };
 }
 
 function extractInvoiceNumberFromText(invoiceText = "") {
   const normalized = invoiceText.replace(/\s+/g, " ");
   const patterns = [
-    /Invoice No\.?\s*[:#]?\s*(\d{4,})/i,
-    /Invoice Number\s*[:#]?\s*(\d{4,})/i,
-    /Invoice no\s*[:#]?\s*(\d{4,})/i,
+    /(?:Tax\s+)?Invoice\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
+    /\bInv\.?\s*(?:No|Number|#)?\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
+    /\b(?:Document|Doc)\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
+    /\bTicket\s*(?:No|Number|#)\.?\s*[:#]?\s*([A-Z0-9/-]{3,})/i,
   ];
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
@@ -1643,11 +1789,30 @@ function extractInvoiceNumberFromText(invoiceText = "") {
 
 function extractInvoiceDateFromText(invoiceText = "") {
   const normalized = invoiceText.replace(/\s+/g, " ");
-  const match = normalized.match(/(?:DELIVERY DATE|Date\/Tax Point|Invoice date|ORDER DATE)\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})/i);
-  if (!match) return "";
-  const [, day, month, yearRaw] = match;
-  const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  const keyword = "(?:DELIVERY DATE|Date\\/Tax Point|Tax Point|Invoice date|Invoice Date|ORDER DATE|Order date|Date)";
+  const numericDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(\\d{1,2})[./-](\\d{1,2})[./-](\\d{2,4})`, "i"));
+  if (numericDate) {
+    const [, day, month, yearRaw] = numericDate;
+    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  const isoDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(20\\d{2})-(\\d{1,2})-(\\d{1,2})`, "i"));
+  if (isoDate) {
+    const [, year, month, day] = isoDate;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  const monthNames = { jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06", jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12" };
+  const namedDate = normalized.match(new RegExp(`${keyword}\\s*:?\\s*(\\d{1,2})[-\\s]([A-Z]{3,})[-\\s](\\d{2,4})`, "i"));
+  if (namedDate) {
+    const [, day, monthRaw, yearRaw] = namedDate;
+    const month = monthNames[monthRaw.slice(0, 3).toLowerCase()];
+    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+    if (month) return `${year}-${month}-${day.padStart(2, "0")}`;
+  }
+
+  return "";
 }
 
 function detectSupplierFromInvoiceText(invoiceText = "", fallback = "") {
@@ -2788,7 +2953,7 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
   const readControllerRef = useRef(null);
   const uploadRunRef = useRef(0);
   const isReading = draft.status === "Reading invoice...";
-  const statusTone = draft.status.startsWith("Could not read") ? "error" : draft.status.startsWith("Parser extracted") ? "success" : "info";
+  const statusTone = draft.status.startsWith("Could not read") ? "error" : draft.status.startsWith("Image uploaded") ? "warn" : draft.status.startsWith("Parser extracted") ? "success" : "info";
   const hasDraftWork = draft.files.length || draft.invoiceText.trim() || draft.items.length || draft.supplier.trim() || draft.invoiceNumber.trim();
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
   const draftDiscountContext = {
@@ -2812,8 +2977,9 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
     const uploadRun = uploadRunRef.current + 1;
     uploadRunRef.current = uploadRun;
     const hasImageUpload = uploaded.some(isImageInvoiceFile);
+    const hasTextReadableUpload = uploaded.some(canExtractTextFromInvoiceFile);
     const uploadStatus = hasImageUpload
-      ? `${uploaded.length} file(s) uploaded. Paste OCR text or upload a text-based PDF to use Work Edition parsers.`
+      ? (hasTextReadableUpload ? `${uploaded.length} file(s) uploaded. Text files will be parsed locally; images still need OCR text.` : imageNeedsOcrMessage)
       : `${uploaded.length} file(s) uploaded`;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: uploadStatus }));
     const uploadedText = await textFromInvoiceFiles(uploaded);
@@ -2845,7 +3011,8 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
 
     if (!invoiceText) {
       readControllerRef.current = null;
-      setDraft((current) => ({ ...current, status: "Could not read this invoice automatically. Please enter manually or import CSV." }));
+      const hasOnlyImageFiles = draft.files.some(isImageInvoiceFile) && !draft.files.some(canExtractTextFromInvoiceFile);
+      setDraft((current) => ({ ...current, status: hasOnlyImageFiles ? imageNeedsOcrMessage : couldNotReadInvoiceMessage }));
       return;
     }
 
@@ -2876,7 +3043,7 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
     try {
       const parsed = parseInvoiceWithSupplierParsers(invoiceText, draft.supplier);
       if (!parsed.lines.length) {
-        setDraft((current) => ({ ...current, invoiceText, status: "Could not read this invoice automatically. Please enter manually or import CSV." }));
+        setDraft((current) => ({ ...current, invoiceText, status: couldNotReadInvoiceMessage }));
         return;
       }
       const supplier = parsed.supplier || "Unknown Supplier";
@@ -2895,7 +3062,7 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
       }));
     } catch (error) {
       if (error.name === "AbortError") return;
-      setDraft((current) => ({ ...current, status: `Could not read this invoice automatically. Please enter manually or import CSV. ${error.message}` }));
+      setDraft((current) => ({ ...current, status: `${couldNotReadInvoiceMessage} ${error.message}` }));
     } finally {
       if (readControllerRef.current === controller) readControllerRef.current = null;
     }
@@ -3226,9 +3393,9 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
         )}
         {hasDraftWork && (
           <label className="invoice-text">
-            Pasted or OCR invoice text <span>(optional for image invoices)</span>
+            Pasted or OCR invoice text <span>(required for image invoices in Work Edition)</span>
             <textarea
-              placeholder="Paste invoice text here, or leave blank when uploading a JPG/PNG/WEBP image."
+              placeholder="Paste invoice text here, or upload a text-based PDF/TXT/CSV. JPG/PNG/WEBP files need pasted OCR text in Work Edition."
               rows={7}
               value={draft.invoiceText}
               onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })}
@@ -3242,7 +3409,7 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
-          <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
+          <button disabled={isReading} onClick={readInvoice} type="button"><ReceiptText size={16} />Read Invoice</button>
           <button className="ghost" onClick={() => setManualInvoiceOpen(true)} type="button"><Plus size={16} />Add Manual Invoice</button>
           <button className="ghost danger" disabled={!hasDraftWork} onClick={cancelDraft} type="button"><X size={16} />Cancel Upload</button>
           <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />{draft.editingInvoiceId ? "Save Invoice" : "Confirm Invoice"}</button>
@@ -6017,7 +6184,7 @@ function SettingsPanel({
 
   const testSupplierParser = () => {
     const parsed = parseInvoiceWithSupplierParsers(parserSampleText);
-    setParserSampleResult(parsed.lines.length ? parsed : { ...parsed, error: "Could not read this invoice automatically. Please enter manually or import CSV." });
+    setParserSampleResult(parsed.lines.length ? parsed : { ...parsed, error: couldNotReadInvoiceMessage });
   };
 
   const saveDepartment = () => {
