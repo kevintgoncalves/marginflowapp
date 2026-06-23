@@ -49,7 +49,7 @@ const emptyInvoiceDraft = () => ({
   editingInvoiceId: "",
 });
 const couldNotReadInvoiceMessage = "Could not read this invoice automatically. Please paste OCR text, upload a text-based PDF/TXT/CSV, or enter manually.";
-const imageNeedsOcrMessage = "Image uploaded. Work Edition reads invoices without AI, so JPG/PNG/WEBP files need OCR text pasted here or a text-based PDF/TXT/CSV upload.";
+const imageNeedsOcrMessage = "Image uploaded. Work Edition will run local OCR in your browser. No AI or OpenAI credits are used.";
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
@@ -1088,7 +1088,7 @@ function canReadFileAsText(file) {
 
 function isImageInvoiceFile(file) {
   const name = file.name.toLowerCase();
-  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(name);
+  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|heic|heif)$/i.test(name);
 }
 
 function canExtractTextFromInvoiceFile(file) {
@@ -1136,6 +1136,65 @@ async function imageFileToInvoiceInput(file) {
 
 async function invoiceImagesFromFiles(files) {
   return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
+}
+
+
+let tesseractLoaderPromise = null;
+
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (tesseractLoaderPromise) return tesseractLoaderPromise;
+
+  tesseractLoaderPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector('script[data-marginflow-tesseract="true"]');
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(window.Tesseract));
+      existingScript.addEventListener("error", () => reject(new Error("Could not load local OCR library.")));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+    script.async = true;
+    script.defer = true;
+    script.dataset.marginflowTesseract = "true";
+    script.onload = () => {
+      if (window.Tesseract) resolve(window.Tesseract);
+      else reject(new Error("Local OCR library loaded but did not initialise."));
+    };
+    script.onerror = () => reject(new Error("Could not load local OCR library. Check the internet connection and try again."));
+    document.head.appendChild(script);
+  });
+
+  return tesseractLoaderPromise;
+}
+
+async function extractTextFromImageInvoiceFile(file, onProgress) {
+  const Tesseract = await loadTesseract();
+  const imageInput = await imageFileToInvoiceInput(file);
+  const result = await Tesseract.recognize(imageInput.dataUrl, "eng", {
+    logger: (message) => {
+      if (message?.status === "recognizing text" && typeof message.progress === "number") {
+        onProgress?.(Math.round(message.progress * 100));
+      }
+    },
+  });
+  return String(result?.data?.text || "").trim();
+}
+
+async function ocrTextFromImageFiles(files, onFileProgress) {
+  const chunks = [];
+  const images = Array.from(files || []).filter(isImageInvoiceFile);
+
+  for (let index = 0; index < images.length; index += 1) {
+    const file = images[index];
+    const text = await extractTextFromImageInvoiceFile(file, (progress) => {
+      onFileProgress?.(file, progress, index + 1, images.length);
+    });
+    if (text) chunks.push(`--- OCR ${file.name} ---\n${text}`);
+  }
+
+  return chunks.join("\n\n").trim();
 }
 
 async function extractPdfText(file) {
@@ -2977,19 +3036,39 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
     const uploadRun = uploadRunRef.current + 1;
     uploadRunRef.current = uploadRun;
     const hasImageUpload = uploaded.some(isImageInvoiceFile);
-    const hasTextReadableUpload = uploaded.some(canExtractTextFromInvoiceFile);
-    const uploadStatus = hasImageUpload
-      ? (hasTextReadableUpload ? `${uploaded.length} file(s) uploaded. Text files will be parsed locally; images still need OCR text.` : imageNeedsOcrMessage)
-      : `${uploaded.length} file(s) uploaded`;
+    const uploadStatus = hasImageUpload ? imageNeedsOcrMessage : `${uploaded.length} file(s) uploaded`;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: uploadStatus }));
-    const uploadedText = await textFromInvoiceFiles(uploaded);
-    if (uploadRunRef.current !== uploadRun) return;
-    if (uploadedText) {
-      setDraft((current) => ({
-        ...current,
-        invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
-        status: uploadStatus,
-      }));
+
+    try {
+      const uploadedText = await textFromInvoiceFiles(uploaded);
+      if (uploadRunRef.current !== uploadRun) return;
+      if (uploadedText) {
+        setDraft((current) => ({
+          ...current,
+          invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
+          status: hasImageUpload ? "Text files loaded. Running local OCR for image files..." : uploadStatus,
+        }));
+      }
+
+      if (hasImageUpload) {
+        setDraft((current) => ({ ...current, status: "Starting local OCR..." }));
+        const ocrText = await ocrTextFromImageFiles(uploaded, (file, progress, fileIndex, fileCount) => {
+          if (uploadRunRef.current !== uploadRun) return;
+          setDraft((current) => ({
+            ...current,
+            status: `Reading image ${fileIndex}/${fileCount}: ${file.name} ${progress}%...`,
+          }));
+        });
+        if (uploadRunRef.current !== uploadRun) return;
+        setDraft((current) => ({
+          ...current,
+          invoiceText: [current.invoiceText, ocrText].filter(Boolean).join("\n\n"),
+          status: ocrText ? "Local OCR finished. Review the text, then click Read Invoice." : "OCR finished but no text was found. Please paste invoice text manually.",
+        }));
+      }
+    } catch (error) {
+      if (uploadRunRef.current !== uploadRun) return;
+      setDraft((current) => ({ ...current, status: `OCR failed. Please paste invoice text manually. ${error.message}` }));
     }
   };
 
@@ -3010,9 +3089,66 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
     if (readControllerRef.current !== controller) return;
 
     if (!invoiceText) {
+      const hasImageFiles = draft.files.some(isImageInvoiceFile);
+      if (hasImageFiles) {
+        try {
+          setDraft((current) => ({ ...current, status: "Running local OCR before reading invoice..." }));
+          const ocrText = await ocrTextFromImageFiles(draft.files, (file, progress, fileIndex, fileCount) => {
+            setDraft((current) => ({ ...current, status: `Reading image ${fileIndex}/${fileCount}: ${file.name} ${progress}%...` }));
+          });
+          if (ocrText) {
+            setDraft((current) => ({ ...current, invoiceText: ocrText, status: "Reading invoice..." }));
+            const parsed = parseInvoiceWithSupplierParsers(ocrText, draft.supplier);
+            if (!parsed.lines.length) {
+              readControllerRef.current = null;
+              setDraft((current) => ({ ...current, invoiceText: ocrText, status: couldNotReadInvoiceMessage }));
+              return;
+            }
+            const supplier = parsed.supplier || "Unknown Supplier";
+            const buildOcrInvoiceItems = (sourceLines) => sourceLines.map((line) => {
+              const quantity = numberValue(line.quantity, 1);
+              const unitCost = invoiceUnitCostFromExtraction(line);
+              return enrichInvoiceLine({
+                id: uid(),
+                productName: line.productName || "Unknown product",
+                packSize: line.packSize || "",
+                quantity,
+                unitCost,
+                lineTotal: numberValue(line.lineTotal, quantity * unitCost),
+                lineStatus: invoiceLineStatuses.includes(line.lineStatus || line.status) ? (line.lineStatus || line.status) : "Received",
+                creditReason: line.reason || line.creditReason || "",
+                lineDiscountAmount: numberValue(line.lineDiscountAmount || line.discountAmount, 0),
+                lineDiscountPercent: numberValue(line.lineDiscountPercent || line.discountPercent, 0),
+                supplier,
+                department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+                departmentSplits: defaultDepartmentSplits(line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment)),
+                source: "Local OCR + supplier parser",
+              }, products);
+            });
+            setDraft((current) => ({
+              ...current,
+              supplier,
+              invoiceText: ocrText,
+              invoiceNumber: parsed.invoiceNumber || current.invoiceNumber,
+              date: parsed.invoiceDate || current.date || today(),
+              items: buildOcrInvoiceItems(parsed.lines),
+              subtotalBeforeDiscount: parsed.subtotalBeforeDiscount || current.subtotalBeforeDiscount,
+              discountAmount: parsed.discountAmount || current.discountAmount,
+              discountPercent: parsed.discountPercent || current.discountPercent,
+              finalInvoiceTotal: parsed.finalInvoiceTotal || current.finalInvoiceTotal,
+              status: `Parser extracted ${parsed.lines.length} lines using ${parsed.parserName}. Please review before approving.`,
+            }));
+            readControllerRef.current = null;
+            return;
+          }
+        } catch (error) {
+          readControllerRef.current = null;
+          setDraft((current) => ({ ...current, status: `OCR failed. Please paste invoice text manually. ${error.message}` }));
+          return;
+        }
+      }
       readControllerRef.current = null;
-      const hasOnlyImageFiles = draft.files.some(isImageInvoiceFile) && !draft.files.some(canExtractTextFromInvoiceFile);
-      setDraft((current) => ({ ...current, status: hasOnlyImageFiles ? imageNeedsOcrMessage : couldNotReadInvoiceMessage }));
+      setDraft((current) => ({ ...current, status: couldNotReadInvoiceMessage }));
       return;
     }
 
@@ -3393,9 +3529,9 @@ function Invoices({ creditNotes, departmentNames, draft, setDraft, invoiceSettin
         )}
         {hasDraftWork && (
           <label className="invoice-text">
-            Pasted or OCR invoice text <span>(required for image invoices in Work Edition)</span>
+            Pasted or OCR invoice text <span>(images use local OCR in Work Edition)</span>
             <textarea
-              placeholder="Paste invoice text here, or upload a text-based PDF/TXT/CSV. JPG/PNG/WEBP files need pasted OCR text in Work Edition."
+              placeholder="Paste invoice text here, or upload PDF/TXT/CSV/JPG/PNG/WEBP/HEIC. Images are OCR-read locally in the browser without AI."
               rows={7}
               value={draft.invoiceText}
               onChange={(event) => setDraft({ ...draft, invoiceText: event.target.value })}
