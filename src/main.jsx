@@ -514,6 +514,46 @@ async function textFromInvoiceFiles(files) {
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
 }
 
+function isoDateFromInvoiceToken(value = "") {
+  const token = String(value || "").trim();
+  let match = token.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (match) {
+    const [, day, month, yearRaw] = match;
+    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  match = token.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  return "";
+}
+
+function extractAlbionDeliveryDate(invoiceText = "") {
+  const dateToken = "\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4}";
+  const orderDeliveryPattern = new RegExp(`ORDER\\s*DATE\\s+DELIVERY\\s*DATE(?:\\s+ORDER\\s*NO\\.?)?[\\s\\S]{0,160}?(${dateToken})\\s+(${dateToken})`, "i");
+  const orderDeliveryMatch = String(invoiceText || "").match(orderDeliveryPattern);
+  if (orderDeliveryMatch?.[2]) return isoDateFromInvoiceToken(orderDeliveryMatch[2]);
+
+  const directDeliveryPattern = new RegExp(`DELIVERY\\s*DATE\\s*:?\\s*(${dateToken})`, "i");
+  const directDeliveryMatch = String(invoiceText || "").match(directDeliveryPattern);
+  if (directDeliveryMatch?.[1]) return isoDateFromInvoiceToken(directDeliveryMatch[1]);
+
+  return "";
+}
+
+function preferredInvoiceDateForSupplier(supplier = "", invoiceText = "", fallbackDate = "") {
+  if (/albion/i.test(`${supplier} ${invoiceText}`)) {
+    const deliveryDate = extractAlbionDeliveryDate(invoiceText);
+    if (deliveryDate) return deliveryDate;
+  }
+
+  return fallbackDate || today();
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1296,7 +1336,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         ...current,
         supplier,
         invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
-        date: payload.invoiceDate || current.date || today(),
+        date: preferredInvoiceDateForSupplier(supplier, invoiceText, payload.invoiceDate || current.date || today()),
         items,
         status: `AI extracted ${items.length} lines. Please review before approving.`,
       }));

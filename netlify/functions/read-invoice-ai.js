@@ -72,6 +72,24 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function isoDateFromInvoiceToken(value = "") {
+  const token = String(value || "").trim();
+  let match = token.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (match) {
+    const [, day, month, yearRaw] = match;
+    const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  match = token.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/);
+  if (match) {
+    const [, year, month, day] = match;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  return "";
+}
+
 function inferSupplier(text) {
   const lower = text.toLowerCase();
   if (lower.includes("tg fruits") || lower.includes("t g fruits")) return "TG Fruits";
@@ -100,11 +118,8 @@ function inferInvoiceDate(text) {
   const isoMatch = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
   if (isoMatch) return isoMatch[1];
 
-  const ukMatch = text.match(/\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b/);
-  if (ukMatch) {
-    const [, day, month, year] = ukMatch;
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  }
+  const ukMatch = text.match(/\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b/);
+  if (ukMatch) return isoDateFromInvoiceToken(ukMatch[1]);
 
   const compactUk = text.match(/\b(\d{2})(\d{2})(\d{2})\b/);
   if (compactUk) {
@@ -113,6 +128,29 @@ function inferInvoiceDate(text) {
   }
 
   return today();
+}
+
+function inferAlbionDeliveryDate(text = "") {
+  const source = String(text || "");
+  const dateToken = "\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4}";
+  const orderDeliveryPattern = new RegExp(`ORDER\\s*DATE\\s+DELIVERY\\s*DATE(?:\\s+ORDER\\s*NO\\.?)?[\\s\\S]{0,160}?(${dateToken})\\s+(${dateToken})`, "i");
+  const orderDeliveryMatch = source.match(orderDeliveryPattern);
+  if (orderDeliveryMatch?.[2]) return isoDateFromInvoiceToken(orderDeliveryMatch[2]);
+
+  const directDeliveryPattern = new RegExp(`DELIVERY\\s*DATE\\s*:?\\s*(${dateToken})`, "i");
+  const directDeliveryMatch = source.match(directDeliveryPattern);
+  if (directDeliveryMatch?.[1]) return isoDateFromInvoiceToken(directDeliveryMatch[1]);
+
+  return "";
+}
+
+function preferredInvoiceDate(supplier, sourceText, fallbackDate = "") {
+  if (/albion/i.test(`${supplier} ${sourceText}`)) {
+    const deliveryDate = inferAlbionDeliveryDate(sourceText);
+    if (deliveryDate) return deliveryDate;
+  }
+
+  return asString(fallbackDate, inferInvoiceDate(sourceText));
 }
 
 function readOpenAiText(payload) {
@@ -166,7 +204,7 @@ function normalizeInvoice(invoice, sourceText) {
 
   return {
     supplier,
-    invoiceDate: asString(invoice.invoiceDate || invoice.date, inferInvoiceDate(sourceText)),
+    invoiceDate: preferredInvoiceDate(supplier, sourceText, invoice.invoiceDate || invoice.date),
     invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
     confidence: clampConfidence(invoice.confidence),
     lines: normalizedLines,
@@ -231,6 +269,7 @@ Rules:
 Supplier-specific guidance:
 - TG Fruits invoices often contain lines like: DATE PRODUCT SIZE QTY PRICE VAT TOTAL, and PDF extraction may merge many rows onto one line.
 - Albion Fine Foods, Woods, BNFS, Cheese Man and Coburn & Baker may use different column layouts. Detect rows by product description plus numeric values.
+- Albion Fine Foods order pages contain both ORDER DATE and DELIVERY DATE. Use DELIVERY DATE as invoiceDate, never ORDER DATE or the browser print timestamp.
 - Products may have dates before them; ignore repeated dates unless it is the invoice date.
 
 Known suppliers in this MarginFlow database:
