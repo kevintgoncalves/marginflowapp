@@ -134,6 +134,21 @@ input[readonly] {
 .brand strong, .brand span { display: block; }
 .brand span { color: var(--muted); font-size: 13px; }
 
+.sidebar-user-switcher {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.sidebar-user-switcher select {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 10px;
+}
+
 nav {
   display: grid;
   gap: 4px;
@@ -621,6 +636,21 @@ label {
 }
 .table-toolbar input { padding-left: 34px; }
 .table-wrap { overflow: auto; }
+.permission-table table {
+  min-width: 520px;
+}
+
+.permission-table td:first-child {
+  color: var(--text);
+}
+
+.permission-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 16px;
+}
+
 table {
   width: 100%;
   min-width: 1120px;

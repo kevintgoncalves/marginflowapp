@@ -327,8 +327,155 @@ const navItems = [
   { id: "waste", label: "Waste", icon: Trash2 },
   { id: "gp", label: "Sales", icon: Gauge },
   { id: "labour", label: "Labour", icon: Users },
+  { id: "ai", label: "AI Insights", icon: Sparkles },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+const permissionLevels = [
+  { value: "none", label: "No access" },
+  { value: "view", label: "View only" },
+  { value: "edit", label: "Edit" },
+  { value: "full", label: "Full access" },
+];
+const permissionLevelRank = { none: 0, view: 1, edit: 2, full: 3 };
+const userRoleLabels = ["Owner", "General Manager", "Head Chef", "Bar Manager", "Custom"];
+const actionPermissionDefinitions = [
+  { key: "add", label: "Add" },
+  { key: "edit", label: "Edit" },
+  { key: "delete", label: "Delete" },
+  { key: "import", label: "Import" },
+  { key: "approve", label: "Approve" },
+  { key: "reset", label: "Reset" },
+];
+const pagePermissionDefinitions = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "gp", label: "Sales" },
+  { id: "invoices", label: "Invoices" },
+  { id: "products", label: "Products" },
+  { id: "suppliers", label: "Suppliers" },
+  { id: "stocktake", label: "Stocktake" },
+  { id: "recipes", label: "Recipes" },
+  { id: "menu", label: "Menu Costing" },
+  { id: "waste", label: "Waste" },
+  { id: "labour", label: "Labour" },
+  { id: "ai", label: "AI Insights" },
+  { id: "settings", label: "Settings" },
+];
+
+function pagePermissionsForLevel(level = "full") {
+  return Object.fromEntries(pagePermissionDefinitions.map((page) => [page.id, level]));
+}
+
+function actionPermissionsFor(value = true) {
+  return Object.fromEntries(actionPermissionDefinitions.map((action) => [action.key, value]));
+}
+
+function departmentPermissionsFor(departmentSettings, level = "edit") {
+  return Object.fromEntries(departmentSettings.map((department) => [department.name, level]));
+}
+
+function rolePermissionTemplate(role, departmentSettings) {
+  const pages = pagePermissionsForLevel("view");
+  const departments = departmentPermissionsFor(departmentSettings, "view");
+  const actions = actionPermissionsFor(true);
+  if (role === "Owner") {
+    return { pages: pagePermissionsForLevel("full"), departments: departmentPermissionsFor(departmentSettings, "edit"), actions: actionPermissionsFor(true) };
+  }
+  if (role === "General Manager") {
+    Object.assign(pages, { dashboard: "full", gp: "full", invoices: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
+    departmentSettings.forEach((department) => {
+      departments[department.name] = ["Bar", "Non-food"].includes(department.type) || department.name === "Bar" ? "edit" : "view";
+    });
+    return { pages, departments, actions: { ...actions, delete: false, reset: false } };
+  }
+  if (role === "Head Chef") {
+    Object.assign(pages, { dashboard: "view", gp: "view", invoices: "edit", products: "edit", suppliers: "view", stocktake: "edit", recipes: "full", menu: "full", waste: "edit", labour: "view", settings: "view" });
+    departmentSettings.forEach((department) => {
+      departments[department.name] = ["Kitchen Made", "Bought In"].includes(department.name) || ["Food", "Bought In"].includes(department.type) ? "edit" : "none";
+    });
+    return { pages, departments, actions: { ...actions, delete: false, reset: false } };
+  }
+  if (role === "Bar Manager") {
+    Object.assign(pages, { dashboard: "view", gp: "edit", invoices: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
+    departmentSettings.forEach((department) => {
+      departments[department.name] = department.name === "Bar" || department.type === "Bar" ? "edit" : "none";
+    });
+    return { pages, departments, actions: { ...actions, delete: false, reset: false } };
+  }
+  return { pages, departments, actions: { ...actions, delete: false, reset: false } };
+}
+
+function createDefaultUsers(departmentSettings) {
+  return [{
+    id: uid(),
+    name: "Owner",
+    email: "owner@marginflow.local",
+    role: "Owner",
+    status: "Active",
+    ...rolePermissionTemplate("Owner", departmentSettings),
+  }];
+}
+
+function normalizePermissionLevel(value, fallback = "none") {
+  return permissionLevelRank[value] === undefined ? fallback : value;
+}
+
+function normalizeUsers(users, departmentSettings) {
+  const sourceUsers = Array.isArray(users) && users.length ? users : createDefaultUsers(departmentSettings);
+  return sourceUsers.map((user) => {
+    const template = rolePermissionTemplate(user.role || "Custom", departmentSettings);
+    return {
+      id: user.id || uid(),
+      name: user.name || "New user",
+      email: user.email || "",
+      role: user.role || "Custom",
+      status: user.status || "Active",
+      pages: Object.fromEntries(pagePermissionDefinitions.map((page) => [page.id, normalizePermissionLevel(user.pages?.[page.id], template.pages[page.id] || "none")])),
+      departments: Object.fromEntries(departmentSettings.map((department) => [department.name, normalizePermissionLevel(user.departments?.[department.name], template.departments[department.name] || "none")])),
+      actions: Object.fromEntries(actionPermissionDefinitions.map((action) => [action.key, Boolean(user.actions?.[action.key] ?? template.actions[action.key])])),
+    };
+  });
+}
+
+function pageLevelAllows(level, minimum) {
+  return permissionLevelRank[normalizePermissionLevel(level)] >= permissionLevelRank[minimum];
+}
+
+function userCanViewPage(user, pageId) {
+  return user?.status !== "Disabled" && pageLevelAllows(user?.pages?.[pageId], "view");
+}
+
+function userCanAction(user, pageId, action) {
+  if (!userCanViewPage(user, pageId)) return false;
+  const level = normalizePermissionLevel(user.pages?.[pageId]);
+  if (level === "view") return false;
+  if (["delete", "reset"].includes(action) && level !== "full") return false;
+  return Boolean(user.actions?.[action]);
+}
+
+function userCanViewDepartment(user, departmentName) {
+  return user?.status !== "Disabled" && pageLevelAllows(user?.departments?.[departmentName], "view");
+}
+
+function userCanEditDepartment(user, departmentName) {
+  return user?.status !== "Disabled" && pageLevelAllows(user?.departments?.[departmentName], "edit");
+}
+
+function permissionsForPage(user, pageId, selectedDepartment = "") {
+  const hasEditableDepartment = Object.values(user?.departments || {}).some((level) => pageLevelAllows(level, "edit"));
+  const departmentAllowed = !selectedDepartment || (selectedDepartment === "All departments" ? hasEditableDepartment : userCanEditDepartment(user, selectedDepartment));
+  return {
+    pageId,
+    level: normalizePermissionLevel(user?.pages?.[pageId]),
+    canView: userCanViewPage(user, pageId),
+    canAdd: userCanAction(user, pageId, "add") && departmentAllowed,
+    canEdit: userCanAction(user, pageId, "edit") && departmentAllowed,
+    canDelete: userCanAction(user, pageId, "delete") && departmentAllowed,
+    canImport: userCanAction(user, pageId, "import") && departmentAllowed,
+    canApprove: userCanAction(user, pageId, "approve") && departmentAllowed,
+    canReset: userCanAction(user, pageId, "reset"),
+  };
+}
 
 function money(value) {
   return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Number(value) || 0);
@@ -3173,8 +3320,16 @@ function parseLabourCsv(text, fallbackDate = today()) {
 function App() {
   const [active, setActive] = useState("dashboard");
   const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
-  const departmentNames = activeDepartmentNames(departmentSettings);
-  const departmentOptions = ["All departments", ...departmentNames];
+  const departmentNames = useMemo(() => activeDepartmentNames(departmentSettings), [departmentSettings]);
+  const [usersState, setUsersState] = useState(() => normalizeUsers(safeReadLocalStorage("marginflow.users", []), departmentSettings));
+  const users = useMemo(() => normalizeUsers(usersState, departmentSettings), [usersState, departmentSettings]);
+  const [activeUserId, setActiveUserIdState] = useState(() => {
+    try {
+      return localStorage.getItem("marginflow.activeUserId") || users[0]?.id || "";
+    } catch {
+      return users[0]?.id || "";
+    }
+  });
   const [department, setDepartmentState] = useState(() => {
     try {
       const stored = localStorage.getItem("marginflow.department") || "Kitchen Made";
@@ -3213,6 +3368,19 @@ function App() {
   const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
   const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
   const setLabourData = storedStateUpdater(setLabourDataState, "marginflow.labour");
+  const setUsers = (value) => {
+    const next = normalizeUsers(typeof value === "function" ? value(users) : value, departmentSettings);
+    setUsersState(next);
+    saveLocalStorage("marginflow.users", next);
+  };
+  const setActiveUserId = (value) => {
+    setActiveUserIdState(value);
+    try {
+      localStorage.setItem("marginflow.activeUserId", value);
+    } catch {
+      // Local user selection is best-effort until auth is connected.
+    }
+  };
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -3239,9 +3407,13 @@ function App() {
     saveLocalStorage("marginflow.departmentSettings", value);
   };
 
-  const appMode = companySettings.appMode || defaultCompanySettings.appMode;
-  const isWorkEdition = appMode === "Work Edition: Non-AI";
-  const visibleNavItems = navItems.filter((item) => !(isWorkEdition && item.id === "ai"));
+  const currentUser = users.find((user) => user.id === activeUserId && user.status !== "Disabled") || users.find((user) => user.status !== "Disabled") || users[0];
+  const visibleNavItems = useMemo(() => navItems.filter((item) => userCanViewPage(currentUser, item.id)), [currentUser]);
+  const allowedDepartmentNames = useMemo(() => departmentNames.filter((name) => userCanViewDepartment(currentUser, name)), [currentUser, departmentNames]);
+  const visibleDepartmentOptions = useMemo(() => {
+    if (!allowedDepartmentNames.length) return ["All departments"];
+    return allowedDepartmentNames.length === departmentNames.length ? ["All departments", ...allowedDepartmentNames] : allowedDepartmentNames;
+  }, [allowedDepartmentNames, departmentNames]);
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
@@ -3250,10 +3422,20 @@ function App() {
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
+  const permissionsByPage = useMemo(
+    () => Object.fromEntries(navItems.map((item) => [item.id, permissionsForPage(currentUser, item.id, departmentContextPages.includes(item.id) ? department : "")])),
+    [currentUser, department],
+  );
 
   useEffect(() => {
-    if (isWorkEdition && active === "ai") setActive("dashboard");
-  }, [active, isWorkEdition]);
+    if (!visibleNavItems.some((item) => item.id === active)) setActive(visibleNavItems[0]?.id || "dashboard");
+  }, [active, visibleNavItems]);
+
+  useEffect(() => {
+    if (!visibleDepartmentOptions.includes(department)) {
+      setDepartment(visibleDepartmentOptions[0] || "All departments");
+    }
+  }, [department, visibleDepartmentOptions]);
 
   const setDepartment = (value) => {
     setDepartmentState(value);
@@ -3265,7 +3447,8 @@ function App() {
     }
   };
 
-  const requestDelete = ({ title = "Delete item", message = "Are you sure you want to delete this item?", onConfirm }) => {
+  const requestDelete = ({ title = "Delete item", message = "Are you sure you want to delete this item?", onConfirm, pageId = active }) => {
+    if (!userCanAction(currentUser, pageId, "delete")) return;
     setDeleteConfirmation({ title, message, onConfirm });
   };
 
@@ -3275,6 +3458,7 @@ function App() {
   };
 
   const approveInvoice = () => {
+    if (!userCanAction(currentUser, "invoices", "approve")) return;
     if (!draft.items.length) return;
     const invalidSplit = draft.items.find((item) => !splitIsValid(item));
     if (invalidSplit) {
@@ -3314,6 +3498,12 @@ function App() {
             <span>Hospitality profit management</span>
           </div>
         </div>
+        <label className="sidebar-user-switcher">
+          <span>User</span>
+          <select value={currentUser?.id || ""} onChange={(event) => setActiveUserId(event.target.value)}>
+            {users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+          </select>
+        </label>
         <nav>
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
@@ -3351,7 +3541,7 @@ function App() {
             {active === "dashboard" && <span className="range-chip">{rangeLabel(dateRangeState, dateRange)}</span>}
             {departmentOpen && (
               <div className="department-menu">
-                {departmentOptions.map((option) => (
+                {visibleDepartmentOptions.map((option) => (
                   <button className={department === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
                     {option}
                   </button>
@@ -3366,12 +3556,13 @@ function App() {
             dateRange={dateRange}
             dateRangeState={dateRangeState}
             department={department}
-            departmentNames={departmentNames}
+            departmentNames={allowedDepartmentNames}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
             invoices={invoices}
             metrics={metrics}
+            permissions={permissionsByPage.dashboard}
             sales={sales}
             setDateRangeState={setDateRangeState}
             stocktakes={stocktakes}
@@ -3392,19 +3583,21 @@ function App() {
             setSuppliers={setSuppliers}
             products={products}
             setProducts={setProducts}
-            departmentNames={departmentNames}
+            departmentNames={allowedDepartmentNames}
             approveInvoice={approveInvoice}
+            permissions={permissionsByPage.invoices}
             requestDelete={requestDelete}
             setCreditNotes={setCreditNotes}
             setInvoices={setInvoices}
           />
         )}
-        {active === "products" && <Products departmentNames={departmentNames} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
+        {active === "products" && <Products departmentNames={allowedDepartmentNames} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} permissions={permissionsByPage.suppliers} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
         {active === "stocktake" && (
           <Stocktake
             department={department}
-            departmentNames={departmentNames}
+            departmentNames={allowedDepartmentNames}
+            permissions={permissionsByPage.stocktake}
             products={products}
             requestDelete={requestDelete}
             setProducts={setProducts}
@@ -3412,20 +3605,21 @@ function App() {
             stocktakes={stocktakes}
           />
         )}
-        {active === "recipes" && <Recipes departmentNames={departmentNames} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={department} departmentNames={departmentNames} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
+        {active === "waste" && <Waste department={department} departmentNames={allowedDepartmentNames} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         {active === "gp" && (
           <SalesAnalysis
             dateRange={dateRange}
             dateRangeState={dateRangeState}
             department={department}
-            departmentNames={departmentNames}
+            departmentNames={allowedDepartmentNames}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
             invoices={invoices}
             metrics={metrics}
+            permissions={permissionsByPage.gp}
             requestDelete={requestDelete}
             sales={sales}
             setDateRangeState={setDateRangeState}
@@ -3443,11 +3637,17 @@ function App() {
             dateRangeState={labourDateRangeState}
             financialSettings={financialSettings}
             labourData={labourData}
+            permissions={permissionsByPage.labour}
             requestDelete={requestDelete}
             sales={sales}
             setDateRangeState={setLabourDateRangeState}
             setLabourData={setLabourData}
           />
+        )}
+        {active === "ai" && (
+          <Panel title="AI Insights">
+            <p className="helper-text">AI Insights permissions are ready for the future AI module. Invoice AI reading remains controlled from Invoices and Settings.</p>
+          </Panel>
         )}
         {active === "settings" && (
           <SettingsPanel
@@ -3457,7 +3657,10 @@ function App() {
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
             menuSettings={menuSettings}
+            permissions={permissionsByPage.settings}
             suppliers={suppliers}
+            users={users}
+            activeUserId={currentUser?.id || activeUserId}
             requestDelete={requestDelete}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
@@ -3465,6 +3668,8 @@ function App() {
             setAiSettings={setAiSettings}
             setInvoiceSettings={setInvoiceSettings}
             setMenuSettings={setMenuSettings}
+            setUsers={setUsers}
+            setActiveUserId={setActiveUserId}
           />
         )}
         {deleteConfirmation && (
@@ -3677,7 +3882,7 @@ function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, met
   );
 }
 
-function PerformanceSections({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, requestDelete, setSales }) {
+function PerformanceSections({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -3691,12 +3896,12 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
       <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
       <PerformanceCharts dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
-      {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
+      {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const allDepartmentMetrics = useMemo(
     () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
     [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
@@ -3719,7 +3924,7 @@ function Dashboard({ dateRange, dateRangeState, department, departmentNames, dep
           Dashboard is showing all departments because {department} has no sales in this date range.
         </div>
       )}
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -3762,7 +3967,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, suppliers, setSuppliers, products, setProducts, approveInvoice, setCreditNotes, setInvoices }) {
+function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoices"), suppliers, setSuppliers, products, setProducts, approveInvoice, setCreditNotes, setInvoices }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
@@ -3807,6 +4012,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const addFiles = async (files) => {
+    if (!permissions.canImport) return;
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
     setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded. Ready for AI reading.` }));
@@ -3821,11 +4027,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const createSupplier = () => {
+    if (!permissions.canAdd) return;
     setSuppliers((current) => ensureSupplierList(current, draft.supplier));
     setDraft((current) => ({ ...current, status: `${current.supplier} created` }));
   };
 
   const readInvoice = async () => {
+    if (!permissions.canImport) return;
     if (!aiSettings.enableAiInvoiceReading) {
       setDraft((current) => ({ ...current, status: "AI failed. AI invoice reading is disabled in Settings." }));
       return;
@@ -3942,6 +4150,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const openManualInvoice = () => {
+    if (!permissions.canAdd) return;
     const supplier = draft.supplier || suppliers[0]?.name || "";
     const department = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
     setManualMode("Simple Mode");
@@ -4009,6 +4218,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const saveManualInvoice = () => {
+    if (!permissions.canAdd && !permissions.canApprove) return;
     const supplier = manualDraft.supplier?.trim() || "Unknown Supplier";
     const date = manualDraft.date || today();
     let items = [];
@@ -4061,6 +4271,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const openEditInvoice = (invoice) => {
+    if (!permissions.canEdit) return;
     setEditDraft({
       ...invoice,
       items: (invoice.items || []).map((item) => ({ ...item, id: item.id || uid() })),
@@ -4118,6 +4329,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const saveEditInvoice = () => {
+    if (!permissions.canEdit) return;
     if (!editDraft) return;
     const supplier = editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
     const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
@@ -4136,6 +4348,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const confirmDeleteInvoice = () => {
+    if (!permissions.canDelete) return;
     if (!deleteTarget) return;
     setInvoices((current) => current.filter((invoice) => invoice.id !== deleteTarget.id));
     setCreditNotes((current) => current.filter((note) => note.invoiceId !== deleteTarget.id));
@@ -4156,16 +4369,16 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           onDrop={(event) => {
             event.preventDefault();
             setDragging(false);
-            addFiles(event.dataTransfer.files);
+            if (permissions.canImport) addFiles(event.dataTransfer.files);
           }}
         >
           <Upload size={30} />
           <h3>Upload invoice PDF or image</h3>
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
-          <label className="file-button">
+          {permissions.canImport && <label className="file-button">
             Choose invoice
             <input key={uploadInputKey} accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
-          </label>
+          </label>}
         </div>
         <div className="invoice-meta">
           <SupplierSelector id="supplier-list" suppliers={suppliers} value={draft.supplier} onChange={(value) => setDraft({ ...draft, supplier: value })} />
@@ -4174,7 +4387,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         </div>
         {showCreateSupplier && (
           <div className="button-row left tight">
-            <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>
+            {permissions.canAdd && <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>}
           </div>
         )}
         <div className="file-list">
@@ -4184,9 +4397,9 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         <div className="button-row left">
-          <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>
-          <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>
-          <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>
+          {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>}
+          {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>}
+          {permissions.canApprove && <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>}
           {hasUploadDraft && (
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
@@ -4217,8 +4430,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
-          onDelete={(id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id))}
-          onEdit={(row) => openEditInvoice(row)}
+          onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
+          onEdit={permissions.canEdit ? (row) => openEditInvoice(row) : null}
           rows={invoices}
         />
       </Panel>
@@ -4256,7 +4469,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         footer={(
           <>
             <button className="ghost" onClick={() => { setEditDraft(null); }} type="button">Cancel</button>
-            <button onClick={saveEditInvoice} type="button"><Save size={16} />Save changes</button>
+            {permissions.canEdit && <button onClick={saveEditInvoice} type="button"><Save size={16} />Save changes</button>}
           </>
         )}
       >
@@ -4501,7 +4714,7 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
 }
 
 
-function Products({ departmentNames, products, requestDelete, setProducts, suppliers }) {
+function Products({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -4607,10 +4820,10 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
             { key: "department", label: "Department" },
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) })}
-          onEdit={openProductModal}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
+          onEdit={permissions.canEdit ? openProductModal : null}
           rows={rows}
-          toolbarAction={<button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button> : null}
         />
       </Panel>
       {modalOpen && !editingId && (
@@ -4621,7 +4834,7 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
               <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
             </div>
             <div className="button-row left tight">
-              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importProducts(event.target.files?.[0])} type="file" /></label>
+              {permissions.canImport && <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importProducts(event.target.files?.[0])} type="file" /></label>}
             </div>
             {status && <div className="invoice-status info">{status}</div>}
             {pendingImport.length > 0 && (
@@ -4637,7 +4850,7 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
                   { key: "aliases", label: "Aliases" },
                 ]} rows={pendingImport} />
                 <div className="button-row left">
-                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+                  {permissions.canImport && <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>}
                   <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
                 </div>
               </div>
@@ -4646,12 +4859,12 @@ function Products({ departmentNames, products, requestDelete, setProducts, suppl
             <div className="button-row left">
               <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
               <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
-              <button onClick={saveBulkProducts} type="button"><Save size={16} />Save Products</button>
+              {permissions.canAdd && <button onClick={saveBulkProducts} type="button"><Save size={16} />Save Products</button>}
             </div>
           </div>
         </div>
       )}
-      {modalOpen && editingId && (
+      {modalOpen && editingId && permissions.canEdit && (
         <EditModal title="Edit product" onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
           <div className="form-grid six">
             <Field label="Product name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
@@ -4692,7 +4905,7 @@ function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRo
   );
 }
 
-function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNotes, suppliers, setSuppliers, supplierSpend }) {
+function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, suppliers, setSuppliers, supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -4821,10 +5034,10 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
             { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) })}
-          onEdit={openSupplierModal}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) }) : null}
+          onEdit={permissions.canEdit ? openSupplierModal : null}
           rows={supplierRows}
-          toolbarAction={<button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button>}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button> : null}
         />
       </Panel>
       {modalOpen && !editingId && (
@@ -4835,7 +5048,7 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
               <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
             </div>
             <div className="button-row left tight">
-              <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSuppliers(event.target.files?.[0])} type="file" /></label>
+              {permissions.canImport && <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSuppliers(event.target.files?.[0])} type="file" /></label>}
             </div>
             {status && <div className="invoice-status info">{status}</div>}
             {pendingImport.length > 0 && (
@@ -4850,7 +5063,7 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
                   { key: "active", label: "Status", render: (value) => value ? "Active" : "Inactive" },
                 ]} rows={pendingImport} />
                 <div className="button-row left">
-                  <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+                  {permissions.canImport && <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>}
                   <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
                 </div>
               </div>
@@ -4859,12 +5072,12 @@ function Suppliers({ creditNotes, invoices, products, requestDelete, setCreditNo
             <div className="button-row left">
               <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
               <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
-              <button onClick={saveBulkSuppliers} type="button"><Save size={16} />Save Suppliers</button>
+              {permissions.canAdd && <button onClick={saveBulkSuppliers} type="button"><Save size={16} />Save Suppliers</button>}
             </div>
           </div>
         </div>
       )}
-      {modalOpen && editingId && (
+      {modalOpen && editingId && permissions.canEdit && (
         <EditModal title="Edit supplier" onCancel={() => setModalOpen(false)} onSave={saveSupplier} saveLabel="Save Supplier">
           <div className="modal-tabs">
             {supplierTabs.map((tab) => (
@@ -4987,7 +5200,7 @@ function stocktakeBlankLine(department, product = {}) {
   };
 }
 
-function Stocktake({ department, departmentNames, products, requestDelete, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes }) {
   const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const blankModal = (type = "Stocktake") => ({
     type,
@@ -5006,6 +5219,8 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
 
   const openModal = (type, stocktake = null) => {
+    if (!stocktake && !permissions.canAdd) return;
+    if (stocktake && !permissions.canEdit) return;
     if (!stocktake) {
       setModal(blankModal(type));
       return;
@@ -5043,7 +5258,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
   };
 
   const importStocktakeCsv = async (file) => {
-    if (!file || !modal) return;
+    if (!permissions.canImport || !file || !modal) return;
     const rows = (await file.text()).split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
     const hasHeader = normalizeHeader(rows[0]?.[0]).includes("product");
     const imported = (hasHeader ? rows.slice(1) : rows).map(([productName, quantity, unitCost]) => {
@@ -5082,6 +5297,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
 
   const saveModal = () => {
     if (!modal) return;
+    if (modal.id ? !permissions.canEdit : !permissions.canAdd) return;
     const isManual = modal.entryMode === "Manual Value";
     const sourceLines = isManual ? [] : modal.lines.filter((line) => line.productName.trim());
     const incomplete = sourceLines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
@@ -5116,8 +5332,8 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
     <div className="page-grid">
       <Panel title="Stocktake">
         <div className="button-row left">
-          <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>
-          <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>
+          {permissions.canAdd && <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
+          {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
         </div>
       </Panel>
       <Panel title="Saved stocktakes">
@@ -5132,8 +5348,8 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
             { key: "actions", label: "Actions", render: (_, row) => (
               <div className="row-actions">
                 <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
-                <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>
-                <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>
+                {permissions.canEdit && <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>}
+                {permissions.canDelete && <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>}
               </div>
             ) },
           ]}
@@ -5154,7 +5370,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
             <div className="radio-section">
               <strong>Entry mode</strong>
               <div className="radio-row">
-                {["Manual Value", "Product List", "CSV Import"].map((mode) => <label key={mode}><input checked={modal.entryMode === mode} onChange={() => setModal({ ...modal, entryMode: mode })} type="radio" />{mode}</label>)}
+                {["Manual Value", "Product List", ...(permissions.canImport ? ["CSV Import"] : [])].map((mode) => <label key={mode}><input checked={modal.entryMode === mode} onChange={() => setModal({ ...modal, entryMode: mode })} type="radio" />{mode}</label>)}
               </div>
             </div>
             {modal.entryMode === "Manual Value" ? (
@@ -5166,7 +5382,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
                 {modal.entryMode === "CSV Import" && (
                   <>
                     <div className="button-row left tight">
-                      <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeCsv(event.target.files?.[0])} type="file" /></label>
+                      {permissions.canImport && <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeCsv(event.target.files?.[0])} type="file" /></label>}
                     </div>
                     {modal.pendingImport.length > 0 && (
                       <div className="import-review">
@@ -5178,7 +5394,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
                           { key: "stockValue", label: "Stock value", render: money },
                         ]} rows={modal.pendingImport} />
                         <div className="button-row left">
-                          <button onClick={() => setModal((current) => ({ ...current, lines: current.pendingImport, pendingImport: [], status: "Import confirmed." }))} type="button"><Save size={16} />Confirm Import</button>
+                          {permissions.canImport && <button onClick={() => setModal((current) => ({ ...current, lines: current.pendingImport, pendingImport: [], status: "Import confirmed." }))} type="button"><Save size={16} />Confirm Import</button>}
                           <button className="ghost danger" onClick={() => setModal((current) => ({ ...current, pendingImport: [], importFileKey: current.importFileKey + 1, status: "Import cancelled." }))} type="button"><X size={16} />Cancel Import</button>
                         </div>
                       </div>
@@ -5195,7 +5411,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
                           <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateModalLine(line.id, "quantity", event.target.value)} /></td>
                           <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateModalLine(line.id, "unitCost", event.target.value)} /></td>
                           <td>{money(line.stockValue)}</td>
-                          <td><button className="icon danger" onClick={() => setModal((current) => ({ ...current, lines: current.lines.length > 1 ? current.lines.filter((item) => item.id !== line.id) : current.lines }))} type="button"><Trash2 size={15} /></button></td>
+                          <td>{(permissions.canAdd || permissions.canEdit) && <button className="icon danger" onClick={() => setModal((current) => ({ ...current, lines: current.lines.length > 1 ? current.lines.filter((item) => item.id !== line.id) : current.lines }))} type="button"><Trash2 size={15} /></button>}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -5203,7 +5419,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
                 </div>
                 <datalist id="stocktake-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
                 <div className="button-row left tight">
-                  <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>
+                  {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>}
                 </div>
               </>
             )}
@@ -5211,7 +5427,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
             <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.entryMode === "Manual Value" ? modal.manualValue : modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
             <div className="button-row left">
               <button className="ghost" onClick={() => setModal(null)} type="button">Cancel</button>
-              <button onClick={saveModal} type="button"><Save size={16} />Save</button>
+              {(modal.id ? permissions.canEdit : permissions.canAdd) && <button onClick={saveModal} type="button"><Save size={16} />Save</button>}
             </div>
           </div>
         </div>
@@ -5233,7 +5449,7 @@ function Stocktake({ department, departmentNames, products, requestDelete, setPr
   );
 }
 
-function Recipes({ departmentNames, products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
+function Recipes({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
   const blankIngredient = () => ({ id: uid(), productId: "", productName: "", supplier: "", quantity: 1, unit: "", unitCost: 0, lineCost: 0 });
   const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", ingredients: [blankIngredient(), blankIngredient()] };
   const emptyProduct = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
@@ -5277,6 +5493,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   };
 
   const openCreateProduct = (ingredient) => {
+    if (!permissions.canAdd && !permissions.canEdit) return;
     setCreateProductForIngredientId(ingredient.id);
     setProductForm({
       ...emptyProduct,
@@ -5287,6 +5504,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   };
 
   const saveCreatedProduct = () => {
+    if (!permissions.canAdd && !permissions.canEdit) return;
     if (!productForm.name.trim()) return;
     const aliases = String(productForm.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
     const unitCost = numberValue(productForm.unitCost);
@@ -5313,6 +5531,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   };
 
   const saveRecipe = () => {
+    if (editingId ? !permissions.canEdit : !permissions.canAdd) return;
     if (!form.name.trim()) return;
     const ingredients = form.ingredients
       .filter((ingredient) => ingredient.productName.trim())
@@ -5343,6 +5562,8 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   };
 
   const openRecipeModal = (row = null) => {
+    if (row && !permissions.canEdit) return;
+    if (!row && !permissions.canAdd) return;
     if (row) {
       const ingredients = (row.ingredients || []).map((ingredient) => ({
         id: ingredient.id || uid(),
@@ -5385,13 +5606,13 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
             { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
             { key: "linked", label: "Ingredients" },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) })}
-          onEdit={openRecipeModal}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) }) : null}
+          onEdit={permissions.canEdit ? openRecipeModal : null}
           rows={rows}
-          toolbarAction={<button onClick={() => openRecipeModal()} type="button"><Plus size={16} />Add Recipe</button>}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openRecipeModal()} type="button"><Plus size={16} />Add Recipe</button> : null}
         />
       </Panel>
-      {modalOpen && (
+      {modalOpen && (editingId ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={editingId ? "Edit recipe" : "Create recipe"} onCancel={() => setModalOpen(false)} onSave={saveRecipe} saveLabel="Save Recipe">
           <div className="form-grid six">
             <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
@@ -5414,7 +5635,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
                         <datalist id={`recipe-product-${ingredient.id}`}>
                           {productAutocomplete(products, ingredient.productName).map((product) => <option key={product.id} value={product.name} />)}
                         </datalist>
-                        {needsProduct && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
+                        {needsProduct && (permissions.canAdd || permissions.canEdit) && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
                       </td>
                       <td>{ingredient.productId ? ingredient.productName : "-"}</td>
                       <td>{ingredient.supplier || "-"}</td>
@@ -5422,7 +5643,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
                       <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateIngredient(ingredient.id, "quantity", event.target.value)} /></td>
                       <td><input value={ingredient.unit} onChange={(event) => updateIngredient(ingredient.id, "unit", event.target.value)} /></td>
                       <td>{money(numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)))}</td>
-                      <td><button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.length > 1 ? current.ingredients.filter((item) => item.id !== ingredient.id) : current.ingredients })) })} type="button"><Trash2 size={15} /></button></td>
+                      <td>{permissions.canDelete && <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.length > 1 ? current.ingredients.filter((item) => item.id !== ingredient.id) : current.ingredients })) })} type="button"><Trash2 size={15} /></button>}</td>
                     </tr>
                   );
                 })}
@@ -5430,7 +5651,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
             </table>
           </div>
           <div className="button-row left tight">
-            <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>
+            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>}
           </div>
           <div className="metric-grid compact">
             <Metric label="Batch cost" value={money(currentBatchCost)} delta={`${form.ingredients.filter((ingredient) => ingredient.productName.trim()).length} ingredient(s)`} />
@@ -5438,7 +5659,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
           </div>
         </EditModal>
       )}
-      {createProductForIngredientId && (
+      {createProductForIngredientId && (permissions.canAdd || permissions.canEdit) && (
         <EditModal title="Create product" onCancel={() => setCreateProductForIngredientId("")} onSave={saveCreatedProduct} saveLabel="Save Product">
           <div className="form-grid six">
             <Field label="Product name" value={productForm.name} onChange={(value) => setProductForm({ ...productForm, name: value })} />
@@ -5455,7 +5676,7 @@ function Recipes({ departmentNames, products, recipes, requestDelete, setProduct
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, products, recipes, requestDelete, setMenus }) {
+function MenuCosting({ financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
@@ -5493,6 +5714,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   const estimatedTotalCost = dishRows.reduce((sum, dish) => sum + dish.cost, 0);
 
   const createMenu = () => {
+    if (!permissions.canAdd) return;
     if (!menuForm.name.trim()) return;
     const subcategories = menuSubcategoryRows
       .map((row) => row.name.trim())
@@ -5507,6 +5729,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   };
 
   const addDish = () => {
+    if (!permissions.canAdd && !permissions.canEdit) return;
     const selectedMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
     if (!selectedMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
     const dishIngredients = dishIngredientRows
@@ -5566,6 +5789,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   };
 
   const deleteMenu = () => {
+    if (!permissions.canDelete) return;
     if (!activeMenu) return;
     requestDelete({
       title: "Delete menu",
@@ -5579,6 +5803,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   };
 
   const deleteSubcategory = (subcategoryId) => {
+    if (!permissions.canDelete) return;
     requestDelete({
       title: "Delete subcategory",
       message: "Are you sure you want to delete this subcategory?",
@@ -5591,6 +5816,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   };
 
   const deleteDish = (dishId) => {
+    if (!permissions.canDelete) return;
     requestDelete({
       title: "Delete menu dish",
       message: "Are you sure you want to delete this menu dish?",
@@ -5617,9 +5843,9 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
             </div>
             <div className="button-row left">
-              <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>
-              <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>
-              <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>
+              {permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}
+              {(permissions.canAdd || permissions.canEdit) && <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>}
+              {permissions.canDelete && <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>}
             </div>
           </Panel>
           <Panel title="Subcategory summary">
@@ -5628,7 +5854,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                 const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
                 const gp = average(rows.map((dish) => dish.gp));
                 const target = numberValue(subcategory.targetGp, menuTarget);
-                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span><button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button></div>;
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span>{permissions.canDelete && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
               })}
             </div>
           </Panel>
@@ -5644,14 +5870,14 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                 { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : value > -5 ? "amber" : "red"}>{percent(value)}</Badge> },
                 { key: "status", label: "Status" },
               ]}
-              onDelete={deleteDish}
+              onDelete={permissions.canDelete ? deleteDish : null}
               rows={dishRows}
             />
           </Panel>
         </>
       )}
-      {!activeMenu && <Panel title="Menu costing"><div className="button-row left"><button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button></div></Panel>}
-      {menuModalOpen && (
+      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}</div></Panel>}
+      {menuModalOpen && permissions.canAdd && (
         <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
           <div className="form-grid six">
             <Field label="Menu name" value={menuForm.name} onChange={(value) => setMenuForm({ ...menuForm, name: value })} />
@@ -5669,11 +5895,11 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
             ))}
           </div>
           <div className="button-row left tight">
-            <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add Subcategory</button>
+            {permissions.canAdd && <button className="ghost" onClick={() => setMenuSubcategoryRows((current) => [...current, { id: uid(), name: "" }])} type="button"><Plus size={16} />Add Subcategory</button>}
           </div>
         </EditModal>
       )}
-      {dishModalOpen && (
+      {dishModalOpen && (permissions.canAdd || permissions.canEdit) && (
         <EditModal title="Add dish" onCancel={() => setDishModalOpen(false)} onSave={addDish} saveLabel="Save Dish">
           <div className="form-grid six">
             <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
@@ -5716,7 +5942,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
                     <td><input value={ingredient.unit} onChange={(event) => updateDishIngredient(ingredient.id, "unit", event.target.value)} /></td>
                     <td>{money(ingredient.unitCost)}</td>
                     <td>{money(ingredient.lineCost)}</td>
-                    <td><button className="icon danger" onClick={() => setDishIngredientRows((current) => current.length > 1 ? current.filter((item) => item.id !== ingredient.id) : current)} type="button"><Trash2 size={15} /></button></td>
+                    <td>{permissions.canDelete && <button className="icon danger" onClick={() => setDishIngredientRows((current) => current.length > 1 ? current.filter((item) => item.id !== ingredient.id) : current)} type="button"><Trash2 size={15} /></button>}</td>
                   </tr>
                   );
                 })}
@@ -5724,7 +5950,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
             </table>
           </div>
           <div className="button-row left tight">
-            <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add Ingredient Row</button>
+            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add Ingredient Row</button>}
           </div>
           <div className="metric-grid compact">
             <Metric label="Dish cost" value={money(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0))} delta="Sum all ingredients" />
@@ -5736,7 +5962,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, products, recipes
   );
 }
 
-function Waste({ department, departmentNames, products, requestDelete, wasteItems, setWasteItems }) {
+function Waste({ department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "waste"), products, requestDelete, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
   const emptyWaste = { date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" };
   const [form, setForm] = useState(emptyWaste);
@@ -5749,6 +5975,7 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
   };
 
   const addWaste = () => {
+    if (editingWasteId ? !permissions.canEdit : !permissions.canAdd) return;
     if (!form.productName.trim()) return;
     const payload = { ...form, id: editingWasteId || uid(), cost: wasteCost(form) };
     setWasteItems((current) => editingWasteId ? current.map((item) => (item.id === editingWasteId ? payload : item)) : [payload, ...current]);
@@ -5758,6 +5985,8 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
   };
 
   const openWasteModal = (row = null) => {
+    if (row && !permissions.canEdit) return;
+    if (!row && !permissions.canAdd) return;
     setForm(row || emptyWaste);
     setEditingWasteId(row?.id || "");
     setWasteModalOpen(true);
@@ -5777,13 +6006,13 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
             { key: "notes", label: "Notes" },
             { key: "cost", label: "Waste cost", render: (value) => money(value) },
           ]}
-          onEdit={openWasteModal}
-          onDelete={(id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) })}
+          onEdit={permissions.canEdit ? openWasteModal : null}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) }) : null}
           rows={visibleWaste}
-          toolbarAction={<button onClick={() => openWasteModal()} type="button"><Plus size={16} />Add Waste</button>}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openWasteModal()} type="button"><Plus size={16} />Add Waste</button> : null}
         />
       </Panel>
-      {wasteModalOpen && (
+      {wasteModalOpen && (editingWasteId ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={editingWasteId ? "Edit waste" : "Add waste"} onCancel={() => { setWasteModalOpen(false); setEditingWasteId(""); setForm(emptyWaste); }} onSave={addWaste} saveLabel="Save Waste">
           <div className="form-grid six">
             <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
@@ -5809,7 +6038,7 @@ function Waste({ department, departmentNames, products, requestDelete, wasteItem
   );
 }
 
-function SalesManager({ financialSettings, departmentNames, requestDelete, sales, setSales }) {
+function SalesManager({ financialSettings, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), requestDelete, sales, setSales }) {
   const defaultVatRate = financialSettings.defaultVat;
   const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
@@ -5993,8 +6222,8 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
   return (
     <Panel title="Sales input" action="Manual or CSV">
       <div className="button-row left">
-        <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>
-        <label className="file-button secondary">Smart CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>
+        {permissions.canAdd && <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>}
+        {permissions.canImport && <label className="file-button secondary">Smart CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>}
       </div>
       {status && <div className="invoice-status info">{status}</div>}
       {smartSalesImport && (
@@ -6031,7 +6260,7 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
             rows={pendingImport}
           />
           <div className="button-row left">
-            <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>
+            {permissions.canImport && <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>}
             <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
           </div>
         </div>
@@ -6048,25 +6277,25 @@ function SalesManager({ financialSettings, departmentNames, requestDelete, sales
           { key: "discounts", label: "Discounts", render: (value) => money(value) },
           { key: "refunds", label: "Refunds", render: (value) => money(value) },
         ]}
-        onDelete={(id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) })}
-        onEdit={(row) => {
+        onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) }) : null}
+        onEdit={permissions.canEdit ? (row) => {
           setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, refunds: row.refunds ?? 0, serviceCharge: row.serviceCharge ?? 0 });
           setEditingId(row.id);
           setEditModalOpen(true);
-        }}
+        } : null}
         rows={sales}
       />
-      {addModalOpen && (
+      {addModalOpen && permissions.canAdd && (
         <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Add sales" updateGross={updateGross} updateVatRate={updateVatRate} />
       )}
-      {editModalOpen && (
+      {editModalOpen && permissions.canEdit && (
         <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Edit sales record" updateGross={updateGross} updateVatRate={updateVatRate} />
       )}
     </Panel>
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSettings, requestDelete, sales, setDateRangeState, setSales }) {
+function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSettings, permissions, requestDelete, sales, setDateRangeState, setSales }) {
   const salesTotals = totalSalesRows(sales, dateRange);
 
   return (
@@ -6080,7 +6309,7 @@ function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSetti
         <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
         <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
       </div>
-      <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />
+      <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />
       <SalesComparison financialSettings={financialSettings} sales={sales} />
     </>
   );
@@ -6318,7 +6547,7 @@ function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmou
   );
 }
 
-function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sales = [], setDateRangeState, setLabourData }) {
+function LabourPage({ dateRange, dateRangeState, labourData, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
   const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
@@ -6423,6 +6652,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const deleteFromCollection = (collection, id, label) => {
+    if (!permissions.canDelete) return;
     requestDelete({
       title: `Delete ${label}`,
       message: `Remove this ${label.toLowerCase()} from Labour? Existing historical rows are left untouched.`,
@@ -6522,6 +6752,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   const salesTotalsForLabourWeek = (weekStart) => salesTotalsForRange(sales || [], { start: weekStart, end: shiftDate(weekStart, 6) }, "All departments");
 
   const openWeeklyInput = () => {
+    if (!permissions.canAdd) return;
     const activeEmployees = data.employees.filter((employee) => employee.status !== "left");
     const weekStart = dateRange.start || today();
     const weekSales = salesTotalsForLabourWeek(weekStart);
@@ -6550,6 +6781,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveEmployee = () => {
+    if (employeeModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
     const previousEmployee = data.employees.find((item) => item.id === employeeModal.id);
     const previousRate = numberValue(previousEmployee?.rate, 0);
     const nextRate = numberValue(employeeModal.rate, 0);
@@ -6583,6 +6815,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveDepartment = () => {
+    if (departmentModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
     const department = {
       ...departmentModal,
       id: departmentModal.id || uid(),
@@ -6596,6 +6829,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveSales = () => {
+    if (salesModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
     const serviceCharge = numberValue(salesModal.serviceCharge, 0);
     const sales = {
       ...salesModal,
@@ -6615,6 +6849,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveHoliday = () => {
+    if (holidayModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
     const employee = data.employees.find((item) => item.id === holidayModal.employeeId);
     const holiday = {
       ...holidayModal,
@@ -6628,6 +6863,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveRate = () => {
+    if (rateModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
     const employee = data.employees.find((item) => item.id === rateModal.employeeId);
     const rate = {
       ...rateModal,
@@ -6691,6 +6927,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const saveWeeklyInput = () => {
+    if (!permissions.canAdd) return;
     const isDailyMode = weeklyModal.mode === "daily";
     const labourStartDate = isDailyMode ? (weeklyModal.date || weeklyModal.weekStart || today()) : (weeklyModal.weekStart || weeklyModal.date || today());
     const labourEndDate = isDailyMode ? labourStartDate : shiftDate(labourStartDate, 6);
@@ -6737,6 +6974,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const importSalesFile = async (file) => {
+    if (!permissions.canImport) return;
     if (!file) return;
     const rows = parseLabourSalesCsv(await file.text());
     saveData((current) => ({ ...current, sales: [...rows, ...current.sales] }));
@@ -6745,6 +6983,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const importLabourFile = async (file) => {
+    if (!permissions.canImport) return;
     if (!file) return;
     const importedRows = parseLabourCsv(await file.text(), dateRange.start || today());
     const duplicateWeekKeys = duplicateWeeksForRows(importedRows);
@@ -6756,6 +6995,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const importWeeklyHoursFile = async (file) => {
+    if (!permissions.canImport) return;
     if (!file || !weeklyModal) return;
     const importedRows = parseLabourCsv(await file.text(), (weeklyModal.mode === "daily" ? weeklyModal.date : weeklyModal.weekStart) || dateRange.start || today());
     const matchedNames = [];
@@ -6803,6 +7043,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   };
 
   const resetLabourData = () => {
+    if (!permissions.canReset) return;
     requestDelete({
       title: "Reset Labour data",
       message: "Replace Labour data with the imported Labour Cost seed data?",
@@ -6939,7 +7180,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
         <div className="button-row left labour-hub-actions">
-          <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour</button>
+          {permissions.canAdd && <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour</button>}
           <button className="ghost" onClick={() => setActiveLabourModal("imports")} type="button">Staff Earnings</button>
           <button className="ghost" onClick={() => setActiveLabourModal("employees")} type="button">Employees</button>
           <button className="ghost" onClick={() => setActiveLabourModal("departments")} type="button">Departments & breakdown</button>
@@ -6964,8 +7205,8 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         <AppModal
           footer={(
             <>
-              <button className="ghost danger" onClick={() => resolveDuplicateWeekModal("replace")} type="button">Replace week</button>
-              <button onClick={() => resolveDuplicateWeekModal("merge")} type="button">Merge week</button>
+              {permissions.canImport && <button className="ghost danger" onClick={() => resolveDuplicateWeekModal("replace")} type="button">Replace week</button>}
+              {permissions.canImport && <button onClick={() => resolveDuplicateWeekModal("merge")} type="button">Merge week</button>}
               <button className="ghost" onClick={() => resolveDuplicateWeekModal("cancel")} type="button">Cancel</button>
             </>
           )}
@@ -6983,9 +7224,9 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       {activeLabourModal === "imports" && (
         <AppModal title="Staff Earnings" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
           <div className="modal-stack">
-            <div className="button-row left">
+            {permissions.canReset && <div className="button-row left">
               <button className="ghost danger" onClick={resetLabourData} type="button">Reset Labour seed</button>
-            </div>
+            </div>}
             <div className="form-grid six labour-filter-bar">
               <label>Period<select value={earningsFilters.period} onChange={(event) => setEarningsFilters({ ...earningsFilters, period: event.target.value })}><option value="week">Week</option><option value="month">Month</option><option value="year">Year</option><option value="custom">Custom dates</option></select></label>
               {earningsFilters.period === "week" && <Field label="Week start" type="date" value={earningsFilters.weekStart} onChange={(value) => setEarningsFilters({ ...earningsFilters, weekStart: value })} />}
@@ -7030,10 +7271,10 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                 { key: "manualAverageWeeklyHours", label: "Avg hours", render: (value, row) => (numberValue(value) || labourEmployeeAverageWeeklyHours(data, row)).toFixed(1) },
                 { key: "status", label: "Status", render: (value) => <Badge tone={value === "active" ? "green" : "orange"}>{value}</Badge> },
               ]}
-              onDelete={(id) => deleteFromCollection("employees", id, "Employee")}
-              onEdit={(row) => setEmployeeModal(row)}
+              onDelete={permissions.canDelete ? (id) => deleteFromCollection("employees", id, "Employee") : null}
+              onEdit={permissions.canEdit ? (row) => setEmployeeModal(row) : null}
               rows={filteredEmployees}
-              toolbarAction={<button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add Employee</button>}
+              toolbarAction={permissions.canAdd ? <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add Employee</button> : null}
             />
           </div>
         </AppModal>
@@ -7067,10 +7308,10 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                   { key: "serviceChargeShare", label: "Service weight" },
                   { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "orange"}>{value ? "Active" : "Inactive"}</Badge> },
                 ]}
-                onDelete={(id) => deleteFromCollection("departments", id, "Department")}
-                onEdit={(row) => setDepartmentModal(row)}
+                onDelete={permissions.canDelete ? (id) => deleteFromCollection("departments", id, "Department") : null}
+                onEdit={permissions.canEdit ? (row) => setDepartmentModal(row) : null}
                 rows={filteredDepartments}
-                toolbarAction={<button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Add Department</button>}
+                toolbarAction={permissions.canAdd ? <button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Add Department</button> : null}
               />
             </Panel>
           </div>
@@ -7093,7 +7334,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                 { key: "notes", label: "Notes" },
               ]}
               rows={activeHolidayRows}
-              toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Holiday Booking</button>}
+              toolbarAction={permissions.canAdd ? <button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Holiday Booking</button> : null}
             />
           </div>
         </AppModal>
@@ -7112,10 +7353,10 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                 { key: "hours", label: "Hours" },
                 { key: "status", label: "Status" },
               ]}
-              onDelete={(id) => deleteFromCollection("holidays", id, "Holiday")}
-              onEdit={(row) => setHolidayModal(row)}
+              onDelete={permissions.canDelete ? (id) => deleteFromCollection("holidays", id, "Holiday") : null}
+              onEdit={permissions.canEdit ? (row) => setHolidayModal(row) : null}
               rows={activeHolidayBookings}
-              toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Booking</button>}
+              toolbarAction={permissions.canAdd ? <button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Booking</button> : null}
             />
           </div>
         </AppModal>
@@ -7132,16 +7373,16 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                 { key: "payType", label: "Type", render: (_, row) => labourPayTypeLabel(row) },
                 { key: "rate", label: "Rate", render: money },
               ]}
-              onDelete={(id) => deleteFromCollection("rateHistory", id, "Rate history row")}
-              onEdit={(row) => setRateModal(row)}
+              onDelete={permissions.canDelete ? (id) => deleteFromCollection("rateHistory", id, "Rate history row") : null}
+              onEdit={permissions.canEdit ? (row) => setRateModal(row) : null}
               rows={filteredRateRows}
-              toolbarAction={<button className="ghost" onClick={() => setRateModal(blankRate())} type="button"><Plus size={16} />Add Rate</button>}
+              toolbarAction={permissions.canAdd ? <button className="ghost" onClick={() => setRateModal(blankRate())} type="button"><Plus size={16} />Add Rate</button> : null}
             />
           </div>
         </AppModal>
       )}
 
-      {employeeModal && (
+      {employeeModal && (employeeModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={employeeModal.id ? "Edit Employee" : "Add Employee"} onCancel={() => setEmployeeModal(null)} onSave={saveEmployee} saveLabel="Save Employee">
           <div className="form-grid six">
             <Field label="Name" value={employeeModal.name} onChange={(value) => setEmployeeModal({ ...employeeModal, name: value })} />
@@ -7171,7 +7412,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         </EditModal>
       )}
 
-      {departmentModal && (
+      {departmentModal && (departmentModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={departmentModal.id ? "Edit Department" : "Add Department"} onCancel={() => setDepartmentModal(null)} onSave={saveDepartment} saveLabel="Save Department">
           <div className="form-grid six">
             <Field label="Department" value={departmentModal.name} onChange={(value) => setDepartmentModal({ ...departmentModal, name: value })} />
@@ -7184,7 +7425,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         </EditModal>
       )}
 
-      {salesModal && (
+      {salesModal && (salesModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={salesModal.id ? "Edit Labour Sales" : "Add Labour Sales"} onCancel={() => setSalesModal(null)} onSave={saveSales} saveLabel="Save Sales">
           <div className="form-grid six">
             <Field label="From" type="date" value={salesModal.dateFrom} onChange={(value) => setSalesModal({ ...salesModal, dateFrom: value })} />
@@ -7199,7 +7440,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         </EditModal>
       )}
 
-      {holidayModal && (
+      {holidayModal && (holidayModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={holidayModal.id ? "Edit Holiday" : "Add Holiday"} onCancel={() => setHolidayModal(null)} onSave={saveHoliday} saveLabel="Save Holiday">
           <div className="form-grid six">
             <label>Employee<select value={holidayModal.employeeId} onChange={(event) => {
@@ -7215,7 +7456,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         </EditModal>
       )}
 
-      {rateModal && (
+      {rateModal && (rateModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={rateModal.id ? "Edit Rate" : "Add Rate"} onCancel={() => setRateModal(null)} onSave={saveRate} saveLabel="Save Rate">
           <div className="form-grid six">
             <label>Employee<select value={rateModal.employeeId} onChange={(event) => {
@@ -7234,7 +7475,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
           footer={(
             <>
               <button className="ghost" onClick={() => setWeeklyModal(null)} type="button">Cancel</button>
-              <button onClick={saveWeeklyInput} type="button"><Save size={16} />Save Labour</button>
+              {permissions.canAdd && <button onClick={saveWeeklyInput} type="button"><Save size={16} />Save Labour</button>}
             </>
           )}
           onClose={() => setWeeklyModal(null)}
@@ -7275,7 +7516,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
             </div>
             <p className="helper-text">Only enter employee hours here. Sales and service charge come from the Sales page for the selected {weeklyModal.mode === "daily" ? "day" : "week"}.</p>
             <div className="button-row left">
-              <label className="file-button secondary">Import Hours CSV<input accept=".csv,text/csv" key={`weekly-${labourImportKey}`} onChange={(event) => importWeeklyHoursFile(event.target.files?.[0])} type="file" /></label>
+              {permissions.canImport && <label className="file-button secondary">Import Hours CSV<input accept=".csv,text/csv" key={`weekly-${labourImportKey}`} onChange={(event) => importWeeklyHoursFile(event.target.files?.[0])} type="file" /></label>}
             </div>
             <div className="form-grid four labour-filter-bar">
               <Field label="Search employee" value={weeklyFilters.search} onChange={(value) => setWeeklyFilters({ ...weeklyFilters, search: value })} />
@@ -7324,7 +7565,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   );
 }
 
-function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, sales, setDateRangeState, setSales, weekStartsOn }) {
+function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
   const makeSalesDraft = (date = today()) => {
     const existing = sales.find((row) => row.date === date);
     const departments = salesDepartments(existing);
@@ -7436,7 +7677,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
           <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
         </div>
         <div className="button-row left">
-          <button onClick={openInputSales} type="button"><Plus size={16} />Input sales</button>
+          {permissions.canAdd && <button onClick={openInputSales} type="button"><Plus size={16} />Input sales</button>}
         </div>
       </Panel>
 
@@ -7496,7 +7737,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         footer={(
           <>
             <button className="ghost" onClick={() => setInputOpen(false)} type="button">Cancel</button>
-            <button onClick={saveSalesDraft} type="button"><Save size={16} />Save sales</button>
+            {permissions.canAdd && <button onClick={saveSalesDraft} type="button"><Save size={16} />Save sales</button>}
           </>
         )}
         onClose={() => setInputOpen(false)}
@@ -7536,19 +7777,24 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
 
 function SettingsPanel({
   aiSettings,
+  activeUserId,
   companySettings,
   departmentSettings,
   financialSettings,
   invoiceSettings,
   menuSettings,
+  permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "settings"),
   requestDelete,
   suppliers,
   setCompanySettings,
+  setActiveUserId,
   setDepartmentSettings,
   setFinancialSettings,
   setAiSettings,
   setInvoiceSettings,
   setMenuSettings,
+  setUsers,
+  users = [],
 }) {
   const departmentEmpty = { name: "", type: "Food", targetGp: financialSettings.targetGp, active: true };
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
@@ -7561,26 +7807,46 @@ function SettingsPanel({
   const [importSummary, setImportSummary] = useState(null);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
+  const [userModal, setUserModal] = useState(null);
   const [labourSettings, setLabourSettingsState] = useState(() => ({
     ...defaultLabourSettings,
     ...safeReadLocalStorage("marginflow.labourSettings", defaultLabourSettings),
   }));
 
-  const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
-  const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
-  const updateMenu = (field, value) => setMenuSettings({ ...menuSettings, [field]: value });
-  const updateInvoice = (field, value) => setInvoiceSettings({ ...invoiceSettings, [field]: value });
-  const updateAi = (field, value) => setAiSettings({ ...aiSettings, [field]: value });
+  const canChangeSettings = permissions.canAdd || permissions.canEdit;
+  const updateCompany = (field, value) => {
+    if (!canChangeSettings) return;
+    setCompanySettings({ ...companySettings, [field]: value });
+  };
+  const updateFinancial = (field, value) => {
+    if (!canChangeSettings) return;
+    setFinancialSettings({ ...financialSettings, [field]: value });
+  };
+  const updateMenu = (field, value) => {
+    if (!canChangeSettings) return;
+    setMenuSettings({ ...menuSettings, [field]: value });
+  };
+  const updateInvoice = (field, value) => {
+    if (!canChangeSettings) return;
+    setInvoiceSettings({ ...invoiceSettings, [field]: value });
+  };
+  const updateAi = (field, value) => {
+    if (!canChangeSettings) return;
+    setAiSettings({ ...aiSettings, [field]: value });
+  };
   const updateLabourSettings = (field, value) => {
+    if (!canChangeSettings) return;
     const next = { ...labourSettings, [field]: value };
     setLabourSettingsState(next);
     localStorage.setItem("marginflow.labourSettings", JSON.stringify(next));
   };
 
   const resetDataSection = (label, keys) => {
+    if (!permissions.canReset) return;
     requestDelete({
       title: `Reset ${label}?`,
       message: `This will permanently remove saved ${label.toLowerCase()} data from this browser. Export a full backup first if you may need it later.`,
+      pageId: "settings",
       onConfirm: () => {
         keys.forEach((key) => localStorage.removeItem(key));
         setDataStatus(`${label} reset. Reloading app...`);
@@ -7608,6 +7874,7 @@ function SettingsPanel({
   };
 
   const saveDepartment = () => {
+    if (editingDepartmentId ? !permissions.canEdit : !permissions.canAdd) return;
     if (!departmentForm.name.trim()) return;
     const payload = { ...departmentForm, targetGp: numberValue(departmentForm.targetGp), active: Boolean(departmentForm.active) };
     if (editingDepartmentId) {
@@ -7621,6 +7888,8 @@ function SettingsPanel({
   };
 
   const openDepartmentModal = (row = null) => {
+    if (row && !permissions.canEdit) return;
+    if (!row && !permissions.canAdd) return;
     setDepartmentForm(row || departmentEmpty);
     setEditingDepartmentId(row?.id || "");
     setDepartmentModalOpen(true);
@@ -7645,6 +7914,7 @@ function SettingsPanel({
   };
 
   const importFullBackup = async (file) => {
+    if (!permissions.canImport) return;
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
@@ -7670,6 +7940,7 @@ function SettingsPanel({
   };
 
   const replaceFullBackup = () => {
+    if (!permissions.canImport) return;
     if (!pendingFullBackup) return;
     savePreImportBackup();
     Object.entries(pendingFullBackup.storage).forEach(([key, value]) => {
@@ -7681,6 +7952,7 @@ function SettingsPanel({
   };
 
   const mergeFullBackup = () => {
+    if (!permissions.canImport) return;
     if (!pendingFullBackup) return;
     savePreImportBackup();
     const { nextStorage, summary } = mergeMarginFlowStorage(readMarginFlowLocalStorage(), pendingFullBackup.storage, backupImportSettingsMode === "Use imported settings");
@@ -7694,6 +7966,7 @@ function SettingsPanel({
   };
 
   const resetDemoSettings = () => {
+    if (!permissions.canReset) return;
     setCompanySettings(defaultCompanySettings);
     setFinancialSettings(defaultFinancialSettings);
     setDepartmentSettings(defaultDepartmentSettings);
@@ -7705,8 +7978,168 @@ function SettingsPanel({
     setDataStatus("Demo settings restored.");
   };
 
+  const blankUser = () => ({
+    id: "",
+    name: "",
+    email: "",
+    role: "Custom",
+    status: "Active",
+    ...rolePermissionTemplate("Custom", departmentSettings),
+  });
+
+  const openUserModal = (user = null) => {
+    if (user && !permissions.canEdit) return;
+    if (!user && !permissions.canAdd) return;
+    setUserModal(user ? { ...user, pages: { ...user.pages }, departments: { ...user.departments }, actions: { ...user.actions } } : blankUser());
+  };
+
+  const changeUserRole = (role) => {
+    const template = rolePermissionTemplate(role, departmentSettings);
+    setUserModal((current) => ({
+      ...current,
+      role,
+      pages: { ...template.pages },
+      departments: { ...template.departments },
+      actions: { ...template.actions },
+    }));
+  };
+
+  const updateUserPagePermission = (pageId, level) => {
+    setUserModal((current) => ({ ...current, pages: { ...current.pages, [pageId]: level } }));
+  };
+
+  const updateUserDepartmentPermission = (departmentName, level) => {
+    setUserModal((current) => ({ ...current, departments: { ...current.departments, [departmentName]: level } }));
+  };
+
+  const updateUserActionPermission = (actionKey, value) => {
+    setUserModal((current) => ({ ...current, actions: { ...current.actions, [actionKey]: value } }));
+  };
+
+  const saveUser = () => {
+    if (userModal?.id ? !permissions.canEdit : !permissions.canAdd) return;
+    if (!userModal.name.trim()) return;
+    const normalizedUser = normalizeUsers([{ ...userModal, id: userModal.id || uid() }], departmentSettings)[0];
+    const hasOtherActiveUser = users.some((user) => user.id !== normalizedUser.id && user.status !== "Disabled");
+    const savedUser = !hasOtherActiveUser && normalizedUser.status === "Disabled" ? { ...normalizedUser, status: "Active" } : normalizedUser;
+    setUsers((current) => {
+      const exists = current.some((user) => user.id === savedUser.id);
+      return exists ? current.map((user) => (user.id === savedUser.id ? savedUser : user)) : [savedUser, ...current];
+    });
+    if (!activeUserId) setActiveUserId(savedUser.id);
+    setUserModal(null);
+  };
+
+  const deleteUser = (id) => {
+    if (!permissions.canDelete || users.length <= 1) return;
+    requestDelete({
+      title: "Delete user",
+      message: "Remove this local placeholder user and their saved permissions?",
+      pageId: "settings",
+      onConfirm: () => {
+        setUsers((current) => {
+          const next = current.filter((user) => user.id !== id);
+          if (activeUserId === id) setActiveUserId(next[0]?.id || "");
+          return next;
+        });
+      },
+    });
+  };
+
   return (
     <div className="settings-grid">
+      <Panel title="Users & Permissions" action="Local placeholders">
+        <div className="form-grid six">
+          <label>Current user<select value={activeUserId || ""} onChange={(event) => setActiveUserId(event.target.value)}>{users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+        </div>
+        <DataTable
+          columns={[
+            { key: "name", label: "Name" },
+            { key: "email", label: "Email" },
+            { key: "role", label: "Role label" },
+            { key: "status", label: "Status", render: (value) => <Badge tone={value === "Active" ? "green" : "amber"}>{value}</Badge> },
+            { key: "pageCount", label: "Allowed pages" },
+            { key: "departmentCount", label: "Allowed departments" },
+            { key: "actionCount", label: "Actions" },
+          ]}
+          onDelete={permissions.canDelete ? deleteUser : null}
+          onEdit={permissions.canEdit ? openUserModal : null}
+          rows={users.map((user) => ({
+            ...user,
+            pageCount: pagePermissionDefinitions.filter((page) => normalizePermissionLevel(user.pages?.[page.id]) !== "none").length,
+            departmentCount: departmentSettings.filter((department) => normalizePermissionLevel(user.departments?.[department.name]) !== "none").length,
+            actionCount: actionPermissionDefinitions.filter((action) => user.actions?.[action.key]).length,
+          }))}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openUserModal()} type="button"><Plus size={16} />Add User</button> : null}
+        />
+      </Panel>
+
+      {userModal && (userModal.id ? permissions.canEdit : permissions.canAdd) && (
+        <EditModal title={userModal.id ? "Edit user permissions" : "Add user permissions"} onCancel={() => setUserModal(null)} onSave={saveUser} saveLabel={userModal.id ? "Save User" : "Add User"}>
+          <div className="form-grid six">
+            <Field label="Name" value={userModal.name} onChange={(value) => setUserModal({ ...userModal, name: value })} />
+            <Field label="Email" type="email" value={userModal.email} onChange={(value) => setUserModal({ ...userModal, email: value })} />
+            <label>Role label<select value={userModal.role} onChange={(event) => changeUserRole(event.target.value)}>{userRoleLabels.map((role) => <option key={role}>{role}</option>)}</select></label>
+            <label>Status<select value={userModal.status} onChange={(event) => setUserModal({ ...userModal, status: event.target.value })}><option>Active</option><option>Disabled</option></select></label>
+          </div>
+
+          <Panel title="Page access">
+            <div className="table-wrap compact-table permission-table">
+              <table>
+                <thead><tr><th>Page</th><th>Access</th></tr></thead>
+                <tbody>
+                  {pagePermissionDefinitions.map((page) => (
+                    <tr key={page.id}>
+                      <td>{page.label}</td>
+                      <td>
+                        <select value={normalizePermissionLevel(userModal.pages?.[page.id])} onChange={(event) => updateUserPagePermission(page.id, event.target.value)}>
+                          {permissionLevels.map((level) => <option key={level.value} value={level.value}>{level.label}</option>)}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+
+          <Panel title="Department access">
+            <div className="table-wrap compact-table permission-table">
+              <table>
+                <thead><tr><th>Department</th><th>Access</th></tr></thead>
+                <tbody>
+                  {departmentSettings.map((department) => (
+                    <tr key={department.id || department.name}>
+                      <td>{department.name}</td>
+                      <td>
+                        <select value={normalizePermissionLevel(userModal.departments?.[department.name])} onChange={(event) => updateUserDepartmentPermission(department.name, event.target.value)}>
+                          <option value="none">No access</option>
+                          <option value="view">Can view</option>
+                          <option value="edit">Can edit</option>
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+
+          <Panel title="Action permissions">
+            <div className="permission-check-grid">
+              {actionPermissionDefinitions.map((action) => (
+                <CheckboxField
+                  checked={Boolean(userModal.actions?.[action.key])}
+                  key={action.key}
+                  label={action.label}
+                  onChange={(value) => updateUserActionPermission(action.key, value)}
+                />
+              ))}
+            </div>
+          </Panel>
+        </EditModal>
+      )}
+
       <Panel title="Company settings">
         <div className="form-grid six">
           <label>App mode<select value={companySettings.appMode || defaultCompanySettings.appMode} onChange={(event) => updateCompany("appMode", event.target.value)}>{appModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
@@ -7787,14 +8220,14 @@ function SettingsPanel({
             { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={(id) => requestDelete({ title: "Delete department", message: "Are you sure you want to delete this department?", onConfirm: () => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id)) })}
-          onEdit={openDepartmentModal}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete department", message: "Are you sure you want to delete this department?", pageId: "settings", onConfirm: () => setDepartmentSettings(departmentSettings.filter((department) => department.id !== id)) }) : null}
+          onEdit={permissions.canEdit ? openDepartmentModal : null}
           rows={departmentSettings}
-          toolbarAction={<button onClick={() => openDepartmentModal()} type="button"><Plus size={16} />Add Department</button>}
+          toolbarAction={permissions.canAdd ? <button onClick={() => openDepartmentModal()} type="button"><Plus size={16} />Add Department</button> : null}
         />
       </Panel>
 
-      {departmentModalOpen && (
+      {departmentModalOpen && (editingDepartmentId ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={editingDepartmentId ? "Edit department" : "Add department"} onCancel={closeDepartmentModal} onSave={saveDepartment} saveLabel={editingDepartmentId ? "Save Department" : "Add Department"}>
           <div className="form-grid six">
             <Field label="Department" value={departmentForm.name} onChange={(value) => setDepartmentForm({ ...departmentForm, name: value })} />
@@ -7861,25 +8294,25 @@ function SettingsPanel({
       <Panel title="Reset data by page">
         <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
         <div className="button-row left wrap">
-          <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes"])} type="button">Reset invoices</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Products", ["marginflow.products"])} type="button">Reset products</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Suppliers", ["marginflow.suppliers", "marginflow.creditNotes"])} type="button">Reset suppliers</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Sales", ["marginflow.sales"])} type="button">Reset sales</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Labour", ["marginflow.labour"])} type="button">Reset labour</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Stocktake", ["marginflow.stocktakes"])} type="button">Reset stocktake</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Recipes", ["marginflow.recipes"])} type="button">Reset recipes</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Menu costing", ["marginflow.menus", "marginflow.menuSettings"])} type="button">Reset menu costing</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Waste", ["marginflow.waste"])} type="button">Reset waste</button>
-          <button className="ghost danger" onClick={() => resetDataSection("Settings", ["marginflow.companySettings", "marginflow.financialSettings", "marginflow.departmentSettings", "marginflow.invoiceSettings", "marginflow.aiSettings", "marginflow.menuSettings", "marginflow.labourSettings"])} type="button">Reset settings</button>
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes"])} type="button">Reset invoices</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Products", ["marginflow.products"])} type="button">Reset products</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Suppliers", ["marginflow.suppliers", "marginflow.creditNotes"])} type="button">Reset suppliers</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Sales", ["marginflow.sales"])} type="button">Reset sales</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Labour", ["marginflow.labour"])} type="button">Reset labour</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Stocktake", ["marginflow.stocktakes"])} type="button">Reset stocktake</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Recipes", ["marginflow.recipes"])} type="button">Reset recipes</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Menu costing", ["marginflow.menus", "marginflow.menuSettings"])} type="button">Reset menu costing</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Waste", ["marginflow.waste"])} type="button">Reset waste</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Settings", ["marginflow.companySettings", "marginflow.financialSettings", "marginflow.departmentSettings", "marginflow.invoiceSettings", "marginflow.aiSettings", "marginflow.menuSettings", "marginflow.labourSettings"])} type="button">Reset settings</button>}
         </div>
       </Panel>
 
       <Panel title="Data settings">
         <div className="button-row left">
           <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
-          <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>
+          {permissions.canImport && <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>}
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
-          <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>
+          {permissions.canReset && <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>}
         </div>
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
         {importSummary && (
@@ -7913,8 +8346,8 @@ function SettingsPanel({
               <label>Settings during merge<select value={backupImportSettingsMode} onChange={(event) => setBackupImportSettingsMode(event.target.value)}><option>Keep current settings</option><option>Use imported settings</option></select></label>
             </div>
             <div className="button-row left">
-              <button className="ghost danger" onClick={replaceFullBackup} type="button">Replace</button>
-              <button onClick={mergeFullBackup} type="button">Merge</button>
+              {permissions.canImport && <button className="ghost danger" onClick={replaceFullBackup} type="button">Replace</button>}
+              {permissions.canImport && <button onClick={mergeFullBackup} type="button">Merge</button>}
               <button className="ghost" onClick={() => { setPendingFullBackup(null); setDataStatus("Full backup import cancelled."); }} type="button">Cancel</button>
             </div>
           </div>
