@@ -101,6 +101,17 @@ const defaultInvoiceSettings = {
   autoCreateProductsAfterApproval: true,
 };
 
+const defaultLabourSettings = {
+  targetLabourPercent: 32,
+  weeklyView: true,
+  bohServiceChargePercent: 40,
+  fohServiceChargePercent: 60,
+  includeServiceChargeInLabourCost: false,
+  excludeFreelanceFromTronc: true,
+  defaultHolidayEntitlementDays: 28,
+  holidayYearStartMonth: "November",
+};
+
 const defaultMatchingSettings = {
   enableProductMatching: true,
   autoMatchConfidenceThreshold: 90,
@@ -2584,11 +2595,13 @@ function salesTotalsForRange(sales, range, department = "All departments") {
   const rows = salesRowsForRange(sales, range, department);
   const netSales = rows.reduce((sum, row) => sum + numberValue(row.netSales, row.sales), 0);
   const grossSales = rows.reduce((sum, row) => sum + numberValue(row.grossSales, row.netSales), 0);
+  const serviceCharge = rows.reduce((sum, row) => sum + numberValue(row.serviceCharge, 0), 0);
   const dayCount = daysBetween(range.start, range.end);
   return {
     rows,
     netSales,
     grossSales,
+    serviceCharge,
     vat: Math.max(0, grossSales - netSales),
     dayCount,
     averageDailyNet: netSales / dayCount,
@@ -2674,6 +2687,33 @@ function labourEntryInRange(startDate, endDate, range) {
 
 function labourSameText(left, right) {
   return normalizeHeader(left) === normalizeHeader(right);
+}
+
+function labourPersonTokens(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && token.length > 1);
+}
+
+function labourFindEmployeeByName(employees = [], name = "") {
+  const targetTokens = labourPersonTokens(name);
+  if (!targetTokens.length) return null;
+  const targetKey = targetTokens.join(" ");
+  return employees.find((employee) => labourSameText(employee.name, name))
+    || employees.find((employee) => {
+      const employeeTokens = labourPersonTokens(employee.name);
+      const employeeKey = employeeTokens.join(" " );
+      if (!employeeTokens.length) return false;
+      if (employeeKey.includes(targetKey) || targetKey.includes(employeeKey)) return true;
+      const matched = targetTokens.filter((token) => employeeTokens.includes(token)).length;
+      return matched >= Math.min(2, targetTokens.length, employeeTokens.length);
+    })
+    || null;
 }
 
 function labourSum(rows, key) {
@@ -2773,6 +2813,15 @@ function labourRateLabel(employee) {
   return `${money(employee.rate)}/h`;
 }
 
+function labourServiceChargePoints(employee = {}) {
+  if (employee.excludeFromServiceCharge) return 0;
+  return numberValue(employee.serviceChargePoints ?? employee.scWeight ?? employee.serviceChargeWeight, 1);
+}
+
+function labourEmployeeRate(employee = {}) {
+  return numberValue(employee.rate, 0);
+}
+
 function labourSalesInRange(data, range) {
   return data.sales.filter((row) => labourEntryInRange(row.dateFrom, row.dateTo || row.dateFrom, range));
 }
@@ -2798,24 +2847,60 @@ function labourTotals(rows) {
   };
 }
 
-function aggregateLabourByEmployee(data, rows) {
+function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) {
   const map = new Map();
   rows.forEach((row) => {
-    const key = row.employeeId || normalizeHeader(row.employeeName);
+    const employee = data.employees.find((item) => item.id === row.employeeId) || labourFindEmployeeByName(data.employees, row.employeeName) || {};
+    const key = row.employeeId || employee.id || normalizeHeader(row.employeeName);
+    const departmentName = labourDepartmentName(data, row.departmentId || employee.departmentId, row.departmentName || "-");
+    const hours = numberValue(row.hours, 0);
+    const rate = labourEmployeeRate(employee) || numberValue(row.rate, 0);
+    const wages = numberValue(row.wages, 0) || hours * rate;
+    const serviceChargePoints = numberValue(row.serviceChargePoints ?? row.serviceChargeWeight ?? labourServiceChargePoints(employee), 1);
+    const serviceChargeHours = numberValue(row.serviceChargeHours, hours * serviceChargePoints);
     const current = map.get(key) || {
       id: key || uid(),
-      employeeName: row.employeeName,
-      departmentName: labourDepartmentName(data, row.departmentId, row.departmentName || "-"),
+      employeeId: row.employeeId || employee.id || "",
+      employeeName: row.employeeName || employee.name,
+      departmentName,
       hours: 0,
       wages: 0,
       serviceCharge: 0,
+      serviceChargePoints,
+      serviceChargeHours: 0,
     };
-    current.hours += numberValue(row.hours, 0);
-    current.wages += numberValue(row.wages, 0);
-    current.serviceCharge += numberValue(row.serviceCharge, 0);
+    current.hours += hours;
+    current.wages += wages;
+    current.serviceCharge += numberValue(row.serviceCharge ?? row.tronc, 0);
+    current.serviceChargeHours += serviceChargeHours;
+    current.serviceChargePoints = serviceChargePoints;
+    current.departmentName = departmentName || current.departmentName;
     map.set(key, current);
   });
-  return [...map.values()];
+  const grouped = [...map.values()];
+  const hasAllocatedServiceCharge = grouped.some((row) => numberValue(row.serviceCharge, 0));
+  const pool = numberValue(salesTotalsForAllocation?.serviceCharge, 0);
+  if (!hasAllocatedServiceCharge && pool > 0) {
+    const poolForGroup = (groupName) => {
+      if (groupName === "BOH") return numberValue(salesTotalsForAllocation?.bohServiceCharge, pool * 0.4);
+      if (groupName === "FOH") return numberValue(salesTotalsForAllocation?.fohServiceCharge, pool * 0.6);
+      return 0;
+    };
+    const rowGroup = (row) => ["BOH", "KP"].includes(row.departmentName) ? "BOH" : "FOH";
+    ["BOH", "FOH"].forEach((groupName) => {
+      const groupRows = grouped.filter((row) => rowGroup(row) === groupName && numberValue(row.serviceChargeHours, 0) > 0);
+      const totalScHours = labourSum(groupRows, "serviceChargeHours");
+      const groupPool = poolForGroup(groupName);
+      groupRows.forEach((row) => {
+        row.serviceCharge = totalScHours ? groupPool * numberValue(row.serviceChargeHours, 0) / totalScHours : 0;
+      });
+    });
+  }
+  return grouped.map((row) => ({
+    ...row,
+    serviceChargePerHour: numberValue(row.hours, 0) ? numberValue(row.serviceCharge, 0) / numberValue(row.hours, 0) : 0,
+    total: numberValue(row.wages, 0) + numberValue(row.serviceCharge, 0),
+  }));
 }
 
 function labourDepartmentBreakdownRows(data, labourRows, salesTotals) {
@@ -2949,46 +3034,56 @@ function parseLabourSalesCsv(text) {
   }).filter((row) => row.dateFrom && (row.totalSales || row.netSales || row.foodSales || row.serviceCharge));
 }
 
-function parseLabourCsv(text) {
+function parseLabourCsv(text, fallbackDate = today()) {
   const rows = parseCsvText(text);
   if (!rows.length) return [];
   const headers = rows[0] || [];
   const mapping = {
-    date: findHeaderIndex(headers, ["date", "shiftdate", "weekstart", "datefrom"]),
-    dateTo: findHeaderIndex(headers, ["dateto", "enddate", "weekend"]),
+    date: findHeaderIndex(headers, ["date", "shiftdate", "weekstart", "datefrom", "businessdate"]),
+    dateTo: findHeaderIndex(headers, ["dateto", "enddate", "weekend", "periodto"]),
     employeeName: findHeaderIndex(headers, ["employee", "employeename", "name", "staff", "worker"]),
+    firstName: findHeaderIndex(headers, ["firstname", "first name", "first"]),
+    lastName: findHeaderIndex(headers, ["lastname", "last name", "surname", "last"]),
     departmentName: findHeaderIndex(headers, ["department", "dept", "role", "team"]),
-    hours: findHeaderIndex(headers, ["hours", "hourstotal", "time", "paidhours"]),
-    wages: findHeaderIndex(headers, ["wages", "wage", "pay", "labourcost", "cost"]),
-    serviceCharge: findHeaderIndex(headers, ["servicecharge", "tronc", "tips", "gratuity"]),
+    hours: findHeaderIndex(headers, ["totalpaidhours", "total paid hours", "hours", "hourstotal", "time", "paidhours"]),
+    regularHours: findHeaderIndex(headers, ["regularhours", "regular hours"]),
+    overtimeHours: findHeaderIndex(headers, ["overtimehours", "overtime hours"]),
+    doubleTimeHours: findHeaderIndex(headers, ["doubletimehours", "double-time hours", "double time hours"]),
+    wages: findHeaderIndex(headers, ["totallabourcost", "total labour cost", "wages", "wage", "pay", "labourcost", "cost"]),
+    serviceCharge: findHeaderIndex(headers, ["servicecharge", "tronc", "transactiontips", "transaction tips", "tips", "gratuity"]),
     rate: findHeaderIndex(headers, ["rate", "hourlyrate", "payrate"]),
   };
   const hasHeader = Object.values(mapping).some((index) => index >= 0);
   const dataRows = hasHeader ? rows.slice(1) : rows;
-  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, employeeName: 1, departmentName: 2, hours: 3, wages: 4, serviceCharge: 5, rate: 6 };
+  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, employeeName: 1, firstName: -1, lastName: -1, departmentName: 2, hours: 3, regularHours: -1, overtimeHours: -1, doubleTimeHours: -1, wages: 4, serviceCharge: 5, rate: 6 };
   return dataRows.map((cells) => {
     const at = (field) => Number(fallback[field]) >= 0 ? cells[Number(fallback[field])] : "";
-    const date = normalizeImportDate(at("date"));
-    const employeeName = at("employeeName") || "Unknown employee";
-    const hours = parseCurrencyCell(at("hours"));
+    const date = normalizeImportDate(at("date")) || fallbackDate;
+    const firstName = at("firstName");
+    const lastName = at("lastName");
+    const employeeName = (at("employeeName") || `${firstName || ""} ${lastName || ""}`.trim() || "Unknown employee").trim();
+    const regularHours = parseCurrencyCell(at("regularHours"));
+    const overtimeHours = parseCurrencyCell(at("overtimeHours"));
+    const doubleTimeHours = parseCurrencyCell(at("doubleTimeHours"));
+    const hours = parseCurrencyCell(at("hours")) || regularHours + overtimeHours + doubleTimeHours;
     const wages = parseCurrencyCell(at("wages"));
-    const rate = parseCurrencyCell(at("rate")) || (hours ? wages / hours : 0);
+    const rate = parseCurrencyCell(at("rate")) || (hours && wages ? wages / hours : 0);
     return {
       id: uid(),
-      source: "csv-upload",
+      source: "square-hours-csv",
       date,
       dateTo: normalizeImportDate(at("dateTo")) || date,
       employeeName,
-      departmentName: at("departmentName") || "FOH",
+      departmentName: at("departmentName") || "",
       hours,
       wages,
       serviceCharge: parseCurrencyCell(at("serviceCharge")),
       tronc: parseCurrencyCell(at("serviceCharge")),
       rate,
+      importStatus: "Imported from hours CSV",
     };
-  }).filter((row) => row.date && row.employeeName && (row.hours || row.wages || row.serviceCharge));
+  }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && (row.hours || row.wages || row.serviceCharge));
 }
-
 function App() {
   const [active, setActive] = useState("dashboard");
   const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
@@ -3018,7 +3113,7 @@ function App() {
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
-  const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
+  const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
   const [labourData, setLabourDataState] = useState(() => normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
@@ -3263,6 +3358,7 @@ function App() {
             financialSettings={financialSettings}
             labourData={labourData}
             requestDelete={requestDelete}
+            sales={sales}
             setDateRangeState={setLabourDateRangeState}
             setLabourData={setLabourData}
           />
@@ -3380,10 +3476,11 @@ function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, departmen
   );
 }
 
-function dashboardChartGranularity(rows) {
-  if (rows.length > 120) return "Month";
-  if (rows.length > 45) return "Week";
-  return "Day";
+function dashboardChartGranularity(rows, range) {
+  const periodDays = range?.start && range?.end ? dateRangeLength(range) : rows.length;
+  if (periodDays <= 7) return "Day";
+  if (periodDays <= 120) return "Week";
+  return "Month";
 }
 
 function dashboardWeekLabel(date) {
@@ -3392,12 +3489,18 @@ function dashboardWeekLabel(date) {
   return `${formatRangeDate(toIsoDate(start))} - ${formatRangeDate(toIsoDate(end))}`;
 }
 
+function chartTitlePrefix(granularity) {
+  if (granularity === "Month") return "Monthly";
+  if (granularity === "Week") return "Weekly";
+  return "Daily";
+}
+
 function dashboardMonthLabel(date) {
   return new Intl.DateTimeFormat("en-GB", { month: "short", year: "2-digit" }).format(parseDate(date));
 }
 
-function aggregateDashboardRows(rows) {
-  const granularity = dashboardChartGranularity(rows);
+function aggregateDashboardRows(rows, range) {
+  const granularity = dashboardChartGranularity(rows, range);
   if (granularity === "Day") return { granularity, rows: rows.map((row) => ({ ...row, label: row.day || formatRangeDate(row.date) })) };
 
   const buckets = new Map();
@@ -3454,21 +3557,22 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
   );
 }
 
-function PerformanceCharts({ departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
+function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
-  const chartData = aggregateDashboardRows(dailyRows);
+  const chartData = aggregateDashboardRows(dailyRows, dateRange);
+  const chartPrefix = chartTitlePrefix(chartData.granularity);
 
   if (!hasData) return <EmptyState />;
 
   return (
     <>
       <div className="dashboard-layout">
-        <Panel title="GP trend" action={`${chartData.granularity} view`}>
+        <Panel title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}>
           <DailyGpChart rows={chartData.rows} targetGp={gpTarget} />
         </Panel>
-        <Panel title="Sales vs purchases" action={`${chartData.granularity} totals`}>
+        <Panel title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}>
           <SalesPurchasesChart rows={chartData.rows} />
         </Panel>
       </div>
@@ -3499,7 +3603,7 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
       <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
-      <PerformanceCharts departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
+      <PerformanceCharts dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
       {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
@@ -6128,11 +6232,24 @@ function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmou
   );
 }
 
-function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setDateRangeState, setLabourData }) {
+function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
   const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
-  const salesTotals = useMemo(() => labourSalesTotals(salesRows), [salesRows]);
+  const marginFlowSalesTotals = useMemo(() => {
+    const totals = salesTotalsForRange(sales || [], dateRange, "All departments");
+    const serviceCharge = totals.rows.reduce((sum, row) => sum + numberValue(row.serviceCharge, 0), 0);
+    return {
+      rows: totals.rows,
+      totalSales: totals.grossSales || totals.netSales,
+      netSales: totals.netSales,
+      foodSales: totals.netSales,
+      serviceCharge,
+    };
+  }, [sales, dateRange]);
+  const importedLabourSalesTotals = useMemo(() => labourSalesTotals(salesRows), [salesRows]);
+  const salesTotals = marginFlowSalesTotals.rows.length ? marginFlowSalesTotals : importedLabourSalesTotals;
+  const salesSourceLabel = marginFlowSalesTotals.rows.length ? "Using Sales page data" : "Using Labour sales import fallback";
   const labourSummary = useMemo(() => labourTotals(labourRows), [labourRows]);
   const departmentRows = useMemo(() => labourDepartmentBreakdownRows(data, labourRows, salesTotals), [data, labourRows, salesTotals]);
   const employeeRows = useMemo(() => [...data.employees].sort((a, b) => a.name.localeCompare(b.name)), [data.employees]);
@@ -6145,8 +6262,12 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
   const [holidayModal, setHolidayModal] = useState(null);
   const [rateModal, setRateModal] = useState(null);
   const [weeklyModal, setWeeklyModal] = useState(null);
+  const [activeLabourModal, setActiveLabourModal] = useState(null);
   const [salesImportKey, setSalesImportKey] = useState(0);
   const [labourImportKey, setLabourImportKey] = useState(0);
+  const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
+  const [labourFilters, setLabourFilters] = useState({ search: "", department: "All", active: "active" });
+  const [earningsFilters, setEarningsFilters] = useState({ period: "week", weekStart: dateRange.start || today(), month: today().slice(0, 7), year: today().slice(0, 4), from: dateRange.start || today(), to: dateRange.end || today(), search: "", department: "All" });
 
   const saveData = (updater) => {
     setLabourData((current) => normalizeLabourData(typeof updater === "function" ? updater(normalizeLabourData(current)) : updater));
@@ -6219,39 +6340,62 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
     });
   };
 
+  const salesTotalsForLabourWeek = (weekStart) => salesTotalsForRange(sales || [], { start: weekStart, end: shiftDate(weekStart, 6) }, "All departments");
+
   const openWeeklyInput = () => {
     const activeEmployees = data.employees.filter((employee) => employee.status !== "left");
+    const weekStart = dateRange.start || today();
+    const weekSales = salesTotalsForLabourWeek(weekStart);
     setWeeklyModal({
-      weekStart: dateRange.start || today(),
-      serviceCharge: 0,
-      salesTotal: 0,
-      netSales: 0,
-      foodSales: 0,
+      mode: "weekly",
+      date: weekStart,
+      weekStart,
+      serviceCharge: weekSales.serviceCharge || 0,
+      salesTotal: weekSales.grossSales || weekSales.netSales || 0,
+      netSales: weekSales.netSales || 0,
+      foodSales: weekSales.netSales || 0,
       rows: activeEmployees.map((employee) => ({
         employeeId: employee.id,
         employeeName: employee.name,
         departmentId: employee.departmentId,
         departmentName: labourDepartmentName(data, employee.departmentId, "FOH"),
         hours: 0,
-        rate: employee.payType === "annual" ? 0 : numberValue(employee.rate, 0),
+        rate: employee.payType === "annual" ? 0 : labourEmployeeRate(employee),
         wages: 0,
-        serviceChargeWeight: 1,
+        serviceChargePoints: labourServiceChargePoints(employee),
+        serviceChargeHours: 0,
         include: true,
       })),
     });
   };
 
   const saveEmployee = () => {
+    const previousEmployee = data.employees.find((item) => item.id === employeeModal.id);
+    const previousRate = numberValue(previousEmployee?.rate, 0);
+    const nextRate = numberValue(employeeModal.rate, 0);
+    const localRateHistory = Array.isArray(employeeModal.rateHistory) ? employeeModal.rateHistory : [];
+    const rateChanged = previousEmployee && previousRate !== nextRate;
     const employee = {
       ...employeeModal,
       id: employeeModal.id || uid(),
-      rate: numberValue(employeeModal.rate, 0),
+      rate: nextRate,
       contractedHours: numberValue(employeeModal.contractedHours, 0),
       manualAverageWeeklyHours: numberValue(employeeModal.manualAverageWeeklyHours, 0),
       holidayEntitlementDays: numberValue(employeeModal.holidayEntitlementDays, 28),
+      serviceChargePoints: numberValue(employeeModal.serviceChargePoints, 1),
+      excludeFromServiceCharge: Boolean(employeeModal.excludeFromServiceCharge),
+      rateHistory: rateChanged
+        ? [{ id: uid(), effectiveDate: today(), oldRate: previousRate, newRate: nextRate, notes: "Rate updated in Employees" }, ...localRateHistory]
+        : localRateHistory,
     };
     if (!employee.name.trim()) return;
-    saveData((current) => ({ ...current, employees: replaceById(current.employees, employee) }));
+    saveData((current) => ({
+      ...current,
+      employees: replaceById(current.employees, employee),
+      rateHistory: rateChanged
+        ? [{ id: uid(), employeeId: employee.id, employeeName: employee.name, effectiveDate: today(), payType: employee.payType, rate: nextRate, oldRate: previousRate }, ...current.rateHistory]
+        : current.rateHistory,
+    }));
     setEmployeeModal(null);
   };
 
@@ -6318,12 +6462,26 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
     setRateModal(null);
   };
 
+  const updateWeeklyWeekStart = (value) => {
+    const weekStart = value || today();
+    const weekSales = salesTotalsForLabourWeek(weekStart);
+    setWeeklyModal((current) => ({
+      ...current,
+      weekStart,
+      serviceCharge: weekSales.serviceCharge || 0,
+      salesTotal: weekSales.grossSales || weekSales.netSales || 0,
+      netSales: weekSales.netSales || 0,
+      foodSales: weekSales.netSales || 0,
+    }));
+  };
+
   const updateWeeklyRow = (index, key, value) => {
     setWeeklyModal((current) => {
       const rows = current.rows.map((row, rowIndex) => {
         if (rowIndex !== index) return row;
-        const next = { ...row, [key]: ["hours", "rate", "wages", "serviceChargeWeight"].includes(key) ? numberValue(value, 0) : value };
-        if (key === "hours" || key === "rate") next.wages = numberValue(next.hours, 0) * numberValue(next.rate, 0);
+        const next = { ...row, [key]: ["hours", "wages", "serviceChargePoints"].includes(key) ? numberValue(value, 0) : value };
+        if (key === "hours") next.wages = numberValue(next.hours, 0) * numberValue(next.rate, 0);
+        next.serviceChargeHours = numberValue(next.hours, 0) * numberValue(next.serviceChargePoints, 1);
         return next;
       });
       return { ...current, rows };
@@ -6331,15 +6489,17 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
   };
 
   const allocateServiceCharge = (rows, pool) => {
-    const weightedHours = rows.reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargeWeight, 1), 0);
+    const weightedHours = rows.reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1), 0);
     return new Map(rows.map((row) => [
       row.employeeId,
-      weightedHours ? (pool * numberValue(row.hours, 0) * numberValue(row.serviceChargeWeight, 1)) / weightedHours : 0,
+      weightedHours ? (pool * numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1)) / weightedHours : 0,
     ]));
   };
 
   const saveWeeklyInput = () => {
-    const weekEnd = shiftDate(weeklyModal.weekStart, 6);
+    const isDailyMode = weeklyModal.mode === "daily";
+    const labourStartDate = isDailyMode ? (weeklyModal.date || weeklyModal.weekStart || today()) : (weeklyModal.weekStart || weeklyModal.date || today());
+    const labourEndDate = isDailyMode ? labourStartDate : shiftDate(labourStartDate, 6);
     const rows = weeklyModal.rows.filter((row) => row.include && (numberValue(row.hours, 0) || numberValue(row.wages, 0)));
     const serviceCharge = numberValue(weeklyModal.serviceCharge, 0);
     const bohRows = rows.filter((row) => ["BOH", "KP"].includes(labourDepartmentName(data, row.departmentId, row.departmentName)));
@@ -6351,8 +6511,8 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
     const labour = rows.map((row) => ({
       id: uid(),
       source: "manual-week",
-      date: weeklyModal.weekStart,
-      dateTo: weekEnd,
+      date: labourStartDate,
+      dateTo: labourEndDate,
       employeeId: row.employeeId,
       employeeName: row.employeeName,
       departmentId: row.departmentId,
@@ -6360,25 +6520,15 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
       hours: numberValue(row.hours, 0),
       rate: numberValue(row.rate, 0),
       wages: numberValue(row.wages, 0),
+      serviceChargePoints: numberValue(row.serviceChargePoints, 1),
+      serviceChargeHours: numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1),
       serviceCharge: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
       tronc: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
     }));
-    const sales = {
-      id: uid(),
-      source: "manual-week",
-      dateFrom: weeklyModal.weekStart,
-      dateTo: weekEnd,
-      totalSales: numberValue(weeklyModal.salesTotal, 0),
-      netSales: numberValue(weeklyModal.netSales, numberValue(weeklyModal.salesTotal, 0)),
-      foodSales: numberValue(weeklyModal.foodSales, 0),
-      serviceCharge,
-      bohServiceCharge: bohPool,
-      fohServiceCharge: fohPool,
-    };
     saveData((current) => ({
       ...current,
       labour: [...labour, ...current.labour],
-      sales: (sales.totalSales || sales.netSales || sales.foodSales || sales.serviceCharge) ? [sales, ...current.sales] : current.sales,
+      sales: current.sales,
     }));
     setWeeklyModal(null);
   };
@@ -6393,7 +6543,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
 
   const importLabourFile = async (file) => {
     if (!file) return;
-    const importedRows = parseLabourCsv(await file.text());
+    const importedRows = parseLabourCsv(await file.text(), dateRange.start || today());
     saveData((current) => {
       const departments = [...current.departments];
       const employees = [...current.employees];
@@ -6406,7 +6556,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
         return department;
       };
       const ensureEmployee = (row, department) => {
-        let employee = employees.find((item) => labourSameText(item.name, row.employeeName));
+        let employee = labourFindEmployeeByName(employees, row.employeeName);
         if (!employee) {
           employee = {
             ...blankEmployee(),
@@ -6422,11 +6572,69 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
       const labour = importedRows.map((row) => {
         const department = ensureDepartment(row.departmentName);
         const employee = ensureEmployee(row, department);
-        return { ...row, employeeId: employee.id, departmentId: department.id, departmentName: department.name };
+        const hours = numberValue(row.hours, 0);
+        const rate = labourEmployeeRate(employee) || numberValue(row.rate, 0);
+        return {
+          ...row,
+          employeeId: employee.id,
+          departmentId: department.id,
+          departmentName: department.name,
+          rate,
+          wages: numberValue(row.wages, 0) || hours * rate,
+          serviceChargePoints: labourServiceChargePoints(employee),
+          serviceChargeHours: hours * labourServiceChargePoints(employee),
+        };
       });
       return { ...current, departments, employees, labour: [...labour, ...current.labour] };
     });
     setStatus(`Imported ${importedRows.length} Labour row(s).`);
+    setLabourImportKey((key) => key + 1);
+  };
+
+  const importWeeklyHoursFile = async (file) => {
+    if (!file || !weeklyModal) return;
+    const importedRows = parseLabourCsv(await file.text(), (weeklyModal.mode === "daily" ? weeklyModal.date : weeklyModal.weekStart) || dateRange.start || today());
+    const matchedNames = [];
+    const unmatchedNames = [];
+    setWeeklyModal((current) => {
+      if (!current) return current;
+      const rows = current.rows.map((row) => ({ ...row }));
+      importedRows.forEach((imported) => {
+        const employee = labourFindEmployeeByName(data.employees, imported.employeeName);
+        if (!employee) {
+          unmatchedNames.push(imported.employeeName);
+          return;
+        }
+        const rowIndex = rows.findIndex((row) => row.employeeId === employee.id);
+        if (rowIndex < 0) {
+          unmatchedNames.push(imported.employeeName);
+          return;
+        }
+        const departmentId = employee.departmentId || rows[rowIndex].departmentId;
+        const rate = labourEmployeeRate(employee);
+        const hours = numberValue(imported.hours, 0);
+        const serviceChargePoints = labourServiceChargePoints(employee);
+        rows[rowIndex] = {
+          ...rows[rowIndex],
+          include: true,
+          employeeId: employee.id,
+          employeeName: employee.name,
+          departmentId,
+          departmentName: labourDepartmentName(data, departmentId, rows[rowIndex].departmentName),
+          hours,
+          rate,
+          wages: hours * rate,
+          serviceChargePoints,
+          serviceChargeHours: hours * serviceChargePoints,
+        };
+        matchedNames.push(employee.name);
+      });
+      return { ...current, rows };
+    });
+    const uniqueUnmatched = [...new Set(unmatchedNames)].filter(Boolean);
+    setStatus(uniqueUnmatched.length
+      ? `Imported hours for ${matchedNames.length} employee(s). Unmatched: ${uniqueUnmatched.join(", ")}. Add or match them in Employees.`
+      : `Imported hours for ${matchedNames.length} employee(s) from Square CSV.`);
     setLabourImportKey((key) => key + 1);
   };
 
@@ -6444,160 +6652,284 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
   const weeklyTotals = weeklyModal ? {
     hours: labourSum(weeklyModal.rows.filter((row) => row.include), "hours"),
     wages: labourSum(weeklyModal.rows.filter((row) => row.include), "wages"),
-  } : { hours: 0, wages: 0 };
+    serviceChargeHours: weeklyModal.rows.filter((row) => row.include).reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1), 0),
+  } : { hours: 0, wages: 0, serviceChargeHours: 0 };
+
+  const departmentFilterOptions = useMemo(() => {
+    const values = new Set(["All", "BOH", "FOH", "Manager", "KP"]);
+    data.departments.forEach((department) => {
+      if (department.group) values.add(department.group);
+      if (department.name) values.add(department.name);
+    });
+    return [...values];
+  }, [data.departments]);
+
+  const employeeById = useMemo(() => new Map(data.employees.map((employee) => [employee.id, employee])), [data.employees]);
+  const normaliseText = (value) => String(value || "").trim().toLowerCase();
+  const employeeIsActive = (employee) => !employee || !employee.status || employee.status === "active";
+  const rowEmployee = (row) => employeeById.get(row.employeeId) || labourFindEmployeeByName(data.employees, row.employeeName);
+  const rowDepartmentName = (row) => labourDepartmentName(data, row.departmentId || rowEmployee(row)?.departmentId, row.departmentName || "-");
+  const rowDepartmentGroup = (row) => data.departments.find((department) => department.id === (row.departmentId || rowEmployee(row)?.departmentId))?.group || rowDepartmentName(row);
+  const matchesText = (text, query) => !normaliseText(query) || normaliseText(text).includes(normaliseText(query));
+  const matchesDepartment = (row, filter) => {
+    if (!filter || filter === "All") return true;
+    const name = normaliseText(rowDepartmentName(row));
+    const group = normaliseText(rowDepartmentGroup(row));
+    const target = normaliseText(filter);
+    return name === target || group === target || name.includes(target) || group.includes(target);
+  };
+  const matchesActive = (row, filter = "all") => {
+    const employee = rowEmployee(row) || row;
+    if (filter === "all") return true;
+    if (filter === "inactive") return !employeeIsActive(employee);
+    return employeeIsActive(employee);
+  };
+  const filterEmployeeRows = (rows, filters = labourFilters) => rows.filter((row) => (
+    matchesText(row.name || row.employeeName, filters.search)
+    && matchesDepartment(row, filters.department)
+    && matchesActive(row, filters.active || (filters.showInactive ? "all" : "active"))
+  ));
+  const labourFilterControls = (filters, setFilters, options = {}) => (
+    <div className="form-grid four labour-filter-bar">
+      <Field label="Search employee" value={filters.search || ""} onChange={(value) => setFilters({ ...filters, search: value })} />
+      <label>Department<select value={filters.department || "All"} onChange={(event) => setFilters({ ...filters, department: event.target.value })}>{departmentFilterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+      {options.activeToggle ? (
+        <label>Employees<select value={filters.active || "active"} onChange={(event) => setFilters({ ...filters, active: event.target.value })}><option value="active">Active only</option><option value="all">Active + inactive</option><option value="inactive">Inactive only</option></select></label>
+      ) : null}
+    </div>
+  );
+  const weeklyVisibleRows = weeklyModal ? weeklyModal.rows.map((row, index) => ({ ...row, index })).filter((row) => (
+    matchesText(row.employeeName, weeklyFilters.search)
+    && matchesDepartment(row, weeklyFilters.department)
+    && (weeklyFilters.showInactive || employeeIsActive(rowEmployee(row)))
+  )) : [];
+  const earningsRange = (() => {
+    if (earningsFilters.period === "month") {
+      const start = `${earningsFilters.month || today().slice(0, 7)}-01`;
+      const endDate = new Date(parseDate(start));
+      endDate.setMonth(endDate.getMonth() + 1);
+      endDate.setDate(0);
+      return { start, end: toIsoDate(endDate) };
+    }
+    if (earningsFilters.period === "year") return { start: `${earningsFilters.year || today().slice(0, 4)}-01-01`, end: `${earningsFilters.year || today().slice(0, 4)}-12-31` };
+    if (earningsFilters.period === "custom") return { start: earningsFilters.from || dateRange.start, end: earningsFilters.to || dateRange.end };
+    return { start: earningsFilters.weekStart || dateRange.start || today(), end: shiftDate(earningsFilters.weekStart || dateRange.start || today(), 6) };
+  })();
+  const earningsRowsRaw = labourRowsInRange(data, earningsRange);
+  const earningsSalesRows = labourSalesInRange(data, earningsRange);
+  const earningsImportedSalesTotals = labourSalesTotals(earningsSalesRows);
+  const earningsMarginFlowSalesTotals = salesTotalsForRange(sales || [], earningsRange, "All departments");
+  const earningsServiceCharge = earningsMarginFlowSalesTotals.rows.length
+    ? earningsMarginFlowSalesTotals.rows.reduce((sum, row) => sum + numberValue(row.serviceCharge, 0), 0)
+    : earningsImportedSalesTotals.serviceCharge;
+  const earningsRows = filterEmployeeRows(aggregateLabourByEmployee(data, earningsRowsRaw, {
+    serviceCharge: earningsServiceCharge,
+    bohServiceCharge: earningsServiceCharge * 0.4,
+    fohServiceCharge: earningsServiceCharge * 0.6,
+  }), { ...earningsFilters, active: "all" });
+  const activeHolidayRows = holidaySummary.rows.filter((row) => matchesActive(row, labourFilters.active || "active") && matchesText(row.name, labourFilters.search) && matchesDepartment(row, labourFilters.department));
+  const activeHolidayBookings = data.holidays.filter((row) => matchesText(row.employeeName, labourFilters.search) && matchesDepartment(row, labourFilters.department) && matchesActive(row, labourFilters.active || "active"));
+  const filteredEmployees = filterEmployeeRows(employeeRows, labourFilters);
+  const filteredDepartments = data.departments.filter((department) => {
+    const query = normaliseText(labourFilters.search);
+    const departmentMatches = !query || normaliseText(department.name).includes(query) || normaliseText(department.group).includes(query);
+    const filterMatches = !labourFilters.department || labourFilters.department === "All" || normaliseText(department.name) === normaliseText(labourFilters.department) || normaliseText(department.group) === normaliseText(labourFilters.department);
+    return departmentMatches && filterMatches;
+  });
+  const filteredDepartmentRows = departmentRows.filter((row) => {
+    const department = data.departments.find((item) => item.id === row.id) || { name: row.department, group: row.department };
+    const query = normaliseText(labourFilters.search);
+    const departmentMatches = !query || normaliseText(row.department).includes(query) || normaliseText(department.group).includes(query);
+    const filterMatches = !labourFilters.department || labourFilters.department === "All" || normaliseText(row.department) === normaliseText(labourFilters.department) || normaliseText(department.group) === normaliseText(labourFilters.department);
+    return departmentMatches && filterMatches;
+  });
+  const filteredRateRows = [...data.rateHistory].sort((a, b) => String(b.effectiveDate).localeCompare(String(a.effectiveDate))).filter((row) => matchesText(row.employeeName, labourFilters.search) && matchesDepartment(row, labourFilters.department) && matchesActive(row, labourFilters.active || "active"));
 
   return (
     <div className="page-grid">
-      <Panel title="Labour controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+      <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-        <div className="button-row left">
-          <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour week</button>
-          <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Employee</button>
-          <button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Department</button>
-          <label className="file-button secondary">Import labour CSV<input accept=".csv,text/csv" key={labourImportKey} onChange={(event) => importLabourFile(event.target.files?.[0])} type="file" /></label>
-          <label className="file-button secondary">Import sales CSV<input accept=".csv,text/csv" key={salesImportKey} onChange={(event) => importSalesFile(event.target.files?.[0])} type="file" /></label>
-          <button className="ghost danger" onClick={resetLabourData} type="button">Reset Labour seed</button>
+        <div className="button-row left labour-hub-actions">
+          <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour</button>
+          <button className="ghost" onClick={() => setActiveLabourModal("imports")} type="button">Staff Earnings</button>
+          <button className="ghost" onClick={() => setActiveLabourModal("employees")} type="button">Employees</button>
+          <button className="ghost" onClick={() => setActiveLabourModal("departments")} type="button">Departments & breakdown</button>
+          <button className="ghost" onClick={() => setActiveLabourModal("holidays")} type="button">Holidays</button>
+          <button className="ghost" onClick={() => setActiveLabourModal("bookings")} type="button">Holiday bookings</button>
         </div>
+        <div className="helper-text">{salesSourceLabel}. This page is designed to be managed weekly. Sales are pulled from the Sales page when available; use Input labour week for staff hours and wages.</div>
         {status && <div className="invoice-status">{status}</div>}
       </Panel>
 
       <div className="metric-grid">
-        <Metric label="Food sales" value={money(salesTotals.foodSales)} delta={`${salesRows.length} sales import row(s)`} tone="good" />
-        <Metric label="Total sales" value={money(salesTotals.totalSales || salesTotals.netSales)} delta="Labour sales data" />
+        <Metric label="Food sales" value={money(salesTotals.foodSales)} delta={salesSourceLabel} tone="good" />
+        <Metric label="Total sales" value={money(salesTotals.totalSales || salesTotals.netSales)} delta={`${salesRows.length} labour import row(s)`} />
         <Metric label="Labour cost" value={money(labourSummary.wages)} delta={`${numberValue(labourSummary.hours).toFixed(1)} hours`} />
         <Metric label="Labour %" value={percent(labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales))} delta="Cost / sales" tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
-        <Metric label="Service charge" value={money(labourSummary.serviceCharge || salesTotals.serviceCharge)} delta="Allocated / imported" />
+        <Metric label="Target" value="32%" delta={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "Above target" : "On/under target"} tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
+        <Metric label="Service charge" value={money(labourSummary.serviceCharge || salesTotals.serviceCharge)} delta="Allocated / sales page" />
         <Metric label="Holiday liability" value={money(holidaySummary.totalLiability)} delta={`${numberValue(holidaySummary.totalRemainingHours).toFixed(1)}h owed`} />
       </div>
 
-      <Panel title="Department breakdown" action="Actual vs target">
-        <DataTable
-          columns={[
-            { key: "department", label: "Department" },
-            { key: "basis", label: "Basis" },
-            { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
-            { key: "wages", label: "Labour", render: money },
-            { key: "actual", label: "Actual %", render: percent },
-            { key: "target", label: "Target %", render: percent },
-            { key: "status", label: "Status", render: (value) => <Badge tone={value === "OK" ? "green" : "orange"}>{value}</Badge> },
-          ]}
-          rows={departmentRows}
-        />
-      </Panel>
+      {activeLabourModal === "imports" && (
+        <AppModal title="Staff Earnings" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            <div className="button-row left">
+              <button className="ghost danger" onClick={resetLabourData} type="button">Reset Labour seed</button>
+            </div>
+            <div className="form-grid six labour-filter-bar">
+              <label>Period<select value={earningsFilters.period} onChange={(event) => setEarningsFilters({ ...earningsFilters, period: event.target.value })}><option value="week">Week</option><option value="month">Month</option><option value="year">Year</option><option value="custom">Custom dates</option></select></label>
+              {earningsFilters.period === "week" && <Field label="Week start" type="date" value={earningsFilters.weekStart} onChange={(value) => setEarningsFilters({ ...earningsFilters, weekStart: value })} />}
+              {earningsFilters.period === "month" && <Field label="Month" type="month" value={earningsFilters.month} onChange={(value) => setEarningsFilters({ ...earningsFilters, month: value })} />}
+              {earningsFilters.period === "year" && <Field label="Year" type="number" value={earningsFilters.year} onChange={(value) => setEarningsFilters({ ...earningsFilters, year: value })} />}
+              {earningsFilters.period === "custom" && <Field label="From" type="date" value={earningsFilters.from} onChange={(value) => setEarningsFilters({ ...earningsFilters, from: value })} />}
+              {earningsFilters.period === "custom" && <Field label="To" type="date" value={earningsFilters.to} onChange={(value) => setEarningsFilters({ ...earningsFilters, to: value })} />}
+              <Field label="Search employee" value={earningsFilters.search} onChange={(value) => setEarningsFilters({ ...earningsFilters, search: value })} />
+              <label>Department<select value={earningsFilters.department} onChange={(event) => setEarningsFilters({ ...earningsFilters, department: event.target.value })}>{departmentFilterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+            </div>
+            <div className="helper-text">Showing {formatRangeDate(earningsRange.start)} - {formatRangeDate(earningsRange.end)}. Gross pay uses locked employee rates. Service charge is allocated by hours × service charge points.</div>
+            <DataTable
+              columns={[
+                { key: "employeeName", label: "Employee" },
+                { key: "departmentName", label: "Department" },
+                { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
+                { key: "wages", label: "Gross pay", render: money },
+                { key: "serviceChargePoints", label: "SC points", render: (value) => numberValue(value, 0).toFixed(2) },
+                { key: "serviceChargeHours", label: "SC hours", render: (value) => numberValue(value, 0).toFixed(1) },
+                { key: "serviceCharge", label: "Service charge", render: money },
+                { key: "serviceChargePerHour", label: "SC / h", render: money },
+                { key: "total", label: "Total earned", render: (_, row) => money(numberValue(row.wages) + numberValue(row.serviceCharge)) },
+              ]}
+              rows={earningsRows}
+            />
+          </div>
+        </AppModal>
+      )}
 
-      <Panel title="Labour imports" action={`${labourRows.length} row(s) in period`}>
-        <DataTable
-          columns={[
-            { key: "employeeName", label: "Employee" },
-            { key: "departmentName", label: "Department" },
-            { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
-            { key: "wages", label: "Wages", render: money },
-            { key: "serviceCharge", label: "Service charge", render: money },
-            { key: "total", label: "Total", render: (_, row) => money(numberValue(row.wages) + numberValue(row.serviceCharge)) },
-          ]}
-          rows={aggregateLabourByEmployee(data, labourRows)}
-        />
-      </Panel>
+      {activeLabourModal === "employees" && (
+        <AppModal title="Employees" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            {labourFilterControls(labourFilters, setLabourFilters, { activeToggle: true })}
+            <DataTable
+              columns={[
+                { key: "name", label: "Employee" },
+                { key: "departmentId", label: "Department", render: (value) => labourDepartmentName(data, value, "-") },
+                { key: "payType", label: "Pay type" },
+                { key: "rate", label: "Rate", render: (_, row) => labourRateLabel(row) },
+                { key: "serviceChargePoints", label: "SC points", render: (_, row) => row.excludeFromServiceCharge ? "Excluded" : numberValue(row.serviceChargePoints, 1).toFixed(2) },
+                { key: "manualAverageWeeklyHours", label: "Avg hours", render: (value, row) => (numberValue(value) || labourEmployeeAverageWeeklyHours(data, row)).toFixed(1) },
+                { key: "status", label: "Status", render: (value) => <Badge tone={value === "active" ? "green" : "orange"}>{value}</Badge> },
+              ]}
+              onDelete={(id) => deleteFromCollection("employees", id, "Employee")}
+              onEdit={(row) => setEmployeeModal(row)}
+              rows={filteredEmployees}
+              toolbarAction={<button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add Employee</button>}
+            />
+          </div>
+        </AppModal>
+      )}
 
-      <Panel title="Employees" action={`${employeeRows.length} employee(s)`}>
-        <DataTable
-          columns={[
-            { key: "name", label: "Employee" },
-            { key: "departmentId", label: "Department", render: (value) => labourDepartmentName(data, value, "-") },
-            { key: "payType", label: "Pay type" },
-            { key: "rate", label: "Rate", render: (_, row) => labourRateLabel(row) },
-            { key: "manualAverageWeeklyHours", label: "Avg hours", render: (value, row) => (numberValue(value) || labourEmployeeAverageWeeklyHours(data, row)).toFixed(1) },
-            { key: "status", label: "Status", render: (value) => <Badge tone={value === "active" ? "green" : "orange"}>{value}</Badge> },
-          ]}
-          onDelete={(id) => deleteFromCollection("employees", id, "Employee")}
-          onEdit={(row) => setEmployeeModal(row)}
-          rows={employeeRows}
-          toolbarAction={<button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add Employee</button>}
-        />
-      </Panel>
+      {activeLabourModal === "departments" && (
+        <AppModal title="Departments & breakdown" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            {labourFilterControls(labourFilters, setLabourFilters, { activeToggle: false })}
+            <Panel title="Department breakdown" action="Actual vs target">
+              <DataTable
+                columns={[
+                  { key: "department", label: "Department" },
+                  { key: "basis", label: "Basis" },
+                  { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
+                  { key: "wages", label: "Labour", render: money },
+                  { key: "actual", label: "Actual %", render: percent },
+                  { key: "target", label: "Target %", render: percent },
+                  { key: "status", label: "Status", render: (value) => <Badge tone={value === "OK" ? "green" : "orange"}>{value}</Badge> },
+                ]}
+                rows={filteredDepartmentRows}
+              />
+            </Panel>
+            <Panel title="Departments" action={`${data.departments.length} department(s)`}>
+              <DataTable
+                columns={[
+                  { key: "name", label: "Department" },
+                  { key: "group", label: "Group" },
+                  { key: "basis", label: "Target basis", render: (value) => labourBasisLabels[value] || value },
+                  { key: "targetPercent", label: "Target %", render: percent },
+                  { key: "serviceChargeShare", label: "Service weight" },
+                  { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "orange"}>{value ? "Active" : "Inactive"}</Badge> },
+                ]}
+                onDelete={(id) => deleteFromCollection("departments", id, "Department")}
+                onEdit={(row) => setDepartmentModal(row)}
+                rows={filteredDepartments}
+                toolbarAction={<button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Add Department</button>}
+              />
+            </Panel>
+          </div>
+        </AppModal>
+      )}
 
-      <Panel title="Departments" action={`${data.departments.length} department(s)`}>
-        <DataTable
-          columns={[
-            { key: "name", label: "Department" },
-            { key: "group", label: "Group" },
-            { key: "basis", label: "Target basis", render: (value) => labourBasisLabels[value] || value },
-            { key: "targetPercent", label: "Target %", render: percent },
-            { key: "serviceChargeShare", label: "Service weight" },
-            { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "orange"}>{value ? "Active" : "Inactive"}</Badge> },
-          ]}
-          onDelete={(id) => deleteFromCollection("departments", id, "Department")}
-          onEdit={(row) => setDepartmentModal(row)}
-          rows={data.departments}
-          toolbarAction={<button className="ghost" onClick={() => setDepartmentModal(blankDepartment())} type="button"><Plus size={16} />Add Department</button>}
-        />
-      </Panel>
+      {activeLabourModal === "holidays" && (
+        <AppModal title="Holidays" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            {labourFilterControls(labourFilters, setLabourFilters, { activeToggle: true })}
+            <DataTable
+              columns={[
+                { key: "name", label: "Employee" },
+                { key: "type", label: "Type" },
+                { key: "avgWeekly", label: "Avg weekly", render: (value) => numberValue(value).toFixed(1) },
+                { key: "accrued", label: "Accrued" },
+                { key: "used", label: "Used" },
+                { key: "projectedRemaining", label: "Projected left" },
+                { key: "liability", label: "Liability", render: money },
+                { key: "notes", label: "Notes" },
+              ]}
+              rows={activeHolidayRows}
+              toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Holiday Booking</button>}
+            />
+          </div>
+        </AppModal>
+      )}
 
-      <Panel title="Sales imports" action="Labour-only sales data">
-        <DataTable
-          columns={[
-            { key: "dateFrom", label: "From" },
-            { key: "dateTo", label: "To" },
-            { key: "totalSales", label: "Total sales", render: money },
-            { key: "netSales", label: "Net sales", render: money },
-            { key: "foodSales", label: "Food sales", render: money },
-            { key: "serviceCharge", label: "Service charge", render: money },
-            { key: "source", label: "Source" },
-          ]}
-          onDelete={(id) => deleteFromCollection("sales", id, "Sales row")}
-          onEdit={(row) => setSalesModal(row)}
-          rows={[...data.sales].sort((a, b) => String(b.dateFrom).localeCompare(String(a.dateFrom))).slice(0, 250)}
-          toolbarAction={<button className="ghost" onClick={() => setSalesModal(blankSales())} type="button"><Plus size={16} />Add Sales</button>}
-        />
-      </Panel>
+      {activeLabourModal === "bookings" && (
+        <AppModal title="Holiday bookings" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            {labourFilterControls(labourFilters, setLabourFilters, { activeToggle: true })}
+            <DataTable
+              columns={[
+                { key: "employeeName", label: "Employee" },
+                { key: "dateFrom", label: "From" },
+                { key: "dateTo", label: "To" },
+                { key: "days", label: "Days" },
+                { key: "hours", label: "Hours" },
+                { key: "status", label: "Status" },
+              ]}
+              onDelete={(id) => deleteFromCollection("holidays", id, "Holiday")}
+              onEdit={(row) => setHolidayModal(row)}
+              rows={activeHolidayBookings}
+              toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Booking</button>}
+            />
+          </div>
+        </AppModal>
+      )}
 
-      <Panel title="Holidays" action={`${data.holidays.length} booking(s)`}>
-        <DataTable
-          columns={[
-            { key: "name", label: "Employee" },
-            { key: "type", label: "Type" },
-            { key: "avgWeekly", label: "Avg weekly", render: (value) => numberValue(value).toFixed(1) },
-            { key: "accrued", label: "Accrued" },
-            { key: "used", label: "Used" },
-            { key: "projectedRemaining", label: "Projected left" },
-            { key: "liability", label: "Liability", render: money },
-            { key: "notes", label: "Notes" },
-          ]}
-          rows={holidaySummary.rows}
-          toolbarAction={<button className="ghost" onClick={() => setHolidayModal(blankHoliday())} type="button"><Plus size={16} />Add Holiday</button>}
-        />
-      </Panel>
-
-      <Panel title="Holiday bookings">
-        <DataTable
-          columns={[
-            { key: "employeeName", label: "Employee" },
-            { key: "dateFrom", label: "From" },
-            { key: "dateTo", label: "To" },
-            { key: "days", label: "Days" },
-            { key: "hours", label: "Hours" },
-            { key: "status", label: "Status" },
-          ]}
-          onDelete={(id) => deleteFromCollection("holidays", id, "Holiday")}
-          onEdit={(row) => setHolidayModal(row)}
-          rows={data.holidays}
-        />
-      </Panel>
-
-      <Panel title="Rate history" action={`${data.rateHistory.length} change(s)`}>
-        <DataTable
-          columns={[
-            { key: "employeeName", label: "Employee" },
-            { key: "effectiveDate", label: "Effective" },
-            { key: "payType", label: "Pay type" },
-            { key: "rate", label: "Rate", render: money },
-          ]}
-          onDelete={(id) => deleteFromCollection("rateHistory", id, "Rate history row")}
-          onEdit={(row) => setRateModal(row)}
-          rows={[...data.rateHistory].sort((a, b) => String(b.effectiveDate).localeCompare(String(a.effectiveDate)))}
-          toolbarAction={<button className="ghost" onClick={() => setRateModal(blankRate())} type="button"><Plus size={16} />Add Rate</button>}
-        />
-      </Panel>
+      {activeLabourModal === "rates" && (
+        <AppModal title="Rate history" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
+          <div className="modal-stack">
+            {labourFilterControls(labourFilters, setLabourFilters, { activeToggle: true })}
+            <DataTable
+              columns={[
+                { key: "employeeName", label: "Employee" },
+                { key: "effectiveDate", label: "Effective" },
+                { key: "payType", label: "Pay type" },
+                { key: "rate", label: "Rate", render: money },
+              ]}
+              onDelete={(id) => deleteFromCollection("rateHistory", id, "Rate history row")}
+              onEdit={(row) => setRateModal(row)}
+              rows={filteredRateRows}
+              toolbarAction={<button className="ghost" onClick={() => setRateModal(blankRate())} type="button"><Plus size={16} />Add Rate</button>}
+            />
+          </div>
+        </AppModal>
+      )}
 
       {employeeModal && (
         <EditModal title={employeeModal.id ? "Edit Employee" : "Add Employee"} onCancel={() => setEmployeeModal(null)} onSave={saveEmployee} saveLabel="Save Employee">
@@ -6606,6 +6938,8 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
             <label>Department<select value={employeeModal.departmentId} onChange={(event) => setEmployeeModal({ ...employeeModal, departmentId: event.target.value })}>{data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
             <label>Pay type<select value={employeeModal.payType} onChange={(event) => setEmployeeModal({ ...employeeModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="annual">Annual salary</option></select></label>
             <Field label="Rate" type="number" value={employeeModal.rate} onChange={(value) => setEmployeeModal({ ...employeeModal, rate: value })} />
+            <Field label="Service charge points" type="number" value={employeeModal.serviceChargePoints ?? 1} onChange={(value) => setEmployeeModal({ ...employeeModal, serviceChargePoints: value })} />
+            <label>Service charge<select value={employeeModal.excludeFromServiceCharge ? "excluded" : "included"} onChange={(event) => setEmployeeModal({ ...employeeModal, excludeFromServiceCharge: event.target.value === "excluded" })}><option value="included">Included</option><option value="excluded">Excluded</option></select></label>
             <Field label="Contracted hours" type="number" value={employeeModal.contractedHours} onChange={(value) => setEmployeeModal({ ...employeeModal, contractedHours: value })} />
             <Field label="Average weekly hours" type="number" value={employeeModal.manualAverageWeeklyHours} onChange={(value) => setEmployeeModal({ ...employeeModal, manualAverageWeeklyHours: value })} />
             <Field label="Start date" type="date" value={employeeModal.startDate} onChange={(value) => setEmployeeModal({ ...employeeModal, startDate: value })} />
@@ -6613,6 +6947,17 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
             <label>Holiday type<select value={employeeModal.holidayType} onChange={(event) => setEmployeeModal({ ...employeeModal, holidayType: event.target.value })}><option value="zero-hours">Zero-hours</option><option value="annual">Annual</option><option value="freelance">Freelance</option></select></label>
             <Field label="Holiday entitlement days" type="number" value={employeeModal.holidayEntitlementDays} onChange={(value) => setEmployeeModal({ ...employeeModal, holidayEntitlementDays: value })} />
           </div>
+          <Panel title="Rate history" action="Stored inside employee profile">
+            <DataTable
+              columns={[
+                { key: "effectiveDate", label: "Effective" },
+                { key: "oldRate", label: "Old rate", render: money },
+                { key: "newRate", label: "New rate", render: money },
+                { key: "notes", label: "Notes" },
+              ]}
+              rows={Array.isArray(employeeModal.rateHistory) ? employeeModal.rateHistory : []}
+            />
+          </Panel>
         </EditModal>
       )}
 
@@ -6679,44 +7024,77 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
           footer={(
             <>
               <button className="ghost" onClick={() => setWeeklyModal(null)} type="button">Cancel</button>
-              <button onClick={saveWeeklyInput} type="button"><Save size={16} />Save Labour Week</button>
+              <button onClick={saveWeeklyInput} type="button"><Save size={16} />Save Labour</button>
             </>
           )}
           onClose={() => setWeeklyModal(null)}
           open={Boolean(weeklyModal)}
-          title="Input labour week"
+          title="Input labour"
           wide
         >
           <div className="modal-stack">
             <div className="form-grid six">
-              <Field label="Week start" type="date" value={weeklyModal.weekStart} onChange={(value) => setWeeklyModal({ ...weeklyModal, weekStart: value })} />
-              <Field label="Total sales" type="number" value={weeklyModal.salesTotal} onChange={(value) => setWeeklyModal({ ...weeklyModal, salesTotal: value })} />
-              <Field label="Net sales" type="number" value={weeklyModal.netSales} onChange={(value) => setWeeklyModal({ ...weeklyModal, netSales: value })} />
-              <Field label="Food sales" type="number" value={weeklyModal.foodSales} onChange={(value) => setWeeklyModal({ ...weeklyModal, foodSales: value })} />
-              <Field label="Service charge" type="number" value={weeklyModal.serviceCharge} onChange={(value) => setWeeklyModal({ ...weeklyModal, serviceCharge: value })} />
+              <label>Input mode<select value={weeklyModal.mode || "weekly"} onChange={(event) => {
+                const mode = event.target.value;
+                const baseDate = weeklyModal.date || weeklyModal.weekStart || today();
+                const nextWeekStart = mode === "weekly" ? baseDate : weeklyModal.weekStart || baseDate;
+                const nextRange = mode === "daily" ? salesTotalsForRange(sales || [], { start: baseDate, end: baseDate }, "All departments") : salesTotalsForLabourWeek(nextWeekStart);
+                setWeeklyModal({
+                  ...weeklyModal,
+                  mode,
+                  date: baseDate,
+                  weekStart: nextWeekStart,
+                  serviceCharge: nextRange.serviceCharge || 0,
+                  salesTotal: nextRange.grossSales || nextRange.netSales || 0,
+                  netSales: nextRange.netSales || 0,
+                  foodSales: nextRange.netSales || 0,
+                });
+              }}><option value="weekly">Weekly</option><option value="daily">Daily</option></select></label>
+              {weeklyModal.mode === "daily" ? (
+                <Field label="Date" type="date" value={weeklyModal.date || weeklyModal.weekStart} onChange={(value) => {
+                  const daySales = salesTotalsForRange(sales || [], { start: value, end: value }, "All departments");
+                  setWeeklyModal({ ...weeklyModal, date: value, weekStart: value, serviceCharge: daySales.serviceCharge || 0, salesTotal: daySales.grossSales || daySales.netSales || 0, netSales: daySales.netSales || 0, foodSales: daySales.netSales || 0 });
+                }} />
+              ) : (
+                <Field label="Week start" type="date" value={weeklyModal.weekStart} onChange={updateWeeklyWeekStart} />
+              )}
+              <Field label="Gross sales" type="number" readOnly value={numberValue(weeklyModal.salesTotal, 0).toFixed(2)} />
+              <Field label="Net sales" type="number" readOnly value={numberValue(weeklyModal.netSales, 0).toFixed(2)} />
+              <Field label="Service charge from Sales" type="number" readOnly value={numberValue(weeklyModal.serviceCharge, 0).toFixed(2)} />
               <Field label="Total wages" type="number" readOnly value={weeklyTotals.wages.toFixed(2)} />
             </div>
+            <p className="helper-text">Only enter employee hours here. Sales and service charge come from the Sales page for the selected {weeklyModal.mode === "daily" ? "day" : "week"}.</p>
+            <div className="button-row left">
+              <label className="file-button secondary">Import Hours CSV<input accept=".csv,text/csv" key={`weekly-${labourImportKey}`} onChange={(event) => importWeeklyHoursFile(event.target.files?.[0])} type="file" /></label>
+            </div>
+            <div className="form-grid four labour-filter-bar">
+              <Field label="Search employee" value={weeklyFilters.search} onChange={(value) => setWeeklyFilters({ ...weeklyFilters, search: value })} />
+              <label>Department<select value={weeklyFilters.department} onChange={(event) => setWeeklyFilters({ ...weeklyFilters, department: event.target.value })}>{departmentFilterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+              <label>Employees<select value={weeklyFilters.showInactive ? "all" : "active"} onChange={(event) => setWeeklyFilters({ ...weeklyFilters, showInactive: event.target.value === "all" })}><option value="active">Active only</option><option value="all">Active + inactive</option></select></label>
+            </div>
+            <div className="helper-text">Showing {weeklyVisibleRows.length} employee(s). Search by name or filter by BOH, FOH, Manager, KP or department.</div>
             <div className="table-wrap modal-table">
               <table>
                 <thead>
                   <tr>
-                    {["Use", "Employee", "Department", "Hours", "Rate", "Wages", "SC weight"].map((header) => <th key={header}>{header}</th>)}
+                    {["Use", "Employee", "Department", "Hours", "Rate", "Wages", "SC points", "SC hours"].map((header) => <th key={header}>{header}</th>)}
                   </tr>
                 </thead>
                 <tbody>
-                  {weeklyModal.rows.map((row, index) => (
+                  {weeklyVisibleRows.map((row) => (
                     <tr key={row.employeeId}>
-                      <td><input checked={row.include} onChange={(event) => updateWeeklyRow(index, "include", event.target.checked)} type="checkbox" /></td>
+                      <td><input checked={row.include} onChange={(event) => updateWeeklyRow(row.index, "include", event.target.checked)} type="checkbox" /></td>
                       <td>{row.employeeName}</td>
                       <td>
-                        <select value={row.departmentId} onChange={(event) => updateWeeklyRow(index, "departmentId", event.target.value)}>
+                        <select value={row.departmentId} onChange={(event) => updateWeeklyRow(row.index, "departmentId", event.target.value)}>
                           {data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
                         </select>
                       </td>
-                      <td><input min="0" step="0.01" type="number" value={row.hours} onChange={(event) => updateWeeklyRow(index, "hours", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={row.rate} onChange={(event) => updateWeeklyRow(index, "rate", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={row.wages} onChange={(event) => updateWeeklyRow(index, "wages", event.target.value)} /></td>
-                      <td><input min="0" step="0.01" type="number" value={row.serviceChargeWeight} onChange={(event) => updateWeeklyRow(index, "serviceChargeWeight", event.target.value)} /></td>
+                      <td><input min="0" step="0.01" type="number" value={row.hours} onChange={(event) => updateWeeklyRow(row.index, "hours", event.target.value)} /></td>
+                      <td><input min="0" readOnly step="0.01" type="number" value={row.rate} title="Rate is locked. Change it in Employees." /></td>
+                      <td><input min="0" readOnly step="0.01" type="number" value={numberValue(row.wages, 0).toFixed(2)} title="Gross pay is calculated from hours × employee rate." /></td>
+                      <td><input min="0" readOnly step="0.01" type="number" value={row.serviceChargePoints} title="Service charge points are managed in Employees." /></td>
+                      <td>{(numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1)).toFixed(1)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -6724,6 +7102,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, setD
             </div>
             <div className="metric-grid compact">
               <Metric label="Hours" value={weeklyTotals.hours.toFixed(1)} delta="Selected employees" />
+              <Metric label="SC hours" value={weeklyTotals.serviceChargeHours.toFixed(1)} delta="Hours × points" />
               <Metric label="Wages" value={money(weeklyTotals.wages)} delta="Before service charge" />
               <Metric label="BOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.4)} delta="40% pool" />
               <Metric label="FOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.6)} delta="60% pool" />
@@ -6742,6 +7121,9 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
     const hasDepartmentBreakdown = Object.keys(departments).length > 0;
     return {
       date,
+      grossSales: existing?.grossSales ?? existing?.totalSales ?? "",
+      netSales: existing?.netSales ?? existing?.sales ?? "",
+      serviceCharge: existing?.serviceCharge ?? "",
       rows: departmentNames.map((departmentName, index) => {
         const existingDepartment = departments[departmentName] || {};
         const legacyValues = existing && !hasDepartmentBreakdown && index === 0 ? existing : {};
@@ -6786,12 +7168,15 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
     vat: Math.max(0, numberValue(row.grossSales, row.netSales) - numberValue(row.netSales)),
   }));
   const departmentRows = salesByDepartment(sales, dateRange, departmentNames);
+  const salesChartData = aggregateDashboardRows(dailyRows.map((row) => ({ ...row, purchases: 0, waste: 0 })), dateRange);
+  const salesChartPrefix = chartTitlePrefix(salesChartData.granularity);
 
   const openInputSales = () => {
     setSalesDraft(makeSalesDraft(today()));
     setInputOpen(true);
   };
   const updateDraftDate = (date) => setSalesDraft(makeSalesDraft(date || today()));
+  const updateDraftTop = (field, value) => setSalesDraft((current) => ({ ...current, [field]: value }));
   const updateDraftLine = (departmentName, field, value) => {
     setSalesDraft((current) => ({
       ...current,
@@ -6810,9 +7195,12 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       };
     });
     const departmentValues = Object.values(departments);
-    if (!departmentValues.length) return;
-    const netSales = departmentValues.reduce((sum, row) => sum + numberValue(row.netSales), 0);
-    const grossSales = departmentValues.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+    const departmentNetSales = departmentValues.reduce((sum, row) => sum + numberValue(row.netSales), 0);
+    const departmentGrossSales = departmentValues.reduce((sum, row) => sum + numberValue(row.grossSales), 0);
+    const netSales = numberValue(salesDraft.netSales, 0) || departmentNetSales;
+    const grossSales = numberValue(salesDraft.grossSales, 0) || departmentGrossSales || netSales;
+    const serviceCharge = numberValue(salesDraft.serviceCharge, 0);
+    if (!netSales && !grossSales && !serviceCharge && !departmentValues.length) return;
     const existing = sales.find((row) => row.date === salesDraft.date);
     const nextRow = {
       id: existing?.id || uid(),
@@ -6821,6 +7209,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       sales: netSales,
       netSales,
       grossSales,
+      serviceCharge,
       departments,
     };
     setSales((current) => [nextRow, ...current.filter((row) => row.date !== salesDraft.date)].sort((a, b) => a.date.localeCompare(b.date)));
@@ -6844,13 +7233,14 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       <div className="metric-grid">
         <Metric label="Net sales" value={money(selectedTotals.netSales)} delta={`${selectedTotals.rows.length} sales day(s)`} tone="good" />
         <Metric label="Gross sales" value={money(selectedTotals.grossSales)} delta={department} />
+        <Metric label="Service charge" value={money(selectedTotals.serviceCharge)} delta="Feeds Labour" />
         <Metric label="VAT / tax" value={money(selectedTotals.vat)} delta="Gross - net" />
         <Metric label="Daily average" value={money(selectedTotals.averageDailyNet)} delta={`${periodLength} day period`} />
         <Metric label="Entries" value={selectedTotals.rows.length} delta="Days with sales input" />
       </div>
 
       <div className="dashboard-layout secondary">
-        <Panel title="Daily net sales"><LineSeries rows={dailyRows} valueKey="netSales" /></Panel>
+        <Panel title={`${salesChartPrefix} net sales`} action={`${salesChartData.granularity} view`}><LineSeries rows={salesChartData.rows} valueKey="netSales" /></Panel>
         <Panel title="Comparison">
           <DataTable
             columns={[
@@ -6873,6 +7263,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
               { key: "department", label: "Department" },
               { key: "netSales", label: "Net sales", render: money },
               { key: "grossSales", label: "Gross sales", render: money },
+              { key: "serviceCharge", label: "Service charge", render: money },
               { key: "vat", label: "VAT / tax", render: money },
             ]}
             rows={departmentRows}
@@ -6906,11 +7297,15 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         <div className="modal-stack">
           <div className="form-grid six">
             <Field label="Sales date" type="date" value={salesDraft.date} onChange={updateDraftDate} />
+            <Field label="Gross sales" type="number" value={salesDraft.grossSales} onChange={(value) => updateDraftTop("grossSales", value)} />
+            <Field label="Net sales" type="number" value={salesDraft.netSales} onChange={(value) => updateDraftTop("netSales", value)} />
+            <Field label="Service charge" type="number" value={salesDraft.serviceCharge} onChange={(value) => updateDraftTop("serviceCharge", value)} />
           </div>
+          <p className="helper-text">Department sales are optional but recommended. They use the active departments created in Settings.</p>
           <div className="table-wrap modal-table sales-input-table">
             <table>
               <thead>
-                <tr>{["Department", "Gross sales", "Net sales"].map((header) => <th key={header}>{header}</th>)}</tr>
+                <tr>{["Department sales", "Gross sales", "Net sales"].map((header) => <th key={header}>{header}</th>)}</tr>
               </thead>
               <tbody>
                 {salesDraft.rows.map((row) => (
@@ -6956,12 +7351,33 @@ function SettingsPanel({
   const [importSummary, setImportSummary] = useState(null);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
+  const [labourSettings, setLabourSettingsState] = useState(() => ({
+    ...defaultLabourSettings,
+    ...safeReadLocalStorage("marginflow.labourSettings", defaultLabourSettings),
+  }));
 
   const updateCompany = (field, value) => setCompanySettings({ ...companySettings, [field]: value });
   const updateFinancial = (field, value) => setFinancialSettings({ ...financialSettings, [field]: value });
   const updateMenu = (field, value) => setMenuSettings({ ...menuSettings, [field]: value });
   const updateInvoice = (field, value) => setInvoiceSettings({ ...invoiceSettings, [field]: value });
   const updateAi = (field, value) => setAiSettings({ ...aiSettings, [field]: value });
+  const updateLabourSettings = (field, value) => {
+    const next = { ...labourSettings, [field]: value };
+    setLabourSettingsState(next);
+    localStorage.setItem("marginflow.labourSettings", JSON.stringify(next));
+  };
+
+  const resetDataSection = (label, keys) => {
+    requestDelete({
+      title: `Reset ${label}?`,
+      message: `This will permanently remove saved ${label.toLowerCase()} data from this browser. Export a full backup first if you may need it later.`,
+      onConfirm: () => {
+        keys.forEach((key) => localStorage.removeItem(key));
+        setDataStatus(`${label} reset. Reloading app...`);
+        window.setTimeout(() => window.location.reload(), 600);
+      },
+    });
+  };
   const savedSupplierParserRows = useMemo(() => {
     const rows = suppliers.map((supplier) => ({
       id: supplier.id || supplier.name,
@@ -7107,6 +7523,20 @@ function SettingsPanel({
         </div>
       </Panel>
 
+      <Panel title="Labour settings">
+        <div className="form-grid six">
+          <Field label="Target labour %" type="number" value={labourSettings.targetLabourPercent} onChange={(value) => updateLabourSettings("targetLabourPercent", numberValue(value))} />
+          <CheckboxField checked={labourSettings.weeklyView} label="Use weekly labour control by default" onChange={(value) => updateLabourSettings("weeklyView", value)} />
+          <Field label="BOH service charge %" type="number" value={labourSettings.bohServiceChargePercent} onChange={(value) => updateLabourSettings("bohServiceChargePercent", numberValue(value))} />
+          <Field label="FOH service charge %" type="number" value={labourSettings.fohServiceChargePercent} onChange={(value) => updateLabourSettings("fohServiceChargePercent", numberValue(value))} />
+          <CheckboxField checked={labourSettings.includeServiceChargeInLabourCost} label="Include service charge in labour cost" onChange={(value) => updateLabourSettings("includeServiceChargeInLabourCost", value)} />
+          <CheckboxField checked={labourSettings.excludeFreelanceFromTronc} label="Exclude freelance/agency from tronc" onChange={(value) => updateLabourSettings("excludeFreelanceFromTronc", value)} />
+          <Field label="Default holiday entitlement days" type="number" value={labourSettings.defaultHolidayEntitlementDays} onChange={(value) => updateLabourSettings("defaultHolidayEntitlementDays", numberValue(value))} />
+          <label>Holiday year starts<select value={labourSettings.holidayYearStartMonth} onChange={(event) => updateLabourSettings("holidayYearStartMonth", event.target.value)}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((month) => <option key={month}>{month}</option>)}</select></label>
+        </div>
+        <p className="helper-text">Labour is controlled weekly. Sales and service charge should normally come from the Sales page, while Labour keeps staff hours, departments, rates and holiday rules.</p>
+      </Panel>
+
       <Panel title="POS & Sales Setup">
         <div className="form-grid six">
           <label>POS Provider<select value={financialSettings.posProvider || defaultFinancialSettings.posProvider} onChange={(event) => updateFinancial("posProvider", event.target.value)}>{["Square", "Lightspeed", "EPOS Now", "Toast", "Zettle", "Other / Manual"].map((provider) => <option key={provider}>{provider}</option>)}</select></label>
@@ -7216,6 +7646,22 @@ function SettingsPanel({
             {parserSampleResult.error || `${parserSampleResult.parserName} found ${parserSampleResult.lines.length} line(s). Supplier: ${parserSampleResult.supplier || "Unknown"}. Invoice: ${parserSampleResult.invoiceNumber || "Not found"}. Date: ${parserSampleResult.invoiceDate || "Not found"}. Total: ${money(parserSampleResult.finalInvoiceTotal)}.`}
           </div>
         )}
+      </Panel>
+
+      <Panel title="Reset data by page">
+        <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
+        <div className="button-row left wrap">
+          <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes"])} type="button">Reset invoices</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Products", ["marginflow.products"])} type="button">Reset products</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Suppliers", ["marginflow.suppliers", "marginflow.creditNotes"])} type="button">Reset suppliers</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Sales", ["marginflow.sales"])} type="button">Reset sales</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Labour", ["marginflow.labour"])} type="button">Reset labour</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Stocktake", ["marginflow.stocktakes"])} type="button">Reset stocktake</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Recipes", ["marginflow.recipes"])} type="button">Reset recipes</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Menu costing", ["marginflow.menus", "marginflow.menuSettings"])} type="button">Reset menu costing</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Waste", ["marginflow.waste"])} type="button">Reset waste</button>
+          <button className="ghost danger" onClick={() => resetDataSection("Settings", ["marginflow.companySettings", "marginflow.financialSettings", "marginflow.departmentSettings", "marginflow.invoiceSettings", "marginflow.aiSettings", "marginflow.menuSettings", "marginflow.labourSettings"])} type="button">Reset settings</button>
+        </div>
       </Panel>
 
       <Panel title="Data settings">
@@ -7582,14 +8028,16 @@ function BarSeries({ rows, valueKey }) {
 }
 
 function LineSeries({ rows, valueKey }) {
-  const max = Math.max(...rows.map((row) => Number(row[valueKey]) || 0), 1);
-  const points = rows.map((row, index) => `${(index / Math.max(rows.length - 1, 1)) * 100},${100 - ((Number(row[valueKey]) || 0) / max) * 88}`).join(" ");
+  const visibleRows = rows.filter((row) => Number(row[valueKey]) || row.grossSales || row.netSales);
+  if (!visibleRows.length) return <EmptyState />;
+  const max = Math.max(...visibleRows.map((row) => Number(row[valueKey]) || 0), 1);
+  const points = visibleRows.map((row, index) => `${(index / Math.max(visibleRows.length - 1, 1)) * 100},${100 - ((Number(row[valueKey]) || 0) / max) * 88}`).join(" ");
   return (
     <div className="line-chart">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none">
         <polyline points={points} />
       </svg>
-      <div className="chart-labels">{rows.map((row) => <span key={row.day}>{row.day}</span>)}</div>
+      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${visibleRows.length}, 1fr)` }}>{visibleRows.map((row) => <span key={row.id || row.date}>{row.label || row.day || formatRangeDate(row.date)}</span>)}</div>
     </div>
   );
 }
