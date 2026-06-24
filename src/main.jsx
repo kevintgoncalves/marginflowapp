@@ -1305,6 +1305,15 @@ function findHeaderIndex(headers, names) {
   return normalized.findIndex((header) => names.includes(header));
 }
 
+function findHeaderIndexByPriority(headers, names) {
+  const normalized = headers.map(normalizeHeader);
+  for (const name of names) {
+    const index = normalized.indexOf(normalizeHeader(name));
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
 function salesCsvTemplateKey(name) {
   return `marginflow.salesCsvTemplate.${normalizeHeader(name || "manual")}`;
 }
@@ -2716,6 +2725,72 @@ function labourFindEmployeeByName(employees = [], name = "") {
     || null;
 }
 
+function labourCanonicalPayType(employee = {}) {
+  const raw = normalizeHeader(employee.employmentType || employee.payType || employee.type || "");
+  if (["salaried", "salary", "annual", "annualsalary"].includes(raw)) return "salaried";
+  if (raw.includes("freelance")) return "freelance";
+  if (raw.includes("agency")) return "agency";
+  return "hourly";
+}
+
+function labourPayTypeLabel(employee = {}) {
+  const type = labourCanonicalPayType(employee);
+  if (type === "salaried") return "Salaried";
+  if (type === "freelance") return "Freelance";
+  if (type === "agency") return "Agency";
+  return "Hourly";
+}
+
+function labourIsSalaried(employee = {}) {
+  return labourCanonicalPayType(employee) === "salaried";
+}
+
+function labourAnnualSalary(employee = {}) {
+  return numberValue(employee.annualSalary ?? employee.salary ?? employee.annualRate ?? employee.rate, 0);
+}
+
+function labourHourlyRate(employee = {}) {
+  if (labourIsSalaried(employee)) return 0;
+  return numberValue(employee.hourlyRate ?? employee.rate, 0);
+}
+
+function labourEmployeeRate(employee = {}) {
+  return labourIsSalaried(employee) ? labourAnnualSalary(employee) : labourHourlyRate(employee);
+}
+
+function labourBasePayForHours(employee = {}, hours = 0) {
+  return labourIsSalaried(employee) ? labourAnnualSalary(employee) / 52 : numberValue(hours, 0) * labourHourlyRate(employee);
+}
+
+function labourWeekKeyForDate(date) {
+  if (!date) return "";
+  return toIsoDate(startOfWeek(parseDate(date), "Monday"));
+}
+
+function labourWeekKeyForRow(row = {}) {
+  return row.weekKey || labourWeekKeyForDate(row.date || row.dateFrom || row.weekStart || row.dateTo);
+}
+
+function labourEmployeeForRow(data, row = {}) {
+  return data.employees.find((employee) => employee.id === row.employeeId) || labourFindEmployeeByName(data.employees, row.employeeName || row.name) || {};
+}
+
+function labourBasePayForRows(data, rows) {
+  const salariedWeeks = new Set();
+  return rows.reduce((sum, row) => {
+    const employee = labourEmployeeForRow(data, row);
+    const hours = numberValue(row.hours, 0);
+    if (labourIsSalaried(employee)) {
+      if (!hours && !numberValue(row.wages, 0)) return sum;
+      const key = `${employee.id || normalizeHeader(row.employeeName)}-${labourWeekKeyForRow(row)}`;
+      if (salariedWeeks.has(key)) return sum;
+      salariedWeeks.add(key);
+      return sum + labourBasePayForHours(employee, hours);
+    }
+    return sum + labourBasePayForHours(employee, hours);
+  }, 0);
+}
+
 function labourSum(rows, key) {
   return rows.reduce((sum, row) => sum + numberValue(row[key], 0), 0);
 }
@@ -2731,14 +2806,18 @@ function createInitialLabourData() {
     id: stableLabourId("emp", employee.name),
     name: employee.name,
     departmentId: departmentIdForName(employee.departmentName),
-    payType: employee.payType || "hourly",
+    payType: labourCanonicalPayType(employee),
+    employmentType: labourPayTypeLabel(employee),
     rate: numberValue(employee.rate, 0),
+    annualSalary: labourIsSalaried(employee) ? labourAnnualSalary(employee) : numberValue(employee.annualSalary, 0),
     contractedHours: numberValue(employee.contractedHours, 0),
     manualAverageWeeklyHours: numberValue(employee.manualAverageWeeklyHours, 0),
     startDate: employee.startDate || "",
     status: employee.status || "left",
     holidayType: employee.holidayType || "zero-hours",
     holidayEntitlementDays: numberValue(employee.holidayEntitlementDays, 28),
+    serviceChargePoints: numberValue(employee.serviceChargePoints ?? employee.scPoints, 1),
+    excludeFromServiceCharge: Boolean(employee.excludeFromServiceCharge),
   }));
   const employeeByName = new Map(employees.map((employee) => [normalizeHeader(employee.name), employee]));
   const labour = (labourImportedSeed.labour || []).map((row, index) => {
@@ -2753,10 +2832,13 @@ function createInitialLabourData() {
       departmentId: employee?.departmentId || departmentIdForName(row.departmentName),
       departmentName: row.departmentName,
       hours: numberValue(row.hours, 0),
-      wages: numberValue(row.wages, 0),
+      wages: employee ? labourBasePayForHours(employee, row.hours) : 0,
       serviceCharge: numberValue(row.serviceCharge, 0),
       tronc: numberValue(row.tronc ?? row.serviceCharge, 0),
-      rate: numberValue(row.rate, 0),
+      rate: labourEmployeeRate(employee),
+      payType: employee ? labourCanonicalPayType(employee) : "hourly",
+      serviceChargePoints: labourServiceChargePoints(employee),
+      serviceChargeHours: numberValue(row.hours, 0) * labourServiceChargePoints(employee),
     };
   });
 
@@ -2809,17 +2891,13 @@ function labourEmployeeAverageWeeklyHours(data, employee) {
 }
 
 function labourRateLabel(employee) {
-  if (employee.payType === "annual") return `${money(employee.rate)}/year (${money(employee.rate / 52)}/week)`;
-  return `${money(employee.rate)}/h`;
+  if (labourIsSalaried(employee)) return `${money(labourAnnualSalary(employee))}/year (${money(labourAnnualSalary(employee) / 52)}/week)`;
+  return `${money(labourHourlyRate(employee))}/h`;
 }
 
 function labourServiceChargePoints(employee = {}) {
   if (employee.excludeFromServiceCharge) return 0;
   return numberValue(employee.serviceChargePoints ?? employee.scWeight ?? employee.serviceChargeWeight, 1);
-}
-
-function labourEmployeeRate(employee = {}) {
-  return numberValue(employee.rate, 0);
 }
 
 function labourSalesInRange(data, range) {
@@ -2839,10 +2917,10 @@ function labourSalesTotals(rows) {
   };
 }
 
-function labourTotals(rows) {
+function labourTotals(data, rows) {
   return {
     hours: labourSum(rows, "hours"),
-    wages: labourSum(rows, "wages"),
+    wages: labourBasePayForRows(data, rows),
     serviceCharge: labourSum(rows, "serviceCharge"),
   };
 }
@@ -2850,30 +2928,41 @@ function labourTotals(rows) {
 function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) {
   const map = new Map();
   rows.forEach((row) => {
-    const employee = data.employees.find((item) => item.id === row.employeeId) || labourFindEmployeeByName(data.employees, row.employeeName) || {};
+    const employee = labourEmployeeForRow(data, row);
     const key = row.employeeId || employee.id || normalizeHeader(row.employeeName);
     const departmentName = labourDepartmentName(data, row.departmentId || employee.departmentId, row.departmentName || "-");
     const hours = numberValue(row.hours, 0);
-    const rate = labourEmployeeRate(employee) || numberValue(row.rate, 0);
-    const wages = numberValue(row.wages, 0) || hours * rate;
     const serviceChargePoints = numberValue(row.serviceChargePoints ?? row.serviceChargeWeight ?? labourServiceChargePoints(employee), 1);
     const serviceChargeHours = numberValue(row.serviceChargeHours, hours * serviceChargePoints);
     const current = map.get(key) || {
       id: key || uid(),
       employeeId: row.employeeId || employee.id || "",
       employeeName: row.employeeName || employee.name,
+      employeeType: labourPayTypeLabel(employee),
       departmentName,
       hours: 0,
       wages: 0,
+      basePay: 0,
       serviceCharge: 0,
       serviceChargePoints,
       serviceChargeHours: 0,
+      salariedWeekKeys: new Set(),
     };
     current.hours += hours;
-    current.wages += wages;
+    if (labourIsSalaried(employee)) {
+      const weekKey = `${employee.id || key}-${labourWeekKeyForRow(row)}`;
+      if ((hours || numberValue(row.wages, 0)) && !current.salariedWeekKeys.has(weekKey)) {
+        current.wages += labourBasePayForHours(employee, hours);
+        current.salariedWeekKeys.add(weekKey);
+      }
+    } else {
+      current.wages += labourBasePayForHours(employee, hours);
+    }
+    current.basePay = current.wages;
     current.serviceCharge += numberValue(row.serviceCharge ?? row.tronc, 0);
     current.serviceChargeHours += serviceChargeHours;
     current.serviceChargePoints = serviceChargePoints;
+    current.employeeType = labourPayTypeLabel(employee);
     current.departmentName = departmentName || current.departmentName;
     map.set(key, current);
   });
@@ -2897,7 +2986,7 @@ function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) 
     });
   }
   return grouped.map((row) => ({
-    ...row,
+    ...Object.fromEntries(Object.entries(row).filter(([key]) => key !== "salariedWeekKeys")),
     serviceChargePerHour: numberValue(row.hours, 0) ? numberValue(row.serviceCharge, 0) / numberValue(row.hours, 0) : 0,
     total: numberValue(row.wages, 0) + numberValue(row.serviceCharge, 0),
   }));
@@ -2909,7 +2998,7 @@ function labourDepartmentBreakdownRows(data, labourRows, salesTotals) {
       const departmentName = labourDepartmentName(data, row.departmentId, row.departmentName);
       return row.departmentId === department.id || labourSameText(departmentName, department.name);
     });
-    const wages = labourSum(rows, "wages");
+    const wages = labourBasePayForRows(data, rows);
     const basis = department.basis || "totalSales";
     const basisValue = numberValue(salesTotals[basis], 0);
     const actual = labourRatio(wages, basisValue);
@@ -2931,13 +3020,13 @@ function labourDepartmentBreakdownRows(data, labourRows, salesTotals) {
 function labourHolidayRow(data, employee) {
   const rows = data.labour.filter((row) => labourSameText(row.employeeName, employee.name));
   const hours = labourSum(rows, "hours");
-  const wages = labourSum(rows, "wages");
+  const wages = labourBasePayForRows(data, rows);
   const avgWeekly = labourEmployeeAverageWeeklyHours(data, employee);
   const avgDaily = avgWeekly / 5;
   const used = data.holidays.filter((holiday) => holiday.employeeId === employee.id || labourSameText(holiday.employeeName, employee.name));
   const usedHours = labourSum(used, "hours");
   const usedDays = labourSum(used, "days") || (avgDaily ? usedHours / avgDaily : 0);
-  const isAnnual = employee.payType === "annual";
+  const isAnnual = labourIsSalaried(employee);
   if (isAnnual) {
     const elapsedDays = labourDaysBetween([employee.startDate || labourFiscalYearStart, labourFiscalYearStart].sort().at(-1), today());
     const yearDays = labourDaysBetween(labourFiscalYearStart, labourFiscalYearEnd) + 1;
@@ -2956,7 +3045,7 @@ function labourHolidayRow(data, employee) {
       projectedHours: 0,
       projectedAccrued: `${numberValue(employee.holidayEntitlementDays, 28).toFixed(1)} days`,
       projectedRemaining: `${numberValue(numberValue(employee.holidayEntitlementDays, 28) - usedDays).toFixed(1)} days`,
-      liability: (numberValue(employee.rate, 0) / 260) * (numberValue(employee.holidayEntitlementDays, 28) - usedDays),
+      liability: (labourAnnualSalary(employee) / 260) * (numberValue(employee.holidayEntitlementDays, 28) - usedDays),
       notes: "Holiday tracked in days",
     };
   }
@@ -2966,7 +3055,7 @@ function labourHolidayRow(data, employee) {
   const projectedAccruedHours = (hours + projectedHours) * labourHolidayAccrualRate;
   const remainingHours = accruedHours - usedHours;
   const projectedRemainingHours = projectedAccruedHours - usedHours;
-  const averageRate = wages / hours || employee.rate || 0;
+  const averageRate = wages / hours || labourHourlyRate(employee) || 0;
   return {
     id: employee.id,
     name: employee.name,
@@ -3045,29 +3134,26 @@ function parseLabourCsv(text, fallbackDate = today()) {
     firstName: findHeaderIndex(headers, ["firstname", "first name", "first"]),
     lastName: findHeaderIndex(headers, ["lastname", "last name", "surname", "last"]),
     departmentName: findHeaderIndex(headers, ["department", "dept", "role", "team"]),
-    hours: findHeaderIndex(headers, ["totalpaidhours", "total paid hours", "hours", "hourstotal", "time", "paidhours"]),
-    regularHours: findHeaderIndex(headers, ["regularhours", "regular hours"]),
-    overtimeHours: findHeaderIndex(headers, ["overtimehours", "overtime hours"]),
-    doubleTimeHours: findHeaderIndex(headers, ["doubletimehours", "double-time hours", "double time hours"]),
-    wages: findHeaderIndex(headers, ["totallabourcost", "total labour cost", "wages", "wage", "pay", "labourcost", "cost"]),
-    serviceCharge: findHeaderIndex(headers, ["servicecharge", "tronc", "transactiontips", "transaction tips", "tips", "gratuity"]),
-    rate: findHeaderIndex(headers, ["rate", "hourlyrate", "payrate"]),
+    totalPaidHours: findHeaderIndexByPriority(headers, ["totalpaidhours", "total paid hours", "paidhours", "paid hours", "hourstotal", "total hours", "hours"]),
+    regularHours: findHeaderIndexByPriority(headers, ["regularhours", "regular hours"]),
+    overtimeHours: findHeaderIndexByPriority(headers, ["overtimehours", "overtime hours"]),
+    doubleTimeHours: findHeaderIndexByPriority(headers, ["doubletimehours", "double time hours", "double-time hours"]),
   };
   const hasHeader = Object.values(mapping).some((index) => index >= 0);
   const dataRows = hasHeader ? rows.slice(1) : rows;
-  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, employeeName: 1, firstName: -1, lastName: -1, departmentName: 2, hours: 3, regularHours: -1, overtimeHours: -1, doubleTimeHours: -1, wages: 4, serviceCharge: 5, rate: 6 };
+  const fallback = hasHeader ? mapping : { date: 0, dateTo: -1, employeeName: 1, firstName: -1, lastName: -1, departmentName: 2, totalPaidHours: 3, regularHours: -1, overtimeHours: -1, doubleTimeHours: -1 };
   return dataRows.map((cells) => {
     const at = (field) => Number(fallback[field]) >= 0 ? cells[Number(fallback[field])] : "";
     const date = normalizeImportDate(at("date")) || fallbackDate;
     const firstName = at("firstName");
     const lastName = at("lastName");
     const employeeName = (at("employeeName") || `${firstName || ""} ${lastName || ""}`.trim() || "Unknown employee").trim();
+    const totalPaidHours = parseCurrencyCell(at("totalPaidHours"));
     const regularHours = parseCurrencyCell(at("regularHours"));
     const overtimeHours = parseCurrencyCell(at("overtimeHours"));
     const doubleTimeHours = parseCurrencyCell(at("doubleTimeHours"));
-    const hours = parseCurrencyCell(at("hours")) || regularHours + overtimeHours + doubleTimeHours;
-    const wages = parseCurrencyCell(at("wages"));
-    const rate = parseCurrencyCell(at("rate")) || (hours && wages ? wages / hours : 0);
+    const fallbackHours = regularHours + overtimeHours + doubleTimeHours;
+    const hours = Number(fallback.totalPaidHours) >= 0 ? totalPaidHours : fallbackHours;
     return {
       id: uid(),
       source: "square-hours-csv",
@@ -3076,13 +3162,13 @@ function parseLabourCsv(text, fallbackDate = today()) {
       employeeName,
       departmentName: at("departmentName") || "",
       hours,
-      wages,
-      serviceCharge: parseCurrencyCell(at("serviceCharge")),
-      tronc: parseCurrencyCell(at("serviceCharge")),
-      rate,
+      wages: 0,
+      serviceCharge: 0,
+      tronc: 0,
+      rate: 0,
       importStatus: "Imported from hours CSV",
     };
-  }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && (row.hours || row.wages || row.serviceCharge));
+  }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && row.hours);
 }
 function App() {
   const [active, setActive] = useState("dashboard");
@@ -6250,7 +6336,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   const importedLabourSalesTotals = useMemo(() => labourSalesTotals(salesRows), [salesRows]);
   const salesTotals = marginFlowSalesTotals.rows.length ? marginFlowSalesTotals : importedLabourSalesTotals;
   const salesSourceLabel = marginFlowSalesTotals.rows.length ? "Using Sales page data" : "Using Labour sales import fallback";
-  const labourSummary = useMemo(() => labourTotals(labourRows), [labourRows]);
+  const labourSummary = useMemo(() => labourTotals(data, labourRows), [data, labourRows]);
   const departmentRows = useMemo(() => labourDepartmentBreakdownRows(data, labourRows, salesTotals), [data, labourRows, salesTotals]);
   const employeeRows = useMemo(() => [...data.employees].sort((a, b) => a.name.localeCompare(b.name)), [data.employees]);
   const employeeOptions = useMemo(() => employeeRows.map((employee) => ({ id: employee.id, name: employee.name })), [employeeRows]);
@@ -6268,6 +6354,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
   const [labourFilters, setLabourFilters] = useState({ search: "", department: "All", active: "active" });
   const [earningsFilters, setEarningsFilters] = useState({ period: "week", weekStart: dateRange.start || today(), month: today().slice(0, 7), year: today().slice(0, 4), from: dateRange.start || today(), to: dateRange.end || today(), search: "", department: "All" });
+  const [duplicateWeekModal, setDuplicateWeekModal] = useState(null);
 
   const saveData = (updater) => {
     setLabourData((current) => normalizeLabourData(typeof updater === "function" ? updater(normalizeLabourData(current)) : updater));
@@ -6278,7 +6365,9 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     name: "",
     departmentId: data.departments[0]?.id || "",
     payType: "hourly",
+    employmentType: "Hourly",
     rate: 0,
+    annualSalary: 0,
     contractedHours: 0,
     manualAverageWeeklyHours: 0,
     startDate: today(),
@@ -6324,6 +6413,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     effectiveDate: today(),
     rate: 0,
     payType: "hourly",
+    employmentType: "Hourly",
   });
 
   const replaceById = (rows, row) => {
@@ -6338,6 +6428,95 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       message: `Remove this ${label.toLowerCase()} from Labour? Existing historical rows are left untouched.`,
       onConfirm: () => saveData((current) => ({ ...current, [collection]: current[collection].filter((row) => row.id !== id) })),
     });
+  };
+
+  const labourWeekKeysForRows = (rows) => [...new Set(rows.map(labourWeekKeyForRow).filter(Boolean))];
+  const duplicateWeeksForRows = (rows) => {
+    const existingWeeks = new Set(data.labour.map(labourWeekKeyForRow).filter(Boolean));
+    return labourWeekKeysForRows(rows).filter((weekKey) => existingWeeks.has(weekKey));
+  };
+
+  const buildLabourRowsFromImport = (current, importedRows) => {
+    const departments = [...current.departments];
+    const employees = [...current.employees];
+    const ensureDepartment = (name) => {
+      let department = departments.find((item) => labourSameText(item.name, name));
+      if (!department) {
+        department = { id: uid(), name: name || "FOH", group: name || "FOH", targetPercent: 0, basis: "totalSales", serviceChargeShare: 1, active: true };
+        departments.push(department);
+      }
+      return department;
+    };
+    const ensureEmployee = (row, fallbackDepartment) => {
+      let employee = labourFindEmployeeByName(employees, row.employeeName);
+      if (!employee) {
+        employee = {
+          id: uid(),
+          name: row.employeeName,
+          departmentId: fallbackDepartment.id,
+          payType: "hourly",
+          employmentType: "Hourly",
+          rate: 0,
+          annualSalary: 0,
+          contractedHours: 0,
+          manualAverageWeeklyHours: 0,
+          startDate: row.date || today(),
+          status: "active",
+          holidayType: "zero-hours",
+          holidayEntitlementDays: 28,
+          serviceChargePoints: 1,
+          excludeFromServiceCharge: false,
+        };
+        employees.push(employee);
+      }
+      return employee;
+    };
+    const labour = importedRows.map((row) => {
+      const csvDepartment = ensureDepartment(row.departmentName || "FOH");
+      const employee = ensureEmployee(row, csvDepartment);
+      const employeeDepartment = departments.find((department) => department.id === employee.departmentId) || csvDepartment;
+      const hours = numberValue(row.hours, 0);
+      const serviceChargePoints = labourServiceChargePoints(employee);
+      return {
+        ...row,
+        id: row.id || uid(),
+        employeeId: employee.id,
+        employeeName: employee.name,
+        departmentId: employeeDepartment.id,
+        departmentName: employeeDepartment.name,
+        payType: labourCanonicalPayType(employee),
+        employeeType: labourPayTypeLabel(employee),
+        rate: labourEmployeeRate(employee),
+        wages: labourBasePayForHours(employee, hours),
+        serviceCharge: 0,
+        tronc: 0,
+        serviceChargePoints,
+        serviceChargeHours: hours * serviceChargePoints,
+      };
+    });
+    return { departments, employees, labour };
+  };
+
+  const commitParsedLabourImport = (importedRows, mode = "merge", duplicateWeekKeys = []) => {
+    saveData((current) => {
+      const built = buildLabourRowsFromImport(current, importedRows);
+      const previousLabour = mode === "replace"
+        ? current.labour.filter((row) => !duplicateWeekKeys.includes(labourWeekKeyForRow(row)))
+        : current.labour;
+      return { ...current, departments: built.departments, employees: built.employees, labour: [...built.labour, ...previousLabour] };
+    });
+    setStatus(`${mode === "replace" ? "Replaced" : "Imported"} ${importedRows.length} Labour row(s).`);
+    setLabourImportKey((key) => key + 1);
+  };
+
+  const commitPreparedLabourRows = (labourRowsToSave, mode = "merge", duplicateWeekKeys = []) => {
+    saveData((current) => {
+      const previousLabour = mode === "replace"
+        ? current.labour.filter((row) => !duplicateWeekKeys.includes(labourWeekKeyForRow(row)))
+        : current.labour;
+      return { ...current, labour: [...labourRowsToSave, ...previousLabour] };
+    });
+    setStatus(`${mode === "replace" ? "Replaced" : "Saved"} ${labourRowsToSave.length} Labour row(s).`);
   };
 
   const salesTotalsForLabourWeek = (weekStart) => salesTotalsForRange(sales || [], { start: weekStart, end: shiftDate(weekStart, 6) }, "All departments");
@@ -6357,10 +6536,11 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       rows: activeEmployees.map((employee) => ({
         employeeId: employee.id,
         employeeName: employee.name,
+        employeeType: labourPayTypeLabel(employee),
         departmentId: employee.departmentId,
         departmentName: labourDepartmentName(data, employee.departmentId, "FOH"),
         hours: 0,
-        rate: employee.payType === "annual" ? 0 : labourEmployeeRate(employee),
+        rate: labourEmployeeRate(employee),
         wages: 0,
         serviceChargePoints: labourServiceChargePoints(employee),
         serviceChargeHours: 0,
@@ -6378,7 +6558,10 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     const employee = {
       ...employeeModal,
       id: employeeModal.id || uid(),
+      payType: labourCanonicalPayType(employeeModal),
+      employmentType: labourPayTypeLabel(employeeModal),
       rate: nextRate,
+      annualSalary: labourIsSalaried(employeeModal) ? numberValue(employeeModal.annualSalary ?? employeeModal.rate, 0) : numberValue(employeeModal.annualSalary, 0),
       contractedHours: numberValue(employeeModal.contractedHours, 0),
       manualAverageWeeklyHours: numberValue(employeeModal.manualAverageWeeklyHours, 0),
       holidayEntitlementDays: numberValue(employeeModal.holidayEntitlementDays, 28),
@@ -6450,13 +6633,22 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       ...rateModal,
       id: rateModal.id || uid(),
       employeeName: employee?.name || rateModal.employeeName,
+      payType: labourCanonicalPayType(rateModal),
       rate: numberValue(rateModal.rate, 0),
     };
     saveData((current) => ({
       ...current,
       rateHistory: replaceById(current.rateHistory, rate),
       employees: current.employees.map((employeeRow) => (
-        employeeRow.id === rate.employeeId ? { ...employeeRow, rate: rate.rate, payType: rate.payType || employeeRow.payType } : employeeRow
+        employeeRow.id === rate.employeeId
+          ? {
+            ...employeeRow,
+            rate: rate.rate,
+            annualSalary: labourIsSalaried(rate) ? rate.rate : employeeRow.annualSalary,
+            payType: labourCanonicalPayType(rate.payType ? rate : employeeRow),
+            employmentType: labourPayTypeLabel(rate.payType ? rate : employeeRow),
+          }
+          : employeeRow
       )),
     }));
     setRateModal(null);
@@ -6480,7 +6672,9 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
       const rows = current.rows.map((row, rowIndex) => {
         if (rowIndex !== index) return row;
         const next = { ...row, [key]: ["hours", "wages", "serviceChargePoints"].includes(key) ? numberValue(value, 0) : value };
-        if (key === "hours") next.wages = numberValue(next.hours, 0) * numberValue(next.rate, 0);
+        const employee = data.employees.find((item) => item.id === next.employeeId) || {};
+        if (key === "departmentId") next.departmentName = labourDepartmentName(data, value, next.departmentName);
+        if (key === "hours") next.wages = numberValue(next.hours, 0) > 0 ? labourBasePayForHours(employee, next.hours) : 0;
         next.serviceChargeHours = numberValue(next.hours, 0) * numberValue(next.serviceChargePoints, 1);
         return next;
       });
@@ -6500,7 +6694,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     const isDailyMode = weeklyModal.mode === "daily";
     const labourStartDate = isDailyMode ? (weeklyModal.date || weeklyModal.weekStart || today()) : (weeklyModal.weekStart || weeklyModal.date || today());
     const labourEndDate = isDailyMode ? labourStartDate : shiftDate(labourStartDate, 6);
-    const rows = weeklyModal.rows.filter((row) => row.include && (numberValue(row.hours, 0) || numberValue(row.wages, 0)));
+    const rows = weeklyModal.rows.filter((row) => row.include && numberValue(row.hours, 0) > 0);
     const serviceCharge = numberValue(weeklyModal.serviceCharge, 0);
     const bohRows = rows.filter((row) => ["BOH", "KP"].includes(labourDepartmentName(data, row.departmentId, row.departmentName)));
     const fohRows = rows.filter((row) => labourDepartmentName(data, row.departmentId, row.departmentName) === "FOH");
@@ -6508,28 +6702,37 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     const fohPool = serviceCharge * 0.6;
     const bohAllocation = allocateServiceCharge(bohRows, bohPool);
     const fohAllocation = allocateServiceCharge(fohRows, fohPool);
-    const labour = rows.map((row) => ({
-      id: uid(),
-      source: "manual-week",
-      date: labourStartDate,
-      dateTo: labourEndDate,
-      employeeId: row.employeeId,
-      employeeName: row.employeeName,
-      departmentId: row.departmentId,
-      departmentName: labourDepartmentName(data, row.departmentId, row.departmentName),
-      hours: numberValue(row.hours, 0),
-      rate: numberValue(row.rate, 0),
-      wages: numberValue(row.wages, 0),
-      serviceChargePoints: numberValue(row.serviceChargePoints, 1),
-      serviceChargeHours: numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1),
-      serviceCharge: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
-      tronc: numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0),
-    }));
-    saveData((current) => ({
-      ...current,
-      labour: [...labour, ...current.labour],
-      sales: current.sales,
-    }));
+    const labour = rows.map((row) => {
+      const employee = data.employees.find((item) => item.id === row.employeeId) || {};
+      const hours = numberValue(row.hours, 0);
+      const serviceChargePoints = labourServiceChargePoints(employee);
+      const serviceCharge = numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0);
+      return {
+        id: uid(),
+        source: "manual-week",
+        date: labourStartDate,
+        dateTo: labourEndDate,
+        employeeId: row.employeeId,
+        employeeName: row.employeeName,
+        employeeType: labourPayTypeLabel(employee),
+        payType: labourCanonicalPayType(employee),
+        departmentId: row.departmentId,
+        departmentName: labourDepartmentName(data, row.departmentId, row.departmentName),
+        hours,
+        rate: labourEmployeeRate(employee),
+        wages: labourBasePayForHours(employee, hours),
+        serviceChargePoints,
+        serviceChargeHours: hours * serviceChargePoints,
+        serviceCharge,
+        tronc: serviceCharge,
+      };
+    });
+    const duplicateWeekKeys = duplicateWeeksForRows(labour);
+    if (duplicateWeekKeys.length) {
+      setDuplicateWeekModal({ type: "prepared", rows: labour, duplicateWeekKeys });
+      return;
+    }
+    commitPreparedLabourRows(labour);
     setWeeklyModal(null);
   };
 
@@ -6544,51 +6747,12 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
   const importLabourFile = async (file) => {
     if (!file) return;
     const importedRows = parseLabourCsv(await file.text(), dateRange.start || today());
-    saveData((current) => {
-      const departments = [...current.departments];
-      const employees = [...current.employees];
-      const ensureDepartment = (name) => {
-        let department = departments.find((item) => labourSameText(item.name, name));
-        if (!department) {
-          department = { ...blankDepartment(), id: uid(), name: name || "FOH" };
-          departments.push(department);
-        }
-        return department;
-      };
-      const ensureEmployee = (row, department) => {
-        let employee = labourFindEmployeeByName(employees, row.employeeName);
-        if (!employee) {
-          employee = {
-            ...blankEmployee(),
-            id: uid(),
-            name: row.employeeName,
-            departmentId: department.id,
-            rate: numberValue(row.rate, 0),
-          };
-          employees.push(employee);
-        }
-        return employee;
-      };
-      const labour = importedRows.map((row) => {
-        const department = ensureDepartment(row.departmentName);
-        const employee = ensureEmployee(row, department);
-        const hours = numberValue(row.hours, 0);
-        const rate = labourEmployeeRate(employee) || numberValue(row.rate, 0);
-        return {
-          ...row,
-          employeeId: employee.id,
-          departmentId: department.id,
-          departmentName: department.name,
-          rate,
-          wages: numberValue(row.wages, 0) || hours * rate,
-          serviceChargePoints: labourServiceChargePoints(employee),
-          serviceChargeHours: hours * labourServiceChargePoints(employee),
-        };
-      });
-      return { ...current, departments, employees, labour: [...labour, ...current.labour] };
-    });
-    setStatus(`Imported ${importedRows.length} Labour row(s).`);
-    setLabourImportKey((key) => key + 1);
+    const duplicateWeekKeys = duplicateWeeksForRows(importedRows);
+    if (duplicateWeekKeys.length) {
+      setDuplicateWeekModal({ type: "parsed", rows: importedRows, duplicateWeekKeys });
+      return;
+    }
+    commitParsedLabourImport(importedRows);
   };
 
   const importWeeklyHoursFile = async (file) => {
@@ -6611,7 +6775,6 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
           return;
         }
         const departmentId = employee.departmentId || rows[rowIndex].departmentId;
-        const rate = labourEmployeeRate(employee);
         const hours = numberValue(imported.hours, 0);
         const serviceChargePoints = labourServiceChargePoints(employee);
         rows[rowIndex] = {
@@ -6619,11 +6782,12 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
           include: true,
           employeeId: employee.id,
           employeeName: employee.name,
+          employeeType: labourPayTypeLabel(employee),
           departmentId,
           departmentName: labourDepartmentName(data, departmentId, rows[rowIndex].departmentName),
           hours,
-          rate,
-          wages: hours * rate,
+          rate: labourEmployeeRate(employee),
+          wages: labourBasePayForHours(employee, hours),
           serviceChargePoints,
           serviceChargeHours: hours * serviceChargePoints,
         };
@@ -6649,10 +6813,14 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     });
   };
 
+  const weeklyPayableRows = weeklyModal ? weeklyModal.rows.filter((row) => row.include && numberValue(row.hours, 0) > 0) : [];
   const weeklyTotals = weeklyModal ? {
-    hours: labourSum(weeklyModal.rows.filter((row) => row.include), "hours"),
-    wages: labourSum(weeklyModal.rows.filter((row) => row.include), "wages"),
-    serviceChargeHours: weeklyModal.rows.filter((row) => row.include).reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1), 0),
+    hours: labourSum(weeklyPayableRows, "hours"),
+    wages: weeklyPayableRows.reduce((sum, row) => {
+      const employee = data.employees.find((item) => item.id === row.employeeId) || {};
+      return sum + labourBasePayForHours(employee, row.hours);
+    }, 0),
+    serviceChargeHours: weeklyPayableRows.reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1), 0),
   } : { hours: 0, wages: 0, serviceChargeHours: 0 };
 
   const departmentFilterOptions = useMemo(() => {
@@ -6752,6 +6920,19 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
     return departmentMatches && filterMatches;
   });
   const filteredRateRows = [...data.rateHistory].sort((a, b) => String(b.effectiveDate).localeCompare(String(a.effectiveDate))).filter((row) => matchesText(row.employeeName, labourFilters.search) && matchesDepartment(row, labourFilters.department) && matchesActive(row, labourFilters.active || "active"));
+  const resolveDuplicateWeekModal = (mode) => {
+    if (!duplicateWeekModal || mode === "cancel") {
+      setDuplicateWeekModal(null);
+      return;
+    }
+    if (duplicateWeekModal.type === "parsed") {
+      commitParsedLabourImport(duplicateWeekModal.rows, mode, duplicateWeekModal.duplicateWeekKeys);
+    } else {
+      commitPreparedLabourRows(duplicateWeekModal.rows, mode, duplicateWeekModal.duplicateWeekKeys);
+      setWeeklyModal(null);
+    }
+    setDuplicateWeekModal(null);
+  };
 
   return (
     <div className="page-grid">
@@ -6765,7 +6946,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
           <button className="ghost" onClick={() => setActiveLabourModal("holidays")} type="button">Holidays</button>
           <button className="ghost" onClick={() => setActiveLabourModal("bookings")} type="button">Holiday bookings</button>
         </div>
-        <div className="helper-text">{salesSourceLabel}. This page is designed to be managed weekly. Sales are pulled from the Sales page when available; use Input labour week for staff hours and wages.</div>
+        <div className="helper-text">{salesSourceLabel}. This page is designed to be managed weekly. Sales are pulled from the Sales page when available; use Input labour week for staff hours and Base Pay.</div>
         {status && <div className="invoice-status">{status}</div>}
       </Panel>
 
@@ -6778,6 +6959,26 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
         <Metric label="Service charge" value={money(labourSummary.serviceCharge || salesTotals.serviceCharge)} delta="Allocated / sales page" />
         <Metric label="Holiday liability" value={money(holidaySummary.totalLiability)} delta={`${numberValue(holidaySummary.totalRemainingHours).toFixed(1)}h owed`} />
       </div>
+
+      {duplicateWeekModal && (
+        <AppModal
+          footer={(
+            <>
+              <button className="ghost danger" onClick={() => resolveDuplicateWeekModal("replace")} type="button">Replace week</button>
+              <button onClick={() => resolveDuplicateWeekModal("merge")} type="button">Merge week</button>
+              <button className="ghost" onClick={() => resolveDuplicateWeekModal("cancel")} type="button">Cancel</button>
+            </>
+          )}
+          onClose={() => resolveDuplicateWeekModal("cancel")}
+          open={Boolean(duplicateWeekModal)}
+          title="Labour week already exists"
+        >
+          <p className="modal-copy">
+            Labour rows already exist for {duplicateWeekModal.duplicateWeekKeys.map((weekKey) => formatRangeDate(weekKey)).join(", ")}.
+            Choose whether to replace those week(s), merge the new rows, or cancel the import.
+          </p>
+        </AppModal>
+      )}
 
       {activeLabourModal === "imports" && (
         <AppModal title="Staff Earnings" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
@@ -6795,18 +6996,19 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               <Field label="Search employee" value={earningsFilters.search} onChange={(value) => setEarningsFilters({ ...earningsFilters, search: value })} />
               <label>Department<select value={earningsFilters.department} onChange={(event) => setEarningsFilters({ ...earningsFilters, department: event.target.value })}>{departmentFilterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
             </div>
-            <div className="helper-text">Showing {formatRangeDate(earningsRange.start)} - {formatRangeDate(earningsRange.end)}. Gross pay uses locked employee rates. Service charge is allocated by hours × service charge points.</div>
+            <div className="helper-text">Showing {formatRangeDate(earningsRange.start)} - {formatRangeDate(earningsRange.end)}. Base Pay uses locked employee salary/rate settings. Service charge is allocated by hours × service charge points.</div>
             <DataTable
               columns={[
                 { key: "employeeName", label: "Employee" },
+                { key: "employeeType", label: "Type" },
                 { key: "departmentName", label: "Department" },
                 { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
-                { key: "wages", label: "Gross pay", render: money },
-                { key: "serviceChargePoints", label: "SC points", render: (value) => numberValue(value, 0).toFixed(2) },
-                { key: "serviceChargeHours", label: "SC hours", render: (value) => numberValue(value, 0).toFixed(1) },
-                { key: "serviceCharge", label: "Service charge", render: money },
-                { key: "serviceChargePerHour", label: "SC / h", render: money },
-                { key: "total", label: "Total earned", render: (_, row) => money(numberValue(row.wages) + numberValue(row.serviceCharge)) },
+                { key: "basePay", label: "Base Pay", render: money },
+                { key: "serviceChargePoints", label: "SC Points", render: (value) => numberValue(value, 0).toFixed(2) },
+                { key: "serviceChargeHours", label: "SC Hours", render: (value) => numberValue(value, 0).toFixed(1) },
+                { key: "serviceCharge", label: "Service Charge", render: money },
+                { key: "serviceChargePerHour", label: "SC / Hour", render: money },
+                { key: "total", label: "Total Earned", render: money },
               ]}
               rows={earningsRows}
             />
@@ -6822,7 +7024,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               columns={[
                 { key: "name", label: "Employee" },
                 { key: "departmentId", label: "Department", render: (value) => labourDepartmentName(data, value, "-") },
-                { key: "payType", label: "Pay type" },
+                { key: "payType", label: "Type", render: (_, row) => labourPayTypeLabel(row) },
                 { key: "rate", label: "Rate", render: (_, row) => labourRateLabel(row) },
                 { key: "serviceChargePoints", label: "SC points", render: (_, row) => row.excludeFromServiceCharge ? "Excluded" : numberValue(row.serviceChargePoints, 1).toFixed(2) },
                 { key: "manualAverageWeeklyHours", label: "Avg hours", render: (value, row) => (numberValue(value) || labourEmployeeAverageWeeklyHours(data, row)).toFixed(1) },
@@ -6847,7 +7049,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                   { key: "department", label: "Department" },
                   { key: "basis", label: "Basis" },
                   { key: "hours", label: "Hours", render: (value) => numberValue(value).toFixed(1) },
-                  { key: "wages", label: "Labour", render: money },
+                  { key: "wages", label: "Base Pay", render: money },
                   { key: "actual", label: "Actual %", render: percent },
                   { key: "target", label: "Target %", render: percent },
                   { key: "status", label: "Status", render: (value) => <Badge tone={value === "OK" ? "green" : "orange"}>{value}</Badge> },
@@ -6927,7 +7129,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               columns={[
                 { key: "employeeName", label: "Employee" },
                 { key: "effectiveDate", label: "Effective" },
-                { key: "payType", label: "Pay type" },
+                { key: "payType", label: "Type", render: (_, row) => labourPayTypeLabel(row) },
                 { key: "rate", label: "Rate", render: money },
               ]}
               onDelete={(id) => deleteFromCollection("rateHistory", id, "Rate history row")}
@@ -6944,8 +7146,8 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
           <div className="form-grid six">
             <Field label="Name" value={employeeModal.name} onChange={(value) => setEmployeeModal({ ...employeeModal, name: value })} />
             <label>Department<select value={employeeModal.departmentId} onChange={(event) => setEmployeeModal({ ...employeeModal, departmentId: event.target.value })}>{data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
-            <label>Pay type<select value={employeeModal.payType} onChange={(event) => setEmployeeModal({ ...employeeModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="annual">Annual salary</option></select></label>
-            <Field label="Rate" type="number" value={employeeModal.rate} onChange={(value) => setEmployeeModal({ ...employeeModal, rate: value })} />
+            <label>Type<select value={labourCanonicalPayType(employeeModal)} onChange={(event) => setEmployeeModal({ ...employeeModal, payType: event.target.value, employmentType: labourPayTypeLabel({ payType: event.target.value }) })}><option value="hourly">Hourly</option><option value="salaried">Salaried</option><option value="freelance">Freelance</option><option value="agency">Agency</option></select></label>
+            <Field label={labourIsSalaried(employeeModal) ? "Annual salary" : "Hourly rate"} type="number" value={employeeModal.rate} onChange={(value) => setEmployeeModal({ ...employeeModal, rate: value, annualSalary: labourIsSalaried(employeeModal) ? value : employeeModal.annualSalary })} />
             <Field label="Service charge points" type="number" value={employeeModal.serviceChargePoints ?? 1} onChange={(value) => setEmployeeModal({ ...employeeModal, serviceChargePoints: value })} />
             <label>Service charge<select value={employeeModal.excludeFromServiceCharge ? "excluded" : "included"} onChange={(event) => setEmployeeModal({ ...employeeModal, excludeFromServiceCharge: event.target.value === "excluded" })}><option value="included">Included</option><option value="excluded">Excluded</option></select></label>
             <Field label="Contracted hours" type="number" value={employeeModal.contractedHours} onChange={(value) => setEmployeeModal({ ...employeeModal, contractedHours: value })} />
@@ -7021,8 +7223,8 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               setRateModal({ ...rateModal, employeeId: event.target.value, employeeName: employee?.name || "" });
             }}>{employeeOptions.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></label>
             <Field label="Effective date" type="date" value={rateModal.effectiveDate} onChange={(value) => setRateModal({ ...rateModal, effectiveDate: value })} />
-            <label>Pay type<select value={rateModal.payType} onChange={(event) => setRateModal({ ...rateModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="annual">Annual salary</option></select></label>
-            <Field label="Rate" type="number" value={rateModal.rate} onChange={(value) => setRateModal({ ...rateModal, rate: value })} />
+            <label>Type<select value={labourCanonicalPayType(rateModal)} onChange={(event) => setRateModal({ ...rateModal, payType: event.target.value })}><option value="hourly">Hourly</option><option value="salaried">Salaried</option><option value="freelance">Freelance</option><option value="agency">Agency</option></select></label>
+            <Field label={labourIsSalaried(rateModal) ? "Annual salary" : "Hourly rate"} type="number" value={rateModal.rate} onChange={(value) => setRateModal({ ...rateModal, rate: value })} />
           </div>
         </EditModal>
       )}
@@ -7069,7 +7271,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               <Field label="Gross sales" type="number" readOnly value={numberValue(weeklyModal.salesTotal, 0).toFixed(2)} />
               <Field label="Net sales" type="number" readOnly value={numberValue(weeklyModal.netSales, 0).toFixed(2)} />
               <Field label="Service charge from Sales" type="number" readOnly value={numberValue(weeklyModal.serviceCharge, 0).toFixed(2)} />
-              <Field label="Total wages" type="number" readOnly value={weeklyTotals.wages.toFixed(2)} />
+              <Field label="Total Base Pay" type="number" readOnly value={weeklyTotals.wages.toFixed(2)} />
             </div>
             <p className="helper-text">Only enter employee hours here. Sales and service charge come from the Sales page for the selected {weeklyModal.mode === "daily" ? "day" : "week"}.</p>
             <div className="button-row left">
@@ -7085,7 +7287,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
               <table>
                 <thead>
                   <tr>
-                    {["Use", "Employee", "Department", "Hours", "Rate", "Wages", "SC points", "SC hours"].map((header) => <th key={header}>{header}</th>)}
+                    {["Use", "Employee", "Department", "Hours", "Rate", "Base Pay", "SC points", "SC hours"].map((header) => <th key={header}>{header}</th>)}
                   </tr>
                 </thead>
                 <tbody>
@@ -7100,7 +7302,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
                       </td>
                       <td><input min="0" step="0.01" type="number" value={row.hours} onChange={(event) => updateWeeklyRow(row.index, "hours", event.target.value)} /></td>
                       <td><input min="0" readOnly step="0.01" type="number" value={row.rate} title="Rate is locked. Change it in Employees." /></td>
-                      <td><input min="0" readOnly step="0.01" type="number" value={numberValue(row.wages, 0).toFixed(2)} title="Gross pay is calculated from hours × employee rate." /></td>
+                      <td><input min="0" readOnly step="0.01" type="number" value={numberValue(row.wages, 0).toFixed(2)} title="Base Pay uses annual salary / 52 for salaried staff, otherwise hours × employee rate." /></td>
                       <td><input min="0" readOnly step="0.01" type="number" value={row.serviceChargePoints} title="Service charge points are managed in Employees." /></td>
                       <td>{(numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1)).toFixed(1)}</td>
                     </tr>
@@ -7111,7 +7313,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
             <div className="metric-grid compact">
               <Metric label="Hours" value={weeklyTotals.hours.toFixed(1)} delta="Selected employees" />
               <Metric label="SC hours" value={weeklyTotals.serviceChargeHours.toFixed(1)} delta="Hours × points" />
-              <Metric label="Wages" value={money(weeklyTotals.wages)} delta="Before service charge" />
+              <Metric label="Base Pay" value={money(weeklyTotals.wages)} delta="Before service charge" />
               <Metric label="BOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.4)} delta="40% pool" />
               <Metric label="FOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.6)} delta="60% pool" />
             </div>
