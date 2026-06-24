@@ -6666,8 +6666,16 @@ function LabourPage({ dateRange, dateRangeState, labourData, requestDelete, sale
 
   const employeeById = useMemo(() => new Map(data.employees.map((employee) => [employee.id, employee])), [data.employees]);
   const normaliseText = (value) => String(value || "").trim().toLowerCase();
-  const employeeIsActive = (employee) => !employee || !employee.status || employee.status === "active";
-  const rowEmployee = (row) => employeeById.get(row.employeeId) || labourFindEmployeeByName(data.employees, row.employeeName);
+  const employeeIsActive = (employee) => {
+    if (!employee) return false;
+    if (employee.active === false) return false;
+    const status = normaliseText(employee.status || employee.employmentStatus || employee.employeeStatus || "active");
+    if (["inactive", "left", "leaver", "terminated", "archived"].includes(status)) return false;
+    const leavingDate = employee.endDate || employee.leftDate || employee.leaveDate || employee.terminationDate;
+    if (leavingDate && parseDate(leavingDate) && parseDate(leavingDate) < new Date(new Date().toDateString())) return false;
+    return true;
+  };
+  const rowEmployee = (row) => employeeById.get(row.employeeId || row.id) || labourFindEmployeeByName(data.employees, row.employeeName || row.name);
   const rowDepartmentName = (row) => labourDepartmentName(data, row.departmentId || rowEmployee(row)?.departmentId, row.departmentName || "-");
   const rowDepartmentGroup = (row) => data.departments.find((department) => department.id === (row.departmentId || rowEmployee(row)?.departmentId))?.group || rowDepartmentName(row);
   const matchesText = (text, query) => !normaliseText(query) || normaliseText(text).includes(normaliseText(query));
