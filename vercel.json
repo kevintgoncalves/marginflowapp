@@ -1,15 +1,5 @@
 {
-  "rewrites": [
-    {
-      "source": "/.netlify/functions/read-invoice-ai",
-      "destination": "/api/read-invoice-ai"
-    },
-    {
-      "source": "/.netlify/functions/import-sales-ai",
-      "destination": "/api/import-sales-ai"
-    }
-  ],
-  "installCommand": "npm install --legacy-peer-deps",
+  "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite"

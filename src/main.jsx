@@ -4337,7 +4337,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
 
     try {
-      const response = await fetch("/.netlify/functions/read-invoice-ai", {
+      const response = await fetch("/api/read-invoice-ai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

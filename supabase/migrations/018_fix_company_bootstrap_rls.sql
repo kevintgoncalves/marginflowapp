@@ -114,11 +114,11 @@ begin
   values (trim(company_name), trim(company_name), 'active', current_user_id, current_user_id)
   returning id into new_company_id;
 
-  insert into public.locations (company_id, name, status, created_by, updated_by)
+  insert into public.locations (company_id, name, active, created_by, updated_by)
   values (
     new_company_id,
     coalesce(nullif(trim(location_name), ''), 'Main Location'),
-    'active',
+    true,
     current_user_id,
     current_user_id
   )
