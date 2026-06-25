@@ -9,7 +9,7 @@
       "destination": "/api/import-sales-ai"
     }
   ],
-  "installCommand": "npm ci",
+  "installCommand": "npm install --legacy-peer-deps",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite"

@@ -16,11 +16,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
-  "engines": {
-    "node": "22.x",
-    "npm": "10.x"
-  },
-  "packageManager": "npm@10.8.2",
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
