@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { labourImportedSeed } from "./labourSeedData.js";
+import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -475,6 +476,310 @@ function permissionsForPage(user, pageId, selectedDepartment = "") {
     canApprove: userCanAction(user, pageId, "approve") && departmentAllowed,
     canReset: userCanAction(user, pageId, "reset"),
   };
+}
+
+function authUserName(user) {
+  return user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email?.split("@")[0] || "MarginFlow user";
+}
+
+function authUserToPermissionUser(user, membership, departmentSettings) {
+  const role = membership?.role_label || "Owner";
+  const template = rolePermissionTemplate(role, departmentSettings);
+  return {
+    id: user?.id || "supabase-user",
+    name: authUserName(user),
+    email: user?.email || "",
+    role,
+    status: "Active",
+    ...template,
+  };
+}
+
+async function ensureAuthProfile(user) {
+  if (!supabase || !user) return;
+  await supabase.from("profiles").upsert({
+    id: user.id,
+    email: user.email || "",
+    full_name: authUserName(user),
+  }, { onConflict: "id" });
+}
+
+async function loadAuthMembership(user) {
+  if (!supabase || !user) return null;
+  await ensureAuthProfile(user);
+  const { data, error } = await supabase
+    .from("company_members")
+    .select("id, company_id, location_id, role_label, status, companies(name, trading_name), locations(name)")
+    .eq("user_id", user.id)
+    .eq("status", "active")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+function AuthGate() {
+  const [session, setSession] = useState(null);
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [membership, setMembership] = useState(null);
+  const [loadingMembership, setLoadingMembership] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) {
+      setLoadingSession(false);
+      return undefined;
+    }
+    let mounted = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!mounted) return;
+      if (error) setAuthError(error.message);
+      setSession(data?.session || null);
+      setLoadingSession(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      setSession(nextSession);
+      setAuthError("");
+      setPasswordRecovery(event === "PASSWORD_RECOVERY");
+    });
+    return () => {
+      mounted = false;
+      listener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  const refreshMembership = async (user = session?.user) => {
+    if (!user) {
+      setMembership(null);
+      return;
+    }
+    setLoadingMembership(true);
+    setAuthError("");
+    try {
+      setMembership(await loadAuthMembership(user));
+    } catch (error) {
+      setAuthError(error.message || "Could not load your MarginFlow company.");
+      setMembership(null);
+    } finally {
+      setLoadingMembership(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!session?.user) {
+      setMembership(null);
+      return;
+    }
+    refreshMembership(session.user);
+  }, [session?.user?.id]);
+
+  const signOut = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setSession(null);
+    setMembership(null);
+  };
+
+  if (!isSupabaseConfigured || !supabase) return <SupabaseSetupNotice />;
+  if (loadingSession) return <AuthLoading message="Checking Supabase session..." />;
+  if (!session) return <AuthScreen initialError={authError} />;
+  if (passwordRecovery) return <UpdatePasswordScreen onSignOut={signOut} onUpdated={() => setPasswordRecovery(false)} />;
+  if (loadingMembership) return <AuthLoading message="Loading company access..." />;
+  if (!membership) {
+    return (
+      <CreateCompanyScreen
+        error={authError}
+        onCreated={() => refreshMembership(session.user)}
+        onSignOut={signOut}
+        user={session.user}
+      />
+    );
+  }
+  return <App authMembership={membership} authUser={session.user} onSignOut={signOut} />;
+}
+
+function AuthLayout({ children }) {
+  return (
+    <div className="auth-shell">
+      <div className="auth-card">
+        <div className="auth-brand">
+          <div className="brand-mark">MF</div>
+          <div>
+            <strong>MarginFlow</strong>
+            <span>Hospitality profit management</span>
+          </div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AuthLoading({ message }) {
+  return (
+    <AuthLayout>
+      <div className="auth-status info">{message}</div>
+    </AuthLayout>
+  );
+}
+
+function SupabaseSetupNotice() {
+  return (
+    <AuthLayout>
+      <h1>Connect Supabase</h1>
+      <p className="auth-copy">Add your Supabase project URL and anon key to the Vite environment before using authentication.</p>
+      <div className="code-card">
+        <p>VITE_SUPABASE_URL=</p>
+        <p>VITE_SUPABASE_ANON_KEY=</p>
+      </div>
+    </AuthLayout>
+  );
+}
+
+function AuthScreen({ initialError = "" }) {
+  const [mode, setMode] = useState("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setStatus(initialError), [initialError]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!supabase) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+        if (error) throw error;
+        setStatus("Password reset email sent.");
+        return;
+      }
+      if (mode === "register") {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { full_name: name } },
+        });
+        if (error) throw error;
+        setStatus(data.session ? "Account created." : "Account created. Check your email if confirmation is enabled.");
+        return;
+      }
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    } catch (error) {
+      setStatus(error.message || "Authentication failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const title = mode === "register" ? "Create account" : mode === "forgot" ? "Reset password" : "Log in";
+
+  return (
+    <AuthLayout>
+      <div className="auth-tabs">
+        <button className={mode === "login" ? "active" : ""} onClick={() => setMode("login")} type="button">Login</button>
+        <button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")} type="button">Register</button>
+        <button className={mode === "forgot" ? "active" : ""} onClick={() => setMode("forgot")} type="button">Forgot Password</button>
+      </div>
+      <form className="auth-form" onSubmit={submit}>
+        <h1>{title}</h1>
+        {mode === "register" && <Field label="Name" value={name} onChange={setName} />}
+        <Field label="Email" type="email" value={email} onChange={setEmail} />
+        {mode !== "forgot" && <Field label="Password" type="password" value={password} onChange={setPassword} />}
+        {status && <div className={`auth-status ${status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid") ? "error" : "info"}`}>{status}</div>}
+        <button disabled={busy || !email || (mode !== "forgot" && !password)} type="submit">
+          {busy ? "Please wait..." : title}
+        </button>
+      </form>
+    </AuthLayout>
+  );
+}
+
+function CreateCompanyScreen({ error, onCreated, onSignOut, user }) {
+  const [companyName, setCompanyName] = useState("");
+  const [locationName, setLocationName] = useState("Main Location");
+  const [status, setStatus] = useState(error || "");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setStatus(error || ""), [error]);
+
+  const createCompany = async (event) => {
+    event.preventDefault();
+    if (!supabase || !companyName.trim()) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const { error: rpcError } = await supabase.rpc("create_company_with_owner", {
+        company_name: companyName.trim(),
+        location_name: locationName.trim() || "Main Location",
+      });
+      if (rpcError) throw rpcError;
+      await onCreated();
+    } catch (rpcError) {
+      setStatus(rpcError.message || "Could not create company.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <AuthLayout>
+      <form className="auth-form" onSubmit={createCompany}>
+        <h1>Create Company</h1>
+        <p className="auth-copy">{user?.email} will be added as Owner.</p>
+        <Field label="Company name" value={companyName} onChange={setCompanyName} />
+        <Field label="Location name" value={locationName} onChange={setLocationName} />
+        {status && <div className="auth-status error">{status}</div>}
+        <div className="button-row left">
+          <button disabled={busy || !companyName.trim()} type="submit">{busy ? "Creating..." : "Create Company"}</button>
+          <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+        </div>
+      </form>
+    </AuthLayout>
+  );
+}
+
+function UpdatePasswordScreen({ onSignOut, onUpdated }) {
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const updatePassword = async (event) => {
+    event.preventDefault();
+    if (!supabase || !password) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+      setStatus("Password updated.");
+      onUpdated();
+    } catch (error) {
+      setStatus(error.message || "Could not update password.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <AuthLayout>
+      <form className="auth-form" onSubmit={updatePassword}>
+        <h1>Set new password</h1>
+        <Field label="New password" type="password" value={password} onChange={setPassword} />
+        {status && <div className={`auth-status ${status === "Password updated." ? "info" : "error"}`}>{status}</div>}
+        <div className="button-row left">
+          <button disabled={busy || !password} type="submit">{busy ? "Saving..." : "Save Password"}</button>
+          <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+        </div>
+      </form>
+    </AuthLayout>
+  );
 }
 
 function money(value) {
@@ -3317,19 +3622,10 @@ function parseLabourCsv(text, fallbackDate = today()) {
     };
   }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && row.hours);
 }
-function App() {
+function App({ authMembership, authUser, onSignOut }) {
   const [active, setActive] = useState("dashboard");
   const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
   const departmentNames = useMemo(() => activeDepartmentNames(departmentSettings), [departmentSettings]);
-  const [usersState, setUsersState] = useState(() => normalizeUsers(safeReadLocalStorage("marginflow.users", []), departmentSettings));
-  const users = useMemo(() => normalizeUsers(usersState, departmentSettings), [usersState, departmentSettings]);
-  const [activeUserId, setActiveUserIdState] = useState(() => {
-    try {
-      return localStorage.getItem("marginflow.activeUserId") || users[0]?.id || "";
-    } catch {
-      return users[0]?.id || "";
-    }
-  });
   const [department, setDepartmentState] = useState(() => {
     try {
       const stored = localStorage.getItem("marginflow.department") || "Kitchen Made";
@@ -3368,19 +3664,6 @@ function App() {
   const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
   const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
   const setLabourData = storedStateUpdater(setLabourDataState, "marginflow.labour");
-  const setUsers = (value) => {
-    const next = normalizeUsers(typeof value === "function" ? value(users) : value, departmentSettings);
-    setUsersState(next);
-    saveLocalStorage("marginflow.users", next);
-  };
-  const setActiveUserId = (value) => {
-    setActiveUserIdState(value);
-    try {
-      localStorage.setItem("marginflow.activeUserId", value);
-    } catch {
-      // Local user selection is best-effort until auth is connected.
-    }
-  };
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
@@ -3407,7 +3690,8 @@ function App() {
     saveLocalStorage("marginflow.departmentSettings", value);
   };
 
-  const currentUser = users.find((user) => user.id === activeUserId && user.status !== "Disabled") || users.find((user) => user.status !== "Disabled") || users[0];
+  const currentUser = useMemo(() => authUserToPermissionUser(authUser, authMembership, departmentSettings), [authUser, authMembership, departmentSettings]);
+  const users = useMemo(() => [currentUser], [currentUser]);
   const visibleNavItems = useMemo(() => navItems.filter((item) => userCanViewPage(currentUser, item.id)), [currentUser]);
   const allowedDepartmentNames = useMemo(() => departmentNames.filter((name) => userCanViewDepartment(currentUser, name)), [currentUser, departmentNames]);
   const visibleDepartmentOptions = useMemo(() => {
@@ -3498,12 +3782,12 @@ function App() {
             <span>Hospitality profit management</span>
           </div>
         </div>
-        <label className="sidebar-user-switcher">
-          <span>User</span>
-          <select value={currentUser?.id || ""} onChange={(event) => setActiveUserId(event.target.value)}>
-            {users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
-          </select>
-        </label>
+        <div className="sidebar-user-switcher">
+          <span>Signed in</span>
+          <strong>{currentUser.name}</strong>
+          <small>{currentUser.email}</small>
+          <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+        </div>
         <nav>
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
@@ -3660,7 +3944,10 @@ function App() {
             permissions={permissionsByPage.settings}
             suppliers={suppliers}
             users={users}
-            activeUserId={currentUser?.id || activeUserId}
+            activeUserId={currentUser.id}
+            authMembership={authMembership}
+            authMode
+            authUser={authUser}
             requestDelete={requestDelete}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
@@ -3668,8 +3955,8 @@ function App() {
             setAiSettings={setAiSettings}
             setInvoiceSettings={setInvoiceSettings}
             setMenuSettings={setMenuSettings}
-            setUsers={setUsers}
-            setActiveUserId={setActiveUserId}
+            setUsers={() => {}}
+            setActiveUserId={() => {}}
           />
         )}
         {deleteConfirmation && (
@@ -7778,6 +8065,9 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
 function SettingsPanel({
   aiSettings,
   activeUserId,
+  authMembership = null,
+  authMode = false,
+  authUser = null,
   companySettings,
   departmentSettings,
   financialSettings,
@@ -8048,10 +8338,30 @@ function SettingsPanel({
 
   return (
     <div className="settings-grid">
-      <Panel title="Users & Permissions" action="Local placeholders">
-        <div className="form-grid six">
-          <label>Current user<select value={activeUserId || ""} onChange={(event) => setActiveUserId(event.target.value)}>{users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
-        </div>
+      <Panel title="Users & Permissions" action={authMode ? "Supabase Auth" : "Local placeholders"}>
+        {authMode ? (
+          <div className="auth-account-summary">
+            <div>
+              <span>Account</span>
+              <strong>{authUserName(authUser)}</strong>
+              <small>{authUser?.email}</small>
+            </div>
+            <div>
+              <span>Company</span>
+              <strong>{authMembership?.companies?.trading_name || authMembership?.companies?.name || "MarginFlow"}</strong>
+              <small>{authMembership?.locations?.name || "Company access"}</small>
+            </div>
+            <div>
+              <span>Role</span>
+              <strong>{authMembership?.role_label || "Owner"}</strong>
+              <small>Managed by Supabase Auth</small>
+            </div>
+          </div>
+        ) : (
+          <div className="form-grid six">
+            <label>Current user<select value={activeUserId || ""} onChange={(event) => setActiveUserId(event.target.value)}>{users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+          </div>
+        )}
         <DataTable
           columns={[
             { key: "name", label: "Name" },
@@ -8062,19 +8372,19 @@ function SettingsPanel({
             { key: "departmentCount", label: "Allowed departments" },
             { key: "actionCount", label: "Actions" },
           ]}
-          onDelete={permissions.canDelete ? deleteUser : null}
-          onEdit={permissions.canEdit ? openUserModal : null}
+          onDelete={!authMode && permissions.canDelete ? deleteUser : null}
+          onEdit={!authMode && permissions.canEdit ? openUserModal : null}
           rows={users.map((user) => ({
             ...user,
             pageCount: pagePermissionDefinitions.filter((page) => normalizePermissionLevel(user.pages?.[page.id]) !== "none").length,
             departmentCount: departmentSettings.filter((department) => normalizePermissionLevel(user.departments?.[department.name]) !== "none").length,
             actionCount: actionPermissionDefinitions.filter((action) => user.actions?.[action.key]).length,
           }))}
-          toolbarAction={permissions.canAdd ? <button onClick={() => openUserModal()} type="button"><Plus size={16} />Add User</button> : null}
+          toolbarAction={!authMode && permissions.canAdd ? <button onClick={() => openUserModal()} type="button"><Plus size={16} />Add User</button> : null}
         />
       </Panel>
 
-      {userModal && (userModal.id ? permissions.canEdit : permissions.canAdd) && (
+      {!authMode && userModal && (userModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={userModal.id ? "Edit user permissions" : "Add user permissions"} onCancel={() => setUserModal(null)} onSave={saveUser} saveLabel={userModal.id ? "Save User" : "Add User"}>
           <div className="form-grid six">
             <Field label="Name" value={userModal.name} onChange={(value) => setUserModal({ ...userModal, name: value })} />
@@ -8720,4 +9030,4 @@ function departmentForProduct(name = "", departmentNames = defaultDepartments, f
 const rootElement = document.getElementById("root");
 const root = rootElement._marginFlowRoot || createRoot(rootElement);
 rootElement._marginFlowRoot = root;
-root.render(<App />);
+root.render(<AuthGate />);
