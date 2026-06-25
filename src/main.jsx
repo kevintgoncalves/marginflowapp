@@ -53,6 +53,8 @@ const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
 const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
+const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const weekdayShortLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const authModes = ["login", "register"];
 const cloudStateTable = "marginflow_cloud_state";
 const cloudStatusText = {
@@ -67,8 +69,10 @@ const cloudModuleDefinitions = [
   { key: "departmentSettings", storageKey: "marginflow.departmentSettings" },
   { key: "labourSettings", storageKey: "marginflow.labourSettings" },
   { key: "suppliers", storageKey: "marginflow.suppliers" },
+  { key: "supplierDeliverySchedules", storageKey: "marginflow.supplierDeliverySchedules" },
   { key: "products", storageKey: "marginflow.products" },
   { key: "invoices", storageKey: "marginflow.invoices" },
+  { key: "invoiceDayStatusOverrides", storageKey: "marginflow.invoiceDayStatusOverrides" },
   { key: "creditNotes", storageKey: "marginflow.creditNotes" },
   { key: "sales", storageKey: "marginflow.sales" },
   { key: "labourData", storageKey: "marginflow.labour" },
@@ -373,6 +377,7 @@ const initialMenus = [
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: Home },
   { id: "invoices", label: "Invoices", icon: ReceiptText },
+  { id: "invoiceControl", label: "Invoice Control Centre", icon: ReceiptText },
   { id: "products", label: "Products", icon: PackageSearch },
   { id: "suppliers", label: "Suppliers", icon: Store },
   { id: "stocktake", label: "Stocktake", icon: Boxes },
@@ -405,6 +410,7 @@ const pagePermissionDefinitions = [
   { id: "dashboard", label: "Dashboard" },
   { id: "gp", label: "Sales" },
   { id: "invoices", label: "Invoices" },
+  { id: "invoiceControl", label: "Invoice Control Centre" },
   { id: "products", label: "Products" },
   { id: "suppliers", label: "Suppliers" },
   { id: "stocktake", label: "Stocktake" },
@@ -452,21 +458,21 @@ function rolePermissionTemplate(role, departmentSettings) {
     return { pages: pagePermissionsForLevel("full"), departments: departmentPermissionsFor(departmentSettings, "edit"), actions: actionPermissionsFor(true) };
   }
   if (role === "General Manager") {
-    Object.assign(pages, { dashboard: "full", gp: "full", invoices: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
+    Object.assign(pages, { dashboard: "full", gp: "full", invoices: "edit", invoiceControl: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
     departmentSettings.forEach((department) => {
       departments[department.name] = ["Bar", "Non-food"].includes(department.type) || department.name === "Bar" ? "edit" : "view";
     });
     return { pages, departments, actions: { ...actions, delete: false, reset: false } };
   }
   if (role === "Head Chef") {
-    Object.assign(pages, { dashboard: "view", gp: "view", invoices: "edit", products: "edit", suppliers: "view", stocktake: "edit", recipes: "full", menu: "full", waste: "edit", labour: "view", settings: "view" });
+    Object.assign(pages, { dashboard: "view", gp: "view", invoices: "edit", invoiceControl: "edit", products: "edit", suppliers: "view", stocktake: "edit", recipes: "full", menu: "full", waste: "edit", labour: "view", settings: "view" });
     departmentSettings.forEach((department) => {
       departments[department.name] = ["Kitchen Made", "Bought In"].includes(department.name) || ["Food", "Bought In"].includes(department.type) ? "edit" : "none";
     });
     return { pages, departments, actions: { ...actions, delete: false, reset: false } };
   }
   if (role === "Bar Manager") {
-    Object.assign(pages, { dashboard: "view", gp: "edit", invoices: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
+    Object.assign(pages, { dashboard: "view", gp: "edit", invoices: "edit", invoiceControl: "edit", products: "view", suppliers: "view", stocktake: "edit", waste: "edit", labour: "view", settings: "view" });
     departmentSettings.forEach((department) => {
       departments[department.name] = department.name === "Bar" || department.type === "Bar" ? "edit" : "none";
     });
@@ -3481,7 +3487,9 @@ function createDemoData() {
     departmentSettings: cloneData(defaultDepartmentSettings),
     products: cloneData(initialProducts),
     suppliers: cloneData(initialSuppliers),
+    supplierDeliverySchedules: [],
     invoices: cloneData(initialInvoices),
+    invoiceDayStatusOverrides: [],
     sales: normalizeSalesRows(cloneData(initialSales)),
     stocktakes: normalizeStocktakes(cloneData(initialStocktakes)),
     wasteItems: cloneData(initialWaste),
@@ -3512,9 +3520,11 @@ function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
     departmentSettings: Array.isArray(read(byKey.departmentSettings, defaultDepartmentSettings)) ? read(byKey.departmentSettings, defaultDepartmentSettings) : defaultDepartmentSettings,
     labourSettings: { ...defaultLabourSettings, ...read(byKey.labourSettings, defaultLabourSettings) },
     suppliers: Array.isArray(read(byKey.suppliers, initialSuppliers)) ? read(byKey.suppliers, initialSuppliers) : initialSuppliers,
+    supplierDeliverySchedules: Array.isArray(read(byKey.supplierDeliverySchedules, [])) ? read(byKey.supplierDeliverySchedules, []) : [],
     products: Array.isArray(read(byKey.products, initialProducts)) ? read(byKey.products, initialProducts) : initialProducts,
     invoices: Array.isArray(read(byKey.invoices, initialInvoices)) ? read(byKey.invoices, initialInvoices) : initialInvoices,
     creditNotes: Array.isArray(read(byKey.creditNotes, [])) ? read(byKey.creditNotes, []) : [],
+    invoiceDayStatusOverrides: Array.isArray(read(byKey.invoiceDayStatusOverrides, [])) ? read(byKey.invoiceDayStatusOverrides, []) : [],
     sales: normalizeSalesRows(Array.isArray(read(byKey.sales, initialSales)) ? read(byKey.sales, initialSales) : initialSales),
     labourData: normalizeLabourData(read(byKey.labourData, createInitialLabourData())),
     recipes: Array.isArray(read(byKey.recipes, initialRecipes)) ? read(byKey.recipes, initialRecipes) : initialRecipes,
@@ -3855,7 +3865,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [departmentOpen, setDepartmentOpen] = useState(false);
   const [products, setProductsState] = useState(() => demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts));
   const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
+  const [supplierDeliverySchedules, setSupplierDeliverySchedulesState] = useState(() => demoInitialData?.supplierDeliverySchedules || safeReadLocalStorageArray("marginflow.supplierDeliverySchedules", []));
   const [invoices, setInvoicesState] = useState(() => demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
+  const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
   const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
   const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", initialWaste));
@@ -3876,7 +3888,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
   const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
+  const setSupplierDeliverySchedules = demoMode ? makeStateUpdater(setSupplierDeliverySchedulesState) : makeStateUpdater(setSupplierDeliverySchedulesState, "marginflow.supplierDeliverySchedules");
   const setInvoices = demoMode ? makeStateUpdater(setInvoicesState) : makeStateUpdater(setInvoicesState, "marginflow.invoices");
+  const setInvoiceDayStatusOverrides = demoMode ? makeStateUpdater(setInvoiceDayStatusOverridesState) : makeStateUpdater(setInvoiceDayStatusOverridesState, "marginflow.invoiceDayStatusOverrides");
   const setSales = demoMode ? makeStateUpdater(setSalesState) : makeStateUpdater(setSalesState, "marginflow.sales");
   const setStocktakes = demoMode ? makeStateUpdater(setStocktakesState) : makeStateUpdater(setStocktakesState, "marginflow.stocktakes");
   const setWasteItems = demoMode ? makeStateUpdater(setWasteItemsState) : makeStateUpdater(setWasteItemsState, "marginflow.waste");
@@ -3922,7 +3936,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setDepartmentOpen(false);
     setProductsState(next.products);
     setSuppliersState(next.suppliers);
+    setSupplierDeliverySchedulesState(next.supplierDeliverySchedules);
     setInvoicesState(next.invoices);
+    setInvoiceDayStatusOverridesState(next.invoiceDayStatusOverrides);
     setSalesState(next.sales);
     setStocktakesState(next.stocktakes);
     setWasteItemsState(next.wasteItems);
@@ -3968,8 +3984,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     departmentSettings,
     labourSettings,
     suppliers,
+    supplierDeliverySchedules,
     products,
     invoices,
+    invoiceDayStatusOverrides,
     creditNotes,
     sales,
     labourData,
@@ -3981,7 +3999,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     invoiceSettings,
     aiSettings,
     departmentSelection: department,
-  }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, products, invoices, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
+  }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
   const applyCloudSnapshot = (snapshot) => {
     setCompanySettingsState(snapshot.companySettings);
@@ -3989,8 +4007,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setDepartmentSettingsState(snapshot.departmentSettings);
     setLabourSettingsState(snapshot.labourSettings);
     setSuppliersState(snapshot.suppliers);
+    setSupplierDeliverySchedulesState(snapshot.supplierDeliverySchedules);
     setProductsState(snapshot.products);
     setInvoicesState(snapshot.invoices);
+    setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
     setCreditNotesState(snapshot.creditNotes);
     setSalesState(snapshot.sales);
     setLabourDataState(snapshot.labourData);
@@ -4153,6 +4173,16 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setDraft(emptyInvoiceDraft());
   };
 
+  const prepareInvoiceUploadFromControl = (supplierName, date) => {
+    setDraft((current) => ({
+      ...current,
+      supplier: supplierName,
+      date,
+      status: `Ready to upload or add invoice for ${supplierName} on ${formatRangeDate(date)}.`,
+    }));
+    setActive("invoices");
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -4278,8 +4308,22 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setInvoices={setInvoices}
           />
         )}
+        {active === "invoiceControl" && (
+          <InvoiceControlCentre
+            departmentNames={allowedDepartmentNames}
+            invoiceDayStatusOverrides={invoiceDayStatusOverrides}
+            invoices={invoices}
+            onAddInvoice={prepareInvoiceUploadFromControl}
+            permissions={permissionsByPage.invoiceControl}
+            sales={sales}
+            setInvoiceDayStatusOverrides={setInvoiceDayStatusOverrides}
+            setSupplierDeliverySchedules={setSupplierDeliverySchedules}
+            supplierDeliverySchedules={supplierDeliverySchedules}
+            suppliers={suppliers}
+          />
+        )}
         {active === "products" && <Products departmentNames={allowedDepartmentNames} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} permissions={permissionsByPage.suppliers} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSuppliers={setSuppliers} supplierSpend={supplierSpend} />}
+        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} permissions={permissionsByPage.suppliers} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSupplierDeliverySchedules={setSupplierDeliverySchedules} setSuppliers={setSuppliers} supplierDeliverySchedules={supplierDeliverySchedules} supplierSpend={supplierSpend} />}
         {active === "stocktake" && (
           <Stocktake
             department={department}
@@ -4402,6 +4446,127 @@ function CloudStatusBanner({ enabled, error, loading, status }) {
       </div>
     </div>
   );
+}
+
+function weekdayNameForDate(date) {
+  const index = (parseDate(date).getDay() + 6) % 7;
+  return weekdays[index] || "Monday";
+}
+
+function weekDatesFromStart(weekStart) {
+  return weekdays.map((_, index) => shiftDate(weekStart, index));
+}
+
+function sameSupplier(left = "", right = "") {
+  return normalizeHeader(left) === normalizeHeader(right);
+}
+
+function supplierScheduleFor(supplier, schedules = [], invoices = []) {
+  const existing = schedules.find((schedule) => schedule.supplierId === supplier.id || sameSupplier(schedule.supplierName, supplier.name));
+  if (existing) {
+    return {
+      ...existing,
+      supplierId: supplier.id,
+      supplierName: supplier.name,
+      deliveryDays: Array.isArray(existing.deliveryDays) ? existing.deliveryDays : [],
+      scheduleMode: existing.scheduleMode || "manual",
+      defaultExpected: existing.defaultExpected !== false,
+    };
+  }
+  return {
+    id: "",
+    supplierId: supplier.id,
+    supplierName: supplier.name,
+    deliveryDays: Array.isArray(supplier.deliveryDays) ? supplier.deliveryDays : [],
+    scheduleMode: supplier.scheduleMode || "manual",
+    defaultExpected: supplier.defaultExpected !== false,
+    suggestedDeliveryDays: suggestedDeliveryDaysForSupplier(supplier, invoices),
+  };
+}
+
+function suggestedDeliveryDaysForSupplier(supplier, invoices = []) {
+  const cutoff = shiftDate(today(), -84);
+  const counts = Object.fromEntries(weekdays.map((day) => [day, 0]));
+  invoices
+    .filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && invoice.date >= cutoff)
+    .forEach((invoice) => {
+      counts[weekdayNameForDate(invoice.date)] += 1;
+    });
+  return weekdays.filter((day) => counts[day] >= 2 || counts[day] >= Math.max(1, Math.ceil(invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name)).length / 4)));
+}
+
+function supplierOverrideFor(supplier, date, overrides = []) {
+  return overrides.find((override) => (override.supplierId === supplier.id || sameSupplier(override.supplierName, supplier.name)) && override.date === date);
+}
+
+function invoiceForSupplierDate(supplier, date, invoices = []) {
+  const matches = invoices
+    .filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && invoice.date === date)
+    .sort((a, b) => String(b.invoiceNumber || "").localeCompare(String(a.invoiceNumber || ""), undefined, { numeric: true }));
+  return matches[0] || null;
+}
+
+function supplierAverageInvoiceAmount(supplier, invoices = []) {
+  const rows = invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name)).slice(0, 12);
+  return rows.length ? rows.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0) / rows.length : 0;
+}
+
+function invoiceControlCellState({ date, invoices, overrides, schedule, supplier }) {
+  const invoice = invoiceForSupplierDate(supplier, date, invoices);
+  if (invoice) {
+    return { state: "received", label: "Received", invoice, total: invoiceTotal(invoice) };
+  }
+  const override = supplierOverrideFor(supplier, date, overrides);
+  if (override?.statusOverride === "not_ordered") return { state: "not_ordered", label: "Not Ordered", override };
+  const scheduled = schedule.defaultExpected && schedule.deliveryDays.includes(weekdayNameForDate(date));
+  const expectedByOverride = override?.statusOverride === "expected";
+  if (!scheduled && !expectedByOverride) return { state: "no_delivery", label: "No Delivery Day" };
+  if (date < today()) return { state: "missing", label: "Missing", override };
+  return { state: "expected", label: "Expected", override };
+}
+
+function departmentPurchaseTotalForDate(invoices, date, selectedDepartment) {
+  return invoices
+    .filter((invoice) => invoice.date === date)
+    .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
+}
+
+function invoiceControlDailySummaries({ invoices, sales, weekDates }) {
+  return weekDates.map((date) => {
+    const purchases = departmentPurchaseTotalForDate(invoices, date, "All departments");
+    const makeIn = departmentPurchaseTotalForDate(invoices, date, "Kitchen Made");
+    const boughtIn = departmentPurchaseTotalForDate(invoices, date, "Bought In");
+    const salesTotals = salesTotalsForRange(sales, { start: date, end: date }, "All departments");
+    const gp = salesTotals.netSales ? ((salesTotals.netSales - purchases) / salesTotals.netSales) * 100 : 0;
+    return { date, purchases, makeIn, boughtIn, sales: salesTotals.netSales, gp };
+  });
+}
+
+function updateOverrideRows(rows, supplier, date, statusOverride) {
+  const withoutCurrent = rows.filter((row) => !(row.date === date && (row.supplierId === supplier.id || sameSupplier(row.supplierName, supplier.name))));
+  if (!statusOverride) return withoutCurrent;
+  return [{
+    id: uid(),
+    supplierId: supplier.id,
+    supplierName: supplier.name,
+    date,
+    statusOverride,
+    notes: "",
+    updatedAt: new Date().toISOString(),
+  }, ...withoutCurrent];
+}
+
+function upsertSupplierSchedule(rows, supplier, patch) {
+  const current = supplierScheduleFor(supplier, rows);
+  const next = {
+    ...current,
+    id: current.id || uid(),
+    supplierId: supplier.id,
+    supplierName: supplier.name,
+    ...patch,
+  };
+  const withoutCurrent = rows.filter((row) => !(row.supplierId === supplier.id || sameSupplier(row.supplierName, supplier.name)));
+  return [next, ...withoutCurrent];
 }
 
 function displayDepartmentName(name) {
@@ -5427,6 +5592,282 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
   );
 }
 
+function InvoiceControlCentre({
+  departmentNames,
+  invoiceDayStatusOverrides,
+  invoices,
+  onAddInvoice,
+  permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoiceControl"),
+  sales,
+  setInvoiceDayStatusOverrides,
+  setSupplierDeliverySchedules,
+  supplierDeliverySchedules,
+  suppliers,
+}) {
+  const [weekStart, setWeekStart] = useState(toIsoDate(startOfWeek(parseDate(today()), "Monday")));
+  const [statusFilter, setStatusFilter] = useState("All suppliers");
+  const [categoryFilter, setCategoryFilter] = useState("All categories");
+  const [selectedCell, setSelectedCell] = useState(null);
+  const [viewInvoice, setViewInvoice] = useState(null);
+  const weekDates = weekDatesFromStart(weekStart);
+  const weekRange = { start: weekDates[0], end: weekDates[6] };
+  const activeSuppliers = suppliers.filter((supplier) => supplier.active !== false);
+  const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
+
+  const rows = activeSuppliers.map((supplier) => {
+    const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
+    const cells = weekDates.map((date) => {
+      const cell = invoiceControlCellState({ date, invoices, overrides: invoiceDayStatusOverrides, schedule, supplier });
+      return { ...cell, date, supplier, schedule };
+    });
+    return {
+      id: supplier.id,
+      supplier,
+      schedule,
+      cells,
+      weeklyTotal: cells.reduce((sum, cell) => sum + numberValue(cell.total, 0), 0),
+      missingCount: cells.filter((cell) => cell.state === "missing").length,
+    };
+  }).filter((row) => {
+    const matchesCategory = categoryFilter === "All categories" || row.supplier.category === categoryFilter;
+    if (!matchesCategory) return false;
+    if (statusFilter === "Missing only") return row.cells.some((cell) => cell.state === "missing");
+    if (statusFilter === "Expected only") return row.cells.some((cell) => cell.state === "expected");
+    if (statusFilter === "Received only") return row.cells.some((cell) => cell.state === "received");
+    return true;
+  });
+
+  const allCells = rows.flatMap((row) => row.cells);
+  const receivedCells = allCells.filter((cell) => cell.state === "received");
+  const expectedCells = allCells.filter((cell) => cell.state === "expected");
+  const missingCells = allCells.filter((cell) => cell.state === "missing");
+  const notOrderedCells = allCells.filter((cell) => cell.state === "not_ordered");
+  const weeklySupplierSpend = invoices.filter((invoice) => dateInRange(invoice.date, weekRange)).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const weeklyFoodPurchases = departmentPurchaseTotalForDate(invoices, weekDates[0], "Kitchen Made")
+    + departmentPurchaseTotalForDate(invoices, weekDates[0], "Bought In")
+    + weekDates.slice(1).reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made") + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
+  const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
+  const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
+  const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates });
+
+  const markOverride = (supplier, date, statusOverride) => {
+    if (!permissions.canEdit) return;
+    setInvoiceDayStatusOverrides((current) => updateOverrideRows(current, supplier, date, statusOverride));
+    setSelectedCell(null);
+  };
+
+  const openCell = (cell) => {
+    if (cell.state === "received" && cell.invoice) {
+      setViewInvoice(cell.invoice);
+      return;
+    }
+    setSelectedCell(cell);
+  };
+
+  const applySuggestedSchedule = (supplier, suggestedDays) => {
+    if (!permissions.canEdit) return;
+    setSupplierDeliverySchedules((current) => upsertSupplierSchedule(current, supplier, {
+      deliveryDays: suggestedDays,
+      scheduleMode: "automatic",
+      defaultExpected: true,
+    }));
+  };
+
+  const updateScheduleDay = (supplier, day, checked) => {
+    if (!permissions.canEdit) return;
+    const current = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
+    const deliveryDays = checked
+      ? [...new Set([...current.deliveryDays, day])]
+      : current.deliveryDays.filter((item) => item !== day);
+    setSupplierDeliverySchedules((rows) => upsertSupplierSchedule(rows, supplier, { deliveryDays, scheduleMode: "manual", defaultExpected: true }));
+  };
+
+  return (
+    <div className="page-grid invoice-control-page">
+      <Panel title="Invoice Control Centre" action={`${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}>
+        <div className="form-grid six range-grid">
+          <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(toIsoDate(startOfWeek(parseDate(value || today()), "Monday")))} />
+          <label>Status filter<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            {["All suppliers", "Missing only", "Expected only", "Received only"].map((option) => <option key={option}>{option}</option>)}
+          </select></label>
+          <label>Department / category<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+            {categoryOptions.map((option) => <option key={option}>{option}</option>)}
+          </select></label>
+        </div>
+      </Panel>
+
+      <div className="metric-grid compact">
+        <Metric label="Uploaded" value={receivedCells.length} delta="invoice day(s)" tone="good" />
+        <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
+        <Metric label="Missing" value={missingCells.length} delta="past due" tone={missingCells.length ? "warn" : "good"} />
+        <Metric label="Not ordered" value={notOrderedCells.length} delta="manual override" />
+        <Metric label="Supplier spend" value={money(weeklySupplierSpend)} delta="weekly total" />
+        <Metric label="Food purchases" value={money(weeklyFoodPurchases)} delta="make-in + bought-in" />
+        <Metric label="Make-in" value={money(weeklyMakeInPurchases)} delta="Kitchen Made" />
+        <Metric label="Bought-in" value={money(weeklyBoughtInPurchases)} delta="Bought In" />
+      </div>
+
+      <Panel title="Weekly supplier tracker" action={`${rows.length} supplier(s)`}>
+        <div className="invoice-control-grid-wrap">
+          <table className="invoice-control-grid">
+            <thead>
+              <tr>
+                <th>Supplier</th>
+                {weekDates.map((date, index) => <th key={date}>{weekdayShortLabels[index]}<small>{formatRangeDate(date)}</small></th>)}
+                <th>Weekly Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id || row.supplier.name}>
+                  <td className="supplier-cell">
+                    <strong>{row.supplier.name}</strong>
+                    <small>{row.supplier.category || "Supplier"}</small>
+                    {row.schedule.suggestedDeliveryDays?.length > 0 && !row.schedule.deliveryDays.length && (
+                      <button className="suggestion-pill" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
+                        Suggested: {row.schedule.suggestedDeliveryDays.join(", ")}
+                      </button>
+                    )}
+                  </td>
+                  {row.cells.map((cell) => <InvoiceControlCell cell={cell} key={`${row.supplier.id}-${cell.date}`} onClick={() => openCell(cell)} />)}
+                  <td className="weekly-total">{money(row.weeklyTotal)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <div className="dashboard-layout secondary">
+        <Panel title="Missing invoices" action={`${missingCells.length} missing`}>
+          {missingCells.length ? (
+            <div className="missing-invoice-list">
+              {missingCells.map((cell) => {
+                const expectedAmount = supplierAverageInvoiceAmount(cell.supplier, invoices);
+                const overdue = Math.max(1, daysBetween(cell.date, today()) - 1);
+                return (
+                  <div className="missing-invoice-row" key={`${cell.supplier.id}-${cell.date}`}>
+                    <div>
+                      <strong>{cell.supplier.name}</strong>
+                      <span>{formatRangeDate(cell.date)} · {overdue} day(s) overdue · expected {money(expectedAmount)}</span>
+                    </div>
+                    <button onClick={() => onAddInvoice(cell.supplier.name, cell.date)} type="button">Upload invoice</button>
+                    <button className="ghost" onClick={() => markOverride(cell.supplier, cell.date, "not_ordered")} type="button">Mark not ordered</button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : <EmptyState />}
+        </Panel>
+        <Panel title="Daily summary">
+          <div className="daily-summary-grid">
+            {dailySummaries.map((day) => (
+              <div className="daily-summary-card" key={day.date}>
+                <strong>{weekdayShortLabels[(parseDate(day.date).getDay() + 6) % 7]}</strong>
+                <span>{formatRangeDate(day.date)}</span>
+                <p>Purchases {money(day.purchases)}</p>
+                <p>Make-in {money(day.makeIn)}</p>
+                <p>Bought-in {money(day.boughtIn)}</p>
+                <p>Sales {money(day.sales)}</p>
+                <p>GP est. {day.sales ? percent(day.gp) : "-"}</p>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="Delivery schedules" action="Manual or suggested">
+        <div className="invoice-schedule-list">
+          {rows.map((row) => (
+            <div className="invoice-schedule-row" key={`schedule-${row.supplier.id}`}>
+              <div>
+                <strong>{row.supplier.name}</strong>
+                <small>{row.schedule.scheduleMode === "automatic" ? "Automatic suggestion applied" : "Manual schedule"}</small>
+              </div>
+              <div className="weekday-toggle-row">
+                {weekdays.map((day) => (
+                  <label key={day}>
+                    <input checked={row.schedule.deliveryDays.includes(day)} onChange={(event) => updateScheduleDay(row.supplier, day, event.target.checked)} type="checkbox" />
+                    {day.slice(0, 3)}
+                  </label>
+                ))}
+              </div>
+              {row.schedule.suggestedDeliveryDays?.length > 0 && (
+                <button className="ghost" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
+                  Use suggested delivery days
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      {selectedCell && (
+        <AppModal
+          footer={(
+            <>
+              <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
+              {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
+              {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "not_ordered")} type="button">Mark as Not Ordered</button>}
+              {permissions.canAdd && <button onClick={() => onAddInvoice(selectedCell.supplier.name, selectedCell.date)} type="button">Upload Invoice</button>}
+            </>
+          )}
+          onClose={() => setSelectedCell(null)}
+          open={Boolean(selectedCell)}
+          title={`${selectedCell.supplier.name} · ${formatRangeDate(selectedCell.date)}`}
+        >
+          <div className="modal-stack">
+            <Badge tone={selectedCell.state === "missing" ? "red" : selectedCell.state === "expected" ? "amber" : selectedCell.state === "not_ordered" ? "gray" : "green"}>{selectedCell.label}</Badge>
+            <p className="helper-text">Quick actions update this supplier/day only. Upload Invoice opens the invoice workflow with supplier and date prepared.</p>
+          </div>
+        </AppModal>
+      )}
+
+      {viewInvoice && (
+        <AppModal
+          footer={<button onClick={() => setViewInvoice(null)} type="button">Close</button>}
+          onClose={() => setViewInvoice(null)}
+          open={Boolean(viewInvoice)}
+          title={`Invoice ${viewInvoice.invoiceNumber || ""}`}
+          wide
+        >
+          <div className="modal-stack">
+            <div className="form-grid six">
+              <div className="read-only-field"><span>Supplier</span><strong>{viewInvoice.supplier}</strong></div>
+              <div className="read-only-field"><span>Date</span><strong>{formatRangeDate(viewInvoice.date)}</strong></div>
+              <div className="read-only-field"><span>Total</span><strong>{money(invoiceTotal(viewInvoice))}</strong></div>
+            </div>
+            <DataTable
+              columns={[
+                { key: "productName", label: "Product" },
+                { key: "packSize", label: "Pack" },
+                { key: "quantity", label: "Qty" },
+                { key: "unitCost", label: "Unit cost", render: money },
+                { key: "netLineTotal", label: "Net", render: (_, row) => money(netLineTotal(row, viewInvoice)) },
+              ]}
+              rows={(viewInvoice.items || []).map((item) => ({ ...item, id: item.id || `${item.productName}-${item.packSize}` }))}
+            />
+          </div>
+        </AppModal>
+      )}
+    </div>
+  );
+}
+
+function InvoiceControlCell({ cell, onClick }) {
+  if (cell.state === "no_delivery") {
+    return <td className="invoice-control-cell no-delivery"><span>-</span></td>;
+  }
+  return (
+    <td>
+      <button className={`invoice-control-cell ${cell.state}`} onClick={onClick} type="button">
+        <strong>{cell.label}</strong>
+        {cell.total ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
+      </button>
+    </td>
+  );
+}
+
 
 function Products({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
@@ -5619,7 +6060,7 @@ function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRo
   );
 }
 
-function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, suppliers, setSuppliers, supplierSpend }) {
+function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, suppliers, setSupplierDeliverySchedules = () => {}, setSuppliers, supplierDeliverySchedules = [], supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -5633,10 +6074,14 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
   const supplierIssues = combinedSupplierIssues(creditNotes, invoices);
   const supplierRows = supplierSpend.map((supplier) => {
     const summary = supplierIssueSummary(supplierIssues, supplier.name);
-    return { ...supplier, openIssues: summary.openIssues, valueToChase: summary.valueToChase };
+    const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
+    return { ...supplier, deliveryDaysLabel: schedule.deliveryDays.map((day) => day.slice(0, 3)).join(", ") || "-", openIssues: summary.openIssues, valueToChase: summary.valueToChase };
   });
-  const supplierTabs = ["Details", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
+  const supplierTabs = ["Details", "Delivery Schedule", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
   const selectedSupplierName = form.name;
+  const selectedSupplier = suppliers.find((supplier) => supplier.id === editingId) || form;
+  const selectedSchedule = supplierScheduleFor(selectedSupplier, supplierDeliverySchedules, invoices);
+  const selectedSuggestedDays = selectedSchedule.suggestedDeliveryDays || suggestedDeliveryDaysForSupplier(selectedSupplier, invoices);
   const selectedSupplierIssues = supplierIssues.filter((note) => note.supplier === selectedSupplierName);
   const selectedSupplierInvoices = invoices
     .filter((invoice) => invoice.supplier === selectedSupplierName)
@@ -5733,6 +6178,18 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
     setCreditNotes((current) => current.map((note) => (note.id === id ? { ...note, ...patch } : note)));
   };
 
+  const updateDeliverySchedule = (patch) => {
+    if (!permissions.canEdit) return;
+    setSupplierDeliverySchedules((current) => upsertSupplierSchedule(current, selectedSupplier, patch));
+  };
+
+  const toggleDeliveryDay = (day, checked) => {
+    const deliveryDays = checked
+      ? [...new Set([...selectedSchedule.deliveryDays, day])]
+      : selectedSchedule.deliveryDays.filter((item) => item !== day);
+    updateDeliverySchedule({ deliveryDays, scheduleMode: "manual" });
+  };
+
   return (
     <div className="page-grid">
       <Panel title="Supplier directory" action="Spend totals">
@@ -5743,6 +6200,7 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
             { key: "contact", label: "Contact" },
             { key: "email", label: "Email" },
             { key: "phone", label: "Phone" },
+            { key: "deliveryDaysLabel", label: "Delivery days" },
             { key: "spend", label: "Spend total", render: (value) => money(value) },
             { key: "openIssues", label: "Open issues", render: (value) => value > 0 ? <Badge tone="amber">{value} open</Badge> : <Badge tone="green">0</Badge> },
             { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
@@ -5806,6 +6264,27 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
               <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
               <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
               <label>Status<select value={form.active ? "Active" : "Inactive"} onChange={(event) => setForm({ ...form, active: event.target.value === "Active" })}><option>Active</option><option>Inactive</option></select></label>
+            </div>
+          )}
+          {activeSupplierTab === "Delivery Schedule" && (
+            <div className="modal-stack">
+              <div className="form-grid six">
+                <label>Schedule mode<select value={selectedSchedule.scheduleMode} onChange={(event) => updateDeliverySchedule({ scheduleMode: event.target.value })}><option value="manual">Manual</option><option value="automatic">Automatic</option></select></label>
+                <CheckboxField checked={selectedSchedule.defaultExpected} label="Default expected on delivery days" onChange={(value) => updateDeliverySchedule({ defaultExpected: value })} />
+              </div>
+              <div className="supplier-schedule-picker">
+                {weekdays.map((day) => (
+                  <label key={day}>
+                    <input checked={selectedSchedule.deliveryDays.includes(day)} onChange={(event) => toggleDeliveryDay(day, event.target.checked)} type="checkbox" />
+                    <span>{day}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="code-card">
+                <p><strong>Suggested delivery days based on invoice history</strong></p>
+                <p>{selectedSuggestedDays.length ? selectedSuggestedDays.join(", ") : "No clear pattern yet. Upload more invoices or select days manually."}</p>
+                {selectedSuggestedDays.length > 0 && <button className="ghost" onClick={() => updateDeliverySchedule({ deliveryDays: selectedSuggestedDays, scheduleMode: "automatic", defaultExpected: true })} type="button">Use suggested days</button>}
+              </div>
             </div>
           )}
           {activeSupplierTab === "Invoices" && (

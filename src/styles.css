@@ -966,6 +966,253 @@ td input, td select { min-width: 110px; }
 .badge.green { background: rgba(16, 185, 129, 0.16); color: var(--success); }
 .badge.amber { background: rgba(245, 158, 11, 0.16); color: var(--warning); }
 .badge.red { background: rgba(239, 68, 68, 0.16); color: var(--danger); }
+.badge.gray { background: rgba(148, 163, 184, 0.16); color: var(--muted); }
+.badge.gray { background: rgba(148, 163, 184, 0.16); color: var(--muted); }
+
+.invoice-control-grid-wrap {
+  overflow: auto;
+}
+
+.invoice-control-grid {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+}
+
+.invoice-control-grid th,
+.invoice-control-grid td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+  vertical-align: middle;
+}
+
+.invoice-control-grid th {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.invoice-control-grid th small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.supplier-cell {
+  width: 220px;
+}
+
+.supplier-cell strong,
+.supplier-cell small {
+  display: block;
+}
+
+.supplier-cell small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.invoice-control-cell {
+  display: grid;
+  width: 100%;
+  min-width: 112px;
+  min-height: 58px;
+  align-content: center;
+  justify-items: start;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.invoice-control-cell strong {
+  font-size: 12px;
+}
+
+.invoice-control-cell span {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.invoice-control-cell.received {
+  border-color: rgba(16, 185, 129, 0.32);
+  background: rgba(16, 185, 129, 0.14);
+  color: #86efac;
+}
+
+.invoice-control-cell.expected {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+}
+
+.invoice-control-cell.missing {
+  border-color: rgba(239, 68, 68, 0.38);
+  background: rgba(239, 68, 68, 0.13);
+  color: #fca5a5;
+}
+
+.invoice-control-cell.not_ordered {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
+
+.invoice-control-cell.no-delivery {
+  display: table-cell;
+  min-width: 112px;
+  min-height: auto;
+  background: transparent;
+  color: #64748b;
+  text-align: center;
+}
+
+.weekly-total {
+  color: var(--text);
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.suggestion-pill {
+  justify-content: flex-start;
+  min-height: 28px;
+  margin-top: 7px;
+  padding: 0 8px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #bfdbfe;
+  font-size: 11px;
+}
+
+.missing-invoice-list,
+.invoice-schedule-list {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+}
+
+.missing-invoice-row,
+.invoice-schedule-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111c31;
+}
+
+.missing-invoice-row strong,
+.missing-invoice-row span,
+.invoice-schedule-row strong,
+.invoice-schedule-row small {
+  display: block;
+}
+
+.missing-invoice-row span,
+.invoice-schedule-row small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.daily-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 18px;
+  overflow: auto;
+}
+
+.daily-summary-card {
+  min-width: 120px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111c31;
+}
+
+.daily-summary-card strong,
+.daily-summary-card span,
+.daily-summary-card p {
+  display: block;
+}
+
+.daily-summary-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.daily-summary-card p {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.weekday-toggle-row,
+.supplier-schedule-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.weekday-toggle-row label,
+.supplier-schedule-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #101a2e;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.weekday-toggle-row input,
+.supplier-schedule-picker input {
+  width: 14px;
+  min-height: 14px;
+  padding: 0;
+}
+
+.read-only-field {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #111c31;
+}
+
+.read-only-field span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.read-only-field strong {
+  color: var(--text);
+}
+
+@media (max-width: 900px) {
+  .missing-invoice-row,
+  .invoice-schedule-row {
+    grid-template-columns: 1fr;
+  }
+
+  .daily-summary-grid {
+    grid-template-columns: repeat(7, 132px);
+  }
+}
 
 .bar-series {
   display: grid;
