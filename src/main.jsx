@@ -2952,6 +2952,8 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
     "marginflow.invoices": invoiceFallbackKey,
     "marginflow.products": null,
     "marginflow.suppliers": null,
+    "marginflow.supplierDeliverySchedules": null,
+    "marginflow.invoiceDayStatusOverrides": null,
     "marginflow.recipes": null,
     "marginflow.menus": null,
     "marginflow.stocktakes": null,
@@ -2959,12 +2961,17 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
     "marginflow.sales": null,
     "marginflow.creditNotes": null,
   };
+  const objectKeys = new Set([
+    "marginflow.labour",
+  ]);
   const settingsKeys = new Set([
     "marginflow.companySettings",
     "marginflow.financialSettings",
     "marginflow.departmentSettings",
+    "marginflow.labourSettings",
     "marginflow.menuSettings",
     "marginflow.invoiceSettings",
+    "marginflow.aiSettings",
     "marginflow.department",
   ]);
 
@@ -2990,8 +2997,14 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
       }
       return;
     }
+    if (objectKeys.has(key)) {
+      const currentObject = parseBackupValue(currentStorage[key], {});
+      const importedObject = parseBackupValue(value, {});
+      nextStorage[key] = JSON.stringify(mergeRecords(currentObject, importedObject));
+      return;
+    }
     if (settingsKeys.has(key)) {
-      if (useImportedSettings) nextStorage[key] = stringifyStorageValue(value);
+      if (useImportedSettings || !currentStorage[key]) nextStorage[key] = stringifyStorageValue(value);
       return;
     }
     if (!currentStorage[key]) nextStorage[key] = stringifyStorageValue(value);
@@ -4074,11 +4087,28 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     loadCloudState(cloudScope)
       .then(async (rows) => {
         if (cancelled) return;
+
+        const localStorageData = readMarginFlowLocalStorage();
+        const hasLocalMarginFlowData = Object.keys(localStorageData).some((key) => {
+          if (key === "marginflow.preImportBackup") return false;
+          const value = localStorageData[key];
+          return value !== undefined && value !== null && value !== "";
+        });
+
         if (rows.length) {
-          applyCloudSnapshot(cloudSnapshotFromRows(rows));
+          const cloudStorage = storageFromCloudSnapshot(cloudSnapshotFromRows(rows));
+          const merged = hasLocalMarginFlowData
+            ? mergeMarginFlowStorage(cloudStorage, localStorageData, false).nextStorage
+            : cloudStorage;
+          const nextSnapshot = cloudSnapshotFromStorage(merged);
+          applyCloudSnapshot(nextSnapshot);
+          if (hasLocalMarginFlowData) await saveCloudState(cloudScope, nextSnapshot, true);
+          if (cancelled) return;
           setCloudStatus("synced");
         } else {
-          await saveCloudState(cloudScope, cloudSnapshot);
+          const firstSnapshot = hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot;
+          applyCloudSnapshot(firstSnapshot);
+          await saveCloudState(cloudScope, firstSnapshot, hasLocalMarginFlowData);
           if (cancelled) return;
           setCloudStatus("synced");
         }
