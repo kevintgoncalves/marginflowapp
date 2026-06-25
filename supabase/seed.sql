@@ -1,0 +1,3 @@
+-- MarginFlow seed file.
+-- Intentionally empty for the initial Supabase setup.
+-- The application continues to run from localStorage until the data sync layer is added.
