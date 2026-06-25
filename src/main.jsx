@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
@@ -53,6 +53,59 @@ const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
 const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
+const authModes = ["login", "register"];
+const cloudStateTable = "marginflow_cloud_state";
+const cloudStatusText = {
+  local: "Local only",
+  synced: "Cloud synced",
+  error: "Sync error",
+};
+
+const cloudModuleDefinitions = [
+  { key: "companySettings", storageKey: "marginflow.companySettings" },
+  { key: "financialSettings", storageKey: "marginflow.financialSettings" },
+  { key: "departmentSettings", storageKey: "marginflow.departmentSettings" },
+  { key: "labourSettings", storageKey: "marginflow.labourSettings" },
+  { key: "suppliers", storageKey: "marginflow.suppliers" },
+  { key: "products", storageKey: "marginflow.products" },
+  { key: "invoices", storageKey: "marginflow.invoices" },
+  { key: "creditNotes", storageKey: "marginflow.creditNotes" },
+  { key: "sales", storageKey: "marginflow.sales" },
+  { key: "labourData", storageKey: "marginflow.labour" },
+  { key: "recipes", storageKey: "marginflow.recipes" },
+  { key: "menus", storageKey: "marginflow.menus" },
+  { key: "stocktakes", storageKey: "marginflow.stocktakes" },
+  { key: "wasteItems", storageKey: "marginflow.waste" },
+  { key: "menuSettings", storageKey: "marginflow.menuSettings" },
+  { key: "invoiceSettings", storageKey: "marginflow.invoiceSettings" },
+  { key: "aiSettings", storageKey: "marginflow.aiSettings" },
+  { key: "departmentSelection", storageKey: "marginflow.department" },
+];
+
+function currentSearchParams() {
+  try {
+    return new URLSearchParams(window.location.search);
+  } catch {
+    return new URLSearchParams();
+  }
+}
+
+function isDemoUrl() {
+  return currentSearchParams().get("demo") === "true";
+}
+
+function authModeFromUrl() {
+  const mode = currentSearchParams().get("mode");
+  return authModes.includes(mode) ? mode : "login";
+}
+
+function cloneData(value) {
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value));
+  }
+}
 
 const defaultDepartmentSettings = [
   { id: uid(), name: "Kitchen Made", type: "Food", targetGp: 75, active: true },
@@ -363,6 +416,22 @@ const pagePermissionDefinitions = [
   { id: "settings", label: "Settings" },
 ];
 
+const demoAuthUser = {
+  id: "demo-owner",
+  email: "demo@marginflow.app",
+  user_metadata: { full_name: "Demo Owner" },
+};
+
+const demoAuthMembership = {
+  id: "demo-membership",
+  company_id: "demo-company",
+  location_id: "demo-location",
+  role_label: "Owner",
+  status: "active",
+  companies: { name: "Reading Room Demo", trading_name: "Reading Room Demo" },
+  locations: { name: "Demo Location" },
+};
+
 function pagePermissionsForLevel(level = "full") {
   return Object.fromEntries(pagePermissionDefinitions.map((page) => [page.id, level]));
 }
@@ -519,6 +588,8 @@ async function loadAuthMembership(user) {
 }
 
 function AuthGate() {
+  const demoMode = isDemoUrl();
+  const initialAuthMode = authModeFromUrl();
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
   const [membership, setMembership] = useState(null);
@@ -527,7 +598,7 @@ function AuthGate() {
   const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) {
+    if (demoMode || !isSupabaseConfigured || !supabase) {
       setLoadingSession(false);
       return undefined;
     }
@@ -547,7 +618,7 @@ function AuthGate() {
       mounted = false;
       listener?.subscription?.unsubscribe();
     };
-  }, []);
+  }, [demoMode]);
 
   const refreshMembership = async (user = session?.user) => {
     if (!user) {
@@ -581,9 +652,10 @@ function AuthGate() {
     setMembership(null);
   };
 
+  if (demoMode) return <App authMembership={demoAuthMembership} authUser={demoAuthUser} demoMode onSignOut={() => { window.location.href = "/?mode=login"; }} />;
   if (!isSupabaseConfigured || !supabase) return <SupabaseSetupNotice />;
   if (loadingSession) return <AuthLoading message="Checking Supabase session..." />;
-  if (!session) return <AuthScreen initialError={authError} />;
+  if (!session) return <AuthScreen initialError={authError} initialMode={initialAuthMode} />;
   if (passwordRecovery) return <UpdatePasswordScreen onSignOut={signOut} onUpdated={() => setPasswordRecovery(false)} />;
   if (loadingMembership) return <AuthLoading message="Loading company access..." />;
   if (!membership) {
@@ -637,8 +709,8 @@ function SupabaseSetupNotice() {
   );
 }
 
-function AuthScreen({ initialError = "" }) {
-  const [mode, setMode] = useState("login");
+function AuthScreen({ initialError = "", initialMode = "login" }) {
+  const [mode, setMode] = useState(authModes.includes(initialMode) ? initialMode : "login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -646,6 +718,9 @@ function AuthScreen({ initialError = "" }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => setStatus(initialError), [initialError]);
+  useEffect(() => {
+    if (authModes.includes(initialMode)) setMode(initialMode);
+  }, [initialMode]);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -1784,7 +1859,8 @@ function defaultSalesCsvMapping(headers = []) {
   };
 }
 
-function loadSalesCsvTemplate(name, headers) {
+function loadSalesCsvTemplate(name, headers, temporary = false) {
+  if (temporary) return defaultSalesCsvMapping(headers);
   try {
     const stored = localStorage.getItem(salesCsvTemplateKey(name));
     return stored ? { ...defaultSalesCsvMapping(headers), ...JSON.parse(stored) } : defaultSalesCsvMapping(headers);
@@ -2685,6 +2761,24 @@ function buildFullBackupPayload() {
   };
 }
 
+function storageFromCloudSnapshot(snapshot = {}) {
+  return Object.fromEntries(cloudModuleDefinitions
+    .filter((definition) => snapshot[definition.key] !== undefined)
+    .map((definition) => [definition.storageKey, stringifyStorageValue(snapshot[definition.key])]));
+}
+
+function buildFullBackupPayloadFromSnapshot(snapshot = {}, source = "cloud") {
+  const localStorageData = storageFromCloudSnapshot(snapshot);
+  return {
+    app: "MarginFlow",
+    appVersion: "0.1.0",
+    source,
+    exportedAt: new Date().toISOString(),
+    localStorage: localStorageData,
+    ...localStorageData,
+  };
+}
+
 function downloadJsonFile(filename, payload) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -2714,6 +2808,51 @@ function parseBackupValue(value, fallback = null) {
 
 function stringifyStorageValue(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function cloudScopeForMembership(membership) {
+  const companyId = membership?.company_id || "";
+  const locationId = membership?.location_id || null;
+  return {
+    companyId,
+    locationId,
+    scopeKey: locationId || "company",
+  };
+}
+
+function cloudRowsFromSnapshot(scope, snapshot, migratedFromLocalStorage = false) {
+  return cloudModuleDefinitions
+    .filter((definition) => snapshot[definition.key] !== undefined)
+    .map((definition) => ({
+      company_id: scope.companyId,
+      location_id: scope.locationId,
+      scope_key: scope.scopeKey,
+      module_key: definition.key,
+      payload: snapshot[definition.key],
+      migrated_from_local_storage: migratedFromLocalStorage,
+      synced_at: new Date().toISOString(),
+    }));
+}
+
+async function loadCloudState(scope) {
+  if (!supabase || !scope.companyId) return [];
+  const { data, error } = await supabase
+    .from(cloudStateTable)
+    .select("module_key,payload,synced_at")
+    .eq("company_id", scope.companyId)
+    .eq("scope_key", scope.scopeKey);
+  if (error) throw error;
+  return data || [];
+}
+
+async function saveCloudState(scope, snapshot, migratedFromLocalStorage = false) {
+  if (!supabase || !scope.companyId) return;
+  const rows = cloudRowsFromSnapshot(scope, snapshot, migratedFromLocalStorage);
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from(cloudStateTable)
+    .upsert(rows, { onConflict: "company_id,scope_key,module_key" });
+  if (error) throw error;
 }
 
 function recordCompletenessScore(record) {
@@ -2862,6 +3001,12 @@ function storedStateUpdater(setState, key) {
       saveLocalStorage(key, next);
       return next;
     });
+  };
+}
+
+function transientStateUpdater(setState) {
+  return (value) => {
+    setState((current) => (typeof value === "function" ? value(current) : value));
   };
 }
 
@@ -3330,6 +3475,68 @@ function normalizeLabourData(data = {}) {
   };
 }
 
+function createDemoData() {
+  return {
+    activeDepartment: "All departments",
+    departmentSettings: cloneData(defaultDepartmentSettings),
+    products: cloneData(initialProducts),
+    suppliers: cloneData(initialSuppliers),
+    invoices: cloneData(initialInvoices),
+    sales: normalizeSalesRows(cloneData(initialSales)),
+    stocktakes: normalizeStocktakes(cloneData(initialStocktakes)),
+    wasteItems: cloneData(initialWaste),
+    creditNotes: [],
+    recipes: cloneData(initialRecipes),
+    menus: cloneData(initialMenus),
+    companySettings: {
+      ...cloneData(defaultCompanySettings),
+      companyName: "Reading Room Demo",
+      tradingName: "Reading Room Demo",
+      email: "demo@marginflow.app",
+    },
+    financialSettings: cloneData(defaultFinancialSettings),
+    labourSettings: cloneData(defaultLabourSettings),
+    menuSettings: cloneData(defaultMenuSettings),
+    invoiceSettings: cloneData(defaultInvoiceSettings),
+    aiSettings: cloneData(defaultAiSettings),
+    labourData: normalizeLabourData(createInitialLabourData()),
+  };
+}
+
+function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
+  const read = (definition, fallback) => parseBackupValue(storage[definition.storageKey], fallback);
+  const byKey = Object.fromEntries(cloudModuleDefinitions.map((definition) => [definition.key, definition]));
+  return {
+    companySettings: { ...defaultCompanySettings, ...read(byKey.companySettings, defaultCompanySettings) },
+    financialSettings: { ...defaultFinancialSettings, ...read(byKey.financialSettings, defaultFinancialSettings) },
+    departmentSettings: Array.isArray(read(byKey.departmentSettings, defaultDepartmentSettings)) ? read(byKey.departmentSettings, defaultDepartmentSettings) : defaultDepartmentSettings,
+    labourSettings: { ...defaultLabourSettings, ...read(byKey.labourSettings, defaultLabourSettings) },
+    suppliers: Array.isArray(read(byKey.suppliers, initialSuppliers)) ? read(byKey.suppliers, initialSuppliers) : initialSuppliers,
+    products: Array.isArray(read(byKey.products, initialProducts)) ? read(byKey.products, initialProducts) : initialProducts,
+    invoices: Array.isArray(read(byKey.invoices, initialInvoices)) ? read(byKey.invoices, initialInvoices) : initialInvoices,
+    creditNotes: Array.isArray(read(byKey.creditNotes, [])) ? read(byKey.creditNotes, []) : [],
+    sales: normalizeSalesRows(Array.isArray(read(byKey.sales, initialSales)) ? read(byKey.sales, initialSales) : initialSales),
+    labourData: normalizeLabourData(read(byKey.labourData, createInitialLabourData())),
+    recipes: Array.isArray(read(byKey.recipes, initialRecipes)) ? read(byKey.recipes, initialRecipes) : initialRecipes,
+    menus: Array.isArray(read(byKey.menus, initialMenus)) ? read(byKey.menus, initialMenus) : initialMenus,
+    stocktakes: normalizeStocktakes(Array.isArray(read(byKey.stocktakes, initialStocktakes)) ? read(byKey.stocktakes, initialStocktakes) : initialStocktakes),
+    wasteItems: Array.isArray(read(byKey.wasteItems, initialWaste)) ? read(byKey.wasteItems, initialWaste) : initialWaste,
+    menuSettings: { ...defaultMenuSettings, ...read(byKey.menuSettings, defaultMenuSettings) },
+    invoiceSettings: { ...defaultInvoiceSettings, ...read(byKey.invoiceSettings, defaultInvoiceSettings) },
+    aiSettings: { ...defaultAiSettings, ...read(byKey.aiSettings, defaultAiSettings) },
+    departmentSelection: read(byKey.departmentSelection, "Kitchen Made") || "Kitchen Made",
+  };
+}
+
+function cloudSnapshotFromRows(rows = []) {
+  const snapshot = {};
+  rows.forEach((row) => {
+    if (row?.module_key) snapshot[row.module_key] = row.payload;
+  });
+  const storage = storageFromCloudSnapshot(snapshot);
+  return cloudSnapshotFromStorage(storage);
+}
+
 function labourDepartmentName(data, departmentId, fallback = "") {
   return data.departments.find((department) => department.id === departmentId)?.name || fallback;
 }
@@ -3622,11 +3829,22 @@ function parseLabourCsv(text, fallbackDate = today()) {
     };
   }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && row.hours);
 }
-function App({ authMembership, authUser, onSignOut }) {
+function App({ authMembership, authUser, demoMode = false, onSignOut }) {
+  const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
+  const effectiveAuthUser = demoMode ? demoAuthUser : authUser;
+  const effectiveAuthMembership = demoMode ? demoAuthMembership : authMembership;
+  const cloudScope = useMemo(() => cloudScopeForMembership(effectiveAuthMembership), [effectiveAuthMembership?.company_id, effectiveAuthMembership?.location_id]);
+  const cloudEnabled = !demoMode && Boolean(supabase && cloudScope.companyId);
+  const cloudReadyRef = useRef(false);
+  const cloudSaveTimerRef = useRef(null);
+  const [cloudStatus, setCloudStatus] = useState("local");
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudError, setCloudError] = useState("");
   const [active, setActive] = useState("dashboard");
-  const [departmentSettings, setDepartmentSettingsState] = useState(() => safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
+  const [departmentSettings, setDepartmentSettingsState] = useState(() => demoInitialData?.departmentSettings || safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
   const departmentNames = useMemo(() => activeDepartmentNames(departmentSettings), [departmentSettings]);
   const [department, setDepartmentState] = useState(() => {
+    if (demoInitialData) return demoInitialData.activeDepartment;
     try {
       const stored = localStorage.getItem("marginflow.department") || "Kitchen Made";
       return stored;
@@ -3635,62 +3853,96 @@ function App({ authMembership, authUser, onSignOut }) {
     }
   });
   const [departmentOpen, setDepartmentOpen] = useState(false);
-  const [products, setProductsState] = useState(() => safeReadLocalStorageArray("marginflow.products", initialProducts));
-  const [suppliers, setSuppliersState] = useState(() => safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
-  const [invoices, setInvoicesState] = useState(() => safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
-  const [sales, setSalesState] = useState(() => normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
-  const [stocktakes, setStocktakesState] = useState(() => normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
-  const [wasteItems, setWasteItemsState] = useState(() => safeReadLocalStorageArray("marginflow.waste", initialWaste));
-  const [creditNotes, setCreditNotesState] = useState(() => safeReadLocalStorageArray("marginflow.creditNotes", []));
-  const [recipes, setRecipesState] = useState(() => safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
-  const [menus, setMenusState] = useState(() => safeReadLocalStorageArray("marginflow.menus", initialMenus));
-  const [companySettings, setCompanySettingsState] = useState(() => safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
-  const [financialSettings, setFinancialSettingsState] = useState(() => ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
-  const [menuSettings, setMenuSettingsState] = useState(() => safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
-  const [invoiceSettings, setInvoiceSettingsState] = useState(() => safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
-  const [aiSettings, setAiSettingsState] = useState(() => safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
+  const [products, setProductsState] = useState(() => demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts));
+  const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
+  const [invoices, setInvoicesState] = useState(() => demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
+  const [sales, setSalesState] = useState(() => demoInitialData?.sales || normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
+  const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
+  const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", initialWaste));
+  const [creditNotes, setCreditNotesState] = useState(() => demoInitialData?.creditNotes || safeReadLocalStorageArray("marginflow.creditNotes", []));
+  const [recipes, setRecipesState] = useState(() => demoInitialData?.recipes || safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
+  const [menus, setMenusState] = useState(() => demoInitialData?.menus || safeReadLocalStorageArray("marginflow.menus", initialMenus));
+  const [companySettings, setCompanySettingsState] = useState(() => demoInitialData?.companySettings || safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
+  const [financialSettings, setFinancialSettingsState] = useState(() => demoInitialData?.financialSettings || ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
+  const [labourSettings, setLabourSettingsState] = useState(() => demoInitialData?.labourSettings || ({ ...defaultLabourSettings, ...safeReadLocalStorage("marginflow.labourSettings", defaultLabourSettings) }));
+  const [menuSettings, setMenuSettingsState] = useState(() => demoInitialData?.menuSettings || safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
+  const [invoiceSettings, setInvoiceSettingsState] = useState(() => demoInitialData?.invoiceSettings || safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
+  const [aiSettings, setAiSettingsState] = useState(() => demoInitialData?.aiSettings || safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
   const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
   const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
-  const [labourData, setLabourDataState] = useState(() => normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
+  const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
-  const setProducts = storedStateUpdater(setProductsState, "marginflow.products");
-  const setSuppliers = storedStateUpdater(setSuppliersState, "marginflow.suppliers");
-  const setInvoices = storedStateUpdater(setInvoicesState, "marginflow.invoices");
-  const setSales = storedStateUpdater(setSalesState, "marginflow.sales");
-  const setStocktakes = storedStateUpdater(setStocktakesState, "marginflow.stocktakes");
-  const setWasteItems = storedStateUpdater(setWasteItemsState, "marginflow.waste");
-  const setCreditNotes = storedStateUpdater(setCreditNotesState, "marginflow.creditNotes");
-  const setRecipes = storedStateUpdater(setRecipesState, "marginflow.recipes");
-  const setMenus = storedStateUpdater(setMenusState, "marginflow.menus");
-  const setLabourData = storedStateUpdater(setLabourDataState, "marginflow.labour");
+  const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
+  const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
+  const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
+  const setInvoices = demoMode ? makeStateUpdater(setInvoicesState) : makeStateUpdater(setInvoicesState, "marginflow.invoices");
+  const setSales = demoMode ? makeStateUpdater(setSalesState) : makeStateUpdater(setSalesState, "marginflow.sales");
+  const setStocktakes = demoMode ? makeStateUpdater(setStocktakesState) : makeStateUpdater(setStocktakesState, "marginflow.stocktakes");
+  const setWasteItems = demoMode ? makeStateUpdater(setWasteItemsState) : makeStateUpdater(setWasteItemsState, "marginflow.waste");
+  const setCreditNotes = demoMode ? makeStateUpdater(setCreditNotesState) : makeStateUpdater(setCreditNotesState, "marginflow.creditNotes");
+  const setRecipes = demoMode ? makeStateUpdater(setRecipesState) : makeStateUpdater(setRecipesState, "marginflow.recipes");
+  const setMenus = demoMode ? makeStateUpdater(setMenusState) : makeStateUpdater(setMenusState, "marginflow.menus");
+  const setLabourData = demoMode ? makeStateUpdater(setLabourDataState) : makeStateUpdater(setLabourDataState, "marginflow.labour");
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
-    saveLocalStorage("marginflow.companySettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.companySettings", value);
   };
   const setFinancialSettings = (value) => {
     setFinancialSettingsState(value);
-    saveLocalStorage("marginflow.financialSettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.financialSettings", value);
+  };
+  const setLabourSettings = (value) => {
+    setLabourSettingsState(value);
+    if (!demoMode) saveLocalStorage("marginflow.labourSettings", value);
   };
   const setMenuSettings = (value) => {
     setMenuSettingsState(value);
-    saveLocalStorage("marginflow.menuSettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.menuSettings", value);
   };
   const setInvoiceSettings = (value) => {
     setInvoiceSettingsState(value);
-    saveLocalStorage("marginflow.invoiceSettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.invoiceSettings", value);
   };
   const setAiSettings = (value) => {
     setAiSettingsState(value);
-    saveLocalStorage("marginflow.aiSettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.aiSettings", value);
   };
   const setDepartmentSettings = (value) => {
     setDepartmentSettingsState(value);
-    saveLocalStorage("marginflow.departmentSettings", value);
+    if (!demoMode) saveLocalStorage("marginflow.departmentSettings", value);
   };
 
-  const currentUser = useMemo(() => authUserToPermissionUser(authUser, authMembership, departmentSettings), [authUser, authMembership, departmentSettings]);
+  const resetDemoData = () => {
+    if (!demoMode) return;
+    const next = createDemoData();
+    setDepartmentSettingsState(next.departmentSettings);
+    setDepartmentState(next.activeDepartment);
+    setDepartmentOpen(false);
+    setProductsState(next.products);
+    setSuppliersState(next.suppliers);
+    setInvoicesState(next.invoices);
+    setSalesState(next.sales);
+    setStocktakesState(next.stocktakes);
+    setWasteItemsState(next.wasteItems);
+    setCreditNotesState(next.creditNotes);
+    setRecipesState(next.recipes);
+    setMenusState(next.menus);
+    setCompanySettingsState(next.companySettings);
+    setFinancialSettingsState(next.financialSettings);
+    setLabourSettingsState(next.labourSettings);
+    setMenuSettingsState(next.menuSettings);
+    setInvoiceSettingsState(next.invoiceSettings);
+    setAiSettingsState(next.aiSettings);
+    setDateRangeState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
+    setLabourDateRangeState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
+    setLabourDataState(next.labourData);
+    setDraft(emptyInvoiceDraft());
+    setDeleteConfirmation(null);
+  };
+
+  const currentUser = useMemo(() => authUserToPermissionUser(effectiveAuthUser, effectiveAuthMembership, departmentSettings), [effectiveAuthUser, effectiveAuthMembership, departmentSettings]);
   const users = useMemo(() => [currentUser], [currentUser]);
   const visibleNavItems = useMemo(() => navItems.filter((item) => userCanViewPage(currentUser, item.id)), [currentUser]);
   const allowedDepartmentNames = useMemo(() => departmentNames.filter((name) => userCanViewDepartment(currentUser, name)), [currentUser, departmentNames]);
@@ -3710,6 +3962,134 @@ function App({ authMembership, authUser, onSignOut }) {
     () => Object.fromEntries(navItems.map((item) => [item.id, permissionsForPage(currentUser, item.id, departmentContextPages.includes(item.id) ? department : "")])),
     [currentUser, department],
   );
+  const cloudSnapshot = useMemo(() => ({
+    companySettings,
+    financialSettings,
+    departmentSettings,
+    labourSettings,
+    suppliers,
+    products,
+    invoices,
+    creditNotes,
+    sales,
+    labourData,
+    recipes,
+    menus,
+    stocktakes,
+    wasteItems,
+    menuSettings,
+    invoiceSettings,
+    aiSettings,
+    departmentSelection: department,
+  }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, products, invoices, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
+
+  const applyCloudSnapshot = (snapshot) => {
+    setCompanySettingsState(snapshot.companySettings);
+    setFinancialSettingsState(snapshot.financialSettings);
+    setDepartmentSettingsState(snapshot.departmentSettings);
+    setLabourSettingsState(snapshot.labourSettings);
+    setSuppliersState(snapshot.suppliers);
+    setProductsState(snapshot.products);
+    setInvoicesState(snapshot.invoices);
+    setCreditNotesState(snapshot.creditNotes);
+    setSalesState(snapshot.sales);
+    setLabourDataState(snapshot.labourData);
+    setRecipesState(snapshot.recipes);
+    setMenusState(snapshot.menus);
+    setStocktakesState(snapshot.stocktakes);
+    setWasteItemsState(snapshot.wasteItems);
+    setMenuSettingsState(snapshot.menuSettings);
+    setInvoiceSettingsState(snapshot.invoiceSettings);
+    setAiSettingsState(snapshot.aiSettings);
+    setDepartmentState(snapshot.departmentSelection || "All departments");
+  };
+
+  const saveSnapshotToCloud = async (snapshot, migratedFromLocalStorage = false) => {
+    if (!cloudEnabled) return;
+    setCloudLoading(true);
+    setCloudError("");
+    try {
+      await saveCloudState(cloudScope, snapshot, migratedFromLocalStorage);
+      setCloudStatus("synced");
+    } catch (error) {
+      setCloudStatus("error");
+      setCloudError(error.message || "Cloud sync failed.");
+      throw error;
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  const migrateLocalDataToCloud = async () => {
+    if (!cloudEnabled) return;
+    const snapshot = cloudSnapshotFromStorage(readMarginFlowLocalStorage());
+    applyCloudSnapshot(snapshot);
+    await saveSnapshotToCloud(snapshot, true);
+  };
+
+  const importBackupToCloud = async (pendingBackup, mode, useImportedSettings) => {
+    if (!cloudEnabled || !pendingBackup) return null;
+    const currentStorage = storageFromCloudSnapshot(cloudSnapshot);
+    const merged = mode === "replace" ? null : mergeMarginFlowStorage(currentStorage, pendingBackup.storage, useImportedSettings);
+    const nextStorage = mode === "replace" ? pendingBackup.storage : merged.nextStorage;
+    const summary = mode === "replace" ? null : merged.summary;
+    const snapshot = cloudSnapshotFromStorage(nextStorage);
+    applyCloudSnapshot(snapshot);
+    await saveSnapshotToCloud(snapshot, true);
+    return summary;
+  };
+
+  useEffect(() => {
+    if (!cloudEnabled) {
+      cloudReadyRef.current = false;
+      setCloudStatus("local");
+      setCloudLoading(false);
+      setCloudError("");
+      return undefined;
+    }
+    let cancelled = false;
+    cloudReadyRef.current = false;
+    setCloudLoading(true);
+    setCloudError("");
+    loadCloudState(cloudScope)
+      .then(async (rows) => {
+        if (cancelled) return;
+        if (rows.length) {
+          applyCloudSnapshot(cloudSnapshotFromRows(rows));
+          setCloudStatus("synced");
+        } else {
+          await saveCloudState(cloudScope, cloudSnapshot);
+          if (cancelled) return;
+          setCloudStatus("synced");
+        }
+        cloudReadyRef.current = true;
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCloudStatus("error");
+        setCloudError(error.message || "Could not load cloud data.");
+      })
+      .finally(() => {
+        if (!cancelled) setCloudLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
+    };
+  }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey]);
+
+  useEffect(() => {
+    if (!cloudEnabled || !cloudReadyRef.current) return undefined;
+    if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
+    cloudSaveTimerRef.current = window.setTimeout(() => {
+      saveSnapshotToCloud(cloudSnapshot).catch(() => {
+        // Error state is surfaced through the cloud status banner.
+      });
+    }, 900);
+    return () => {
+      if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
+    };
+  }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey, cloudSnapshot]);
 
   useEffect(() => {
     if (!visibleNavItems.some((item) => item.id === active)) setActive(visibleNavItems[0]?.id || "dashboard");
@@ -3724,6 +4104,7 @@ function App({ authMembership, authUser, onSignOut }) {
   const setDepartment = (value) => {
     setDepartmentState(value);
     setDepartmentOpen(false);
+    if (demoMode) return;
     try {
       localStorage.setItem("marginflow.department", value);
     } catch {
@@ -3783,10 +4164,14 @@ function App({ authMembership, authUser, onSignOut }) {
           </div>
         </div>
         <div className="sidebar-user-switcher">
-          <span>Signed in</span>
+          <span>{demoMode ? "Demo mode" : "Signed in"}</span>
           <strong>{currentUser.name}</strong>
           <small>{currentUser.email}</small>
-          <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+          {demoMode ? (
+            <a className="ghost sidebar-link-button" href="/?mode=register">Create account</a>
+          ) : (
+            <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+          )}
         </div>
         <nav>
           {visibleNavItems.map((item) => {
@@ -3807,6 +4192,23 @@ function App({ authMembership, authUser, onSignOut }) {
       </aside>
 
       <main className="workspace">
+        {demoMode && (
+          <div className="demo-banner">
+            <span>You are viewing demo data. Create an account to use your own data.</span>
+            <div>
+              <button className="ghost" onClick={resetDemoData} type="button">Reset Demo</button>
+              <a href="/?mode=register">Create account</a>
+            </div>
+          </div>
+        )}
+        {!demoMode && (
+          <CloudStatusBanner
+            enabled={cloudEnabled}
+            error={cloudError}
+            loading={cloudLoading}
+            status={cloudStatus}
+          />
+        )}
         <header className="topbar">
           <div>
             <p className="eyebrow">MarginFlow v3</p>
@@ -3839,6 +4241,7 @@ function App({ authMembership, authUser, onSignOut }) {
           <Dashboard
             dateRange={dateRange}
             dateRangeState={dateRangeState}
+            demoMode={demoMode}
             department={department}
             departmentNames={allowedDepartmentNames}
             departmentSettings={departmentSettings}
@@ -3937,21 +4340,32 @@ function App({ authMembership, authUser, onSignOut }) {
           <SettingsPanel
             aiSettings={aiSettings}
             companySettings={companySettings}
+            cloudEnabled={cloudEnabled}
+            cloudError={cloudError}
+            cloudLoading={cloudLoading}
+            cloudSnapshot={cloudSnapshot}
+            cloudStatus={cloudStatus}
             departmentSettings={departmentSettings}
+            demoMode={demoMode}
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
+            labourSettings={labourSettings}
             menuSettings={menuSettings}
+            onImportBackupToCloud={importBackupToCloud}
+            onMigrateLocalToCloud={migrateLocalDataToCloud}
+            onResetDemo={resetDemoData}
             permissions={permissionsByPage.settings}
             suppliers={suppliers}
             users={users}
             activeUserId={currentUser.id}
-            authMembership={authMembership}
-            authMode
-            authUser={authUser}
+            authMembership={effectiveAuthMembership}
+            authMode={!demoMode}
+            authUser={effectiveAuthUser}
             requestDelete={requestDelete}
             setCompanySettings={setCompanySettings}
             setDepartmentSettings={setDepartmentSettings}
             setFinancialSettings={setFinancialSettings}
+            setLabourSettings={setLabourSettings}
             setAiSettings={setAiSettings}
             setInvoiceSettings={setInvoiceSettings}
             setMenuSettings={setMenuSettings}
@@ -3975,6 +4389,19 @@ function App({ authMembership, authUser, onSignOut }) {
 
 function targetForRow(departmentSettings, department, fallback) {
   return targetForDepartment(departmentSettings, department, fallback);
+}
+
+function CloudStatusBanner({ enabled, error, loading, status }) {
+  const label = enabled ? cloudStatusText[status] || cloudStatusText.local : cloudStatusText.local;
+  const tone = status === "error" ? "error" : status === "synced" ? "success" : "info";
+  return (
+    <div className={`cloud-status-banner ${tone}`}>
+      <div>
+        <strong>{loading ? "Syncing cloud data..." : label}</strong>
+        <span>{error || (enabled ? "Company data is scoped to the current Supabase account and company." : "Using local fallback until cloud access is available.")}</span>
+      </div>
+    </div>
+  );
 }
 
 function displayDepartmentName(name) {
@@ -4169,7 +4596,7 @@ function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, met
   );
 }
 
-function PerformanceSections({ dateRange, dateRangeState, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
+function PerformanceSections({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -4183,12 +4610,12 @@ function PerformanceSections({ dateRange, dateRangeState, department, department
       <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
       <PerformanceCharts dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
-      {showSalesManager && <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
+      {showSalesManager && <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const allDepartmentMetrics = useMemo(
     () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
     [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
@@ -4211,7 +4638,7 @@ function Dashboard({ dateRange, dateRangeState, department, departmentNames, dep
           Dashboard is showing all departments because {department} has no sales in this date range.
         </div>
       )}
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
         <Panel title="Recent invoices">
           <DataTable
@@ -6325,7 +6752,7 @@ function Waste({ department, departmentNames, permissions = permissionsForPage(r
   );
 }
 
-function SalesManager({ financialSettings, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), requestDelete, sales, setSales }) {
+function SalesManager({ demoMode = false, financialSettings, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), requestDelete, sales, setSales }) {
   const defaultVatRate = financialSettings.defaultVat;
   const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
@@ -6396,7 +6823,7 @@ function SalesManager({ financialSettings, departmentNames, permissions = permis
       return;
     }
     const headers = csvRowsRaw[0] || [];
-    const mapping = loadSalesCsvTemplate("Manual CSV", headers);
+    const mapping = loadSalesCsvTemplate("Manual CSV", headers, demoMode);
     const dataRows = csvRowsRaw.slice(1);
     const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
     setCsvWizard({
@@ -6447,7 +6874,7 @@ function SalesManager({ financialSettings, departmentNames, permissions = permis
   const updateCsvTemplate = (templateName) => {
     setCsvWizard((current) => {
       if (!current) return current;
-      const mapping = loadSalesCsvTemplate(templateName, current.headers);
+      const mapping = loadSalesCsvTemplate(templateName, current.headers, demoMode);
       const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
       return { ...current, templateName, mapping, previewRows: preview.rows, errors: preview.errors };
     });
@@ -6460,7 +6887,7 @@ function SalesManager({ financialSettings, departmentNames, permissions = permis
       setStatus("No valid sales rows yet. Check the column mapping.");
       return;
     }
-    if (csvWizard.saveTemplate) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping);
+    if (csvWizard.saveTemplate && !demoMode) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping);
     setPendingImport(preview.validRows);
     setCsvWizard(null);
     const invalidCount = preview.rows.length - preview.validRows.length;
@@ -6582,7 +7009,7 @@ function SalesManager({ financialSettings, departmentNames, permissions = permis
   );
 }
 
-function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSettings, permissions, requestDelete, sales, setDateRangeState, setSales }) {
+function GpAnalysis({ dateRange, dateRangeState, demoMode = false, departmentNames, financialSettings, permissions, requestDelete, sales, setDateRangeState, setSales }) {
   const salesTotals = totalSalesRows(sales, dateRange);
 
   return (
@@ -6596,7 +7023,7 @@ function GpAnalysis({ dateRange, dateRangeState, departmentNames, financialSetti
         <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
         <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
       </div>
-      <SalesManager financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />
+      <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />
       <SalesComparison financialSettings={financialSettings} sales={sales} />
     </>
   );
@@ -8068,11 +8495,21 @@ function SettingsPanel({
   authMembership = null,
   authMode = false,
   authUser = null,
+  cloudEnabled = false,
+  cloudError = "",
+  cloudLoading = false,
+  cloudSnapshot = null,
+  cloudStatus = "local",
   companySettings,
+  demoMode = false,
   departmentSettings,
   financialSettings,
   invoiceSettings,
+  labourSettings = defaultLabourSettings,
   menuSettings,
+  onImportBackupToCloud,
+  onMigrateLocalToCloud,
+  onResetDemo,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "settings"),
   requestDelete,
   suppliers,
@@ -8080,6 +8517,7 @@ function SettingsPanel({
   setActiveUserId,
   setDepartmentSettings,
   setFinancialSettings,
+  setLabourSettings = () => {},
   setAiSettings,
   setInvoiceSettings,
   setMenuSettings,
@@ -8098,10 +8536,6 @@ function SettingsPanel({
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
   const [userModal, setUserModal] = useState(null);
-  const [labourSettings, setLabourSettingsState] = useState(() => ({
-    ...defaultLabourSettings,
-    ...safeReadLocalStorage("marginflow.labourSettings", defaultLabourSettings),
-  }));
 
   const canChangeSettings = permissions.canAdd || permissions.canEdit;
   const updateCompany = (field, value) => {
@@ -8127,12 +8561,11 @@ function SettingsPanel({
   const updateLabourSettings = (field, value) => {
     if (!canChangeSettings) return;
     const next = { ...labourSettings, [field]: value };
-    setLabourSettingsState(next);
-    localStorage.setItem("marginflow.labourSettings", JSON.stringify(next));
+    setLabourSettings(next);
   };
 
   const resetDataSection = (label, keys) => {
-    if (!permissions.canReset) return;
+    if (demoMode || !permissions.canReset) return;
     requestDelete({
       title: `Reset ${label}?`,
       message: `This will permanently remove saved ${label.toLowerCase()} data from this browser. Export a full backup first if you may need it later.`,
@@ -8197,14 +8630,16 @@ function SettingsPanel({
   const lightspeedSalesTemplate = "Date,Category,Gross,Net,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Food,2053.75,1821.49,232.26,0,0,0";
 
   const exportFullBackup = () => {
-    const payload = buildFullBackupPayload();
+    const payload = cloudEnabled && cloudSnapshot
+      ? buildFullBackupPayloadFromSnapshot(cloudSnapshot, cloudStatus === "synced" ? "cloud" : "app-state")
+      : buildFullBackupPayload();
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     downloadJsonFile(`marginflow-full-backup-${stamp}.json`, payload);
     setDataStatus(`Exported ${Object.keys(payload.localStorage).length} MarginFlow localStorage key(s).`);
   };
 
   const importFullBackup = async (file) => {
-    if (!permissions.canImport) return;
+    if (demoMode || !permissions.canImport) return;
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
@@ -8225,13 +8660,24 @@ function SettingsPanel({
   };
 
   const savePreImportBackup = () => {
+    if (demoMode) return;
     const preImportBackup = buildFullBackupPayload();
     localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
   };
 
-  const replaceFullBackup = () => {
-    if (!permissions.canImport) return;
+  const replaceFullBackup = async () => {
+    if (demoMode || !permissions.canImport) return;
     if (!pendingFullBackup) return;
+    if (cloudEnabled && onImportBackupToCloud) {
+      try {
+        await onImportBackupToCloud(pendingFullBackup, "replace", false);
+        setPendingFullBackup(null);
+        setDataStatus(`Replaced ${pendingFullBackup.keyCount} backup key(s) in cloud.`);
+      } catch (error) {
+        setDataStatus(error.message || "Cloud import failed.");
+      }
+      return;
+    }
     savePreImportBackup();
     Object.entries(pendingFullBackup.storage).forEach(([key, value]) => {
       if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
@@ -8241,9 +8687,20 @@ function SettingsPanel({
     window.setTimeout(() => window.location.reload(), 500);
   };
 
-  const mergeFullBackup = () => {
-    if (!permissions.canImport) return;
+  const mergeFullBackup = async () => {
+    if (demoMode || !permissions.canImport) return;
     if (!pendingFullBackup) return;
+    if (cloudEnabled && onImportBackupToCloud) {
+      try {
+        const summary = await onImportBackupToCloud(pendingFullBackup, "merge", backupImportSettingsMode === "Use imported settings");
+        setImportSummary(summary);
+        setPendingFullBackup(null);
+        setDataStatus("Merged full backup into cloud.");
+      } catch (error) {
+        setDataStatus(error.message || "Cloud import failed.");
+      }
+      return;
+    }
     savePreImportBackup();
     const { nextStorage, summary } = mergeMarginFlowStorage(readMarginFlowLocalStorage(), pendingFullBackup.storage, backupImportSettingsMode === "Use imported settings");
     Object.entries(nextStorage).forEach(([key, value]) => {
@@ -8257,6 +8714,11 @@ function SettingsPanel({
 
   const resetDemoSettings = () => {
     if (!permissions.canReset) return;
+    if (demoMode) {
+      onResetDemo?.();
+      setDataStatus("Demo data reset.");
+      return;
+    }
     setCompanySettings(defaultCompanySettings);
     setFinancialSettings(defaultFinancialSettings);
     setDepartmentSettings(defaultDepartmentSettings);
@@ -8278,6 +8740,7 @@ function SettingsPanel({
   });
 
   const openUserModal = (user = null) => {
+    if (demoMode) return;
     if (user && !permissions.canEdit) return;
     if (!user && !permissions.canAdd) return;
     setUserModal(user ? { ...user, pages: { ...user.pages }, departments: { ...user.departments }, actions: { ...user.actions } } : blankUser());
@@ -8321,6 +8784,7 @@ function SettingsPanel({
   };
 
   const deleteUser = (id) => {
+    if (demoMode) return;
     if (!permissions.canDelete || users.length <= 1) return;
     requestDelete({
       title: "Delete user",
@@ -8338,8 +8802,50 @@ function SettingsPanel({
 
   return (
     <div className="settings-grid">
-      <Panel title="Users & Permissions" action={authMode ? "Supabase Auth" : "Local placeholders"}>
-        {authMode ? (
+      {!demoMode && (
+        <Panel title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
+          <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
+            <div>
+              <strong>{cloudLoading ? "Syncing..." : cloudStatusText[cloudStatus] || cloudStatusText.local}</strong>
+              <p>{cloudError || (cloudEnabled ? "Data is synced by company and location after login. Local browser data remains as a fallback." : "Cloud sync is waiting for Supabase Auth company access.")}</p>
+            </div>
+            {permissions.canImport && (
+              <button disabled={!cloudEnabled || cloudLoading} onClick={async () => {
+                try {
+                  setDataStatus("");
+                  await onMigrateLocalToCloud?.();
+                  setDataStatus("Local data migrated to cloud.");
+                } catch (error) {
+                  setDataStatus(error.message || "Cloud migration failed.");
+                }
+              }} type="button">
+                {cloudLoading ? "Syncing..." : "Migrate all local data to cloud"}
+              </button>
+            )}
+          </div>
+          {dataStatus && <div className={`invoice-status ${cloudStatus === "error" ? "error" : "info"}`}>{dataStatus}</div>}
+        </Panel>
+      )}
+      <Panel title="Users & Permissions" action={demoMode ? "Demo Mode" : authMode ? "Supabase Auth" : "Local placeholders"}>
+        {demoMode ? (
+          <div className="auth-account-summary">
+            <div>
+              <span>Account</span>
+              <strong>{authUserName(authUser)}</strong>
+              <small>{authUser?.email}</small>
+            </div>
+            <div>
+              <span>Company</span>
+              <strong>{authMembership?.companies?.trading_name || authMembership?.companies?.name || "MarginFlow Demo"}</strong>
+              <small>{authMembership?.locations?.name || "Demo Location"}</small>
+            </div>
+            <div>
+              <span>Role</span>
+              <strong>Owner</strong>
+              <small>Demo permissions are read/write locally only</small>
+            </div>
+          </div>
+        ) : authMode ? (
           <div className="auth-account-summary">
             <div>
               <span>Account</span>
@@ -8372,19 +8878,19 @@ function SettingsPanel({
             { key: "departmentCount", label: "Allowed departments" },
             { key: "actionCount", label: "Actions" },
           ]}
-          onDelete={!authMode && permissions.canDelete ? deleteUser : null}
-          onEdit={!authMode && permissions.canEdit ? openUserModal : null}
+          onDelete={!demoMode && !authMode && permissions.canDelete ? deleteUser : null}
+          onEdit={!demoMode && !authMode && permissions.canEdit ? openUserModal : null}
           rows={users.map((user) => ({
             ...user,
             pageCount: pagePermissionDefinitions.filter((page) => normalizePermissionLevel(user.pages?.[page.id]) !== "none").length,
             departmentCount: departmentSettings.filter((department) => normalizePermissionLevel(user.departments?.[department.name]) !== "none").length,
             actionCount: actionPermissionDefinitions.filter((action) => user.actions?.[action.key]).length,
           }))}
-          toolbarAction={!authMode && permissions.canAdd ? <button onClick={() => openUserModal()} type="button"><Plus size={16} />Add User</button> : null}
+          toolbarAction={!demoMode && !authMode && permissions.canAdd ? <button onClick={() => openUserModal()} type="button"><Plus size={16} />Add User</button> : null}
         />
       </Panel>
 
-      {!authMode && userModal && (userModal.id ? permissions.canEdit : permissions.canAdd) && (
+      {!demoMode && !authMode && userModal && (userModal.id ? permissions.canEdit : permissions.canAdd) && (
         <EditModal title={userModal.id ? "Edit user permissions" : "Add user permissions"} onCancel={() => setUserModal(null)} onSave={saveUser} saveLabel={userModal.id ? "Save User" : "Add User"}>
           <div className="form-grid six">
             <Field label="Name" value={userModal.name} onChange={(value) => setUserModal({ ...userModal, name: value })} />
@@ -8601,6 +9107,17 @@ function SettingsPanel({
         )}
       </Panel>
 
+      {demoMode ? (
+        <Panel title="Demo data" action="Temporary">
+          <p className="helper-text">Demo edits live only in this browser session. Reset returns every page to the original demo dataset.</p>
+          <div className="button-row left">
+            {permissions.canReset && <button onClick={() => { onResetDemo?.(); setDataStatus("Demo data reset."); }} type="button">Reset Demo</button>}
+            <a className="file-button secondary" href="/?mode=register">Create account</a>
+          </div>
+          {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
+        </Panel>
+      ) : (
+        <>
       <Panel title="Reset data by page">
         <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
         <div className="button-row left wrap">
@@ -8636,7 +9153,9 @@ function SettingsPanel({
           </div>
         )}
       </Panel>
-      {pendingFullBackup && (
+        </>
+      )}
+      {!demoMode && pendingFullBackup && (
         <div className="modal-backdrop" role="presentation">
           <div className="split-modal" role="dialog" aria-modal="true" aria-label="Import full backup">
             <div className="modal-header">

@@ -175,6 +175,20 @@ input[readonly] {
   padding: 0 10px;
 }
 
+.sidebar-user-switcher .sidebar-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: #29384f;
+  color: var(--text);
+  text-decoration: none;
+  text-transform: none;
+}
+
 nav {
   display: grid;
   gap: 4px;
@@ -209,6 +223,93 @@ nav button.active {
   gap: 18px;
   align-content: start;
   padding: 28px;
+}
+
+.demo-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 12px;
+  background: #1f2a3f;
+  color: #fde68a;
+  font-weight: 900;
+}
+
+.demo-banner div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.demo-banner a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--primary);
+  color: #fff;
+  text-decoration: none;
+}
+
+.cloud-status-banner,
+.cloud-settings-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #162238;
+}
+
+.cloud-status-banner strong,
+.cloud-settings-card strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.cloud-status-banner span,
+.cloud-settings-card p {
+  display: block;
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.cloud-status-banner.success,
+.cloud-settings-card.success {
+  border-color: rgba(16, 185, 129, 0.38);
+}
+
+.cloud-status-banner.success strong,
+.cloud-settings-card.success strong {
+  color: #86efac;
+}
+
+.cloud-status-banner.error,
+.cloud-settings-card.error {
+  border-color: rgba(239, 68, 68, 0.42);
+}
+
+.cloud-status-banner.error strong,
+.cloud-settings-card.error strong {
+  color: #fca5a5;
+}
+
+.cloud-status-banner.info,
+.cloud-settings-card.info {
+  border-color: rgba(59, 130, 246, 0.3);
 }
 
 .auth-shell {
