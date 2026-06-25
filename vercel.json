@@ -8,5 +8,9 @@
       "source": "/.netlify/functions/import-sales-ai",
       "destination": "/api/import-sales-ai"
     }
-  ]
+  ],
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite"
 }
