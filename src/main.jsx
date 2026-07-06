@@ -27,6 +27,21 @@ import {
 } from "lucide-react";
 import { labourImportedSeed } from "./labourSeedData.js";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
+import { invoiceUnitCostFromExtraction as extractedInvoiceUnitCost, parseCheesemanInvoiceRows } from "./domain/invoiceParsing.js";
+import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
+import {
+  activeSupplierRows,
+  canonicalSupplierForName,
+  findSupplierDuplicateCandidates,
+  isSupplierTombstone,
+  mergeSupplierReferences,
+  reconcileSuppliersForSync,
+  sameSupplierIdentity,
+  supplierExistsByIdentity,
+  supplierIdentityKey,
+  supplierSortKey,
+} from "./domain/supplierIdentity.js";
+import { propagateInvoiceSupplierToLines, validateInvoiceLinesForApproval } from "./domain/invoiceWorkflow.js";
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -1023,18 +1038,6 @@ function amountsAlmostEqual(a, b) {
   const right = Number(b);
   if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
   return Math.abs(left - right) <= Math.max(0.03, Math.abs(right) * 0.015);
-}
-
-function invoiceUnitCostFromExtraction(line) {
-  const quantity = numberValue(line.quantity, 1);
-  const unitCost = numberValue(line.unitCost, 0);
-  const extractedLineTotal = numberValue(line.lineTotal, 0);
-
-  if (quantity > 0 && extractedLineTotal > 0 && !amountsAlmostEqual(quantity * unitCost, extractedLineTotal)) {
-    return Number((extractedLineTotal / quantity).toFixed(4));
-  }
-
-  return unitCost;
 }
 
 function invoiceDateTokenPattern() {
@@ -2191,7 +2194,10 @@ function normalizeStocktakes(rows) {
 
 function cheapestOffer(product, products) {
   const prices = collectSupplierPrices(product, products);
-  return prices.sort((a, b) => a.price - b.price)[0] || { supplier: product.supplier, price: numberValue(product.unitCost) };
+  const comparison = priceComparisonForProduct(product, prices);
+  return comparison.comparable
+    ? { ...comparison.cheapest, price: comparison.cheapest?.price ?? comparison.cheapest?.originalCost ?? 0, comparison }
+    : prices.sort((a, b) => a.price - b.price)[0] || { supplier: product.supplier, price: numberValue(product.unitCost), comparison };
 }
 
 function productGroupMatches(a, b) {
@@ -2201,19 +2207,35 @@ function productGroupMatches(a, b) {
 
 function collectSupplierPrices(product, products) {
   const prices = [];
-  const addPrice = (supplier, price, date = today()) => {
+  const addPrice = (supplier, price, date = today(), packSize = "", extra = {}) => {
     const numeric = numberValue(price);
     if (!supplier || !numeric) return;
-    const existing = prices.find((entry) => entry.supplier === supplier);
+    const normalized = normalisedCostForPrice(numeric, packSize || product.packSize, extra);
+    const priceKey = `${supplier}|${packSize || product.packSize || ""}|${normalized.baseQuantity}|${normalized.baseUnit}`;
+    const existing = prices.find((entry) => entry.priceKey === priceKey);
+    const nextEntry = {
+      priceKey,
+      supplier,
+      price: numeric,
+      date,
+      packSize: packSize || product.packSize || "",
+      normalizedCost: normalized.normalizedCost,
+      normalizedUnit: normalized.baseUnit,
+      conversionConfidence: normalized.confidence,
+      conversionReviewRequired: normalized.reviewRequired,
+      conversionReason: normalized.reason,
+      ...extra,
+    };
     if (!existing || existing.date <= date) {
-      if (existing) existing.price = numeric;
-      else prices.push({ supplier, price: numeric, date });
+      if (existing) Object.assign(existing, nextEntry);
+      else prices.push(nextEntry);
     }
   };
 
   products.filter((candidate) => productGroupMatches(product, candidate)).forEach((candidate) => {
-    addPrice(candidate.supplier, candidate.unitCost, candidate.priceHistory?.at(-1)?.date);
-    (candidate.supplierPrices || []).forEach((entry) => addPrice(entry.supplier, entry.price, entry.date));
+    addPrice(candidate.supplier, candidate.unitCost, candidate.priceHistory?.at(-1)?.date, candidate.packSize, candidate);
+    (candidate.supplierPrices || []).forEach((entry) => addPrice(entry.supplier, entry.price, entry.date, entry.packSize || candidate.packSize, entry));
+    (candidate.supplierFormats || []).forEach((entry) => addPrice(entry.supplier, entry.purchaseUnitCost ?? entry.price, entry.date, entry.packSize || candidate.packSize, entry));
   });
 
   return prices;
@@ -2221,23 +2243,35 @@ function collectSupplierPrices(product, products) {
 
 function buildProductRows(products) {
   return products.map((product) => {
-    const cheapest = cheapestOffer(product, products);
-    const difference = cheapest.price ? ((numberValue(product.unitCost) - cheapest.price) / cheapest.price) * 100 : 0;
+    const prices = collectSupplierPrices(product, products);
+    const comparison = priceComparisonForProduct(product, prices);
+    const cheapest = comparison.comparable ? comparison.cheapest : cheapestOffer(product, products);
+    const currentNormalized = normalisedCostForPrice(product.unitCost, product.packSize, product);
+    const difference = comparison.comparable ? comparison.differencePercent : 0;
     return {
       ...product,
-      cheapestSupplier: `${cheapest.supplier} ${money(cheapest.price)}`,
+      cheapestSupplier: comparison.comparable
+        ? `${cheapest.supplier} ${money(cheapest.normalizedCost)} / ${comparison.normalizedUnit}`
+        : "Needs pack conversion",
       priceDifference: difference,
+      priceDifferenceLabel: comparison.comparable ? (difference > 0 ? `+${percent(difference)}` : percent(difference)) : "Not comparable",
+      normalizedCostLabel: currentNormalized.normalizedCost ? `${money(currentNormalized.normalizedCost)} / ${currentNormalized.baseUnit}` : "-",
+      packReview: currentNormalized.reviewRequired || comparison.reviewRequired ? (comparison.message || currentNormalized.reason) : "OK",
       aliasesLabel: (product.aliases || []).join(", "),
     };
   });
 }
 
 function supplierExists(suppliers, name) {
-  return suppliers.some((supplier) => supplier.name.toLowerCase() === name.trim().toLowerCase());
+  return supplierExistsByIdentity(suppliers, name);
 }
 
 function ensureSupplierList(suppliers, name) {
   if (!name.trim() || supplierExists(suppliers, name)) return suppliers;
+  const canonical = canonicalSupplierForName(suppliers, name);
+  if (canonical) return suppliers;
+  const likelyDuplicate = findSupplierDuplicateCandidates(suppliers, name, { includeDeleted: true })[0];
+  if (likelyDuplicate && likelyDuplicate.similarity >= 0.82) return suppliers;
   return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
 }
 
@@ -2246,7 +2280,8 @@ function removeInvoiceProductHistory(products, invoiceId) {
   return products.map((product) => {
     const priceHistory = (product.priceHistory || []).filter((entry) => entry.invoiceId !== invoiceId);
     const supplierPrices = (product.supplierPrices || []).filter((entry) => entry.invoiceId !== invoiceId);
-    return { ...product, priceHistory, supplierPrices };
+    const supplierFormats = (product.supplierFormats || []).filter((entry) => entry.invoiceId !== invoiceId);
+    return { ...product, priceHistory, supplierPrices, supplierFormats };
   });
 }
 
@@ -2260,19 +2295,46 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
       : matchProduct(item.productName, next);
     const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
-    const historyEntry = { date: invoiceDate, supplier: item.supplier, price: invoiceUnitCost, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id };
-    const supplierEntry = { supplier: item.supplier, price: invoiceUnitCost, date: invoiceDate, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id };
+    const supplierFormat = supplierFormatFromLine({ ...item, unitCost: invoiceUnitCost }, invoiceDate);
+    const historyEntry = {
+      date: invoiceDate,
+      supplier: item.supplier,
+      price: invoiceUnitCost,
+      packSize: item.packSize,
+      normalizedCost: supplierFormat.normalizedCost,
+      normalizedUnit: supplierFormat.baseUnit,
+      conversionReviewRequired: supplierFormat.conversionReviewRequired,
+      source: "Invoice",
+      invoiceId: invoiceContext.id,
+      lineId: item.id,
+    };
+    const supplierEntry = {
+      supplier: item.supplier,
+      price: invoiceUnitCost,
+      packSize: item.packSize,
+      normalizedCost: supplierFormat.normalizedCost,
+      normalizedUnit: supplierFormat.baseUnit,
+      conversionReviewRequired: supplierFormat.conversionReviewRequired,
+      date: invoiceDate,
+      source: "Invoice",
+      invoiceId: invoiceContext.id,
+      lineId: item.id,
+    };
 
     if (index >= 0 && match.confidence > 0.9) {
       const aliases = new Set([...(next[index].aliases || [])]);
       if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
       const supplierPrices = [
-        ...(next[index].supplierPrices || []).filter((entry) => entry.supplier !== item.supplier && !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+        ...(next[index].supplierPrices || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
         supplierEntry,
       ];
       const priceHistory = [
         ...(next[index].priceHistory || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
         historyEntry,
+      ];
+      const supplierFormats = [
+        ...(next[index].supplierFormats || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+        { ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id },
       ];
       next[index] = {
         ...next[index],
@@ -2280,9 +2342,14 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
         packSize: item.packSize,
         quantity: numberValue(item.quantity, 1),
         unitCost: invoiceUnitCost,
+        normalizedCost: supplierFormat.normalizedCost,
+        normalizedUnit: supplierFormat.baseUnit,
+        conversionReviewRequired: supplierFormat.conversionReviewRequired,
+        conversionReason: supplierFormat.conversionReason,
         department: primaryDepartment(item),
         departmentSplits: normalizeDepartmentSplits(item, item.department),
         aliases: [...aliases],
+        supplierFormats,
         supplierPrices,
         priceHistory,
       };
@@ -2296,9 +2363,14 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       packSize: item.packSize,
       quantity: numberValue(item.quantity, 1),
       unitCost: invoiceUnitCost,
+      normalizedCost: supplierFormat.normalizedCost,
+      normalizedUnit: supplierFormat.baseUnit,
+      conversionReviewRequired: supplierFormat.conversionReviewRequired,
+      conversionReason: supplierFormat.conversionReason,
       department: primaryDepartment(item),
       departmentSplits: normalizeDepartmentSplits(item, item.department),
       aliases: [],
+      supplierFormats: [{ ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id }],
       supplierPrices: [supplierEntry],
       priceHistory: [historyEntry],
     });
@@ -2511,6 +2583,9 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
   } else if (key.includes("elite fine foods") || key.includes("elite sales")) {
     parserName = "Elite Fine Foods parser";
     lines = parseEliteInvoiceRows(text);
+  } else if (key.includes("cheeseman") || key.includes("cheese man")) {
+    parserName = "Cheese Man parser";
+    lines = parseCheesemanInvoiceRows(text);
   } else {
     const supported = supplierParserStatus(detectedSupplier) === "Supported";
     parserName = supported && detectedSupplier ? `${detectedSupplier} parser` : "Generic parser";
@@ -2543,7 +2618,7 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
 }
 
 function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
-  return suppliers.map((supplier) => {
+  return activeSupplierRows(suppliers).map((supplier) => {
     const spend = invoices
       .filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange))
       .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
@@ -2981,6 +3056,13 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
       const currentRows = parseBackupValue(currentStorage[key], []);
       const importedRows = parseBackupValue(value, []);
       if (!Array.isArray(currentRows) || !Array.isArray(importedRows)) return;
+      if (key === "marginflow.suppliers") {
+        const rows = reconcileSuppliersForSync(currentRows, importedRows);
+        nextStorage[key] = JSON.stringify(rows);
+        summary.suppliersAdded = Math.max(0, rows.length - currentRows.length);
+        summary.suppliersSkipped = importedRows.length - summary.suppliersAdded;
+        return;
+      }
       const { rows, stats } = mergeArrayById(currentRows, importedRows, arrayKeys[key]);
       nextStorage[key] = JSON.stringify(rows);
       if (key === "marginflow.invoices") {
@@ -4175,12 +4257,20 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const approveInvoice = () => {
     if (!userCanAction(currentUser, "invoices", "approve")) return;
     if (!draft.items.length) return;
+    const validation = validateInvoiceLinesForApproval(draft.items, {
+      splitValidator: splitIsValid,
+      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+    });
+    if (!validation.valid) {
+      setDraft((current) => ({ ...current, status: validation.errors[0] || "Review invoice lines before confirming." }));
+      return;
+    }
     const invalidSplit = draft.items.find((item) => !splitIsValid(item));
     if (invalidSplit) {
       setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
       return;
     }
-    const supplier = draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
+    const supplier = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier)?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
     const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const invoice = prepareApprovedInvoice({
       id: draft.editingInvoiceId || uid(),
@@ -4353,7 +4443,25 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           />
         )}
         {active === "products" && <Products departmentNames={allowedDepartmentNames} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
-        {active === "suppliers" && <Suppliers creditNotes={creditNotes} invoices={invoices} permissions={permissionsByPage.suppliers} products={products} requestDelete={requestDelete} setCreditNotes={setCreditNotes} suppliers={suppliers} setSupplierDeliverySchedules={setSupplierDeliverySchedules} setSuppliers={setSuppliers} supplierDeliverySchedules={supplierDeliverySchedules} supplierSpend={supplierSpend} />}
+        {active === "suppliers" && (
+          <Suppliers
+            creditNotes={creditNotes}
+            invoiceDayStatusOverrides={invoiceDayStatusOverrides}
+            invoices={invoices}
+            permissions={permissionsByPage.suppliers}
+            products={products}
+            requestDelete={requestDelete}
+            setCreditNotes={setCreditNotes}
+            setInvoiceDayStatusOverrides={setInvoiceDayStatusOverrides}
+            setInvoices={setInvoices}
+            setProducts={setProducts}
+            suppliers={suppliers}
+            setSupplierDeliverySchedules={setSupplierDeliverySchedules}
+            setSuppliers={setSuppliers}
+            supplierDeliverySchedules={supplierDeliverySchedules}
+            supplierSpend={supplierSpend}
+          />
+        )}
         {active === "stocktake" && (
           <Stocktake
             department={department}
@@ -4488,7 +4596,7 @@ function weekDatesFromStart(weekStart) {
 }
 
 function sameSupplier(left = "", right = "") {
-  return normalizeHeader(left) === normalizeHeader(right);
+  return sameSupplierIdentity(left, right);
 }
 
 function supplierScheduleFor(supplier, schedules = [], invoices = []) {
@@ -4561,14 +4669,34 @@ function departmentPurchaseTotalForDate(invoices, date, selectedDepartment) {
     .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
 }
 
-function invoiceControlDailySummaries({ invoices, sales, weekDates }) {
+function invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows = [], scope = "Visible suppliers" }) {
   return weekDates.map((date) => {
-    const purchases = departmentPurchaseTotalForDate(invoices, date, "All departments");
-    const makeIn = departmentPurchaseTotalForDate(invoices, date, "Kitchen Made");
-    const boughtIn = departmentPurchaseTotalForDate(invoices, date, "Bought In");
+    const visibleCells = trackerRows.flatMap((row) => row.cells || []).filter((cell) => cell.date === date);
+    const visibleInvoices = visibleCells.map((cell) => cell.invoice).filter(Boolean);
+    const relevantInvoices = scope === "Visible suppliers" && trackerRows.length
+      ? [...new Map(visibleInvoices.map((invoice) => [invoice.id || `${invoice.supplier}-${invoice.invoiceNumber}-${invoice.date}`, invoice])).values()]
+      : invoices.filter((invoice) => invoice.date === date);
+    const purchaseTotalForDepartment = (selectedDepartment) => relevantInvoices
+      .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
+    const purchases = purchaseTotalForDepartment("All departments");
+    const makeIn = purchaseTotalForDepartment("Kitchen Made");
+    const boughtIn = purchaseTotalForDepartment("Bought In");
     const salesTotals = salesTotalsForRange(sales, { start: date, end: date }, "All departments");
     const gp = salesTotals.netSales ? ((salesTotals.netSales - purchases) / salesTotals.netSales) * 100 : 0;
-    return { date, purchases, makeIn, boughtIn, sales: salesTotals.netSales, gp };
+    return {
+      date,
+      purchases,
+      makeIn,
+      boughtIn,
+      sales: salesTotals.netSales,
+      gp,
+      includedInvoiceCount: relevantInvoices.length,
+      supplierCount: new Set(relevantInvoices.map((invoice) => invoice.supplier)).size,
+      receivedCount: scope === "Visible suppliers" ? visibleCells.filter((cell) => cell.state === "received").length : relevantInvoices.length,
+      expectedCount: visibleCells.filter((cell) => cell.state === "expected").length,
+      missingCount: visibleCells.filter((cell) => cell.state === "missing").length,
+      notOrderedCount: visibleCells.filter((cell) => cell.state === "not_ordered").length,
+    };
   });
 }
 
@@ -4884,7 +5012,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const [manualMode, setManualMode] = useState("Simple Mode");
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
-  const defaultManualSupplier = suppliers[0]?.name || draft.supplier || "";
+  const visibleSuppliers = activeSupplierRows(suppliers);
+  const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
   const createManualDraft = () => ({
     supplier: defaultManualSupplier,
@@ -4937,8 +5066,29 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
   const createSupplier = () => {
     if (!permissions.canAdd) return;
+    const duplicateCandidates = findSupplierDuplicateCandidates(suppliers, draft.supplier, { includeDeleted: true });
+    if (duplicateCandidates.length) {
+      const candidate = duplicateCandidates[0];
+      setDraft((current) => ({
+        ...current,
+        supplier: candidate.deleted ? current.supplier : candidate.supplier.name,
+        items: candidate.deleted ? current.items : propagateInvoiceSupplierToLines(current.items, candidate.supplier.name, current.supplier),
+        status: candidate.deleted
+          ? `${current.supplier} was deleted or merged before. Select the canonical supplier instead.`
+          : `Using existing supplier ${candidate.supplier.name}.`,
+      }));
+      return;
+    }
     setSuppliers((current) => ensureSupplierList(current, draft.supplier));
     setDraft((current) => ({ ...current, status: `${current.supplier} created` }));
+  };
+
+  const setDraftSupplier = (supplier) => {
+    setDraft((current) => ({
+      ...current,
+      supplier,
+      items: propagateInvoiceSupplierToLines(current.items, supplier, current.supplier),
+    }));
   };
 
   const readInvoice = async () => {
@@ -4977,10 +5127,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
       if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
 
-      const supplier = payload.supplier || draft.supplier || "Unknown Supplier";
+      const supplier = canonicalSupplierForName(suppliers, payload.supplier || draft.supplier)?.name || payload.supplier || draft.supplier || "Unknown Supplier";
       const items = (payload.lines || []).map((line) => {
         const quantity = numberValue(line.quantity, 1);
-        const unitCost = numberValue(line.unitCost, 0);
+        const unitCost = extractedInvoiceUnitCost(line);
         return enrichInvoiceLine(
           {
             id: uid(),
@@ -4991,6 +5141,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
             supplier,
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
             source: "OpenAI",
+            sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [] },
           },
           products,
           aiSettings
@@ -5045,6 +5196,16 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }));
   };
 
+  const addDraftInvoiceLine = () => {
+    const supplier = draft.supplier || visibleSuppliers[0]?.name || "";
+    const department = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+    setDraft((current) => ({
+      ...current,
+      items: [...current.items, { ...emptyInvoiceLine(supplier, department), source: current.items.length ? "Manual review line" : "Manual line" }],
+      status: current.status === "Idle" ? "Manual review line added." : current.status,
+    }));
+  };
+
   const applySuggestion = (id) => {
     setDraft((current) => ({
       ...current,
@@ -5060,7 +5221,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
   const openManualInvoice = () => {
     if (!permissions.canAdd) return;
-    const supplier = draft.supplier || suppliers[0]?.name || "";
+    const supplier = draft.supplier || visibleSuppliers[0]?.name || "";
     const department = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
     setManualMode("Simple Mode");
     setManualDraft({
@@ -5077,7 +5238,14 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateManualField = (field, value) => {
-    setManualDraft((current) => ({ ...current, [field]: value }));
+    setManualDraft((current) => {
+      if (field !== "supplier") return { ...current, [field]: value };
+      return {
+        ...current,
+        supplier: value,
+        items: propagateInvoiceSupplierToLines(current.items, value, current.supplier),
+      };
+    });
   };
 
   const updateManualLine = (id, field, value) => {
@@ -5128,7 +5296,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
   const saveManualInvoice = () => {
     if (!permissions.canAdd && !permissions.canApprove) return;
-    const supplier = manualDraft.supplier?.trim() || "Unknown Supplier";
+    const supplier = canonicalSupplierForName(suppliers, manualDraft.supplier)?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
     const date = manualDraft.date || today();
     let items = [];
 
@@ -5158,6 +5326,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     }
 
     items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment));
+    const validation = validateInvoiceLinesForApproval(items, {
+      splitValidator: splitIsValid,
+      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+    });
+    if (!validation.valid) return;
     if (items.some((item) => !splitIsValid(item))) return;
 
     const invoice = prepareApprovedInvoice({
@@ -5188,7 +5361,14 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const updateEditInvoice = (field, value) => {
-    setEditDraft((current) => ({ ...current, [field]: value }));
+    setEditDraft((current) => {
+      if (field !== "supplier") return { ...current, [field]: value };
+      return {
+        ...current,
+        supplier: value,
+        items: propagateInvoiceSupplierToLines(current.items || [], value, current.supplier),
+      };
+    });
   };
 
   const updateEditLine = (id, field, value) => {
@@ -5227,7 +5407,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   };
 
   const addEditLine = () => {
-    const supplier = editDraft?.supplier || suppliers[0]?.name || "Unknown Supplier";
+    const supplier = editDraft?.supplier || visibleSuppliers[0]?.name || "Unknown Supplier";
     setEditDraft((current) => ({
       ...current,
       items: [
@@ -5240,8 +5420,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const saveEditInvoice = () => {
     if (!permissions.canEdit) return;
     if (!editDraft) return;
-    const supplier = editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
+    const supplier = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier)?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
     const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
+    const validation = validateInvoiceLinesForApproval(items, {
+      splitValidator: splitIsValid,
+      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+    });
+    if (!validation.valid) return;
     if (items.some((item) => !splitIsValid(item))) return;
     const cleaned = prepareApprovedInvoice({
       ...editDraft,
@@ -5290,7 +5475,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           </label>}
         </div>
         <div className="invoice-meta">
-          <SupplierSelector id="supplier-list" suppliers={suppliers} value={draft.supplier} onChange={(value) => setDraft({ ...draft, supplier: value })} />
+          <SupplierSelector id="supplier-list" suppliers={suppliers} value={draft.supplier} onChange={setDraftSupplier} />
           <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
           <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
         </div>
@@ -5327,6 +5512,11 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           updateLine={updateDraftItem}
           updateSplit={updateDraftSplit}
         />
+        {permissions.canAdd && (
+          <div className="button-row left tight panel-inline-actions">
+            <button className="ghost" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add line</button>
+          </div>
+        )}
       </Panel>
 
       <Panel title="Approved invoices">
@@ -5470,12 +5660,20 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
 
 
 function SupplierSelector({ id, label = "Supplier", suppliers, value, onChange }) {
+  const options = activeSupplierRows(suppliers)
+    .filter((supplier) => {
+      const term = String(value || "").trim();
+      if (!term) return true;
+      return supplier.name.toLowerCase().includes(term.toLowerCase()) || supplierIdentityKey(supplier.name).includes(supplierIdentityKey(term));
+    })
+    .sort((left, right) => supplierSortKey(left, value).localeCompare(supplierSortKey(right, value)))
+    .slice(0, 20);
   return (
     <label>
       {label}
       <input list={id} value={value || ""} onChange={(event) => onChange(event.target.value)} />
       <datalist id={id}>
-        {suppliers.map((supplier) => <option key={supplier.id || supplier.name} value={supplier.name} />)}
+        {options.map((supplier) => <option key={supplier.id || supplier.name} value={supplier.name} />)}
       </datalist>
     </label>
   );
@@ -5637,11 +5835,13 @@ function InvoiceControlCentre({
   const [weekStart, setWeekStart] = useState(toIsoDate(startOfWeek(parseDate(today()), "Monday")));
   const [statusFilter, setStatusFilter] = useState("All suppliers");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
+  const [summaryScope, setSummaryScope] = useState("Visible suppliers");
+  const [summaryMode, setSummaryMode] = useState("Purchases + GP");
   const [selectedCell, setSelectedCell] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
   const weekDates = weekDatesFromStart(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
-  const activeSuppliers = suppliers.filter((supplier) => supplier.active !== false);
+  const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
 
   const rows = activeSuppliers.map((supplier) => {
@@ -5678,7 +5878,7 @@ function InvoiceControlCentre({
     + weekDates.slice(1).reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made") + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
   const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
   const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
-  const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates });
+  const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
 
   const markOverride = (supplier, date, statusOverride) => {
     if (!permissions.canEdit) return;
@@ -5789,17 +5989,43 @@ function InvoiceControlCentre({
             </div>
           ) : <EmptyState />}
         </Panel>
-        <Panel title="Daily summary">
+        <Panel title="Daily summary" action={summaryScope}>
+          <div className="daily-summary-controls">
+            <p className="helper-text">Summary is calculated from {summaryScope === "Visible suppliers" ? "the suppliers currently visible in the tracker" : "all invoices in this week"}. Sales are included only where sales entries exist.</p>
+            <div className="form-grid six compact-form">
+              <label>Scope<select value={summaryScope} onChange={(event) => setSummaryScope(event.target.value)}>
+                <option>Visible suppliers</option>
+                <option>All suppliers</option>
+              </select></label>
+              <label>View<select value={summaryMode} onChange={(event) => setSummaryMode(event.target.value)}>
+                <option>Purchases + GP</option>
+                <option>Operations</option>
+              </select></label>
+            </div>
+          </div>
           <div className="daily-summary-grid">
             {dailySummaries.map((day) => (
               <div className="daily-summary-card" key={day.date}>
                 <strong>{weekdayShortLabels[(parseDate(day.date).getDay() + 6) % 7]}</strong>
                 <span>{formatRangeDate(day.date)}</span>
-                <p>Purchases {money(day.purchases)}</p>
-                <p>Make-in {money(day.makeIn)}</p>
-                <p>Bought-in {money(day.boughtIn)}</p>
-                <p>Sales {money(day.sales)}</p>
-                <p>GP est. {day.sales ? percent(day.gp) : "-"}</p>
+                {summaryMode === "Operations" ? (
+                  <>
+                    <p>Received {day.receivedCount}</p>
+                    <p>Expected {day.expectedCount}</p>
+                    <p>Missing {day.missingCount}</p>
+                    <p>Not ordered {day.notOrderedCount}</p>
+                    <p>Suppliers {day.supplierCount}</p>
+                  </>
+                ) : (
+                  <>
+                    <p>Invoices {day.includedInvoiceCount}</p>
+                    <p>Purchases {money(day.purchases)}</p>
+                    <p>Make-in {money(day.makeIn)}</p>
+                    <p>Bought-in {money(day.boughtIn)}</p>
+                    <p>Sales {money(day.sales)}</p>
+                    <p>GP est. {day.sales ? percent(day.gp) : "-"}</p>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -5900,7 +6126,8 @@ function InvoiceControlCell({ cell, onClick }) {
 
 
 function Products({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
-  const empty = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
+  const visibleSuppliers = activeSupplierRows(suppliers);
+  const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
   const [bulkRows, setBulkRows] = useState([emptyBulkRow(), emptyBulkRow()]);
@@ -5914,22 +6141,56 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
   const productPayload = (row) => {
     const aliases = String(row.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
     const unitCost = numberValue(row.unitCost);
-    const supplier = row.supplier || suppliers[0]?.name || "";
+    const supplier = row.supplier || visibleSuppliers[0]?.name || "";
+    const conversion = normalisedCostForPrice(unitCost, row.packSize, row);
+    const supplierFormat = {
+      supplier,
+      packSize: row.packSize || "",
+      purchaseUnitCost: unitCost,
+      quantity: numberValue(row.quantity, 1),
+      date: today(),
+      baseQuantity: conversion.baseQuantity,
+      baseUnit: conversion.baseUnit,
+      normalizedCost: conversion.normalizedCost,
+      conversionConfidence: conversion.confidence,
+      conversionReviewRequired: conversion.reviewRequired,
+      conversionReason: conversion.reason,
+    };
     return {
       ...row,
       supplier,
       aliases,
       unitCost,
       quantity: numberValue(row.quantity, 1),
-      supplierPrices: [{ supplier, price: unitCost, date: today() }],
-      priceHistory: [{ date: today(), supplier, price: unitCost }],
+      baseQuantity: row.baseQuantity || conversion.baseQuantity,
+      baseUnit: row.baseUnit || conversion.baseUnit,
+      normalizedCost: conversion.normalizedCost,
+      normalizedUnit: conversion.baseUnit,
+      conversionReviewRequired: conversion.reviewRequired,
+      conversionReason: conversion.reason,
+      supplierFormats: [supplierFormat],
+      supplierPrices: [{ supplier, price: unitCost, packSize: row.packSize || "", date: today(), normalizedCost: conversion.normalizedCost, normalizedUnit: conversion.baseUnit }],
+      priceHistory: [{ date: today(), supplier, price: unitCost, packSize: row.packSize || "", normalizedCost: conversion.normalizedCost, normalizedUnit: conversion.baseUnit }],
     };
   };
 
   const saveProduct = () => {
     if (!form.name.trim()) return;
     const payload = productPayload(form);
-    setProducts((current) => current.map((product) => (product.id === editingId ? { ...product, ...payload, id: editingId, priceHistory: [...(product.priceHistory || []), { date: today(), supplier: payload.supplier, price: payload.unitCost }] } : product)));
+    setProducts((current) => current.map((product) => (product.id === editingId ? {
+      ...product,
+      ...payload,
+      id: editingId,
+      supplierFormats: [...(product.supplierFormats || []).filter((entry) => entry.supplier !== payload.supplier), ...(payload.supplierFormats || [])],
+      priceHistory: [...(product.priceHistory || []), {
+        date: today(),
+        supplier: payload.supplier,
+        price: payload.unitCost,
+        packSize: payload.packSize,
+        normalizedCost: payload.normalizedCost,
+        normalizedUnit: payload.normalizedUnit,
+      }],
+    } : product)));
     setForm(empty);
     setEditingId("");
     setModalOpen(false);
@@ -5955,7 +6216,7 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
 
   const importProducts = async (file) => {
     if (!file) return;
-    const imported = parseProductsCsv(await file.text(), suppliers, departmentNames);
+    const imported = parseProductsCsv(await file.text(), visibleSuppliers, departmentNames);
     if (!imported.length) {
       setStatus("CSV import found no product rows.");
       return;
@@ -5999,9 +6260,11 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
             { key: "name", label: "Product" },
             { key: "supplier", label: "Current supplier" },
             { key: "unitCost", label: "Current cost", render: (value) => money(value) },
+            { key: "normalizedCostLabel", label: "Normalised cost" },
             { key: "cheapestSupplier", label: "Cheapest supplier" },
-            { key: "priceDifference", label: "Price difference", render: (value) => (value > 0 ? `+${percent(value)}` : percent(value)) },
+            { key: "priceDifferenceLabel", label: "Price difference" },
             { key: "packSize", label: "Pack" },
+            { key: "packReview", label: "Pack review" },
             { key: "department", label: "Department" },
             { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
           ]}
@@ -6040,7 +6303,7 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
                 </div>
               </div>
             )}
-            <BulkProductsTable rows={bulkRows} setRows={setBulkRows} suppliers={suppliers} departmentNames={departmentNames} updateRow={updateBulkRow} />
+            <BulkProductsTable rows={bulkRows} setRows={setBulkRows} suppliers={visibleSuppliers} departmentNames={departmentNames} updateRow={updateBulkRow} />
             <div className="button-row left">
               <button className="ghost" onClick={() => setBulkRows((current) => [...current, emptyBulkRow()])} type="button"><Plus size={16} />Add Row</button>
               <button className="ghost" onClick={() => setModalOpen(false)} type="button">Cancel</button>
@@ -6053,10 +6316,12 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
         <EditModal title="Edit product" onCancel={() => setModalOpen(false)} onSave={saveProduct} saveLabel="Save Product">
           <div className="form-grid six">
             <Field label="Product name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
+            <label>Supplier<select value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })}>{visibleSuppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
             <Field label="Pack size" value={form.packSize} onChange={(value) => setForm({ ...form, packSize: value })} />
             <Field label="Quantity" type="number" value={form.quantity} onChange={(value) => setForm({ ...form, quantity: value })} />
             <Field label="Unit cost" type="number" value={form.unitCost} onChange={(value) => setForm({ ...form, unitCost: value })} />
+            <Field label="Base quantity" type="number" value={form.baseQuantity || ""} onChange={(value) => setForm({ ...form, baseQuantity: value })} />
+            <Field label="Base unit" value={form.baseUnit || ""} onChange={(value) => setForm({ ...form, baseUnit: value })} />
             <label>Department<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
             <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
           </div>
@@ -6090,7 +6355,7 @@ function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRo
   );
 }
 
-function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, suppliers, setSupplierDeliverySchedules = () => {}, setSuppliers, supplierDeliverySchedules = [], supplierSpend }) {
+function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, setInvoiceDayStatusOverrides = () => {}, setInvoices = () => {}, setProducts = () => {}, suppliers, setSupplierDeliverySchedules = () => {}, setSuppliers, supplierDeliverySchedules = [], supplierSpend }) {
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -6101,8 +6366,9 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [activeSupplierTab, setActiveSupplierTab] = useState("Details");
+  const [duplicateReview, setDuplicateReview] = useState(null);
   const supplierIssues = combinedSupplierIssues(creditNotes, invoices);
-  const supplierRows = supplierSpend.map((supplier) => {
+  const supplierRows = supplierSpend.filter((supplier) => !isSupplierTombstone(supplier)).map((supplier) => {
     const summary = supplierIssueSummary(supplierIssues, supplier.name);
     const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
     return { ...supplier, deliveryDaysLabel: schedule.deliveryDays.map((day) => day.slice(0, 3)).join(", ") || "-", openIssues: summary.openIssues, valueToChase: summary.valueToChase };
@@ -6129,8 +6395,23 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
       }))
   ));
 
-  const saveSupplier = () => {
+  const saveSupplier = (forceCreate = false) => {
     if (!form.name.trim()) return;
+    const duplicateCandidates = findSupplierDuplicateCandidates(suppliers, form.name, { excludeId: editingId, includeDeleted: true });
+    const protectedDuplicate = duplicateCandidates.find((candidate) => candidate.exact && candidate.deleted);
+    if (protectedDuplicate) {
+      setStatus(`${form.name} was deleted or merged before. Use the existing canonical supplier instead of recreating it.`);
+      setDuplicateReview({ mode: editingId ? "edit" : "create", payload: { ...form, id: editingId }, candidates: duplicateCandidates });
+      return;
+    }
+    if (!forceCreate && duplicateCandidates.length) {
+      setDuplicateReview({
+        mode: editingId ? "edit" : "create",
+        payload: { ...form, id: editingId },
+        candidates: duplicateCandidates,
+      });
+      return;
+    }
     const payload = {
       id: editingId,
       name: form.name,
@@ -6144,6 +6425,35 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
     setForm(empty);
     setEditingId("");
     setModalOpen(false);
+    setDuplicateReview(null);
+  };
+
+  const mergeCurrentSupplierInto = (targetSupplier) => {
+    if (!permissions.canEdit || !editingId || !targetSupplier) return;
+    const sourceSupplier = suppliers.find((supplier) => supplier.id === editingId);
+    if (!sourceSupplier || sourceSupplier.id === targetSupplier.id) return;
+    const merged = mergeSupplierReferences({
+      sourceSupplier,
+      targetSupplier,
+      suppliers,
+      invoices,
+      products,
+      creditNotes,
+      supplierDeliverySchedules,
+      invoiceDayStatusOverrides,
+      idFactory: uid,
+    });
+    setSuppliers(merged.suppliers);
+    setInvoices(merged.invoices);
+    setProducts(merged.products);
+    setCreditNotes(merged.creditNotes);
+    setSupplierDeliverySchedules(merged.supplierDeliverySchedules);
+    setInvoiceDayStatusOverrides(merged.invoiceDayStatusOverrides);
+    setForm(empty);
+    setEditingId("");
+    setModalOpen(false);
+    setDuplicateReview(null);
+    setStatus(`${sourceSupplier.name} merged into ${targetSupplier.name}.`);
   };
 
   const saveBulkSuppliers = () => {
@@ -6152,7 +6462,12 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
       setStatus("Add at least one supplier name.");
       return;
     }
-    setSuppliers((current) => [...current, ...validRows.map((row) => ({ ...row, id: uid() }))]);
+    const duplicates = validRows.flatMap((row) => findSupplierDuplicateCandidates(suppliers, row.name, { includeDeleted: true }).map((candidate) => ({ row, candidate })));
+    if (duplicates.some((entry) => entry.candidate.exact)) {
+      setStatus(`Duplicate supplier found: ${duplicates.find((entry) => entry.candidate.exact).row.name}. Select the existing supplier or rename before saving.`);
+      return;
+    }
+    setSuppliers((current) => reconcileSuppliersForSync(current, validRows.map((row) => ({ ...row, id: uid() }))));
     setBulkRows([emptyBulkRow(), emptyBulkRow()]);
     setPendingImport([]);
     setStatus("");
@@ -6176,7 +6491,12 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
   };
 
   const confirmImport = () => {
-    setSuppliers((current) => [...current, ...pendingImport.map((row) => ({ ...row, id: uid() }))]);
+    const duplicates = pendingImport.flatMap((row) => findSupplierDuplicateCandidates(suppliers, row.name, { includeDeleted: true }).map((candidate) => ({ row, candidate })));
+    if (duplicates.some((entry) => entry.candidate.exact)) {
+      setStatus(`Import stopped: ${duplicates.find((entry) => entry.candidate.exact).row.name} already exists or was merged/deleted.`);
+      return;
+    }
+    setSuppliers((current) => reconcileSuppliersForSync(current, pendingImport.map((row) => ({ ...row, id: uid() }))));
     setPendingImport([]);
     setImportFileKey((current) => current + 1);
     setModalOpen(false);
@@ -6236,7 +6556,7 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
             { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
-          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "Are you sure you want to delete this supplier?", onConfirm: () => setSuppliers((current) => current.filter((supplier) => supplier.id !== id)) }) : null}
+          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
           onEdit={permissions.canEdit ? openSupplierModal : null}
           rows={supplierRows}
           toolbarAction={permissions.canAdd ? <button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button> : null}
@@ -6378,6 +6698,42 @@ function Suppliers({ creditNotes, invoices, permissions = permissionsForPage(rol
             />
           )}
         </EditModal>
+      )}
+      {duplicateReview && (
+        <AppModal
+          title="Possible duplicate supplier"
+          open={Boolean(duplicateReview)}
+          onClose={() => setDuplicateReview(null)}
+          footer={(
+            <>
+              <button className="ghost" onClick={() => setDuplicateReview(null)} type="button">Review name</button>
+              {duplicateReview.mode === "edit" && permissions.canEdit && (
+                <button className="ghost" onClick={() => mergeCurrentSupplierInto(duplicateReview.candidates.find((candidate) => !candidate.deleted)?.supplier || duplicateReview.candidates[0]?.supplier)} type="button">Merge into selected</button>
+              )}
+              {permissions.canAdd && !duplicateReview.candidates.some((candidate) => candidate.exact && candidate.deleted) && <button className="danger-button" onClick={() => saveSupplier(true)} type="button">Create anyway</button>}
+            </>
+          )}
+        >
+          <div className="modal-stack">
+            <p className="modal-copy">MarginFlow found suppliers with the same or very similar name. Use the existing supplier where possible to keep invoice history and price history clean.</p>
+            <div className="duplicate-list">
+              {duplicateReview.candidates.map((candidate) => (
+                <button
+                  className={candidate.deleted ? "duplicate-row muted" : "duplicate-row"}
+                  key={candidate.supplier.id || candidate.supplier.name}
+                  onClick={() => duplicateReview.mode === "edit" ? mergeCurrentSupplierInto(candidate.supplier) : (setForm({ ...form, name: candidate.supplier.name }), setDuplicateReview(null), setModalOpen(false))}
+                  type="button"
+                >
+                  <span>
+                    <strong>{candidate.supplier.name}</strong>
+                    <small>{candidate.exact ? "Exact match" : `${Math.round(candidate.similarity * 100)}% similar`}{candidate.deleted ? " · deleted/merged record" : ""}</small>
+                  </span>
+                  <Badge tone={candidate.deleted ? "gray" : candidate.exact ? "amber" : "green"}>{candidate.deleted ? "Protected" : "Use this"}</Badge>
+                </button>
+              ))}
+            </div>
+          </div>
+        </AppModal>
       )}
     </div>
   );
@@ -6675,7 +7031,8 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
 function Recipes({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
   const blankIngredient = () => ({ id: uid(), productId: "", productName: "", supplier: "", quantity: 1, unit: "", unitCost: 0, lineCost: 0 });
   const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", ingredients: [blankIngredient(), blankIngredient()] };
-  const emptyProduct = { name: "", supplier: suppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
+  const visibleSuppliers = activeSupplierRows(suppliers);
+  const emptyProduct = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);

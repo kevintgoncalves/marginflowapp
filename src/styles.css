@@ -1128,6 +1128,12 @@ td input, td select { min-width: 110px; }
   overflow: auto;
 }
 
+.daily-summary-controls {
+  display: grid;
+  gap: 10px;
+  padding: 14px 18px 0;
+}
+
 .daily-summary-card {
   min-width: 120px;
   padding: 12px;
@@ -1153,6 +1159,40 @@ td input, td select { min-width: 110px; }
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
+}
+
+.panel-inline-actions {
+  padding: 0 18px 18px;
+}
+
+.duplicate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.duplicate-row {
+  display: flex;
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: #111c31;
+  text-align: left;
+}
+
+.duplicate-row.muted {
+  opacity: 0.72;
+}
+
+.duplicate-row span,
+.duplicate-row strong,
+.duplicate-row small {
+  display: block;
+}
+
+.duplicate-row small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .weekday-toggle-row,

@@ -1,3 +1,5 @@
+import { invoiceUnitCostFromExtraction } from "../src/domain/invoiceParsing.js";
+
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
 
@@ -184,8 +186,9 @@ function normalizeInvoice(invoice, sourceText) {
   const normalizedLines = lines
     .map((line) => {
       const quantity = asNumber(line.quantity, 1);
-      const unitCost = asNumber(line.unitCost, 0);
-      const lineTotal = asNumber(line.lineTotal, quantity * unitCost);
+      const rawUnitCost = asNumber(line.unitCost, 0);
+      const lineTotal = asNumber(line.lineTotal, quantity * rawUnitCost);
+      const unitCost = invoiceUnitCostFromExtraction({ quantity, unitCost: rawUnitCost, lineTotal });
       const productName = asString(line.productName || line.product || line.name);
 
       return {
@@ -267,8 +270,9 @@ Rules:
 - Suggested department defaults to Kitchen Made unless clearly Bar, Bought In, Non-food or Excluded.
 
 Supplier-specific guidance:
-- TG Fruits invoices often contain lines like: DATE PRODUCT SIZE QTY PRICE VAT TOTAL, and PDF extraction may merge many rows onto one line.
+- TG Fruits invoices often contain lines like: DATE PRODUCT SIZE QTY PRICE VAT TOTAL, and PDF extraction may merge many rows onto one line. Do not put TOTAL into unitCost; unitCost must be TOTAL / QTY when necessary.
 - Albion Fine Foods, Woods, BNFS, Cheese Man and Coburn & Baker may use different column layouts. Detect rows by product description plus numeric values.
+- Cheese Man / Cheeseman rows often include description, pack/size, quantity, unit price and line value. Preserve cheese/dairy product descriptions and flag uncertain rows with lower confidence rather than inventing values.
 - Albion Fine Foods order pages contain both ORDER DATE and DELIVERY DATE. Use DELIVERY DATE as invoiceDate, never ORDER DATE or the browser print timestamp.
 - Products may have dates before them; ignore repeated dates unless it is the invoice date.
 
