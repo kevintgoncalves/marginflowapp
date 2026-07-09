@@ -1457,8 +1457,25 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
   }
 
   if (field === "productName") {
-    const enriched = enrichInvoiceLine(updated, products, matchingSettings);
-    updated = { ...enriched, productName: value };
+    const selectedProduct = productForEnteredName(products, value);
+    if (selectedProduct) {
+      updated = {
+        ...updated,
+        productName: selectedProduct.name,
+        matchedProductId: selectedProduct.id,
+        suggestedProductId: "",
+        suggestedProductName: "",
+        matchStatus: "Product selected from database",
+        matchConfidence: 1,
+        packSize: updated.packSize || selectedProduct.packSize || "",
+        unitCost: numberValue(updated.unitCost, 0) || numberValue(selectedProduct.unitCost, 0),
+        supplier: updated.supplier || selectedProduct.supplier || "",
+        department: updated.department || selectedProduct.department || departmentNames[0] || "Kitchen Made",
+      };
+    } else {
+      const enriched = enrichInvoiceLine(updated, products, matchingSettings);
+      updated = { ...enriched, productName: value };
+    }
   }
 
   return normalizeInvoiceLineForEditor(syncInvoiceLineDiscounts(updated, field), departmentNames);
@@ -1612,8 +1629,31 @@ function productAutocomplete(products, query, limit = 8) {
   const term = String(query || "").trim().toLowerCase();
   if (!term) return [];
   return products
-    .filter((product) => productAliases(product).some((alias) => alias.toLowerCase().includes(term)))
-    .slice(0, limit);
+    .map((product) => {
+      const scores = productAliases(product).map((alias) => {
+        const lowerAlias = alias.toLowerCase();
+        if (lowerAlias === term) return 100;
+        if (lowerAlias.startsWith(term)) return 90;
+        if (lowerAlias.includes(term)) return 75;
+        const similarity = productSimilarity(query, alias);
+        return similarity >= 0.45 ? Math.round(similarity * 70) : 0;
+      });
+      return { product, score: Math.max(...scores, 0) };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.product.name.localeCompare(b.product.name))
+    .slice(0, limit)
+    .map((entry) => entry.product);
+}
+
+function productOptionLabel(product) {
+  return [product.supplier, product.packSize, product.unitCost ? money(product.unitCost) : ""].filter(Boolean).join(" · ");
+}
+
+function productForEnteredName(products, value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (!key) return null;
+  return products.find((product) => productAliases(product).some((alias) => alias.toLowerCase() === key)) || null;
 }
 
 function recipeAutocomplete(recipes, query, limit = 8) {
@@ -5506,6 +5546,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           applySuggestion={applySuggestion}
           departmentNames={departmentNames}
           items={draft.items}
+          products={products}
           removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
           removeSplit={removeDraftSplit}
           setDepartmentMode={setDraftDepartmentMode}
@@ -5584,6 +5625,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
               addSplit={addEditSplit}
               departmentNames={departmentNames}
               items={editDraft.items || []}
+              products={products}
               removeLine={(id) => setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== id) }))}
               removeSplit={removeEditSplit}
               setDepartmentMode={setEditDepartmentMode}
@@ -5642,6 +5684,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
                 addSplit={addManualSplit}
                 departmentNames={departmentNames}
                 items={manualDraft.items}
+                products={products}
                 removeLine={removeManualInvoiceLine}
                 removeSplit={removeManualSplit}
                 setDepartmentMode={setManualDepartmentMode}
@@ -5705,6 +5748,7 @@ function InvoiceLineEditor({
   applySuggestion,
   departmentNames,
   items,
+  products = [],
   removeLine,
   removeSplit,
   setDepartmentMode,
@@ -5724,10 +5768,23 @@ function InvoiceLineEditor({
           {items.map((item) => {
             const status = invoiceLineStatus(item);
             const netTotal = invoiceEditorNetLineTotal(item);
+            const productListId = `invoice-product-options-${item.id}`;
+            const productMatches = productAutocomplete(products, item.productName, 12);
             return (
               <tr key={item.id}>
                 <td>
-                  <input title={item.productName || ""} value={item.productName || ""} onChange={(event) => updateLine(item.id, "productName", event.target.value)} />
+                  <input
+                    autoComplete="off"
+                    list={productListId}
+                    title={item.productName || ""}
+                    value={item.productName || ""}
+                    onChange={(event) => updateLine(item.id, "productName", event.target.value)}
+                  />
+                  <datalist id={productListId}>
+                    {productMatches.map((product) => (
+                      <option key={product.id} label={productOptionLabel(product)} value={product.name} />
+                    ))}
+                  </datalist>
                   {item.suggestedProductName && applySuggestion && (
                     <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
                       Did you mean: {item.suggestedProductName}?
