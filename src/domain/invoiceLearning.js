@@ -1,5 +1,7 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
 import { normalizeSupplierDescription, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
+import { sameSupplierIdentity } from "./supplierIdentity.js";
+import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 
 function stableId(prefix, parts = []) {
   const key = parts.map((part) => normalizeHeader(part)).filter(Boolean).join("-");
@@ -7,44 +9,96 @@ function stableId(prefix, parts = []) {
 }
 
 function sameSupplier(mapping = {}, supplier = "") {
-  return normalizeHeader(mapping.supplierName || mapping.supplier || "") === normalizeHeader(supplier);
+  const mappingName = mapping.supplierName || mapping.supplier || "";
+  return normalizeHeader(mappingName) === normalizeHeader(supplier) || sameSupplierIdentity(mappingName, supplier);
 }
 
-function lineAllocation(line = {}) {
+function sameScope(mapping = {}, { companyId = "", locationId = "", supplierId = "", supplierName = "" } = {}) {
+  const mappingCompanyId = mapping.companyId || mapping.company_id || "";
+  const mappingLocationId = mapping.locationId || mapping.location_id || "";
+  const mappingSupplierId = mapping.supplierId || mapping.supplier_id || "";
+  const companyMatches = !companyId || !mappingCompanyId || mappingCompanyId === companyId;
+  const locationMatches = !locationId || !mappingLocationId || mappingLocationId === locationId;
+  const supplierMatches = supplierId && mappingSupplierId
+    ? mappingSupplierId === supplierId
+    : (supplierId && mappingSupplierId === supplierId) || sameSupplier(mapping, supplierName);
+  return companyMatches && locationMatches && supplierMatches;
+}
+
+function departmentForName(departments = [], name = "") {
+  return departments.find((department) => normalizeHeader(department.name) === normalizeHeader(name)) || null;
+}
+
+function departmentNameForId(departments = [], id = "") {
+  return departments.find((department) => department.id === id)?.name || "";
+}
+
+function lineAllocation(line = {}, departments = []) {
   const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
   const allocationMode = line.departmentMode === "Split" || splits.length > 1 ? "Split" : "Single";
-  const department = allocationMode === "Split" ? "" : (line.department || splits[0]?.department || "");
+  const splitMode = allocationMode === "Split";
+  const department = splitMode ? "" : (line.department || departmentNameForId(departments, line.departmentId || line.department_id) || splits[0]?.department || "");
+  const departmentId = splitMode ? "" : (line.departmentId || line.department_id || departmentForName(departments, department)?.id || "");
   return {
-    allocationMode,
+    allocationMode: splitMode ? "split" : "department",
+    departmentId,
     department,
-    departmentSplits: allocationMode === "Split"
+    departmentSplits: splitMode
       ? splits.map((split, index) => ({
         id: split.id || `${line.id || "line"}-split-${index}`,
+        departmentId: split.departmentId || split.department_id || departmentForName(departments, split.department)?.id || "",
         department: split.department,
         percentage: numberValue(split.percentage, 0),
       }))
-      : [{ id: `${line.id || "line"}-single`, department, percentage: 100 }],
+      : [{ id: `${line.id || "line"}-single`, departmentId, department, percentage: 100 }],
   };
 }
 
-function mappingKeyForLine(supplier, line = {}) {
+function mappingKeyForLine({ companyId = "", supplierId = "", supplierName = "", line = {} } = {}) {
   const code = normalizeSupplierProductCode(line.supplierProductCode);
-  if (code) return `code:${normalizeHeader(supplier)}:${code}`;
+  const scope = [companyId || "local", supplierId || normalizeHeader(supplierName)].filter(Boolean).join(":");
+  if (code) return `code:${scope}:${code}`;
   const description = normalizeSupplierDescription(line.rawDescription || line.productName);
-  return description ? `description:${normalizeHeader(supplier)}:${description}` : "";
+  const unit = normalizeHeader(line.unitOfMeasure || line.unit || "");
+  const packSize = normalizeHeader(line.packSize || "");
+  return description ? `description:${scope}:${description}:${unit}:${packSize}` : "";
 }
 
 function valuesEqual(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
+function comparableSplits(splits = []) {
+  return (Array.isArray(splits) ? splits : [])
+    .map((split) => ({
+      departmentId: split.departmentId || split.department_id || "",
+      department: normalizeHeader(split.department || ""),
+      percentage: numberValue(split.percentage, 0),
+    }))
+    .sort((left, right) => `${left.departmentId}-${left.department}`.localeCompare(`${right.departmentId}-${right.department}`));
+}
+
+function sameAllocation(left = {}, right = {}) {
+  return left.allocationMode === right.allocationMode
+    && (left.departmentId || "") === (right.departmentId || "")
+    && normalizeHeader(left.department || "") === normalizeHeader(right.department || "")
+    && valuesEqual(comparableSplits(left.departmentSplits), comparableSplits(right.departmentSplits));
+}
+
 export function learnSupplierProductMappings({
   mappings = [],
   invoice = {},
   products = [],
+  companyId = "",
+  locationId = "",
+  supplierId = "",
+  supplierName = "",
+  departments = [],
+  storageTarget = "snapshot",
   now = new Date().toISOString(),
 } = {}) {
-  const supplier = invoice.supplier || "";
+  const supplier = supplierName || invoice.supplier || "";
+  const resolvedSupplierId = supplierId || invoice.supplierId || invoice.supplier_id || "";
   const next = mappings.map((mapping) => ({ ...mapping }));
   const learned = [];
   if (!supplier) return { mappings: next, learned };
@@ -52,32 +106,53 @@ export function learnSupplierProductMappings({
   (invoice.items || invoice.lines || []).forEach((line) => {
     const productId = line.matchedProductId || line.productId || "";
     if (!productId || line.forgetLearnedRule || line.matchStatus === "Manual invoice") return;
-    const key = mappingKeyForLine(supplier, line);
+    const key = mappingKeyForLine({ companyId, supplierId: resolvedSupplierId, supplierName: supplier, line });
     if (!key) return;
 
     const code = normalizeSupplierProductCode(line.supplierProductCode);
     const description = normalizeSupplierDescription(line.rawDescription || line.productName);
-    const allocation = lineAllocation(line);
+    const unit = normalizeHeader(line.unitOfMeasure || line.unit || "");
+    const packSize = normalizeHeader(line.packSize || "");
+    const allocation = lineAllocation(line, departments);
     const product = products.find((candidate) => candidate.id === productId) || {};
     const existingIndex = next.findIndex((mapping) => mapping.mappingKey === key || (
-      sameSupplier(mapping, supplier)
+      sameScope(mapping, { companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier })
       && (code
         ? normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode) === code
-        : normalizeSupplierDescription(mapping.normalizedSupplierDescription || mapping.supplierDescription) === description)
+        : normalizeSupplierDescription(mapping.normalizedSupplierDescription || mapping.supplierDescription) === description
+          && normalizeHeader(mapping.unitOfMeasure || mapping.unit || mapping.unit_of_measure || "") === unit
+          && normalizeHeader(mapping.packSize || mapping.pack_size || "") === packSize)
     ));
     const existing = existingIndex >= 0 ? next[existingIndex] : null;
     const sameDecision = existing
       && existing.productId === productId
-      && existing.allocationMode === allocation.allocationMode
-      && existing.department === allocation.department
-      && valuesEqual(existing.departmentSplits, allocation.departmentSplits);
+      && sameAllocation(existing, allocation);
     const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + 1 : 1;
     const autoApply = code ? true : confirmationCount >= 2 || line.rememberSupplierMapping === true;
+    invoiceLearningDebug("save-start", {
+      companyId,
+      locationId,
+      supplierId: resolvedSupplierId,
+      supplierName: supplier,
+      invoiceId: invoice.id,
+      invoiceLineId: line.id,
+      supplierProductCode: line.supplierProductCode || "",
+      normalizedSupplierProductCode: code,
+      rawDescription: line.rawDescription || line.productName || "",
+      normalizedDescription: description,
+      productId,
+      departmentId: allocation.departmentId,
+      department: allocation.department,
+      allocationMode: allocation.allocationMode,
+      hasSplit: allocation.allocationMode === "split",
+    });
     const row = {
       ...(existing || {}),
-      id: existing?.id || stableId("spm", [supplier, code || description]),
+      id: existing?.id || stableId("spm", [companyId || "local", resolvedSupplierId || supplier, code || description]),
       mappingKey: key,
-      supplierId: line.supplierId || invoice.supplierId || existing?.supplierId || "",
+      companyId: companyId || existing?.companyId || "",
+      locationId: locationId || existing?.locationId || "",
+      supplierId: line.supplierId || resolvedSupplierId || existing?.supplierId || "",
       supplierName: supplier,
       supplierProductCode: line.supplierProductCode || existing?.supplierProductCode || "",
       normalizedSupplierProductCode: code,
@@ -108,12 +183,21 @@ export function learnSupplierProductMappings({
       next.forEach((mapping, index) => {
         if (index === (existingIndex >= 0 ? existingIndex : next.length - 1)) return;
         if (mapping.active === false) return;
-        if (sameSupplier(mapping, supplier) && normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode) === code) {
+        if (sameScope(mapping, { companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier }) && normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode) === code) {
           next[index] = { ...mapping, active: false, autoApply: false, supersededByMappingId: row.id, updatedAt: now };
         }
       });
     }
 
+    invoiceLearningDebug("mapping-saved", {
+      mappingId: row.id,
+      storageTarget,
+      companyId: row.companyId,
+      supplierId: row.supplierId,
+      normalizedSupplierProductCode: row.normalizedSupplierProductCode,
+      allocationMode: row.allocationMode,
+      departmentId: row.departmentId,
+    });
     learned.push(row);
   });
 

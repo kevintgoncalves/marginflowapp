@@ -121,7 +121,7 @@ test("learning records Kitchen, Bar, Bought In and Split decisions only from sav
   assert.equal(learned.find((mapping) => mapping.supplierProductCode === "7742").department, "Bar");
   assert.equal(learned.find((mapping) => mapping.supplierProductCode === "100").department, "Kitchen Made");
   assert.equal(learned.find((mapping) => mapping.supplierProductCode === "200").department, "Bought In");
-  assert.equal(learned.find((mapping) => mapping.supplierProductCode === "300").allocationMode, "Split");
+  assert.equal(learned.find((mapping) => mapping.supplierProductCode === "300").allocationMode, "split");
 });
 
 test("corrected mapping supersedes the old active exact-code mapping", () => {
@@ -137,7 +137,7 @@ test("corrected mapping supersedes the old active exact-code mapping", () => {
   }).mappings;
   const active = corrected.filter((mapping) => mapping.active !== false && mapping.supplierProductCode === "300");
   assert.equal(active.length, 1);
-  assert.equal(active[0].allocationMode, "Split");
+  assert.equal(active[0].allocationMode, "split");
 });
 
 test("forgetting a rule stops automatic application", () => {
@@ -166,4 +166,195 @@ test("correction history is idempotent for repeated saves", () => {
   const once = correctionHistoryForInvoice({ invoice });
   const twice = correctionHistoryForInvoice({ existingCorrections: once, invoice });
   assert.equal(once.length, twice.length);
+});
+
+test("reported bug: Bar department learning survives serialized persistence and reapplies by supplier code", () => {
+  const departments = [{ id: "d-bar", name: "Bar" }, { id: "d-kit", name: "Kitchen Made" }];
+  const saved = learnSupplierProductMappings({
+    mappings: [],
+    invoice: {
+      id: "inv-1",
+      supplier: "TG Fruits",
+      items: [{
+        id: "line-1",
+        supplierProductCode: "7742",
+        rawDescription: "LIMES 4KG",
+        productName: "Limes",
+        matchedProductId: "p3",
+        departmentId: "d-bar",
+        department: "Bar",
+        departmentMode: "Single",
+        departmentSplits: [{ departmentId: "d-bar", department: "Bar", percentage: 100 }],
+      }],
+    },
+    products,
+    companyId: "c1",
+    locationId: "loc-1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    departments,
+  }).mappings;
+  const reloadedMappings = JSON.parse(JSON.stringify(saved));
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
+    existingProducts: products,
+    supplierMappings: reloadedMappings,
+  });
+  assert.equal(match.matchedProductId, "p3");
+  assert.equal(match.departmentId, "d-bar");
+  assert.equal(match.department, "Bar");
+  assert.equal(match.allocationSource, "learned_mapping");
+  assert.equal(match.needsReview, false);
+});
+
+test("application restart does not require reusing the in-memory mapping object", () => {
+  const firstServiceMappings = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-1", supplier: "TG Fruits", items: [{ id: "line-1", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Bar", departmentMode: "Single", departmentSplits: [{ department: "Bar", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const persistedJson = JSON.stringify({ supplierProductMappings: firstServiceMappings });
+  const secondServiceState = JSON.parse(persistedJson);
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: secondServiceState.supplierProductMappings,
+  });
+  assert.equal(match.matchedProductId, "p3");
+  assert.equal(match.department, "Bar");
+});
+
+test("same supplier product code from a different supplier does not reuse learned department", () => {
+  const mappings = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-1", supplier: "TG Fruits", items: [{ id: "line-1", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Bar", departmentMode: "Single", departmentSplits: [{ department: "Bar", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-other",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: JSON.parse(JSON.stringify(mappings)),
+  });
+  assert.equal(match.matchedProductId, null);
+  assert.equal(match.productMatchSource, "no_product_match");
+});
+
+test("department correction updates the active mapping instead of creating a conflicting rule", () => {
+  const first = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-1", supplier: "TG Fruits", items: [{ id: "line-1", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Bar", departmentMode: "Single", departmentSplits: [{ department: "Bar", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const corrected = learnSupplierProductMappings({
+    mappings: JSON.parse(JSON.stringify(first)),
+    invoice: { id: "inv-2", supplier: "TG Fruits", items: [{ id: "line-2", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Kitchen Made", departmentMode: "Single", departmentSplits: [{ department: "Kitchen Made", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const active = corrected.filter((mapping) => mapping.active !== false && mapping.normalizedSupplierProductCode === "7742");
+  assert.equal(active.length, 1);
+  assert.equal(active[0].department, "Kitchen Made");
+  const match = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "sup-tg", supplierName: "TG Fruits", supplierProductCode: "7742", existingProducts: products, supplierMappings: corrected });
+  assert.equal(match.department, "Kitchen Made");
+});
+
+test("split learning survives reload and reapplies percentages to a new total", () => {
+  const mappings = learnSupplierProductMappings({
+    mappings: [],
+    invoice: {
+      id: "inv-1",
+      supplier: "TG Fruits",
+      items: [{
+        id: "line-1",
+        supplierProductCode: "7742",
+        rawDescription: "LIMES 4KG",
+        productName: "Limes",
+        matchedProductId: "p3",
+        departmentMode: "Split",
+        departmentSplits: [{ department: "Bar", percentage: 75 }, { department: "Kitchen Made", percentage: 25 }],
+      }],
+    },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
+    existingProducts: products,
+    supplierMappings: JSON.parse(JSON.stringify(mappings)),
+  });
+  const total = 80;
+  const amounts = match.departmentSplits.map((split) => Number(((total * split.percentage) / 100).toFixed(2)));
+  assert.equal(match.departmentMode, "Split");
+  assert.equal(match.allocationSource, "learned_split_rule");
+  assert.deepEqual(amounts, [60, 20]);
+  assert.equal(amounts.reduce((sum, amount) => sum + amount, 0), 80);
+});
+
+test("description-only mapping uses normalized description, unit and pack size after repeated confirmations", () => {
+  const first = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-1", supplier: "TG Fruits", items: [{ id: "line-1", rawDescription: "LIMES 4KG", productName: "Limes", packSize: "4kg", unitOfMeasure: "kg", matchedProductId: "p3", department: "Bar", departmentMode: "Single", departmentSplits: [{ department: "Bar", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const second = learnSupplierProductMappings({
+    mappings: JSON.parse(JSON.stringify(first)),
+    invoice: { id: "inv-2", supplier: "TG Fruits", items: [{ id: "line-2", rawDescription: "LIMES 4KG", productName: "Limes", packSize: "4kg", unitOfMeasure: "kg", matchedProductId: "p3", department: "Bar", departmentMode: "Single", departmentSplits: [{ department: "Bar", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const differentPack = learnSupplierProductMappings({
+    mappings: JSON.parse(JSON.stringify(second)),
+    invoice: { id: "inv-3", supplier: "TG Fruits", items: [{ id: "line-3", rawDescription: "LIMES 4KG", productName: "Limes", packSize: "10kg", unitOfMeasure: "kg", matchedProductId: "p3", department: "Kitchen", departmentMode: "Single", departmentSplits: [{ department: "Kitchen", percentage: 100 }] }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    rawDescription: "limes 4kg",
+    packSize: "4kg",
+    unitOfMeasure: "kg",
+    existingProducts: products,
+    supplierMappings: JSON.parse(JSON.stringify(second)),
+  });
+  assert.equal(second[0].confirmationCount, 2);
+  assert.equal(differentPack.length, 2);
+  assert.equal(differentPack.filter((mapping) => mapping.active !== false).length, 2);
+  assert.equal(match.productMatchSource, "supplier_description_mapping");
+  assert.equal(match.department, "Bar");
 });

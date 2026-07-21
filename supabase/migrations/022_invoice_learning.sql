@@ -41,7 +41,7 @@ create table if not exists public.supplier_product_mappings (
   created_by uuid references auth.users(id) on delete set null default auth.uid(),
   updated_by uuid references auth.users(id) on delete set null default auth.uid(),
   constraint supplier_product_mappings_allocation_mode_check
-    check (allocation_mode in ('Single', 'Split', 'Kitchen', 'Bar', 'Bought In', 'Non-food', 'Excluded')),
+    check (allocation_mode in ('department', 'split', 'Single', 'Split', 'Kitchen', 'Bar', 'Bought In', 'Non-food', 'Excluded')),
   constraint supplier_product_mappings_confirmations_check
     check (confirmation_count >= 0),
   constraint supplier_product_mappings_identifier_check

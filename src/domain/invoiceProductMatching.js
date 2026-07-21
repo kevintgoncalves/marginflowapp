@@ -1,4 +1,6 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
+import { sameSupplierIdentity } from "./supplierIdentity.js";
+import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 
 export const PRODUCT_MATCH_SOURCES = {
   SUPPLIER_CODE: "supplier_code_mapping",
@@ -71,9 +73,11 @@ function sameOrganisation(row = {}, organisationId = "") {
 
 function sameSupplier(row = {}, supplierId = "", supplierName = "") {
   if (!supplierId && !supplierName) return true;
-  if (supplierId && (row.supplierId || row.supplier_id) === supplierId) return true;
+  const rowSupplierId = row.supplierId || row.supplier_id || "";
+  if (supplierId && rowSupplierId) return rowSupplierId === supplierId;
   const rowSupplierName = normalizeHeader(row.supplierName || row.supplier || "");
-  return Boolean(supplierName && rowSupplierName && rowSupplierName === normalizeHeader(supplierName));
+  const rowDisplayName = row.supplierName || row.supplier || "";
+  return Boolean(supplierName && rowSupplierName && (rowSupplierName === normalizeHeader(supplierName) || sameSupplierIdentity(rowDisplayName, supplierName)));
 }
 
 function canonicalUnit(value = "") {
@@ -103,11 +107,14 @@ function allocationFromMapping(mapping = {}) {
     ? (mapping.departmentSplits || mapping.splitRule || mapping.splitLines)
     : [];
   const department = mapping.department || mapping.departmentName || mapping.destination || "";
-  const allocationMode = mapping.allocationMode || mapping.allocation_mode || (splitLines.length > 1 ? "Split" : "Single");
+  const departmentId = mapping.departmentId || mapping.department_id || "";
+  const allocationMode = mapping.allocationMode || mapping.allocation_mode || (splitLines.length > 1 ? "split" : "department");
+  const splitMode = /^split$/i.test(allocationMode) || allocationMode === "Split";
   return {
     allocationMode,
+    departmentId,
     department,
-    departmentMode: allocationMode === "Split" ? "Split" : "Single",
+    departmentMode: splitMode ? "Split" : "Single",
     departmentSplits: splitLines,
   };
 }
@@ -121,6 +128,8 @@ function resultFromProduct({
   suggestedProducts = [],
   mapping = null,
 } = {}) {
+  const allocation = allocationFromMapping(mapping);
+  const allocationSource = mapping ? (allocation.departmentMode === "Split" ? "learned_split_rule" : "learned_mapping") : null;
   return {
     matchedProductId: product?.id || null,
     matchedProductName: product?.name || product?.productName || null,
@@ -129,10 +138,31 @@ function resultFromProduct({
     suggestedProducts,
     needsReview,
     reviewReasons,
-    allocationSource: mapping ? "learned_mapping" : null,
+    allocationSource,
     learnedMappingId: mapping?.id || null,
-    ...allocationFromMapping(mapping),
+    ...allocation,
   };
+}
+
+function withMatchDebug(result, context = {}) {
+  invoiceLearningDebug("match-attempt", {
+    supplierId: context.supplierId,
+    supplierName: context.supplierName,
+    supplierProductCode: context.supplierProductCode,
+    normalizedSupplierProductCode: normalizeSupplierProductCode(context.supplierProductCode),
+    description: context.rawDescription || context.productName,
+    matchedMappingId: result.learnedMappingId || "",
+    matchSource: result.productMatchSource,
+  });
+  if (result.learnedMappingId && result.allocationSource) {
+    invoiceLearningDebug("allocation-applied", {
+      mappingId: result.learnedMappingId,
+      departmentId: result.departmentId,
+      department: result.department,
+      allocationMode: result.allocationMode,
+    });
+  }
+  return result;
 }
 
 function scoreProduct(product, rawDescription, productName) {
@@ -173,6 +203,7 @@ export function matchInvoiceLineToExistingProduct({
   autoMatchThreshold = 0.92,
   suggestThreshold = 0.75,
 } = {}) {
+  const context = { supplierId, supplierName, supplierProductCode, rawDescription, productName };
   const products = existingProducts.filter((product) => sameOrganisation(product, organisationId) && product.active !== false);
   const mappings = supplierMappings.filter((mapping) => (
     mapping.active !== false
@@ -189,7 +220,7 @@ export function matchInvoiceLineToExistingProduct({
     ));
     const product = mappingProduct(mapping, products);
     if (mapping && product) {
-      return resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_CODE, confidence: 1, mapping });
+      return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_CODE, confidence: 1, mapping }), context);
     }
   }
 
@@ -204,7 +235,7 @@ export function matchInvoiceLineToExistingProduct({
     });
     const product = mappingProduct(mapping, products);
     if (mapping && product && unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure) && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size)) {
-      return resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_DESCRIPTION, confidence: 0.98, mapping });
+      return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_DESCRIPTION, confidence: 0.98, mapping }), context);
     }
   }
 
@@ -217,11 +248,11 @@ export function matchInvoiceLineToExistingProduct({
     && packSizesCompatible(packSize, product.packSize)
   ));
   if (compatibleExactMatches.length === 1) {
-    return resultFromProduct({
+    return withMatchDebug(resultFromProduct({
       product: compatibleExactMatches[0],
       source: PRODUCT_MATCH_SOURCES.EXACT_PRODUCT,
       confidence: 1,
-    });
+    }), context);
   }
 
   const normalizedMatches = products.filter((product) => productAliases(product).some((alias) => {
@@ -236,11 +267,11 @@ export function matchInvoiceLineToExistingProduct({
     && packSizesCompatible(packSize, product.packSize)
   ));
   if (compatibleNormalized.length === 1) {
-    return resultFromProduct({
+    return withMatchDebug(resultFromProduct({
       product: compatibleNormalized[0],
       source: PRODUCT_MATCH_SOURCES.EXACT_PRODUCT,
       confidence: 0.94,
-    });
+    }), context);
   }
 
   const scored = products
@@ -257,15 +288,15 @@ export function matchInvoiceLineToExistingProduct({
   const best = scored[0];
   const second = scored[1];
   if (best && best.score >= autoMatchThreshold && (!second || best.score - second.score >= 0.04) && !best.unitConflict && !best.packSizeConflict) {
-    return resultFromProduct({
+    return withMatchDebug(resultFromProduct({
       product: best.product,
       source: PRODUCT_MATCH_SOURCES.FUZZY_PRODUCT,
       confidence: Number(best.score.toFixed(2)),
-    });
+    }), context);
   }
 
   if (best) {
-    return {
+    return withMatchDebug({
       matchedProductId: null,
       matchedProductName: null,
       productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
@@ -280,10 +311,10 @@ export function matchInvoiceLineToExistingProduct({
       needsReview: true,
       reviewReasons: [second && Math.abs(best.score - second.score) < 0.08 ? "ambiguous_product_match" : "no_confirmed_product_match"],
       allocationSource: null,
-    };
+    }, context);
   }
 
-  return {
+  return withMatchDebug({
     matchedProductId: null,
     matchedProductName: null,
     productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
@@ -292,5 +323,5 @@ export function matchInvoiceLineToExistingProduct({
     needsReview: true,
     reviewReasons: ["no_confirmed_product_match"],
     allocationSource: null,
-  };
+  }, context);
 }

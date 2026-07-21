@@ -32,6 +32,7 @@ import {
   findProductDuplicateCandidates,
   matchInvoiceLineToExistingProduct,
 } from "./domain/invoiceProductMatching.js";
+import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
 import { validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
@@ -1344,6 +1345,7 @@ function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
 
   return source.map((split) => ({
     id: split.id || uid(),
+    departmentId: split.departmentId || split.department_id || "",
     department: canonicalDepartmentName(split.department, fallbackDepartment),
     percentage: numberValue(split.percentage, 0),
   }));
@@ -1368,6 +1370,8 @@ function normalizedDepartmentSplits(item, departmentNames = defaultDepartments) 
   return source.map((split) => {
     const percentage = numberValue(split.percentage, 0);
     return {
+      id: split.id,
+      departmentId: split.departmentId || split.department_id || "",
       department: split.department || departmentNames[0] || "Kitchen Made",
       percentage,
       amount: (netTotal * percentage) / 100,
@@ -1443,7 +1447,7 @@ function normalizeInvoiceLineForEditor(item, departmentNames = defaultDepartment
   }), departmentNames);
 }
 
-function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments, supplierMappings = [] } = {}) {
+function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments, supplierMappings = [], organisationId = "" } = {}) {
   const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent", "lineDiscountAmount", "lineDiscountPercent"];
   const nextValue = numericFields.includes(field) ? numberValue(value, 0) : value;
   let updated = { ...item, [field]: nextValue };
@@ -1460,6 +1464,8 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
 
   if (field === "department") {
     updated.department = value;
+    updated.departmentId = "";
+    updated.allocationSource = "user_selected";
     updated.departmentMode = "Single";
     updated.departmentSplits = [{ id: uid(), department: value, percentage: 100 }];
   }
@@ -1487,7 +1493,7 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         department: updated.department || selectedProduct.department || departmentNames[0] || "Kitchen Made",
       };
     } else {
-      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings);
+      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId });
       updated = { ...enriched, productName: value };
     }
   }
@@ -1499,26 +1505,26 @@ function setInvoiceLineDepartmentMode(item, mode, departmentNames = defaultDepar
   if (mode === "Split") {
     const first = item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
     const second = departmentNames.find((dept) => dept !== first) || first;
-    return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: [
+    return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: [
       { id: uid(), department: first, percentage: 50 },
       { id: uid(), department: second, percentage: 50 },
     ] }, departmentNames);
   }
 
   const department = item.department || normalizeDepartmentSplits(item, fallbackDepartment)[0]?.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
-  return withCalculatedSplitAmounts({ ...item, departmentMode: "Single", department, departmentSplits: [{ id: uid(), department, percentage: 100 }] }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Single", department, departmentId: "", departmentSplits: [{ id: uid(), department, percentage: 100 }] }, departmentNames);
 }
 
 function updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames = defaultDepartments) {
   const splits = normalizedDepartmentSplits(item, departmentNames).map((split, index) => (
     index === splitIndex ? { ...split, [field]: field === "percentage" ? numberValue(value, 0) : value } : split
   ));
-  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function addInvoiceLineSplit(item, departmentNames = defaultDepartments) {
   const splits = [...normalizedDepartmentSplits(item, departmentNames), { id: uid(), department: departmentNames[0] || "Kitchen Made", percentage: 0 }];
-  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepartments, fallbackDepartment = "Kitchen Made") {
@@ -1527,7 +1533,7 @@ function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepar
     const department = splits[0]?.department || item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
     return setInvoiceLineDepartmentMode({ ...item, department }, "Single", departmentNames, department);
   }
-  return withCalculatedSplitAmounts({ ...item, departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
@@ -1714,13 +1720,37 @@ function recipeAutocomplete(recipes, query, limit = 8) {
   return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
 }
 
-function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = []) {
+function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "" } = {}) {
   const matchingEnabled = matchingSettings.enableProductMatching ?? matchingSettings.enableAiProductMatching ?? true;
   if (!matchingEnabled) {
     return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "", needsReview: true, reviewReasons: ["no_confirmed_product_match"] };
   }
   const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(matchingSettings.autoMatchConfidenceThreshold, 90) / 100));
+  const existingLearnedProduct = line.matchedProductId && ["supplier_code_mapping", "supplier_description_mapping"].includes(line.productMatchSource)
+    ? products.find((product) => product.id === line.matchedProductId)
+    : null;
+  if (existingLearnedProduct) {
+    const learnedSplit = line.departmentMode === "Split" || /^split$/i.test(line.allocationMode || "");
+    const department = learnedSplit ? (line.departmentSplits?.[0]?.department || line.department || existingLearnedProduct.department || "Kitchen Made") : (line.department || existingLearnedProduct.department || "Kitchen Made");
+    return {
+      ...line,
+      productName: existingLearnedProduct.name,
+      matchedProductId: existingLearnedProduct.id,
+      matchedProductName: existingLearnedProduct.name,
+      matchConfidence: line.productMatchConfidence ?? 1,
+      matchStatus: productMatchStatusText(line.productMatchSource),
+      packSize: line.packSize || existingLearnedProduct.packSize || "",
+      supplier: line.supplier || existingLearnedProduct.supplier || "",
+      department,
+      departmentMode: learnedSplit ? "Split" : "Single",
+      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
+      allocationSource: line.allocationSource || (learnedSplit ? "learned_split_rule" : "learned_mapping"),
+      needsReview: false,
+      reviewReasons: [],
+    };
+  }
   const match = matchInvoiceLineToExistingProduct({
+    organisationId,
     supplierId: line.supplierId || "",
     supplierName: line.supplier || "",
     supplierProductCode: line.supplierProductCode || "",
@@ -1734,7 +1764,8 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
   });
   const matchedProduct = products.find((product) => product.id === match.matchedProductId);
   if (matchedProduct) {
-    const department = match.department || line.department || matchedProduct.department || "Kitchen Made";
+    const learnedSplit = match.departmentMode === "Split" || /^split$/i.test(match.allocationMode || "");
+    const department = learnedSplit ? (match.departmentSplits?.[0]?.department || line.department || matchedProduct.department || "Kitchen Made") : (match.department || line.department || matchedProduct.department || "Kitchen Made");
     return {
       ...line,
       productName: matchedProduct.name,
@@ -1750,6 +1781,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       packSize: line.packSize || matchedProduct.packSize || "",
       supplier: line.supplier || matchedProduct.supplier || "",
       department,
+      departmentId: match.departmentId || line.departmentId || "",
       departmentMode: match.departmentMode || line.departmentMode || "Single",
       departmentSplits: match.departmentSplits?.length ? match.departmentSplits : (line.departmentSplits || [{ id: uid(), department, percentage: 100 }]),
       allocationSource: match.allocationSource,
@@ -4394,7 +4426,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
       return;
     }
-    const supplier = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier)?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
+    const supplierRecord = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier);
+    const supplier = supplierRecord?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
     const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const invoice = prepareApprovedInvoice({
       id: draft.editingInvoiceId || uid(),
@@ -4414,7 +4447,16 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, invoice.date, invoice));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice, products }).mappings);
+    setSupplierProductMappings((current) => learnSupplierProductMappings({
+      mappings: current,
+      invoice,
+      products,
+      companyId: cloudScope.companyId,
+      locationId: cloudScope.locationId || "",
+      supplierId: supplierRecord?.id || "",
+      supplierName: supplier,
+      departments: departmentSettings,
+    }).mappings);
     setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
     setDraft(emptyInvoiceDraft());
   };
@@ -4542,6 +4584,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setDraft={setDraft}
             invoices={invoices}
             invoiceSettings={invoiceSettings}
+            companyId={cloudScope.companyId}
+            locationId={cloudScope.locationId || ""}
+            departmentSettings={departmentSettings}
             suppliers={suppliers}
             setSuppliers={setSuppliers}
             supplierProductMappings={supplierProductMappings}
@@ -5140,6 +5185,9 @@ function Invoices({
   draft,
   setDraft,
   invoiceSettings,
+  companyId = "",
+  locationId = "",
+  departmentSettings = [],
   invoices,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoices"),
   suppliers,
@@ -5268,6 +5316,8 @@ function Invoices({
         body: JSON.stringify({
           invoiceText,
           files: aiFiles,
+          companyId,
+          locationId,
           suppliers,
           products: products.map((product) => ({
             id: product.id,
@@ -5283,7 +5333,20 @@ function Invoices({
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
       if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
 
-      const supplier = canonicalSupplierForName(suppliers, payload.supplier || draft.supplier)?.name || payload.supplier || draft.supplier || "Unknown Supplier";
+      const supplierRecord = canonicalSupplierForName(suppliers, payload.supplier || draft.supplier);
+      const supplier = supplierRecord?.name || payload.supplier || draft.supplier || "Unknown Supplier";
+      const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
+        mapping.active !== false
+        && (!companyId || !mapping.companyId || mapping.companyId === companyId)
+        && (supplierRecord?.id && mapping.supplierId
+          ? mapping.supplierId === supplierRecord.id
+          : sameSupplierIdentity(mapping.supplierName || mapping.supplier || "", supplier))
+      ));
+      invoiceLearningDebug("mappings-loaded", {
+        supplierId: supplierRecord?.id || "",
+        supplierName: supplier,
+        mappingCount: supplierScopedMappings.length,
+      });
       const items = (payload.lines || []).map((line) => {
         const quantity = numberValue(line.quantity, 1);
         const unitCost = extractedInvoiceUnitCost(line);
@@ -5300,7 +5363,11 @@ function Invoices({
             unit: line.unit || line.unitOfMeasure || "",
             unitOfMeasure: line.unitOfMeasure || line.unit || "",
             supplier,
+            supplierId: supplierRecord?.id || "",
+            departmentId: line.departmentId || "",
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+            departmentMode: line.departmentMode || (/^split$/i.test(line.allocationMode || "") ? "Split" : "Single"),
+            departmentSplits: Array.isArray(line.departmentSplits) ? line.departmentSplits : [],
             source: "OpenAI",
             sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [], originalExtraction: line },
             originalExtraction: line,
@@ -5319,7 +5386,8 @@ function Invoices({
           },
           products,
           aiSettings,
-          supplierProductMappings
+          supplierScopedMappings,
+          { organisationId: companyId }
         );
       });
       const validated = validateInvoiceExtraction({
@@ -5356,7 +5424,7 @@ function Invoices({
   const updateDraftItem = (id, field, value) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
     }));
   };
 
@@ -5577,7 +5645,7 @@ function Invoices({
   const updateManualLine = (id, field, value) => {
     setManualDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
     }));
   };
 
@@ -5622,7 +5690,8 @@ function Invoices({
 
   const saveManualInvoice = () => {
     if (!permissions.canAdd && !permissions.canApprove) return;
-    const supplier = canonicalSupplierForName(suppliers, manualDraft.supplier)?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
+    const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
+    const supplier = supplierRecord?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
     const date = manualDraft.date || today();
     let items = [];
 
@@ -5675,7 +5744,16 @@ function Invoices({
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, date, invoice));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice, products }).mappings);
+    setSupplierProductMappings((current) => learnSupplierProductMappings({
+      mappings: current,
+      invoice,
+      products,
+      companyId,
+      locationId,
+      supplierId: supplierRecord?.id || "",
+      supplierName: supplier,
+      departments: departmentSettings,
+    }).mappings);
     setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
     setManualOpen(false);
   };
@@ -5702,7 +5780,7 @@ function Invoices({
   const updateEditLine = (id, field, value) => {
     setEditDraft((current) => ({
       ...current,
-      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
     }));
   };
 
@@ -5748,7 +5826,8 @@ function Invoices({
   const saveEditInvoice = () => {
     if (!permissions.canEdit) return;
     if (!editDraft) return;
-    const supplier = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier)?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
+    const supplierRecord = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier);
+    const supplier = supplierRecord?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
     const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const validation = validateInvoiceLinesForApproval(items, {
       splitValidator: splitIsValid,
@@ -5766,7 +5845,16 @@ function Invoices({
     setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice: cleaned, products }).mappings);
+    setSupplierProductMappings((current) => learnSupplierProductMappings({
+      mappings: current,
+      invoice: cleaned,
+      products,
+      companyId,
+      locationId,
+      supplierId: supplierRecord?.id || "",
+      supplierName: supplier,
+      departments: departmentSettings,
+    }).mappings);
     setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: cleaned }));
     setEditDraft(null);
   };
@@ -6122,7 +6210,7 @@ function InvoiceLineEditor({
                 <td>
                   <div className="match-state-cell">
                     <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "user_selected" : "no_product_match"))}</Badge>
-                    {item.allocationSource === "learned_mapping" && <small className="line-note">Applied from previous confirmed invoice</small>}
+                    {["learned_mapping", "learned_split_rule"].includes(item.allocationSource) && <small className="line-note">Learned from previous invoice</small>}
                     {item.learnedMappingId && forgetLearnedRule && (
                       <button className="ghost mini-button" onClick={() => forgetLearnedRule(item.id)} type="button">Forget learned rule</button>
                     )}
