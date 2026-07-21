@@ -28,6 +28,12 @@ import {
 import { labourImportedSeed } from "./labourSeedData.js";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import { invoiceUnitCostFromExtraction as extractedInvoiceUnitCost, parseCheesemanInvoiceRows } from "./domain/invoiceParsing.js";
+import {
+  findProductDuplicateCandidates,
+  matchInvoiceLineToExistingProduct,
+} from "./domain/invoiceProductMatching.js";
+import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
+import { validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
 import {
   activeSupplierRows,
@@ -85,6 +91,8 @@ const cloudModuleDefinitions = [
   { key: "labourSettings", storageKey: "marginflow.labourSettings" },
   { key: "suppliers", storageKey: "marginflow.suppliers" },
   { key: "supplierDeliverySchedules", storageKey: "marginflow.supplierDeliverySchedules" },
+  { key: "supplierProductMappings", storageKey: "marginflow.supplierProductMappings" },
+  { key: "invoiceLineCorrections", storageKey: "marginflow.invoiceLineCorrections" },
   { key: "products", storageKey: "marginflow.products" },
   { key: "invoices", storageKey: "marginflow.invoices" },
   { key: "invoiceDayStatusOverrides", storageKey: "marginflow.invoiceDayStatusOverrides" },
@@ -171,7 +179,7 @@ const defaultInvoiceSettings = {
   defaultInvoiceDepartment: "Kitchen Made",
   defaultVat: 20,
   allowUnknownSuppliers: true,
-  autoCreateProductsAfterApproval: true,
+  autoCreateProductsAfterApproval: false,
 };
 
 const defaultLabourSettings = {
@@ -1435,7 +1443,7 @@ function normalizeInvoiceLineForEditor(item, departmentNames = defaultDepartment
   }), departmentNames);
 }
 
-function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments } = {}) {
+function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments, supplierMappings = [] } = {}) {
   const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent", "lineDiscountAmount", "lineDiscountPercent"];
   const nextValue = numericFields.includes(field) ? numberValue(value, 0) : value;
   let updated = { ...item, [field]: nextValue };
@@ -1463,17 +1471,23 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         ...updated,
         productName: selectedProduct.name,
         matchedProductId: selectedProduct.id,
+        matchedProductName: selectedProduct.name,
         suggestedProductId: "",
         suggestedProductName: "",
-        matchStatus: "Product selected from database",
+        suggestedProducts: [],
+        matchStatus: productMatchStatusText("user_selected"),
+        productMatchSource: "user_selected",
+        productMatchConfidence: 1,
         matchConfidence: 1,
+        needsReview: false,
+        reviewReasons: [],
         packSize: updated.packSize || selectedProduct.packSize || "",
         unitCost: numberValue(updated.unitCost, 0) || numberValue(selectedProduct.unitCost, 0),
         supplier: updated.supplier || selectedProduct.supplier || "",
         department: updated.department || selectedProduct.department || departmentNames[0] || "Kitchen Made",
       };
     } else {
-      const enriched = enrichInvoiceLine(updated, products, matchingSettings);
+      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings);
       updated = { ...enriched, productName: value };
     }
   }
@@ -1656,44 +1670,110 @@ function productForEnteredName(products, value) {
   return products.find((product) => productAliases(product).some((alias) => alias.toLowerCase() === key)) || null;
 }
 
+function productMatchStatusText(source = "") {
+  const labels = {
+    supplier_code_mapping: "Matched from supplier code",
+    supplier_description_mapping: "Learned from previous invoice",
+    exact_product_match: "Exact existing product match",
+    fuzzy_product_match: "Suggested existing product",
+    user_selected: "Product selected from database",
+    new_product: "New product selected by user",
+    no_product_match: "No confirmed existing product match",
+  };
+  return labels[source] || "No confirmed existing product match";
+}
+
+function reviewReasonText(reason = "") {
+  const labels = {
+    low_extraction_confidence: "Low reading confidence",
+    missing_product_name: "Missing product description",
+    invalid_quantity: "Check the quantity",
+    invalid_unit_cost: "Check the unit price",
+    invalid_line_total: "Check the line total",
+    no_confirmed_product_match: "Select an existing product or create a new one",
+    ambiguous_product_match: "More than one existing product may match",
+    price_deviation: "Price differs from recent accepted invoices",
+    unit_conflict: "Unit conflicts with the matched product",
+    pack_size_conflict: "Pack size conflicts with the matched product",
+    invalid_split: "Split allocation must be corrected",
+    invoice_total_mismatch: "Extracted lines do not reconcile with the invoice total",
+    invoice_subtotal_mismatch: "Extracted lines do not reconcile with the invoice subtotal",
+    vat_mismatch: "VAT does not reconcile",
+    duplicate_invoice_number: "Invoice number may already exist",
+    missing_supplier: "Select the supplier",
+    missing_invoice_number: "Add the invoice number",
+    missing_invoice_date: "Add the invoice date",
+    fallback_model_required: "Fallback model review was required",
+  };
+  return labels[reason] || reason.replace(/_/g, " ");
+}
+
 function recipeAutocomplete(recipes, query, limit = 8) {
   const term = String(query || "").trim().toLowerCase();
   if (!term) return [];
   return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
 }
 
-function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings) {
+function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = []) {
   const matchingEnabled = matchingSettings.enableProductMatching ?? matchingSettings.enableAiProductMatching ?? true;
   if (!matchingEnabled) {
-    return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
-  }
-  const match = matchProduct(line.productName, products);
-  if (!match) {
-    return { ...line, matchConfidence: 0, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
+    return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "", needsReview: true, reviewReasons: ["no_confirmed_product_match"] };
   }
   const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(matchingSettings.autoMatchConfidenceThreshold, 90) / 100));
-  if (match.confidence >= autoMatchThreshold) {
+  const match = matchInvoiceLineToExistingProduct({
+    supplierId: line.supplierId || "",
+    supplierName: line.supplier || "",
+    supplierProductCode: line.supplierProductCode || "",
+    rawDescription: line.rawDescription || line.productName || "",
+    productName: line.productName || "",
+    unitOfMeasure: line.unitOfMeasure || line.unit || "",
+    packSize: line.packSize || "",
+    existingProducts: products,
+    supplierMappings,
+    autoMatchThreshold,
+  });
+  const matchedProduct = products.find((product) => product.id === match.matchedProductId);
+  if (matchedProduct) {
+    const department = match.department || line.department || matchedProduct.department || "Kitchen Made";
     return {
       ...line,
-      productName: match.product.name,
-      matchedProductId: match.product.id,
-      matchConfidence: match.confidence,
-      matchStatus: `${match.method} - auto matched`,
+      productName: matchedProduct.name,
+      matchedProductId: matchedProduct.id,
+      matchedProductName: matchedProduct.name,
+      productMatchSource: match.productMatchSource,
+      productMatchConfidence: match.productMatchConfidence,
+      matchConfidence: match.productMatchConfidence ?? 1,
+      matchStatus: productMatchStatusText(match.productMatchSource),
       suggestedProductId: "",
       suggestedProductName: "",
+      suggestedProducts: [],
+      packSize: line.packSize || matchedProduct.packSize || "",
+      supplier: line.supplier || matchedProduct.supplier || "",
+      department,
+      departmentMode: match.departmentMode || line.departmentMode || "Single",
+      departmentSplits: match.departmentSplits?.length ? match.departmentSplits : (line.departmentSplits || [{ id: uid(), department, percentage: 100 }]),
+      allocationSource: match.allocationSource,
+      learnedMappingId: match.learnedMappingId || line.learnedMappingId || "",
+      needsReview: false,
+      reviewReasons: [],
     };
   }
+
   const requireManualApproval = matchingSettings.requireManualApprovalBelowThreshold ?? true;
-  if (match.confidence < 0.6 || !requireManualApproval) {
-    return { ...line, matchConfidence: match.confidence, matchStatus: "Create new product", matchedProductId: "", suggestedProductId: "", suggestedProductName: "" };
-  }
+  const suggestion = requireManualApproval ? match.suggestedProducts?.[0] : null;
   return {
     ...line,
     matchedProductId: "",
-    suggestedProductId: match.product.id,
-    suggestedProductName: match.product.name,
-    matchConfidence: match.confidence,
-    matchStatus: "Needs confirmation",
+    matchedProductName: "",
+    productMatchSource: match.productMatchSource || "no_product_match",
+    productMatchConfidence: match.productMatchConfidence,
+    suggestedProductId: suggestion?.id || "",
+    suggestedProductName: suggestion?.name || "",
+    suggestedProducts: match.suggestedProducts || [],
+    matchConfidence: match.productMatchConfidence || 0,
+    matchStatus: suggestion ? "Suggested existing product" : "No confirmed existing product match",
+    needsReview: true,
+    reviewReasons: match.reviewReasons || ["no_confirmed_product_match"],
   };
 }
 
@@ -2329,12 +2409,12 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
   const next = [...products];
 
   items.filter(isReceivedInvoiceLine).forEach((item) => {
+    const productId = item.matchedProductId || item.productId || "";
+    if (!productId) return;
     const quantity = numberValue(item.quantity, 1);
     const invoiceUnitCost = quantity > 0 ? Number((netLineTotal(item, invoiceContext) / quantity).toFixed(4)) : normalizeInvoiceUnitCost(item);
-    const match = item.matchedProductId
-      ? { product: next.find((product) => product.id === item.matchedProductId), confidence: 1 }
-      : matchProduct(item.productName, next);
-    const index = match?.product ? next.findIndex((product) => product.id === match.product.id) : -1;
+    const index = next.findIndex((product) => product.id === productId);
+    if (index < 0) return;
     const supplierFormat = supplierFormatFromLine({ ...item, unitCost: invoiceUnitCost }, invoiceDate);
     const historyEntry = {
       date: invoiceDate,
@@ -2361,46 +2441,26 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       lineId: item.id,
     };
 
-    if (index >= 0 && match.confidence > 0.9) {
-      const aliases = new Set([...(next[index].aliases || [])]);
-      if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
-      const supplierPrices = [
-        ...(next[index].supplierPrices || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
-        supplierEntry,
-      ];
-      const priceHistory = [
-        ...(next[index].priceHistory || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
-        historyEntry,
-      ];
-      const supplierFormats = [
-        ...(next[index].supplierFormats || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
-        { ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id },
-      ];
-      next[index] = {
-        ...next[index],
-        supplier: item.supplier,
-        packSize: item.packSize,
-        quantity: numberValue(item.quantity, 1),
-        unitCost: invoiceUnitCost,
-        normalizedCost: supplierFormat.normalizedCost,
-        normalizedUnit: supplierFormat.baseUnit,
-        conversionReviewRequired: supplierFormat.conversionReviewRequired,
-        conversionReason: supplierFormat.conversionReason,
-        department: primaryDepartment(item),
-        departmentSplits: normalizeDepartmentSplits(item, item.department),
-        aliases: [...aliases],
-        supplierFormats,
-        supplierPrices,
-        priceHistory,
-      };
-      return;
-    }
-
-    next.push({
-      id: uid(),
-      name: item.productName,
-      supplier: item.supplier,
-      packSize: item.packSize,
+    const aliases = new Set([...(next[index].aliases || [])]);
+    const rawDescription = item.rawDescription || item.originalExtraction?.rawDescription || "";
+    if (rawDescription && rawDescription.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(rawDescription);
+    if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
+    const supplierPrices = [
+      ...(next[index].supplierPrices || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      supplierEntry,
+    ];
+    const priceHistory = [
+      ...(next[index].priceHistory || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      historyEntry,
+    ];
+    const supplierFormats = [
+      ...(next[index].supplierFormats || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      { ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id },
+    ];
+    next[index] = {
+      ...next[index],
+      supplier: item.supplier || next[index].supplier,
+      packSize: item.packSize || next[index].packSize,
       quantity: numberValue(item.quantity, 1),
       unitCost: invoiceUnitCost,
       normalizedCost: supplierFormat.normalizedCost,
@@ -2409,11 +2469,11 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       conversionReason: supplierFormat.conversionReason,
       department: primaryDepartment(item),
       departmentSplits: normalizeDepartmentSplits(item, item.department),
-      aliases: [],
-      supplierFormats: [{ ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id }],
-      supplierPrices: [supplierEntry],
-      priceHistory: [historyEntry],
-    });
+      aliases: [...aliases],
+      supplierFormats,
+      supplierPrices,
+      priceHistory,
+    };
   });
 
   return next;
@@ -3068,6 +3128,8 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
     "marginflow.products": null,
     "marginflow.suppliers": null,
     "marginflow.supplierDeliverySchedules": null,
+    "marginflow.supplierProductMappings": null,
+    "marginflow.invoiceLineCorrections": null,
     "marginflow.invoiceDayStatusOverrides": null,
     "marginflow.recipes": null,
     "marginflow.menus": null,
@@ -3625,6 +3687,8 @@ function createDemoData() {
     supplierDeliverySchedules: [],
     invoices: cloneData(initialInvoices),
     invoiceDayStatusOverrides: [],
+    supplierProductMappings: [],
+    invoiceLineCorrections: [],
     sales: normalizeSalesRows(cloneData(initialSales)),
     stocktakes: normalizeStocktakes(cloneData(initialStocktakes)),
     wasteItems: cloneData(initialWaste),
@@ -3656,6 +3720,8 @@ function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
     labourSettings: { ...defaultLabourSettings, ...read(byKey.labourSettings, defaultLabourSettings) },
     suppliers: Array.isArray(read(byKey.suppliers, initialSuppliers)) ? read(byKey.suppliers, initialSuppliers) : initialSuppliers,
     supplierDeliverySchedules: Array.isArray(read(byKey.supplierDeliverySchedules, [])) ? read(byKey.supplierDeliverySchedules, []) : [],
+    supplierProductMappings: Array.isArray(read(byKey.supplierProductMappings, [])) ? read(byKey.supplierProductMappings, []) : [],
+    invoiceLineCorrections: Array.isArray(read(byKey.invoiceLineCorrections, [])) ? read(byKey.invoiceLineCorrections, []) : [],
     products: Array.isArray(read(byKey.products, initialProducts)) ? read(byKey.products, initialProducts) : initialProducts,
     invoices: Array.isArray(read(byKey.invoices, initialInvoices)) ? read(byKey.invoices, initialInvoices) : initialInvoices,
     creditNotes: Array.isArray(read(byKey.creditNotes, [])) ? read(byKey.creditNotes, []) : [],
@@ -4001,6 +4067,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [products, setProductsState] = useState(() => demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts));
   const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
   const [supplierDeliverySchedules, setSupplierDeliverySchedulesState] = useState(() => demoInitialData?.supplierDeliverySchedules || safeReadLocalStorageArray("marginflow.supplierDeliverySchedules", []));
+  const [supplierProductMappings, setSupplierProductMappingsState] = useState(() => demoInitialData?.supplierProductMappings || safeReadLocalStorageArray("marginflow.supplierProductMappings", []));
+  const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
   const [invoices, setInvoicesState] = useState(() => demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
@@ -4024,6 +4092,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
   const setSupplierDeliverySchedules = demoMode ? makeStateUpdater(setSupplierDeliverySchedulesState) : makeStateUpdater(setSupplierDeliverySchedulesState, "marginflow.supplierDeliverySchedules");
+  const setSupplierProductMappings = demoMode ? makeStateUpdater(setSupplierProductMappingsState) : makeStateUpdater(setSupplierProductMappingsState, "marginflow.supplierProductMappings");
+  const setInvoiceLineCorrections = demoMode ? makeStateUpdater(setInvoiceLineCorrectionsState) : makeStateUpdater(setInvoiceLineCorrectionsState, "marginflow.invoiceLineCorrections");
   const setInvoices = demoMode ? makeStateUpdater(setInvoicesState) : makeStateUpdater(setInvoicesState, "marginflow.invoices");
   const setInvoiceDayStatusOverrides = demoMode ? makeStateUpdater(setInvoiceDayStatusOverridesState) : makeStateUpdater(setInvoiceDayStatusOverridesState, "marginflow.invoiceDayStatusOverrides");
   const setSales = demoMode ? makeStateUpdater(setSalesState) : makeStateUpdater(setSalesState, "marginflow.sales");
@@ -4072,6 +4142,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setProductsState(next.products);
     setSuppliersState(next.suppliers);
     setSupplierDeliverySchedulesState(next.supplierDeliverySchedules);
+    setSupplierProductMappingsState(next.supplierProductMappings);
+    setInvoiceLineCorrectionsState(next.invoiceLineCorrections);
     setInvoicesState(next.invoices);
     setInvoiceDayStatusOverridesState(next.invoiceDayStatusOverrides);
     setSalesState(next.sales);
@@ -4120,6 +4192,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     labourSettings,
     suppliers,
     supplierDeliverySchedules,
+    supplierProductMappings,
+    invoiceLineCorrections,
     products,
     invoices,
     invoiceDayStatusOverrides,
@@ -4134,7 +4208,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     invoiceSettings,
     aiSettings,
     departmentSelection: department,
-  }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
+  }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, supplierProductMappings, invoiceLineCorrections, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
   const applyCloudSnapshot = (snapshot) => {
     setCompanySettingsState(snapshot.companySettings);
@@ -4143,6 +4217,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setLabourSettingsState(snapshot.labourSettings);
     setSuppliersState(snapshot.suppliers);
     setSupplierDeliverySchedulesState(snapshot.supplierDeliverySchedules);
+    setSupplierProductMappingsState(snapshot.supplierProductMappings || []);
+    setInvoiceLineCorrectionsState(snapshot.invoiceLineCorrections || []);
     setProductsState(snapshot.products);
     setInvoicesState(snapshot.invoices);
     setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
@@ -4310,6 +4386,14 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
       return;
     }
+    const unresolvedLine = draft.items.find((item) => (
+      item.matchStatus !== "Manual invoice"
+      && (!item.matchedProductId || (item.needsReview && (item.reviewReasons || []).some((reason) => ["no_confirmed_product_match", "ambiguous_product_match", "invalid_split"].includes(reason))))
+    ));
+    if (unresolvedLine) {
+      setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
+      return;
+    }
     const supplier = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier)?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
     const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const invoice = prepareApprovedInvoice({
@@ -4330,6 +4414,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, invoice.date, invoice));
+    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice, products }).mappings);
+    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
     setDraft(emptyInvoiceDraft());
   };
 
@@ -4458,6 +4544,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             invoiceSettings={invoiceSettings}
             suppliers={suppliers}
             setSuppliers={setSuppliers}
+            supplierProductMappings={supplierProductMappings}
+            setSupplierProductMappings={setSupplierProductMappings}
+            invoiceLineCorrections={invoiceLineCorrections}
+            setInvoiceLineCorrections={setInvoiceLineCorrections}
             products={products}
             setProducts={setProducts}
             departmentNames={allowedDepartmentNames}
@@ -5044,7 +5134,26 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
   );
 }
 
-function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSettings, invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoices"), suppliers, setSuppliers, products, setProducts, approveInvoice, setCreditNotes, setInvoices }) {
+function Invoices({
+  aiSettings,
+  departmentNames,
+  draft,
+  setDraft,
+  invoiceSettings,
+  invoices,
+  permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoices"),
+  suppliers,
+  setSuppliers,
+  supplierProductMappings = [],
+  setSupplierProductMappings = () => {},
+  invoiceLineCorrections = [],
+  setInvoiceLineCorrections = () => {},
+  products,
+  setProducts,
+  approveInvoice,
+  setCreditNotes,
+  setInvoices,
+}) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
@@ -5074,6 +5183,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
   const hasUploadDraft = Boolean(draft.files.length || draft.items.length || draft.invoiceText || draft.status !== "Idle" || draft.supplier || draft.invoiceNumber);
+  const draftHasBlockingReview = draft.items.some((item) => (
+    item.matchStatus !== "Manual invoice"
+    && (!item.matchedProductId || (item.needsReview && (item.reviewReasons || []).some((reason) => ["no_confirmed_product_match", "ambiguous_product_match", "invalid_split"].includes(reason))))
+  )) || Boolean(draft.invoiceNeedsReview && (draft.invoiceReviewReasons || []).some((reason) => ["invoice_total_mismatch", "invoice_subtotal_mismatch", "missing_supplier", "missing_invoice_number", "missing_invoice_date"].includes(reason)));
 
   const resetUploadDraft = () => {
     setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
@@ -5157,11 +5270,14 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           files: aiFiles,
           suppliers,
           products: products.map((product) => ({
+            id: product.id,
             name: product.productName || product.name,
             supplier: product.supplier,
             packSize: product.packSize,
+            unit: product.unit || product.unitOfMeasure || "",
             aliases: product.aliases || [],
           })),
+          supplierMappings: supplierProductMappings,
         }),
       });
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
@@ -5174,18 +5290,49 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         return enrichInvoiceLine(
           {
             id: uid(),
-            productName: line.productName || "Unknown product",
+            productName: line.productName || line.rawDescription || "Unknown product",
+            rawDescription: line.rawDescription || line.productName || "",
+            supplierProductCode: line.supplierProductCode || "",
             packSize: line.packSize || "",
             quantity,
             unitCost,
+            lineTotal: line.lineTotal || quantity * unitCost,
+            unit: line.unit || line.unitOfMeasure || "",
+            unitOfMeasure: line.unitOfMeasure || line.unit || "",
             supplier,
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
             source: "OpenAI",
-            sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [] },
+            sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [], originalExtraction: line },
+            originalExtraction: line,
+            matchedProductId: line.matchedProductId || "",
+            matchedProductName: line.matchedProductName || "",
+            suggestedProductId: line.suggestedProducts?.[0]?.id || line.suggestedProductId || "",
+            suggestedProductName: line.suggestedProducts?.[0]?.name || line.suggestedProductName || "",
+            suggestedProducts: line.suggestedProducts || [],
+            productMatchSource: line.productMatchSource || "no_product_match",
+            productMatchConfidence: line.productMatchConfidence,
+            matchStatus: productMatchStatusText(line.productMatchSource || "no_product_match"),
+            allocationSource: line.allocationSource || "",
+            learnedMappingId: line.learnedMappingId || "",
+            needsReview: Boolean(line.needsReview),
+            reviewReasons: line.reviewReasons || [],
           },
           products,
-          aiSettings
+          aiSettings,
+          supplierProductMappings
         );
+      });
+      const validated = validateInvoiceExtraction({
+        invoice: {
+          supplier,
+          invoiceNumber: payload.invoiceNumber || draft.invoiceNumber,
+          invoiceDate: payload.invoiceDate || draft.date,
+          invoiceSubtotal: payload.invoiceSubtotal,
+          invoiceTotal: payload.invoiceTotal,
+          vatTotal: payload.vatTotal,
+        },
+        lines: items,
+        historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
       });
 
       setDraft((current) => ({
@@ -5193,8 +5340,13 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         supplier,
         invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
         date: preferredInvoiceDateForSupplier(supplier, invoiceText, payload.invoiceDate || current.date || today()),
-        items,
-        status: `AI extracted ${items.length} lines. Please review before approving.`,
+        items: validated.lines,
+        invoiceNeedsReview: validated.invoiceNeedsReview,
+        invoiceReviewReasons: validated.invoiceReviewReasons,
+        extractionModel: payload.extractionModel,
+        fallbackModelUsed: payload.fallbackModelUsed,
+        fallbackReason: payload.fallbackReason,
+        status: `AI extracted ${items.length} lines${payload.fallbackModelUsed ? " using fallback review" : ""}. Please review before approving.`,
       }));
     } catch (error) {
       setDraft((current) => ({ ...current, status: `AI could not read this invoice. Please try a clearer photo, upload a PDF, or enter it manually. ${error.message}` }));
@@ -5204,7 +5356,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const updateDraftItem = (id, field, value) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
     }));
   };
 
@@ -5253,9 +5405,143 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         if (item.id !== id) return item;
         const product = products.find((candidate) => candidate.id === item.suggestedProductId);
         return product
-          ? { ...item, productName: product.name, matchedProductId: product.id, suggestedProductId: "", suggestedProductName: "", matchStatus: "Suggestion accepted", matchConfidence: 1 }
+          ? {
+            ...item,
+            productName: product.name,
+            matchedProductId: product.id,
+            matchedProductName: product.name,
+            suggestedProductId: "",
+            suggestedProductName: "",
+            suggestedProducts: [],
+            matchStatus: productMatchStatusText("user_selected"),
+            productMatchSource: "user_selected",
+            productMatchConfidence: 1,
+            matchConfidence: 1,
+            needsReview: false,
+            reviewReasons: [],
+          }
           : item;
       }),
+    }));
+  };
+
+  const applyExistingProductToDraftLine = (id, productId) => {
+    const product = products.find((candidate) => candidate.id === productId);
+    if (!product) return;
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const department = item.department || product.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+        return normalizeInvoiceLineForEditor({
+          ...item,
+          productName: product.name,
+          matchedProductId: product.id,
+          matchedProductName: product.name,
+          suggestedProductId: "",
+          suggestedProductName: "",
+          suggestedProducts: [],
+          duplicateProductCandidates: [],
+          productMatchSource: "user_selected",
+          productMatchConfidence: 1,
+          matchStatus: productMatchStatusText("user_selected"),
+          matchConfidence: 1,
+          packSize: item.packSize || product.packSize || "",
+          supplier: item.supplier || product.supplier || current.supplier,
+          department,
+          needsReview: false,
+          reviewReasons: [],
+        }, departmentNames);
+      }),
+    }));
+  };
+
+  const createProductFromDraftLine = (id) => {
+    if (!permissions.canAdd) return;
+    const line = draft.items.find((item) => item.id === id);
+    if (!line?.productName?.trim()) return;
+    const duplicates = findProductDuplicateCandidates(products, {
+      name: line.productName,
+      packSize: line.packSize,
+      unit: line.unitOfMeasure || line.unit,
+    }, { threshold: 0.75 });
+    if (duplicates.length) {
+      setDraft((current) => ({
+        ...current,
+        items: current.items.map((item) => item.id === id ? {
+          ...item,
+          duplicateProductCandidates: duplicates.slice(0, 5).map((entry) => ({
+            id: entry.product.id,
+            name: entry.product.name,
+            score: entry.score,
+            packSize: entry.product.packSize || "",
+            supplier: entry.product.supplier || "",
+          })),
+          needsReview: true,
+          reviewReasons: [...new Set([...(item.reviewReasons || []), "ambiguous_product_match"])],
+          matchStatus: "Possible existing product found",
+        } : item),
+      }));
+      return;
+    }
+
+    const productId = uid();
+    const supplier = line.supplier || draft.supplier || visibleSuppliers[0]?.name || "";
+    const supplierFormat = supplierFormatFromLine(line, draft.date || today());
+    const product = {
+      id: productId,
+      name: line.productName.trim(),
+      supplier,
+      packSize: line.packSize || "",
+      quantity: numberValue(line.quantity, 1),
+      unitCost: numberValue(line.unitCost, 0),
+      normalizedCost: supplierFormat.normalizedCost,
+      normalizedUnit: supplierFormat.baseUnit,
+      conversionReviewRequired: supplierFormat.conversionReviewRequired,
+      conversionReason: supplierFormat.conversionReason,
+      department: line.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+      departmentSplits: normalizeDepartmentSplits(line, line.department || invoiceSettings.defaultInvoiceDepartment),
+      aliases: line.rawDescription && line.rawDescription !== line.productName ? [line.rawDescription] : [],
+      supplierFormats: [],
+      supplierPrices: [],
+      priceHistory: [],
+      explicitInvoiceCreation: true,
+      createdFromInvoiceLineId: line.id,
+    };
+    setProducts((current) => [...current, product]);
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? {
+        ...item,
+        matchedProductId: productId,
+        matchedProductName: product.name,
+        productMatchSource: "new_product",
+        productMatchConfidence: 1,
+        matchStatus: productMatchStatusText("new_product"),
+        matchConfidence: 1,
+        explicitNewProductCreated: true,
+        duplicateProductCandidates: [],
+        needsReview: false,
+        reviewReasons: [],
+      } : item),
+      status: `${product.name} created from reviewed invoice line.`,
+    }));
+  };
+
+  const forgetLearnedRuleForDraftLine = (id) => {
+    const line = draft.items.find((item) => item.id === id);
+    if (!line?.learnedMappingId) return;
+    setSupplierProductMappings((current) => deactivateSupplierProductMapping(current, line.learnedMappingId));
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => item.id === id ? {
+        ...item,
+        learnedMappingId: "",
+        allocationSource: "",
+        productMatchSource: "user_selected",
+        matchStatus: "Learned rule disabled for future invoices",
+      } : item),
+      status: "Learned rule disabled. Save the invoice to keep your corrected choice.",
     }));
   };
 
@@ -5291,7 +5577,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const updateManualLine = (id, field, value) => {
     setManualDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
+      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
     }));
   };
 
@@ -5389,6 +5675,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, date, invoice));
+    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice, products }).mappings);
+    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
     setManualOpen(false);
   };
 
@@ -5414,7 +5702,7 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
   const updateEditLine = (id, field, value) => {
     setEditDraft((current) => ({
       ...current,
-      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames }) : item),
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings }) : item),
     }));
   };
 
@@ -5478,6 +5766,8 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
     setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
+    setSupplierProductMappings((current) => learnSupplierProductMappings({ mappings: current, invoice: cleaned, products }).mappings);
+    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: cleaned }));
     setEditDraft(null);
   };
 
@@ -5530,10 +5820,15 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
+        {draft.invoiceReviewReasons?.length > 0 && (
+          <div className="invoice-status warn">
+            {draft.invoiceReviewReasons.map((reason) => reviewReasonText(reason)).join(" ")}
+          </div>
+        )}
         <div className="button-row left">
           {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>}
           {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>}
-          {permissions.canApprove && <button disabled={!draft.items.length || isReading} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>}
+          {permissions.canApprove && <button disabled={!draft.items.length || isReading || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>}
           {hasUploadDraft && (
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
@@ -5544,7 +5839,10 @@ function Invoices({ aiSettings, departmentNames, draft, setDraft, invoiceSetting
         <InvoiceLineEditor
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
+          applyExistingProduct={applyExistingProductToDraftLine}
+          createProductFromLine={createProductFromDraftLine}
           departmentNames={departmentNames}
+          forgetLearnedRule={forgetLearnedRuleForDraftLine}
           items={draft.items}
           products={products}
           removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
@@ -5745,8 +6043,11 @@ function DiscountEditor({ amount, percent, onAmountChange, onPercentChange, amou
 
 function InvoiceLineEditor({
   addSplit,
+  applyExistingProduct,
   applySuggestion,
+  createProductFromLine,
   departmentNames,
+  forgetLearnedRule,
   items,
   products = [],
   removeLine,
@@ -5756,7 +6057,7 @@ function InvoiceLineEditor({
   updateSplit,
   wrapClassName = "table-wrap invoice-review-table-wrap",
 }) {
-  const headers = ["Product", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", "Net line total", ""];
+  const headers = ["Product", "Match", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", "Net line total", ""];
 
   return (
     <div className={wrapClassName}>
@@ -5770,8 +6071,10 @@ function InvoiceLineEditor({
             const netTotal = invoiceEditorNetLineTotal(item);
             const productListId = `invoice-product-options-${item.id}`;
             const productMatches = productAutocomplete(products, item.productName, 12);
+            const reviewReasons = item.reviewReasons || [];
+            const matchTone = item.needsReview ? "amber" : item.productMatchSource ? "green" : "gray";
             return (
-              <tr key={item.id}>
+              <tr className={item.needsReview ? "review-needed-row" : ""} key={item.id}>
                 <td>
                   <input
                     autoComplete="off"
@@ -5790,7 +6093,45 @@ function InvoiceLineEditor({
                       Did you mean: {item.suggestedProductName}?
                     </button>
                   )}
+                  {applyExistingProduct && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
+                    <div className="line-suggestions">
+                      {item.suggestedProducts.slice(0, 3).map((suggestion) => (
+                        <button className="match-hint" key={suggestion.id} onClick={() => applyExistingProduct?.(item.id, suggestion.id)} type="button">
+                          Use {suggestion.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {applyExistingProduct && Array.isArray(item.duplicateProductCandidates) && item.duplicateProductCandidates.length > 0 && (
+                    <div className="line-suggestions warn">
+                      <small className="line-note warn-text">Possible existing products found</small>
+                      {item.duplicateProductCandidates.slice(0, 3).map((candidate) => (
+                        <button className="match-hint" key={candidate.id} onClick={() => applyExistingProduct?.(item.id, candidate.id)} type="button">
+                          Use {candidate.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {createProductFromLine && !item.matchedProductId && (
+                    <button className="ghost mini-button" onClick={() => createProductFromLine(item.id)} type="button">
+                      <Plus size={12} />Create new product
+                    </button>
+                  )}
                   {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
+                </td>
+                <td>
+                  <div className="match-state-cell">
+                    <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "user_selected" : "no_product_match"))}</Badge>
+                    {item.allocationSource === "learned_mapping" && <small className="line-note">Applied from previous confirmed invoice</small>}
+                    {item.learnedMappingId && forgetLearnedRule && (
+                      <button className="ghost mini-button" onClick={() => forgetLearnedRule(item.id)} type="button">Forget learned rule</button>
+                    )}
+                    {reviewReasons.length > 0 && (
+                      <ul className="review-reason-list">
+                        {reviewReasons.map((reason) => <li key={reason}>{reviewReasonText(reason)}</li>)}
+                      </ul>
+                    )}
+                  </div>
                 </td>
                 <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
                 <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
@@ -9992,7 +10333,6 @@ function SettingsPanel({
           <label>Default invoice department<select value={invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateInvoice("defaultInvoiceDepartment", event.target.value)}>{departmentSettings.filter((department) => department.active).map((department) => <option key={department.id}>{department.name}</option>)}</select></label>
           <Field label="Default VAT %" type="number" value={invoiceSettings.defaultVat} onChange={(value) => updateInvoice("defaultVat", numberValue(value))} />
           <CheckboxField checked={invoiceSettings.allowUnknownSuppliers} label="Allow unknown suppliers" onChange={(value) => updateInvoice("allowUnknownSuppliers", value)} />
-          <CheckboxField checked={invoiceSettings.autoCreateProductsAfterApproval} label="Auto-create products after invoice approval" onChange={(value) => updateInvoice("autoCreateProductsAfterApproval", value)} />
         </div>
       </Panel>
 
@@ -10044,8 +10384,8 @@ function SettingsPanel({
       <Panel title="Reset data by page">
         <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
         <div className="button-row left wrap">
-          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes"])} type="button">Reset invoices</button>}
-          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Products", ["marginflow.products"])} type="button">Reset products</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes", "marginflow.invoiceLineCorrections"])} type="button">Reset invoices</button>}
+          {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Products", ["marginflow.products", "marginflow.supplierProductMappings"])} type="button">Reset products</button>}
           {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Suppliers", ["marginflow.suppliers", "marginflow.creditNotes"])} type="button">Reset suppliers</button>}
           {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Sales", ["marginflow.sales"])} type="button">Reset sales</button>}
           {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Labour", ["marginflow.labour"])} type="button">Reset labour</button>}

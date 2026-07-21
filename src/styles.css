@@ -1913,7 +1913,7 @@ code {
 
 /* Work Edition invoice and sales compatibility */
 .invoice-review-table {
-  min-width: 1760px;
+  min-width: 1960px;
 }
 
 .invoice-review-table-wrap {
@@ -1968,21 +1968,60 @@ code {
   white-space: normal;
 }
 
-.invoice-review-table td:nth-child(2) input {
+.invoice-review-table td:nth-child(2) {
+  min-width: 230px;
+  white-space: normal;
+}
+
+.match-state-cell {
+  display: grid;
+  gap: 7px;
+  width: 220px;
+}
+
+.review-needed-row td {
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.review-reason-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: normal;
+}
+
+.line-suggestions {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.line-suggestions.warn {
+  padding: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.invoice-review-table td:nth-child(3) input {
   min-width: 160px;
   width: 160px;
 }
 
-.invoice-review-table td:nth-child(7) {
+.invoice-review-table td:nth-child(8) {
   min-width: 300px;
 }
 
-.invoice-review-table td:nth-child(8) select {
+.invoice-review-table td:nth-child(9) select {
   min-width: 170px;
   width: 170px;
 }
 
-.invoice-review-table td:nth-child(9) input {
+.invoice-review-table td:nth-child(10) input {
   min-width: 180px;
   width: 180px;
 }

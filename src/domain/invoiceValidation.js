@@ -1,0 +1,164 @@
+import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
+
+const DEFAULT_PRICE_DEVIATION_THRESHOLD = 0.25;
+const DEFAULT_MIN_PRICE_SAMPLES = 3;
+
+function addReason(reasons, reason) {
+  if (reason && !reasons.includes(reason)) reasons.push(reason);
+}
+
+function isNonReceivedLine(line = {}) {
+  return ["Missing", "Damaged", "Sent back", "Not ordered", "Credit note received"].includes(line.lineStatus || line.status || "");
+}
+
+function lineTotalValue(line = {}) {
+  return numberValue(line.lineTotal ?? line.netLineTotal, numberValue(line.quantity, 0) * numberValue(line.unitCost, 0));
+}
+
+function median(values = []) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export function priceDeviationForLine(line = {}, historicalPrices = [], {
+  minSamples = DEFAULT_MIN_PRICE_SAMPLES,
+  threshold = DEFAULT_PRICE_DEVIATION_THRESHOLD,
+} = {}) {
+  const productId = line.matchedProductId || line.productId || "";
+  const supplier = line.supplier || "";
+  const currentPrice = numberValue(line.unitCost, 0);
+  if (!productId || !supplier || currentPrice <= 0) return null;
+
+  const comparable = historicalPrices
+    .filter((entry) => (entry.productId || entry.product_id) === productId)
+    .filter((entry) => !supplier || (entry.supplier || entry.supplierName || "") === supplier)
+    .filter((entry) => !line.packSize || !entry.packSize || String(entry.packSize).toLowerCase() === String(line.packSize).toLowerCase())
+    .map((entry) => numberValue(entry.price ?? entry.unitCost ?? entry.unit_cost, 0))
+    .filter((price) => price > 0);
+
+  if (comparable.length < minSamples) return null;
+  const baseline = median(comparable.slice(-12));
+  if (!baseline) return null;
+  const deviation = Math.abs(currentPrice - baseline) / baseline;
+  return {
+    comparable: true,
+    baseline,
+    sampleCount: comparable.length,
+    deviation,
+    exceedsThreshold: deviation > threshold,
+  };
+}
+
+export function validateInvoiceExtraction({
+  invoice = {},
+  lines = invoice.lines || invoice.items || [],
+  historicalPrices = [],
+  duplicateInvoiceNumbers = [],
+  priceDeviationThreshold = DEFAULT_PRICE_DEVIATION_THRESHOLD,
+  minHistoricalPriceSamples = DEFAULT_MIN_PRICE_SAMPLES,
+} = {}) {
+  const validatedLines = lines.map((line) => {
+    const reviewReasons = [...(line.reviewReasons || [])];
+    const rawDescription = line.rawDescription || line.productName || "";
+    const quantity = numberValue(line.quantity, 0);
+    const unitCost = numberValue(line.unitCost, 0);
+    const lineTotal = lineTotalValue(line);
+    const confidence = numberValue(line.confidence ?? line.extractionConfidence, 1);
+
+    if (confidence > 0 && confidence < 0.65) addReason(reviewReasons, "low_extraction_confidence");
+    if (!String(rawDescription || "").trim()) addReason(reviewReasons, "missing_product_name");
+    if (!Number.isFinite(quantity) || (!isNonReceivedLine(line) && quantity <= 0)) addReason(reviewReasons, "invalid_quantity");
+    if (!Number.isFinite(unitCost) || (!isNonReceivedLine(line) && unitCost < 0)) addReason(reviewReasons, "invalid_unit_cost");
+    if (line.lineTotal !== undefined && (!Number.isFinite(lineTotal) || (!isNonReceivedLine(line) && lineTotal < 0))) addReason(reviewReasons, "invalid_line_total");
+    if (!line.matchedProductId && line.productMatchSource !== "new_product" && line.matchStatus !== "Manual invoice") addReason(reviewReasons, "no_confirmed_product_match");
+    if (line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75) addReason(reviewReasons, "ambiguous_product_match");
+
+    const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
+    const splitTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);
+    if ((line.departmentMode === "Split" || splits.length > 1) && Math.abs(splitTotal - 100) > 0.01) addReason(reviewReasons, "invalid_split");
+
+    const priceDeviation = priceDeviationForLine(line, historicalPrices, {
+      threshold: priceDeviationThreshold,
+      minSamples: minHistoricalPriceSamples,
+    });
+    if (priceDeviation?.exceedsThreshold) addReason(reviewReasons, "price_deviation");
+
+    return {
+      ...line,
+      needsReview: reviewReasons.length > 0,
+      reviewReasons,
+      priceDeviation: priceDeviation || line.priceDeviation || null,
+    };
+  });
+
+  const invoiceReviewReasons = [...(invoice.invoiceReviewReasons || [])];
+  const supplier = invoice.supplier || "";
+  const invoiceNumber = invoice.invoiceNumber || invoice.invoice_number || "";
+  const invoiceDate = invoice.invoiceDate || invoice.date || "";
+  if (!supplier || /^unknown supplier$/i.test(supplier)) addReason(invoiceReviewReasons, "missing_supplier");
+  if (!invoiceNumber) addReason(invoiceReviewReasons, "missing_invoice_number");
+  if (!invoiceDate) addReason(invoiceReviewReasons, "missing_invoice_date");
+  if (duplicateInvoiceNumbers.includes(invoiceNumber)) addReason(invoiceReviewReasons, "duplicate_invoice_number");
+  if (!validatedLines.length) addReason(invoiceReviewReasons, "no_invoice_lines");
+
+  const lineNetTotal = roundMoney(validatedLines.reduce((sum, line) => sum + lineTotalValue(line), 0));
+  const invoiceSubtotal = numberValue(invoice.invoiceSubtotal ?? invoice.subtotalBeforeDiscount ?? invoice.subtotal, 0);
+  const invoiceTotal = numberValue(invoice.invoiceTotal ?? invoice.finalInvoiceTotal ?? invoice.total_amount, 0);
+  const vatTotal = numberValue(invoice.vatTotal ?? invoice.taxAmount ?? invoice.tax_amount, 0);
+  const toleranceFor = (expected) => Math.max(0.5, Math.abs(expected) * 0.01);
+
+  if (invoiceSubtotal && !amountsAlmostEqual(lineNetTotal, invoiceSubtotal, toleranceFor(invoiceSubtotal), 0.01)) {
+    addReason(invoiceReviewReasons, "invoice_subtotal_mismatch");
+  }
+
+  if (invoiceTotal) {
+    const comparableTotal = invoiceSubtotal && vatTotal ? invoiceSubtotal + vatTotal : lineNetTotal + vatTotal;
+    if (comparableTotal && !amountsAlmostEqual(comparableTotal, invoiceTotal, toleranceFor(invoiceTotal), 0.01)) {
+      addReason(invoiceReviewReasons, "invoice_total_mismatch");
+    }
+  }
+
+  return {
+    ...invoice,
+    lines: validatedLines,
+    invoiceNeedsReview: invoiceReviewReasons.length > 0 || validatedLines.some((line) => line.needsReview),
+    invoiceReviewReasons,
+  };
+}
+
+export function fallbackReasonsForExtraction(validatedInvoice = {}) {
+  const invoiceReasons = validatedInvoice.invoiceReviewReasons || [];
+  const lines = validatedInvoice.lines || validatedInvoice.items || [];
+  const lineReasons = lines.flatMap((line) => line.reviewReasons || []);
+  const extractionReasons = new Set([
+    "missing_supplier",
+    "missing_invoice_number",
+    "missing_invoice_date",
+    "no_invoice_lines",
+    "invoice_total_mismatch",
+    "invoice_subtotal_mismatch",
+    "low_extraction_confidence",
+    "missing_product_name",
+    "invalid_quantity",
+    "invalid_unit_cost",
+    "invalid_line_total",
+  ]);
+  return [...invoiceReasons, ...lineReasons].filter((reason, index, all) => extractionReasons.has(reason) && all.indexOf(reason) === index);
+}
+
+export function extractionQualityScore(validatedInvoice = {}) {
+  const lines = validatedInvoice.lines || validatedInvoice.items || [];
+  const invoiceReasons = validatedInvoice.invoiceReviewReasons || [];
+  const lineReasons = lines.flatMap((line) => line.reviewReasons || []);
+  const productOnlyReasons = new Set(["no_confirmed_product_match", "ambiguous_product_match", "price_deviation"]);
+  const significantLineReasons = lineReasons.filter((reason) => !productOnlyReasons.has(reason));
+  return (
+    lines.filter((line) => line.productName || line.rawDescription).length * 4
+    + lines.filter((line) => line.supplierProductCode).length
+    - invoiceReasons.length * 3
+    - significantLineReasons.length * 2
+    - lines.filter((line) => line.needsReview).length
+  );
+}
