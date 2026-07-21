@@ -34,7 +34,7 @@ import {
 } from "./domain/invoiceProductMatching.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
-import { validateInvoiceExtraction } from "./domain/invoiceValidation.js";
+import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
 import {
   activeSupplierRows,
@@ -67,6 +67,9 @@ const emptyInvoiceDraft = () => ({
   subtotalBeforeDiscount: 0,
   discountAmount: 0,
   discountPercent: 0,
+  additionalCharges: 0,
+  additionalChargesDescription: "",
+  inferredAdditionalCharges: 0,
   finalInvoiceTotal: 0,
   status: "Idle",
   editingInvoiceId: "",
@@ -1039,7 +1042,7 @@ function netLineTotal(item, invoice = {}) {
 }
 
 function invoiceFinalTotal(invoice = {}) {
-  return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0);
+  return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0) + numberValue(invoice.additionalCharges, 0);
 }
 
 function amountsAlmostEqual(a, b) {
@@ -1699,9 +1702,11 @@ function reviewReasonText(reason = "") {
     no_confirmed_product_match: "Select an existing product or create a new one",
     ambiguous_product_match: "More than one existing product may match",
     price_deviation: "Price differs from recent accepted invoices",
+    unaccounted_invoice_charge: "Invoice includes a non-product charge",
     unit_conflict: "Unit conflicts with the matched product",
     pack_size_conflict: "Pack size conflicts with the matched product",
     invalid_split: "Split allocation must be corrected",
+    missing_department: "Select a department",
     invoice_total_mismatch: "Extracted lines do not reconcile with the invoice total",
     invoice_subtotal_mismatch: "Extracted lines do not reconcile with the invoice subtotal",
     vat_mismatch: "VAT does not reconcile",
@@ -2539,6 +2544,7 @@ function prepareApprovedInvoice(invoice) {
   const finalContext = { ...invoice, ...discountFields, items };
   return {
     ...invoice,
+    additionalCharges: Number(numberValue(invoice.additionalCharges, 0).toFixed(2)),
     ...normalizeInvoiceDiscountFields(finalContext),
     items: items.map((item) => ({
       ...item,
@@ -4418,9 +4424,28 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
       return;
     }
-    const unresolvedLine = draft.items.find((item) => (
+    const approvalReview = validateInvoiceExtraction({
+      invoice: {
+        supplier: draft.supplier || draft.items[0]?.supplier,
+        invoiceNumber: draft.invoiceNumber,
+        invoiceDate: draft.date,
+        invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
+        invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
+        vatTotal: draft.vatTotal,
+        additionalCharges: draft.additionalCharges,
+        invoiceReviewReasons: draft.invoiceReviewReasons || [],
+      },
+      lines: draft.items,
+      historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
+    });
+    const invoiceBlockers = (approvalReview.invoiceReviewReasons || []).filter((reason) => reviewReasonSeverity(reason) === "error");
+    if (invoiceBlockers.length) {
+      setDraft((current) => ({ ...current, status: `Invoice needs correction before confirming: ${invoiceBlockers.map(reviewReasonText).join(", ")}.` }));
+      return;
+    }
+    const unresolvedLine = approvalReview.lines.find((item) => (
       item.matchStatus !== "Manual invoice"
-      && (!item.matchedProductId || (item.needsReview && (item.reviewReasons || []).some((reason) => ["no_confirmed_product_match", "ambiguous_product_match", "invalid_split"].includes(reason))))
+      && ((!item.matchedProductId && item.productMatchSource !== "new_product") || invoiceLineHasBlockingReview(item))
     ));
     if (unresolvedLine) {
       setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
@@ -4428,6 +4453,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     }
     const supplierRecord = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier);
     const supplier = supplierRecord?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
+    if (!supplier || /^unknown supplier$/i.test(supplier)) {
+      setDraft((current) => ({ ...current, status: "Select the supplier before confirming." }));
+      return;
+    }
     const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
     const invoice = prepareApprovedInvoice({
       id: draft.editingInvoiceId || uid(),
@@ -4437,6 +4466,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       status: "Approved",
       discountAmount: numberValue(draft.discountAmount, 0),
       discountPercent: numberValue(draft.discountPercent, 0),
+      additionalCharges: numberValue(draft.additionalCharges, 0),
+      additionalChargesDescription: draft.additionalChargesDescription || (numberValue(draft.inferredAdditionalCharges, 0) ? "Inferred non-product charge" : ""),
+      sourceInvoiceTotal: numberValue(draft.invoiceTotal ?? draft.sourceInvoiceTotal, 0),
+      sourceInvoiceSubtotal: numberValue(draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal, 0),
+      vatTotal: numberValue(draft.vatTotal, 0),
       items: normalizedItems,
     });
     setInvoices((current) => (
@@ -5231,13 +5265,23 @@ function Invoices({
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
   const hasUploadDraft = Boolean(draft.files.length || draft.items.length || draft.invoiceText || draft.status !== "Idle" || draft.supplier || draft.invoiceNumber);
-  const draftHasBlockingReview = draft.items.some((item) => (
-    item.matchStatus !== "Manual invoice"
-    && (!item.matchedProductId || (item.needsReview && (item.reviewReasons || []).some((reason) => ["no_confirmed_product_match", "ambiguous_product_match", "invalid_split"].includes(reason))))
-  )) || Boolean(draft.invoiceNeedsReview && (draft.invoiceReviewReasons || []).some((reason) => ["invoice_total_mismatch", "invoice_subtotal_mismatch", "missing_supplier", "missing_invoice_number", "missing_invoice_date"].includes(reason)));
+  const draftValidationState = useMemo(() => validateInvoiceExtraction({
+    invoice: {
+      supplier: draft.supplier || draft.items[0]?.supplier,
+      invoiceNumber: draft.invoiceNumber,
+      invoiceDate: draft.date,
+      invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
+      invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
+      vatTotal: draft.vatTotal,
+      additionalCharges: draft.additionalCharges,
+      invoiceReviewReasons: draft.invoiceReviewReasons || [],
+    },
+    lines: draft.items,
+  }), [draft.additionalCharges, draft.date, draft.invoiceNumber, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal]);
+  const draftHasBlockingReview = invoiceHasBlockingReview(draftValidationState);
 
   const resetUploadDraft = () => {
-    setDraft({ files: [], invoiceText: "", items: [], supplier: "", date: today(), invoiceNumber: "", status: "Idle" });
+    setDraft(emptyInvoiceDraft());
     setUploadInputKey((current) => current + 1);
     setCancelUploadOpen(false);
   };
@@ -5398,6 +5442,8 @@ function Invoices({
           invoiceSubtotal: payload.invoiceSubtotal,
           invoiceTotal: payload.invoiceTotal,
           vatTotal: payload.vatTotal,
+          additionalCharges: payload.additionalCharges ?? payload.handlingCharge ?? payload.deliveryCharge ?? 0,
+          additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || "",
         },
         lines: items,
         historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
@@ -5409,8 +5455,18 @@ function Invoices({
         invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
         date: preferredInvoiceDateForSupplier(supplier, invoiceText, payload.invoiceDate || current.date || today()),
         items: validated.lines,
+        invoiceSubtotal: payload.invoiceSubtotal,
+        invoiceTotal: payload.invoiceTotal,
+        sourceInvoiceSubtotal: payload.invoiceSubtotal,
+        sourceInvoiceTotal: payload.invoiceTotal,
+        vatTotal: payload.vatTotal,
+        additionalCharges: validated.additionalCharges || 0,
+        additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || (validated.inferredAdditionalCharges ? "Inferred non-product charge" : ""),
+        inferredAdditionalCharges: validated.inferredAdditionalCharges || 0,
         invoiceNeedsReview: validated.invoiceNeedsReview,
+        invoiceHasBlockingReview: validated.invoiceHasBlockingReview,
         invoiceReviewReasons: validated.invoiceReviewReasons,
+        invoiceReviewSeverity: validated.invoiceReviewSeverity,
         extractionModel: payload.extractionModel,
         fallbackModelUsed: payload.fallbackModelUsed,
         fallbackReason: payload.fallbackReason,
@@ -5909,8 +5965,13 @@ function Invoices({
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
         {draft.invoiceReviewReasons?.length > 0 && (
-          <div className="invoice-status warn">
+          <div className={`invoice-status ${draftValidationState.invoiceHasBlockingReview ? "error" : "warn"}`}>
             {draft.invoiceReviewReasons.map((reason) => reviewReasonText(reason)).join(" ")}
+          </div>
+        )}
+        {numberValue(draft.additionalCharges, 0) !== 0 && (
+          <div className="invoice-status info">
+            Non-product charges included: {money(draft.additionalCharges)}
           </div>
         )}
         <div className="button-row left">

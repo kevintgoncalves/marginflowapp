@@ -10,7 +10,7 @@ const DEFAULT_LEGACY_MODEL = "gpt-4o-mini";
 const invoiceSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["supplier", "invoiceDate", "invoiceNumber", "invoiceSubtotal", "vatTotal", "invoiceTotal", "confidence", "lines"],
+  required: ["supplier", "invoiceDate", "invoiceNumber", "invoiceSubtotal", "vatTotal", "invoiceTotal", "additionalCharges", "additionalChargesDescription", "confidence", "lines"],
   properties: {
     supplier: { type: "string" },
     invoiceDate: { type: "string" },
@@ -18,6 +18,8 @@ const invoiceSchema = {
     invoiceSubtotal: { type: "number" },
     vatTotal: { type: "number" },
     invoiceTotal: { type: "number" },
+    additionalCharges: { type: "number" },
+    additionalChargesDescription: { type: "string" },
     confidence: { type: "number" },
     lines: {
       type: "array",
@@ -250,6 +252,8 @@ function normalizeInvoice(invoice, sourceText, {
     invoiceSubtotal: asNumber(invoice.invoiceSubtotal || invoice.subtotal, 0),
     vatTotal: asNumber(invoice.vatTotal || invoice.taxAmount || invoice.vat, 0),
     invoiceTotal: asNumber(invoice.invoiceTotal || invoice.total, 0),
+    additionalCharges: asNumber(invoice.additionalCharges || invoice.handlingCharge || invoice.deliveryCharge || invoice.carriageCharge || invoice.serviceCharge, 0),
+    additionalChargesDescription: asString(invoice.additionalChargesDescription || invoice.handlingChargeDescription || invoice.deliveryChargeDescription || ""),
     confidence: clampConfidence(invoice.confidence),
     lines: normalizedLines,
     extractionModel: modelUsed,
@@ -350,12 +354,13 @@ Rules:
 - Preserve meaningful pack-size information such as 2x5kg, 24x330ml, box, case, punnet.
 - For each item, identify pack size, quantity, unit cost, VAT and line total where possible.
 - If a field is unknown, use "" or 0.
+- Return invoice-level handling, delivery, carriage or service fees as additionalCharges/additionalChargesDescription. Do not include those fees as product lines.
 - Return unreadable text as "" rather than guessing.
 - Unit cost should be the cost per pack/unit on the invoice, not the total unless only total is available.
 - Line total should be quantity × unit cost when possible.
 - Preserve negative values for credit notes and returns.
 - Ignore repeated page headers as product rows.
-- Ignore bank details, payment instructions, subtotals, VAT totals, grand totals, deposits and service charges as product rows.
+- Ignore bank details, payment instructions, subtotals, VAT totals, grand totals and deposits as product rows.
 - Never calculate missing values unless the calculation is mathematically safe from visible invoice values.
 - Supplier may be inferred from invoice header.
 - Invoice date should be ISO format YYYY-MM-DD.

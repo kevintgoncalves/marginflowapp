@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { findProductDuplicateCandidates, matchInvoiceLineToExistingProduct, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./invoiceLearning.js";
-import { fallbackReasonsForExtraction, validateInvoiceExtraction } from "./invoiceValidation.js";
+import { fallbackReasonsForExtraction, invoiceHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./invoiceValidation.js";
 
 const products = [
   { id: "p1", companyId: "c1", name: "Cherry Tomatoes 250g", packSize: "250g", aliases: ["Cherry Toms"] },
@@ -155,6 +155,96 @@ test("validation marks missing product matches and invalid splits, but fallback 
   assert.ok(validated.lines[0].reviewReasons.includes("no_confirmed_product_match"));
   assert.ok(validated.lines[0].reviewReasons.includes("invalid_split"));
   assert.deepEqual(fallbackReasonsForExtraction({ ...validated, lines: [{ ...validated.lines[0], reviewReasons: ["no_confirmed_product_match"] }] }), []);
+});
+
+test("TG Fruits handling charge reconciles ticket total without blocking confirmation", () => {
+  const validated = validateInvoiceExtraction({
+    invoice: {
+      supplier: "TG Fruits",
+      invoiceNumber: "817701",
+      invoiceDate: "2026-07-17",
+      invoiceSubtotal: 360.15,
+      invoiceTotal: 360.65,
+      vatTotal: 0,
+    },
+    lines: [{
+      id: "tg-817701-line-sum",
+      productName: "TG Fruits product lines",
+      matchedProductId: "p3",
+      productMatchSource: "supplier_code_mapping",
+      quantity: 1,
+      unitCost: 360.15,
+      lineTotal: 360.15,
+      department: "Bar",
+      departmentMode: "Single",
+      departmentSplits: [{ department: "Bar", percentage: 100 }],
+    }],
+  });
+
+  assert.equal(validated.additionalCharges, 0.5);
+  assert.equal(validated.inferredAdditionalCharges, 0.5);
+  assert.equal(validated.invoiceReviewReasons.includes("invoice_subtotal_mismatch"), false);
+  assert.equal(validated.invoiceReviewReasons.includes("invoice_total_mismatch"), false);
+  assert.equal(validated.invoiceReviewReasons.includes("unaccounted_invoice_charge"), true);
+  assert.equal(validated.invoiceHasBlockingReview, false);
+  assert.equal(invoiceHasBlockingReview(validated), false);
+});
+
+test("soft invoice and price warnings remain visible without blocking confirmation", () => {
+  const validated = validateInvoiceExtraction({
+    invoice: {
+      supplier: "TG Fruits",
+      invoiceNumber: "817702",
+      invoiceDate: "2026-07-17",
+      invoiceSubtotal: 100,
+      invoiceTotal: 160,
+      invoiceReviewReasons: ["duplicate_invoice_number"],
+    },
+    lines: [{
+      id: "price-warning",
+      productName: "Limes",
+      matchedProductId: "p3",
+      productMatchSource: "supplier_code_mapping",
+      quantity: 1,
+      unitCost: 100,
+      lineTotal: 100,
+      supplier: "TG Fruits",
+      department: "Bar",
+      departmentMode: "Single",
+      departmentSplits: [{ department: "Bar", percentage: 100 }],
+      reviewReasons: ["price_deviation", "low_extraction_confidence"],
+    }],
+  });
+
+  assert.equal(reviewReasonSeverity("invoice_total_mismatch"), "warning");
+  assert.equal(reviewReasonSeverity("price_deviation"), "warning");
+  assert.equal(validated.invoiceReviewReasons.includes("invoice_total_mismatch"), true);
+  assert.equal(validated.invoiceNeedsReview, true);
+  assert.equal(validated.invoiceHasBlockingReview, false);
+  assert.equal(validated.lines[0].needsReview, true);
+  assert.equal(validated.lines[0].hasBlockingReview, false);
+});
+
+test("hard review reasons still block unsafe invoice confirmation", () => {
+  const validated = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "817703", invoiceDate: "2026-07-17", invoiceSubtotal: 20, invoiceTotal: 20 },
+    lines: [{
+      id: "unmatched-line",
+      productName: "Unknown fruit",
+      quantity: 1,
+      unitCost: 20,
+      lineTotal: 20,
+      department: "Bar",
+      departmentMode: "Single",
+      departmentSplits: [{ department: "Bar", percentage: 100 }],
+      productMatchSource: "no_product_match",
+    }],
+  });
+
+  assert.equal(reviewReasonSeverity("no_confirmed_product_match"), "error");
+  assert.equal(validated.lines[0].reviewReasons.includes("no_confirmed_product_match"), true);
+  assert.equal(validated.lines[0].hasBlockingReview, true);
+  assert.equal(validated.invoiceHasBlockingReview, true);
 });
 
 test("correction history is idempotent for repeated saves", () => {

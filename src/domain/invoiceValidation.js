@@ -2,6 +2,55 @@ import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
 
 const DEFAULT_PRICE_DEVIATION_THRESHOLD = 0.25;
 const DEFAULT_MIN_PRICE_SAMPLES = 3;
+const DEFAULT_SMALL_CHARGE_LIMIT = 10;
+
+export const REVIEW_REASON_SEVERITY = Object.freeze({
+  missing_supplier: "error",
+  no_invoice_lines: "error",
+  no_confirmed_product_match: "error",
+  missing_product_name: "error",
+  invalid_quantity: "error",
+  invalid_unit_cost: "error",
+  invalid_line_total: "error",
+  invalid_split: "error",
+  missing_department: "error",
+
+  low_extraction_confidence: "warning",
+  ambiguous_product_match: "warning",
+  price_deviation: "warning",
+  invoice_total_mismatch: "warning",
+  invoice_subtotal_mismatch: "warning",
+  vat_mismatch: "warning",
+  duplicate_invoice_number: "warning",
+  missing_invoice_number: "warning",
+  missing_invoice_date: "warning",
+  fallback_model_required: "warning",
+  unit_conflict: "warning",
+  pack_size_conflict: "warning",
+  unaccounted_invoice_charge: "warning",
+});
+
+export function reviewReasonSeverity(reason = "") {
+  return REVIEW_REASON_SEVERITY[reason] || "warning";
+}
+
+export function hasBlockingReviewReasons(reasons = []) {
+  return reasons.some((reason) => reviewReasonSeverity(reason) === "error");
+}
+
+export function highestReviewSeverity(reasons = []) {
+  return hasBlockingReviewReasons(reasons) ? "error" : (reasons.length ? "warning" : "none");
+}
+
+export function invoiceLineHasBlockingReview(line = {}) {
+  return hasBlockingReviewReasons(line.reviewReasons || []);
+}
+
+export function invoiceHasBlockingReview(invoice = {}) {
+  const lines = invoice.lines || invoice.items || [];
+  return hasBlockingReviewReasons(invoice.invoiceReviewReasons || [])
+    || lines.some(invoiceLineHasBlockingReview);
+}
 
 function addReason(reasons, reason) {
   if (reason && !reasons.includes(reason)) reasons.push(reason);
@@ -13,6 +62,30 @@ function isNonReceivedLine(line = {}) {
 
 function lineTotalValue(line = {}) {
   return numberValue(line.lineTotal ?? line.netLineTotal, numberValue(line.quantity, 0) * numberValue(line.unitCost, 0));
+}
+
+function sumChargeLines(charges = []) {
+  if (!Array.isArray(charges)) return 0;
+  return charges.reduce((sum, charge) => sum + numberValue(charge.amount ?? charge.value ?? charge.total, 0), 0);
+}
+
+function explicitAdditionalCharges(invoice = {}) {
+  return roundMoney(
+    numberValue(invoice.additionalCharges ?? invoice.handlingCharge ?? invoice.deliveryCharge ?? invoice.carriageCharge ?? invoice.serviceCharge, 0)
+    + sumChargeLines(invoice.invoiceCharges || invoice.additionalChargeLines || invoice.charges),
+  );
+}
+
+function likelySmallInvoiceCharge(amount = 0, invoiceTotal = 0) {
+  const absolute = Math.abs(roundMoney(amount));
+  if (!absolute) return false;
+  return absolute <= Math.max(DEFAULT_SMALL_CHARGE_LIMIT, Math.abs(numberValue(invoiceTotal, 0)) * 0.03);
+}
+
+function totalMatchesAny(expected = 0, candidates = []) {
+  return candidates
+    .map(roundMoney)
+    .some((candidate) => candidate && amountsAlmostEqual(candidate, expected, Math.max(0.5, Math.abs(expected) * 0.01), 0.01));
 }
 
 function median(values = []) {
@@ -77,7 +150,10 @@ export function validateInvoiceExtraction({
 
     const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
     const splitTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);
-    if ((line.departmentMode === "Split" || splits.length > 1) && Math.abs(splitTotal - 100) > 0.01) addReason(reviewReasons, "invalid_split");
+    const splitMode = line.departmentMode === "Split" || splits.length > 1;
+    if (splitMode && (!splits.length || Math.abs(splitTotal - 100) > 0.01)) addReason(reviewReasons, "invalid_split");
+    if (!isNonReceivedLine(line) && splitMode && splits.some((split) => !String(split.department || split.departmentId || split.department_id || "").trim())) addReason(reviewReasons, "missing_department");
+    if (!isNonReceivedLine(line) && !splitMode && !String(line.department || line.departmentId || line.department_id || "").trim()) addReason(reviewReasons, "missing_department");
 
     const priceDeviation = priceDeviationForLine(line, historicalPrices, {
       threshold: priceDeviationThreshold,
@@ -89,6 +165,8 @@ export function validateInvoiceExtraction({
       ...line,
       needsReview: reviewReasons.length > 0,
       reviewReasons,
+      reviewSeverity: highestReviewSeverity(reviewReasons),
+      hasBlockingReview: hasBlockingReviewReasons(reviewReasons),
       priceDeviation: priceDeviation || line.priceDeviation || null,
     };
   });
@@ -107,23 +185,42 @@ export function validateInvoiceExtraction({
   const invoiceSubtotal = numberValue(invoice.invoiceSubtotal ?? invoice.subtotalBeforeDiscount ?? invoice.subtotal, 0);
   const invoiceTotal = numberValue(invoice.invoiceTotal ?? invoice.finalInvoiceTotal ?? invoice.total_amount, 0);
   const vatTotal = numberValue(invoice.vatTotal ?? invoice.taxAmount ?? invoice.tax_amount, 0);
-  const toleranceFor = (expected) => Math.max(0.5, Math.abs(expected) * 0.01);
+  const explicitChargeTotal = explicitAdditionalCharges(invoice);
+  const inferredFromTotal = invoiceTotal ? roundMoney(invoiceTotal - vatTotal - lineNetTotal) : 0;
+  const inferredFromSubtotal = invoiceSubtotal ? roundMoney(invoiceSubtotal - lineNetTotal) : 0;
+  const inferredChargeTotal = explicitChargeTotal
+    ? 0
+    : (likelySmallInvoiceCharge(inferredFromTotal, invoiceTotal) ? inferredFromTotal : (
+      likelySmallInvoiceCharge(inferredFromSubtotal, invoiceSubtotal) ? inferredFromSubtotal : 0
+    ));
+  const additionalCharges = roundMoney(explicitChargeTotal || inferredChargeTotal);
+  if (additionalCharges && !explicitChargeTotal) addReason(invoiceReviewReasons, "unaccounted_invoice_charge");
 
-  if (invoiceSubtotal && !amountsAlmostEqual(lineNetTotal, invoiceSubtotal, toleranceFor(invoiceSubtotal), 0.01)) {
+  if (invoiceSubtotal && !totalMatchesAny(invoiceSubtotal, [lineNetTotal, lineNetTotal + additionalCharges])) {
     addReason(invoiceReviewReasons, "invoice_subtotal_mismatch");
   }
 
   if (invoiceTotal) {
-    const comparableTotal = invoiceSubtotal && vatTotal ? invoiceSubtotal + vatTotal : lineNetTotal + vatTotal;
-    if (comparableTotal && !amountsAlmostEqual(comparableTotal, invoiceTotal, toleranceFor(invoiceTotal), 0.01)) {
+    const totalCandidates = [
+      lineNetTotal + vatTotal,
+      lineNetTotal + vatTotal + additionalCharges,
+      invoiceSubtotal + vatTotal,
+      invoiceSubtotal + vatTotal + additionalCharges,
+    ];
+    if (!totalMatchesAny(invoiceTotal, totalCandidates)) {
       addReason(invoiceReviewReasons, "invoice_total_mismatch");
     }
   }
 
+  const invoiceHasBlockers = hasBlockingReviewReasons(invoiceReviewReasons) || validatedLines.some((line) => line.hasBlockingReview);
   return {
     ...invoice,
+    additionalCharges,
+    inferredAdditionalCharges: additionalCharges && !explicitChargeTotal ? additionalCharges : 0,
     lines: validatedLines,
     invoiceNeedsReview: invoiceReviewReasons.length > 0 || validatedLines.some((line) => line.needsReview),
+    invoiceReviewSeverity: highestReviewSeverity(invoiceReviewReasons),
+    invoiceHasBlockingReview: invoiceHasBlockers,
     invoiceReviewReasons,
   };
 }
