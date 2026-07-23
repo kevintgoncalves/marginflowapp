@@ -1,14 +1,88 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
-import { normalizeSupplierDescription, normalizeSupplierProductCode, productAliases } from "./invoiceProductMatching.js";
+import {
+  LEGACY_PRODUCT_MATCH_SOURCES,
+  PRODUCT_MATCH_SOURCES,
+  normalizeSupplierDescription,
+  normalizeSupplierProductCode,
+  productAliases,
+} from "./invoiceProductMatching.js";
 import { sameSupplierIdentity } from "./supplierIdentity.js";
 
 export const PRODUCT_RESOLUTION_MODES = Object.freeze({
   UNRESOLVED: "unresolved",
+  AUTO_MATCHED: "auto_matched",
+  MANUALLY_MATCHED: "manually_matched",
   EXISTING_PRODUCT: "existing_product",
   CREATE_NEW_PRODUCT: "create_new_product",
+  AMBIGUOUS: "ambiguous",
 });
 
 const productMatchReviewReasons = new Set(["no_confirmed_product_match", "ambiguous_product_match"]);
+const automaticMatchSources = new Set([
+  PRODUCT_MATCH_SOURCES.SUPPLIER_CODE,
+  PRODUCT_MATCH_SOURCES.LEARNED_RULE,
+  PRODUCT_MATCH_SOURCES.SUPPLIER_MAPPING,
+  PRODUCT_MATCH_SOURCES.BARCODE,
+  PRODUCT_MATCH_SOURCES.EXACT_NAME,
+  PRODUCT_MATCH_SOURCES.ALIAS,
+  PRODUCT_MATCH_SOURCES.DETERMINISTIC_MATCH,
+  PRODUCT_MATCH_SOURCES.FUZZY_MATCH,
+  LEGACY_PRODUCT_MATCH_SOURCES.SUPPLIER_CODE,
+  LEGACY_PRODUCT_MATCH_SOURCES.SUPPLIER_DESCRIPTION,
+  LEGACY_PRODUCT_MATCH_SOURCES.EXACT_PRODUCT,
+  LEGACY_PRODUCT_MATCH_SOURCES.FUZZY_PRODUCT,
+]);
+
+const manualMatchSources = new Set([
+  PRODUCT_MATCH_SOURCES.MANUAL_SELECTION,
+  LEGACY_PRODUCT_MATCH_SOURCES.USER_SELECTED,
+]);
+
+export function canonicalProductMatchSource(source = "") {
+  const value = String(source || "").trim();
+  const aliases = {
+    [LEGACY_PRODUCT_MATCH_SOURCES.SUPPLIER_CODE]: PRODUCT_MATCH_SOURCES.SUPPLIER_CODE,
+    [LEGACY_PRODUCT_MATCH_SOURCES.SUPPLIER_DESCRIPTION]: PRODUCT_MATCH_SOURCES.LEARNED_RULE,
+    [LEGACY_PRODUCT_MATCH_SOURCES.EXACT_PRODUCT]: PRODUCT_MATCH_SOURCES.EXACT_NAME,
+    [LEGACY_PRODUCT_MATCH_SOURCES.FUZZY_PRODUCT]: PRODUCT_MATCH_SOURCES.FUZZY_MATCH,
+    [LEGACY_PRODUCT_MATCH_SOURCES.USER_SELECTED]: PRODUCT_MATCH_SOURCES.MANUAL_SELECTION,
+    supplier_description: PRODUCT_MATCH_SOURCES.LEARNED_RULE,
+    exact_product: PRODUCT_MATCH_SOURCES.EXACT_NAME,
+    fuzzy_product: PRODUCT_MATCH_SOURCES.FUZZY_MATCH,
+  };
+  return aliases[value] || value || PRODUCT_MATCH_SOURCES.NONE;
+}
+
+export function isAutomaticProductMatchSource(source = "") {
+  return automaticMatchSources.has(source) || automaticMatchSources.has(canonicalProductMatchSource(source));
+}
+
+export function isManualProductMatchSource(source = "") {
+  return manualMatchSources.has(source) || manualMatchSources.has(canonicalProductMatchSource(source));
+}
+
+export function isAutoMatchedProductResolution(line = {}) {
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+    || (Boolean(line.matchedProductId || line.productId) && isAutomaticProductMatchSource(line.productMatchSource));
+}
+
+export function isManuallyMatchedProductResolution(line = {}) {
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
+    || (Boolean(line.matchedProductId || line.productId) && isManualProductMatchSource(line.productMatchSource));
+}
+
+export function isAmbiguousProductResolution(line = {}) {
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.AMBIGUOUS;
+}
+
+export function isUnresolvedProductResolution(line = {}) {
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.UNRESOLVED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.UNRESOLVED
+    || isAmbiguousProductResolution(line);
+}
 
 export function isCreateNewProductResolution(line = {}) {
   return line.productResolution === PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT
@@ -18,8 +92,21 @@ export function isCreateNewProductResolution(line = {}) {
 
 export function isExistingProductResolution(line = {}) {
   return line.productResolution === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
     || Boolean(line.matchedProductId || line.productId);
+}
+
+export function isResolvedExistingProductResolution(line = {}) {
+  const productId = line.matchedProductId || line.productId || "";
+  if (!productId) return false;
+  if (isUnresolvedProductResolution(line) || isCreateNewProductResolution(line)) return false;
+  if (isAutoMatchedProductResolution(line) || isManuallyMatchedProductResolution(line)) return true;
+  if (line.productResolution === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT) return true;
+  return !line.productResolution && !line.product_resolution_mode;
 }
 
 export function clearProductMatchReviewReasons(reasons = []) {
@@ -40,38 +127,89 @@ export function lineWithCreateNewProductResolution(line = {}) {
     rejectedSuggestedProducts: line.rejectedSuggestedProducts || line.suggestedProducts || [],
     duplicateProductCandidates: [],
     productResolution: PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT,
-    productMatchSource: "new_product",
+    productMatchSource: PRODUCT_MATCH_SOURCES.NEW_PRODUCT,
     productMatchConfidence: 1,
     matchConfidence: 1,
     matchStatus: productName ? `New product will be created: ${productName.toUpperCase()}` : "New product will be created",
+    productMatchCorrectionMode: false,
+    productMatchOverridden: true,
     needsReview: clearProductMatchReviewReasons(line.reviewReasons || []).length > 0,
     reviewReasons: clearProductMatchReviewReasons(line.reviewReasons || []),
   };
 }
 
 export function lineWithExistingProductResolution(line = {}, product = {}) {
+  const productId = product.id || product.productId || line.matchedProductId || line.productId || "";
+  const productName = product.name || product.productName || line.productName || line.matchedProductName || "";
   return {
     ...line,
-    productName: product.name || product.productName || line.productName,
-    matchedProductId: product.id || "",
-    matchedProductName: product.name || product.productName || line.productName,
-    productId: product.id || "",
+    productName,
+    matchedProductId: productId,
+    matchedProductName: productName,
+    productId,
     suggestedProductId: "",
     suggestedProductName: "",
     suggestedProducts: [],
     rejectedSuggestedProducts: [],
     duplicateProductCandidates: [],
-    productResolution: PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT,
-    productMatchSource: "user_selected",
+    productResolution: PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED,
+    productMatchSource: PRODUCT_MATCH_SOURCES.MANUAL_SELECTION,
     productMatchConfidence: 1,
     matchConfidence: 1,
     matchStatus: "Product selected from database",
+    productMatchCorrectionMode: false,
+    productMatchOverridden: true,
+    needsReview: false,
+    reviewReasons: [],
+  };
+}
+
+function automaticMatchCandidate(line = {}, product = {}, { source = "", confidence = null } = {}) {
+  const productId = product.id || product.productId || line.matchedProductId || line.productId || "";
+  const productName = product.name || product.productName || line.matchedProductName || line.productName || "";
+  return {
+    productId,
+    productName,
+    matchedProductId: productId,
+    matchedProductName: productName,
+    productMatchSource: canonicalProductMatchSource(source || line.productMatchSource),
+    productMatchConfidence: confidence ?? line.productMatchConfidence ?? line.matchConfidence ?? null,
+  };
+}
+
+export function lineWithAutoMatchedProductResolution(line = {}, product = {}, { source = "", confidence = null, matchStatus = "Automatically matched" } = {}) {
+  const productId = product.id || product.productId || line.matchedProductId || line.productId || "";
+  const productName = product.name || product.productName || line.matchedProductName || line.productName || "";
+  const productMatchSource = canonicalProductMatchSource(source || line.productMatchSource);
+  return {
+    ...line,
+    productName,
+    matchedProductId: productId,
+    matchedProductName: productName,
+    productId,
+    suggestedProductId: "",
+    suggestedProductName: "",
+    suggestedProducts: [],
+    rejectedSuggestedProducts: [],
+    duplicateProductCandidates: [],
+    productResolution: PRODUCT_RESOLUTION_MODES.AUTO_MATCHED,
+    productMatchSource,
+    productMatchConfidence: confidence ?? line.productMatchConfidence ?? 1,
+    matchConfidence: confidence ?? line.matchConfidence ?? line.productMatchConfidence ?? 1,
+    matchStatus,
+    automaticProductMatch: automaticMatchCandidate(line, { id: productId, name: productName }, { source: productMatchSource, confidence: confidence ?? line.productMatchConfidence ?? 1 }),
+    productMatchCorrectionMode: false,
+    productMatchOverridden: false,
     needsReview: false,
     reviewReasons: [],
   };
 }
 
 export function lineWithResetProductResolution(line = {}) {
+  const previousAutomaticMatch = isAutoMatchedProductResolution(line) && (line.matchedProductId || line.productId)
+    ? automaticMatchCandidate(line, {}, { source: line.productMatchSource, confidence: line.productMatchConfidence ?? line.matchConfidence ?? null })
+    : line.automaticProductMatch;
+  const reviewReasons = [...new Set([...(line.reviewReasons || []).filter((reason) => reason !== "ambiguous_product_match"), "no_confirmed_product_match"])];
   return {
     ...line,
     matchedProductId: "",
@@ -83,12 +221,29 @@ export function lineWithResetProductResolution(line = {}) {
     rejectedSuggestedProducts: [],
     duplicateProductCandidates: [],
     productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
-    productMatchSource: "no_product_match",
+    productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
     productMatchConfidence: line.productMatchConfidence || null,
     matchConfidence: line.matchConfidence || 0,
     matchStatus: "No confirmed existing product match",
+    automaticProductMatch: previousAutomaticMatch || null,
+    productMatchCorrectionMode: true,
+    productMatchOverridden: Boolean(line.productMatchOverridden),
     needsReview: true,
-    reviewReasons: line.reviewReasons?.length ? line.reviewReasons : ["no_confirmed_product_match"],
+    reviewReasons,
+  };
+}
+
+export function lineWithAmbiguousProductResolution(line = {}) {
+  return {
+    ...line,
+    matchedProductId: "",
+    matchedProductName: "",
+    productId: "",
+    productResolution: PRODUCT_RESOLUTION_MODES.AMBIGUOUS,
+    productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
+    matchStatus: "Review product match",
+    needsReview: true,
+    reviewReasons: [...new Set([...(line.reviewReasons || []), "ambiguous_product_match"])],
   };
 }
 

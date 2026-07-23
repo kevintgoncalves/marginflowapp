@@ -38,7 +38,15 @@ import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSev
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
 import {
   PRODUCT_RESOLUTION_MODES,
+  canonicalProductMatchSource,
+  isAutoMatchedProductResolution,
+  isManuallyMatchedProductResolution,
+  isResolvedExistingProductResolution,
+  isUnresolvedProductResolution,
+  isAutomaticProductMatchSource,
   isCreateNewProductResolution,
+  lineWithAutoMatchedProductResolution,
+  lineWithAmbiguousProductResolution,
   lineWithCreateNewProductResolution,
   lineWithExistingProductResolution,
   lineWithResetProductResolution,
@@ -1599,6 +1607,15 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         supplier: updated.supplier || selectedProduct.supplier || "",
         department: updated.department || selectedProduct.department || departmentNames[0] || "Kitchen Made",
       };
+    } else if (item.productMatchCorrectionMode) {
+      updated = {
+        ...lineWithResetProductResolution(updated),
+        productName: value,
+        suggestedProducts: item.suggestedProducts || [],
+        productMatchConfidence: null,
+        matchConfidence: 0,
+        matchStatus: value?.trim() ? "Choose a product match" : "No existing product found",
+      };
     } else {
       const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId });
       updated = { ...enriched, productName: value };
@@ -1785,17 +1802,35 @@ function productForEnteredName(products, value) {
   return products.find((product) => productAliases(product).some((alias) => alias.toLowerCase() === key)) || null;
 }
 
-function productMatchStatusText(source = "") {
+function productMatchSourceText(source = "") {
+  const canonicalSource = canonicalProductMatchSource(source);
   const labels = {
-    supplier_code_mapping: "Matched from supplier code",
-    supplier_description_mapping: "Learned from previous invoice",
-    exact_product_match: "Exact existing product match",
-    fuzzy_product_match: "Suggested existing product",
-    user_selected: "Product selected from database",
+    supplier_code: "Supplier code",
+    supplier_mapping: "Supplier mapping",
+    learned_rule: "Learned supplier rule",
+    barcode: "Barcode / SKU",
+    exact_name: "Exact product name",
+    alias: "Exact product alias",
+    deterministic_match: "Supplier and pack-size match",
+    fuzzy_match: "Fuzzy match",
+    manual_selection: "Manual selection",
     new_product: "New product will be created",
     no_product_match: "No confirmed existing product match",
   };
-  return labels[source] || "No confirmed existing product match";
+  return labels[canonicalSource] || labels[source] || "No confirmed existing product match";
+}
+
+function productMatchStatusText(source = "", resolution = "") {
+  if (resolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED) return "Automatically matched";
+  if (resolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED) return "Manually matched";
+  if (resolution === PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT) return "New product will be created";
+  if (resolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS) return "Review product match";
+  if (resolution === PRODUCT_RESOLUTION_MODES.UNRESOLVED) return "No existing product found";
+  const canonicalSource = canonicalProductMatchSource(source);
+  if (isAutomaticProductMatchSource(canonicalSource)) return "Automatically matched";
+  if (canonicalSource === "manual_selection") return "Manually matched";
+  if (canonicalSource === "new_product") return "New product will be created";
+  return "No existing product found";
 }
 
 function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
@@ -1843,24 +1878,57 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
   if (isCreateNewProductResolution(line)) {
     return lineWithCreateNewProductResolution(line);
   }
+  const currentProduct = (line.matchedProductId || line.productId)
+    ? products.find((product) => product.id === (line.matchedProductId || line.productId))
+    : null;
+  if (currentProduct && isManuallyMatchedProductResolution(line)) {
+    const department = line.department || currentProduct.department || "Kitchen Made";
+    return {
+      ...lineWithExistingProductResolution(line, currentProduct),
+      packSize: line.packSize || currentProduct.packSize || "",
+      supplier: line.supplier || currentProduct.supplier || "",
+      department,
+      departmentMode: line.departmentMode || "Single",
+      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
+    };
+  }
+  if (currentProduct && isAutoMatchedProductResolution(line)) {
+    const learnedSplit = line.departmentMode === "Split" || /^split$/i.test(line.allocationMode || "");
+    const department = learnedSplit ? (line.departmentSplits?.[0]?.department || line.department || currentProduct.department || "Kitchen Made") : (line.department || currentProduct.department || "Kitchen Made");
+    return {
+      ...lineWithAutoMatchedProductResolution(line, currentProduct, {
+        source: line.productMatchSource,
+        confidence: line.productMatchConfidence ?? line.matchConfidence ?? 1,
+      }),
+      packSize: line.packSize || currentProduct.packSize || "",
+      supplier: line.supplier || currentProduct.supplier || "",
+      department,
+      departmentMode: learnedSplit ? "Split" : (line.departmentMode || "Single"),
+      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
+      allocationSource: line.allocationSource || (learnedSplit ? "learned_split_rule" : line.allocationSource),
+      learnedMappingId: line.learnedMappingId || "",
+    };
+  }
+  if (line.productMatchCorrectionMode) {
+    return lineWithResetProductResolution(line);
+  }
   const matchingEnabled = matchingSettings.enableProductMatching ?? matchingSettings.enableAiProductMatching ?? true;
   if (!matchingEnabled) {
-    return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "", needsReview: true, reviewReasons: ["no_confirmed_product_match"] };
+    return { ...line, productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "", needsReview: true, reviewReasons: ["no_confirmed_product_match"] };
   }
   const autoMatchThreshold = Math.max(0, Math.min(1, numberValue(matchingSettings.autoMatchConfidenceThreshold, 90) / 100));
-  const existingLearnedProduct = line.matchedProductId && ["supplier_code_mapping", "supplier_description_mapping"].includes(line.productMatchSource)
+  const existingLearnedProduct = line.matchedProductId && isAutomaticProductMatchSource(line.productMatchSource)
     ? products.find((product) => product.id === line.matchedProductId)
     : null;
   if (existingLearnedProduct) {
     const learnedSplit = line.departmentMode === "Split" || /^split$/i.test(line.allocationMode || "");
     const department = learnedSplit ? (line.departmentSplits?.[0]?.department || line.department || existingLearnedProduct.department || "Kitchen Made") : (line.department || existingLearnedProduct.department || "Kitchen Made");
     return {
-      ...line,
-      productName: existingLearnedProduct.name,
-      matchedProductId: existingLearnedProduct.id,
-      matchedProductName: existingLearnedProduct.name,
-      matchConfidence: line.productMatchConfidence ?? 1,
-      matchStatus: productMatchStatusText(line.productMatchSource),
+      ...lineWithAutoMatchedProductResolution(line, existingLearnedProduct, {
+        source: line.productMatchSource,
+        confidence: line.productMatchConfidence ?? 1,
+        matchStatus: "Automatically matched",
+      }),
       packSize: line.packSize || existingLearnedProduct.packSize || "",
       supplier: line.supplier || existingLearnedProduct.supplier || "",
       department,
@@ -1889,17 +1957,11 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
     const learnedSplit = match.departmentMode === "Split" || /^split$/i.test(match.allocationMode || "");
     const department = learnedSplit ? (match.departmentSplits?.[0]?.department || line.department || matchedProduct.department || "Kitchen Made") : (match.department || line.department || matchedProduct.department || "Kitchen Made");
     return {
-      ...line,
-      productName: matchedProduct.name,
-      matchedProductId: matchedProduct.id,
-      matchedProductName: matchedProduct.name,
-      productMatchSource: match.productMatchSource,
-      productMatchConfidence: match.productMatchConfidence,
-      matchConfidence: match.productMatchConfidence ?? 1,
-      matchStatus: productMatchStatusText(match.productMatchSource),
-      suggestedProductId: "",
-      suggestedProductName: "",
-      suggestedProducts: [],
+      ...lineWithAutoMatchedProductResolution(line, matchedProduct, {
+        source: match.productMatchSource,
+        confidence: match.productMatchConfidence ?? 1,
+        matchStatus: "Automatically matched",
+      }),
       packSize: line.packSize || matchedProduct.packSize || "",
       supplier: line.supplier || matchedProduct.supplier || "",
       department,
@@ -1915,11 +1977,11 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
 
   const requireManualApproval = matchingSettings.requireManualApprovalBelowThreshold ?? true;
   const suggestion = requireManualApproval ? match.suggestedProducts?.[0] : null;
-  return {
+  const unresolvedLine = {
     ...line,
     matchedProductId: "",
     matchedProductName: "",
-    productMatchSource: match.productMatchSource || "no_product_match",
+    productMatchSource: canonicalProductMatchSource(match.productMatchSource || "no_product_match"),
     productMatchConfidence: match.productMatchConfidence,
     suggestedProductId: suggestion?.id || "",
     suggestedProductName: suggestion?.name || "",
@@ -1929,6 +1991,9 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
     needsReview: true,
     reviewReasons: match.reviewReasons || ["no_confirmed_product_match"],
   };
+  return (match.reviewReasons || []).includes("ambiguous_product_match")
+    ? lineWithAmbiguousProductResolution(unresolvedLine)
+    : { ...unresolvedLine, productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED };
 }
 
 function canReadFileAsText(file) {
@@ -5849,9 +5914,10 @@ function Invoices({
             suggestedProductId: line.suggestedProducts?.[0]?.id || line.suggestedProductId || "",
             suggestedProductName: line.suggestedProducts?.[0]?.name || line.suggestedProductName || "",
             suggestedProducts: line.suggestedProducts || [],
-            productMatchSource: line.productMatchSource || "no_product_match",
+            productResolution: line.productResolution || line.product_resolution_mode || PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+            productMatchSource: canonicalProductMatchSource(line.productMatchSource || "no_product_match"),
             productMatchConfidence: line.productMatchConfidence,
-            matchStatus: productMatchStatusText(line.productMatchSource || "no_product_match"),
+            matchStatus: line.matchStatus || productMatchStatusText(line.productMatchSource || "no_product_match", line.productResolution),
             allocationSource: line.allocationSource || "",
             learnedMappingId: line.learnedMappingId || "",
             needsReview: Boolean(line.needsReview),
@@ -6035,12 +6101,33 @@ function Invoices({
   const resetProductResolutionForDraftLine = (id) => {
     setDraft((current) => ({
       ...current,
+      items: current.items.map((item) => item.id === id ? lineWithResetProductResolution(item) : item),
+      status: "Choose an existing product or create a new one.",
+    }));
+  };
+
+  const restoreAutomaticProductMatchForDraftLine = (id) => {
+    setDraft((current) => ({
+      ...current,
       items: current.items.map((item) => {
-        if (item.id !== id) return item;
-        const reset = lineWithResetProductResolution(item);
-        return updateInvoiceLineForEditor(reset, "productName", reset.productName || "", { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        if (item.id !== id || !item.automaticProductMatch) return item;
+        const productId = item.automaticProductMatch.productId || item.automaticProductMatch.matchedProductId || "";
+        const product = products.find((candidate) => candidate.id === productId) || {
+          id: productId,
+          name: item.automaticProductMatch.productName || item.automaticProductMatch.matchedProductName || item.productName,
+        };
+        const department = item.department || product.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+        return normalizeInvoiceLineForEditor({
+          ...lineWithAutoMatchedProductResolution(item, product, {
+            source: item.automaticProductMatch.productMatchSource || item.productMatchSource,
+            confidence: item.automaticProductMatch.productMatchConfidence ?? item.productMatchConfidence ?? 1,
+          }),
+          packSize: item.packSize || product.packSize || "",
+          supplier: item.supplier || product.supplier || current.supplier,
+          department,
+        }, departmentNames);
       }),
-      status: "Product decision reset. Choose an existing product or create a new one.",
+      status: "Automatic product match restored.",
     }));
   };
 
@@ -6054,7 +6141,9 @@ function Invoices({
         ...item,
         learnedMappingId: "",
         allocationSource: "",
-        productMatchSource: "user_selected",
+        productResolution: PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED,
+        productMatchSource: "manual_selection",
+        productMatchOverridden: true,
         matchStatus: "Learned rule disabled for future invoices",
       } : item),
       status: "Learned rule disabled. Save the invoice to keep your corrected choice.",
@@ -6504,6 +6593,7 @@ function Invoices({
           removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
           removeSplit={removeDraftSplit}
           resetProductResolution={resetProductResolutionForDraftLine}
+          restoreAutomaticProductMatch={restoreAutomaticProductMatchForDraftLine}
           setDepartmentMode={setDraftDepartmentMode}
           updateLine={updateDraftItem}
           updateSplit={updateDraftSplit}
@@ -6759,6 +6849,7 @@ function InvoiceLineEditor({
   removeLine,
   removeSplit,
   resetProductResolution,
+  restoreAutomaticProductMatch,
   setDepartmentMode,
   updateLine,
   updateSplit,
@@ -6782,8 +6873,14 @@ function InvoiceLineEditor({
             const productMatches = productAutocomplete(products, item.productName, 12);
             const reviewReasons = item.reviewReasons || [];
             const createNewSelected = isCreateNewProductResolution(item);
-            const existingSelected = Boolean(item.matchedProductId) && !createNewSelected;
-            const matchTone = item.needsReview ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
+            const autoMatched = isAutoMatchedProductResolution(item);
+            const manualMatched = isManuallyMatchedProductResolution(item) || (Boolean(item.matchedProductId) && !autoMatched && !createNewSelected);
+            const existingSelected = isResolvedExistingProductResolution(item)
+              || (Boolean(item.matchedProductId) && !createNewSelected && !isUnresolvedProductResolution(item));
+            const ambiguousMatch = item.productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS || reviewReasons.includes("ambiguous_product_match");
+            const automaticCandidate = item.automaticProductMatch || null;
+            const confidence = Number.isFinite(numberValue(item.productMatchConfidence, NaN)) ? `${Math.round(numberValue(item.productMatchConfidence, 0) * 100)}%` : "";
+            const matchTone = item.hasBlockingReview || ambiguousMatch ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
             return (
               <tr className={item.needsReview ? "review-needed-row" : ""} key={item.id}>
                 <td>
@@ -6799,6 +6896,27 @@ function InvoiceLineEditor({
                       <option key={product.id} label={productOptionLabel(product)} value={product.name} />
                     ))}
                   </datalist>
+                  {autoMatched && existingSelected && (
+                    <div className="product-resolution auto-match">
+                      <strong>Automatically matched</strong>
+                      <small>Document: {item.rawDescription || item.productName}</small>
+                      <small>MarginFlow: {item.matchedProductName || item.productName}</small>
+                      <small>{productMatchSourceText(item.productMatchSource)}{confidence ? ` · ${confidence}` : ""}</small>
+                      {resetProductResolution && <button className="ghost mini-button subtle-action" onClick={() => resetProductResolution(item.id)} type="button">Change</button>}
+                    </div>
+                  )}
+                  {manualMatched && existingSelected && !autoMatched && (
+                    <div className="product-resolution manual-match">
+                      <strong>Selected product</strong>
+                      <small>MarginFlow: {item.matchedProductName || item.productName}</small>
+                      {resetProductResolution && <button className="ghost mini-button subtle-action" onClick={() => resetProductResolution(item.id)} type="button">Change</button>}
+                    </div>
+                  )}
+                  {item.productMatchCorrectionMode && automaticCandidate?.productId && restoreAutomaticProductMatch && !existingSelected && (
+                    <button className="ghost mini-button" onClick={() => restoreAutomaticProductMatch(item.id)} type="button">
+                      Use automatic match: {automaticCandidate.productName || automaticCandidate.matchedProductName}
+                    </button>
+                  )}
                   {item.suggestedProductName && applySuggestion && !createNewSelected && !existingSelected && (
                     <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
                       Did you mean: {item.suggestedProductName}?
@@ -6834,17 +6952,12 @@ function InvoiceLineEditor({
                       {resetProductResolution && <button className="ghost mini-button" onClick={() => resetProductResolution(item.id)} type="button">Choose an existing product instead</button>}
                     </div>
                   )}
-                  {existingSelected && (
-                    <div className="line-decision existing-product">
-                      <small>Matched to existing product: {item.matchedProductName || item.productName}</small>
-                      {resetProductResolution && <button className="ghost mini-button" onClick={() => resetProductResolution(item.id)} type="button">Change decision</button>}
-                    </div>
-                  )}
-                  {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
+                  {!existingSelected && !item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
                 </td>
                 <td>
                   <div className="match-state-cell">
-                    <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "user_selected" : "no_product_match"))}</Badge>
+                    <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "manual_selection" : "no_product_match"), item.productResolution)}</Badge>
+                    {existingSelected && <small className="line-note">{productMatchSourceText(item.productMatchSource)}{confidence ? ` · ${confidence}` : ""}</small>}
                     {["learned_mapping", "learned_split_rule"].includes(item.allocationSource) && <small className="line-note">Learned from previous invoice</small>}
                     {item.learnedMappingId && forgetLearnedRule && (
                       <button className="ghost mini-button" onClick={() => forgetLearnedRule(item.id)} type="button">Forget learned rule</button>

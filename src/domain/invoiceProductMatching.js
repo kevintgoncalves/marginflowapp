@@ -3,13 +3,25 @@ import { sameSupplierIdentity } from "./supplierIdentity.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 
 export const PRODUCT_MATCH_SOURCES = {
+  SUPPLIER_CODE: "supplier_code",
+  LEARNED_RULE: "learned_rule",
+  SUPPLIER_MAPPING: "supplier_mapping",
+  BARCODE: "barcode",
+  EXACT_NAME: "exact_name",
+  ALIAS: "alias",
+  DETERMINISTIC_MATCH: "deterministic_match",
+  FUZZY_MATCH: "fuzzy_match",
+  MANUAL_SELECTION: "manual_selection",
+  NEW_PRODUCT: "new_product",
+  NONE: "no_product_match",
+};
+
+export const LEGACY_PRODUCT_MATCH_SOURCES = {
   SUPPLIER_CODE: "supplier_code_mapping",
   SUPPLIER_DESCRIPTION: "supplier_description_mapping",
   EXACT_PRODUCT: "exact_product_match",
   FUZZY_PRODUCT: "fuzzy_product_match",
   USER_SELECTED: "user_selected",
-  NEW_PRODUCT: "new_product",
-  NONE: "no_product_match",
 };
 
 export function normalizeSupplierProductCode(value = "") {
@@ -172,6 +184,27 @@ function scoreProduct(product, rawDescription, productName) {
   );
 }
 
+function exactAliasMatch(product = {}, target = "") {
+  const targetText = normalizeSupplierDescription(target);
+  if (!targetText) return null;
+  const primaryNames = new Set([product.name, product.productName].filter(Boolean).map(normalizeSupplierDescription));
+  const matchedAlias = productAliases(product).find((alias) => normalizeSupplierDescription(alias) === targetText);
+  if (!matchedAlias) return null;
+  return {
+    product,
+    source: primaryNames.has(normalizeSupplierDescription(matchedAlias)) ? PRODUCT_MATCH_SOURCES.EXACT_NAME : PRODUCT_MATCH_SOURCES.ALIAS,
+  };
+}
+
+function uniqueProductEntries(entries = []) {
+  const byProductId = new Map();
+  entries.forEach((entry) => {
+    if (!entry?.product?.id || byProductId.has(entry.product.id)) return;
+    byProductId.set(entry.product.id, entry);
+  });
+  return [...byProductId.values()];
+}
+
 export function findProductDuplicateCandidates(products = [], candidate = {}, { organisationId = "", threshold = 0.72 } = {}) {
   const name = candidate.name || candidate.productName || "";
   const packSize = candidate.packSize || "";
@@ -235,22 +268,19 @@ export function matchInvoiceLineToExistingProduct({
     });
     const product = mappingProduct(mapping, products);
     if (mapping && product && unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure) && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size)) {
-      return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_DESCRIPTION, confidence: 0.98, mapping }), context);
+      return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.LEARNED_RULE, confidence: 0.98, mapping }), context);
     }
   }
 
-  const exactMatches = products.filter((product) => productAliases(product).some((alias) => {
-    const aliasText = normalizeSupplierDescription(alias);
-    return aliasText && aliasText === normalizeSupplierDescription(productName || rawDescription);
-  }));
-  const compatibleExactMatches = exactMatches.filter((product) => (
-    unitsCompatible(unitOfMeasure, product.unit || product.unitOfMeasure)
-    && packSizesCompatible(packSize, product.packSize)
+  const exactMatchEntries = uniqueProductEntries(products.map((product) => exactAliasMatch(product, productName || rawDescription)).filter(Boolean));
+  const compatibleExactMatches = exactMatchEntries.filter((entry) => (
+    unitsCompatible(unitOfMeasure, entry.product.unit || entry.product.unitOfMeasure)
+    && packSizesCompatible(packSize, entry.product.packSize)
   ));
   if (compatibleExactMatches.length === 1) {
     return withMatchDebug(resultFromProduct({
-      product: compatibleExactMatches[0],
-      source: PRODUCT_MATCH_SOURCES.EXACT_PRODUCT,
+      product: compatibleExactMatches[0].product,
+      source: compatibleExactMatches[0].source,
       confidence: 1,
     }), context);
   }
@@ -269,7 +299,7 @@ export function matchInvoiceLineToExistingProduct({
   if (compatibleNormalized.length === 1) {
     return withMatchDebug(resultFromProduct({
       product: compatibleNormalized[0],
-      source: PRODUCT_MATCH_SOURCES.EXACT_PRODUCT,
+      source: PRODUCT_MATCH_SOURCES.EXACT_NAME,
       confidence: 0.94,
     }), context);
   }
@@ -290,7 +320,7 @@ export function matchInvoiceLineToExistingProduct({
   if (best && best.score >= autoMatchThreshold && (!second || best.score - second.score >= 0.04) && !best.unitConflict && !best.packSizeConflict) {
     return withMatchDebug(resultFromProduct({
       product: best.product,
-      source: PRODUCT_MATCH_SOURCES.FUZZY_PRODUCT,
+      source: PRODUCT_MATCH_SOURCES.FUZZY_MATCH,
       confidence: Number(best.score.toFixed(2)),
     }), context);
   }

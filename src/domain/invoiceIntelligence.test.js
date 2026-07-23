@@ -4,8 +4,11 @@ import { findProductDuplicateCandidates, matchInvoiceLineToExistingProduct, norm
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./invoiceLearning.js";
 import { fallbackReasonsForExtraction, invoiceHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./invoiceValidation.js";
 import {
+  PRODUCT_RESOLUTION_MODES,
+  lineWithAutoMatchedProductResolution,
   lineWithCreateNewProductResolution,
   lineWithExistingProductResolution,
+  lineWithResetProductResolution,
   resolveExplicitNewProductLines,
 } from "./invoiceProductResolution.js";
 
@@ -38,8 +41,68 @@ test("exact supplier code mapping returns the confirmed product", () => {
     }],
   });
   assert.equal(result.matchedProductId, "p1");
-  assert.equal(result.productMatchSource, "supplier_code_mapping");
+  assert.equal(result.productMatchSource, "supplier_code");
   assert.equal(result.needsReview, false);
+});
+
+test("auto-matched supplier code lines validate without a manual click for invoices and credit notes", () => {
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierName: "TG Fruits",
+    supplierProductCode: "4587",
+    rawDescription: "TOM CHERRY RED 250G",
+    existingProducts: products,
+    supplierMappings: [{
+      companyId: "c1",
+      supplierName: "TG Fruits",
+      supplierProductCode: "4587",
+      productId: "p1",
+      active: true,
+      autoApply: true,
+    }],
+  });
+  const line = lineWithAutoMatchedProductResolution({
+    id: "line-auto",
+    rawDescription: "TOM CHERRY RED 250G",
+    productName: "TOM CHERRY RED 250G",
+    supplierProductCode: "4587",
+    quantity: 2,
+    unitCost: 3,
+    lineTotal: 6,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+  }, products.find((product) => product.id === match.matchedProductId), {
+    source: match.productMatchSource,
+    confidence: match.productMatchConfidence,
+  });
+
+  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.AUTO_MATCHED);
+  assert.equal(line.productMatchSource, "supplier_code");
+  assert.equal(line.matchedProductId, "p1");
+
+  const invoiceReview = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", documentNumber: "INV-1", invoiceDate: "2026-07-23", documentType: "invoice" },
+    lines: [line],
+  });
+  assert.equal(invoiceReview.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
+  assert.equal(invoiceReview.invoiceHasBlockingReview, false);
+
+  const creditReview = validateInvoiceExtraction({
+    invoice: {
+      supplier: "TG Fruits",
+      documentNumber: "CN-1",
+      invoiceDate: "2026-07-23",
+      documentType: "credit_note",
+      creditReason: "price_adjustment",
+      inventoryEffect: "financial_only",
+    },
+    lines: [{ ...line, unitCost: -3, lineTotal: -6 }],
+  });
+  assert.equal(creditReview.lines[0].unitCost, 3);
+  assert.equal(creditReview.lines[0].matchedProductId, "p1");
+  assert.equal(creditReview.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
+  assert.equal(creditReview.invoiceHasBlockingReview, false);
 });
 
 test("same supplier code from a different supplier or organisation does not match", () => {
@@ -81,7 +144,40 @@ test("confirmed description mapping waits for repeated confirmation", () => {
     supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
   });
   assert.equal(oneConfirmation.productMatchSource, "no_product_match");
-  assert.equal(twoConfirmations.productMatchSource, "supplier_description_mapping");
+  assert.equal(twoConfirmations.productMatchSource, "learned_rule");
+});
+
+test("learned supplier rules auto-resolve product validation", () => {
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierName: "TG Fruits",
+    rawDescription: "LIMES 4KG",
+    packSize: "4kg",
+    existingProducts: products,
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
+  });
+  const line = lineWithAutoMatchedProductResolution({
+    rawDescription: "LIMES 4KG",
+    productName: "LIMES 4KG",
+    quantity: 1,
+    unitCost: 8,
+    lineTotal: 8,
+    department: "Bar",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Bar", percentage: 100 }],
+  }, products.find((product) => product.id === match.matchedProductId), {
+    source: match.productMatchSource,
+    confidence: match.productMatchConfidence,
+  });
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "LR-1", invoiceDate: "2026-07-23" },
+    lines: [line],
+  });
+  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.AUTO_MATCHED);
+  assert.equal(line.productMatchSource, "learned_rule");
+  assert.equal(reviewed.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
+  assert.equal(reviewed.invoiceHasBlockingReview, false);
 });
 
 test("exact existing product and aliases match without creating products", () => {
@@ -89,7 +185,9 @@ test("exact existing product and aliases match without creating products", () =>
   const alias = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName: "Cherry Toms", existingProducts: products });
   const none = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName: "Purple Carrots", existingProducts: products });
   assert.equal(exact.matchedProductId, "p2");
+  assert.equal(exact.productMatchSource, "exact_name");
   assert.equal(alias.matchedProductId, "p1");
+  assert.equal(alias.productMatchSource, "alias");
   assert.equal(none.matchedProductId, null);
   assert.equal(none.productMatchSource, "no_product_match");
 });
@@ -104,6 +202,41 @@ test("pack-size conflicts prevent unsafe automatic mapping", () => {
   });
   assert.equal(result.matchedProductId, null);
   assert.ok(result.reviewReasons.includes("no_confirmed_product_match"));
+});
+
+test("ambiguous fuzzy product suggestions require review", () => {
+  const ambiguousProducts = [
+    { id: "red", companyId: "c1", name: "Cherry Tomato Red" },
+    { id: "yellow", companyId: "c1", name: "Cherry Tomato Yellow" },
+  ];
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    productName: "Cherry Tomato",
+    existingProducts: ambiguousProducts,
+  });
+  assert.equal(match.matchedProductId, null);
+  assert.ok(match.reviewReasons.includes("ambiguous_product_match"));
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "AMB-1", invoiceDate: "2026-07-23" },
+    lines: [{
+      productName: "Cherry Tomato",
+      quantity: 1,
+      unitCost: 2,
+      lineTotal: 2,
+      department: "Kitchen Made",
+      departmentMode: "Single",
+      departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+      productResolution: PRODUCT_RESOLUTION_MODES.AMBIGUOUS,
+      productMatchSource: "no_product_match",
+      productMatchConfidence: match.productMatchConfidence,
+      suggestedProducts: match.suggestedProducts,
+      reviewReasons: match.reviewReasons,
+    }],
+  });
+  assert.equal(reviewReasonSeverity("ambiguous_product_match"), "error");
+  assert.equal(reviewed.lines[0].hasBlockingReview, true);
+  assert.equal(reviewed.invoiceHasBlockingReview, true);
 });
 
 test("duplicate protection finds similar explicit product creations", () => {
@@ -193,7 +326,7 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
     supplierMappings: learned,
   });
   assert.equal(future.matchedProductId, "horseradish-product");
-  assert.equal(future.productMatchSource, "supplier_code_mapping");
+  assert.equal(future.productMatchSource, "supplier_code");
 });
 
 test("explicit create-new is materialized once per confirmation and exact duplicates block", () => {
@@ -233,10 +366,30 @@ test("explicit create-new is materialized once per confirmation and exact duplic
 test("existing-product selection clears create-new state", () => {
   const createLine = lineWithCreateNewProductResolution({ id: "line-1", productName: "horseradish", suggestedProducts: [{ id: "radish", name: "RADISH" }] });
   const existing = lineWithExistingProductResolution(createLine, { id: "radish", name: "RADISH" });
-  assert.equal(existing.productResolution, "existing_product");
-  assert.equal(existing.productMatchSource, "user_selected");
+  assert.equal(existing.productResolution, "manually_matched");
+  assert.equal(existing.productMatchSource, "manual_selection");
   assert.equal(existing.matchedProductId, "radish");
   assert.equal(existing.suggestedProducts.length, 0);
+});
+
+test("manual correction takes priority after changing an automatic match", () => {
+  const auto = lineWithAutoMatchedProductResolution({
+    id: "line-1",
+    rawDescription: "TOM CHERRY RED 250G",
+    productName: "TOM CHERRY RED 250G",
+    quantity: 1,
+    unitCost: 2,
+    department: "Kitchen Made",
+  }, { id: "p1", name: "Cherry Tomatoes 250g" }, { source: "supplier_code", confidence: 1 });
+  const reset = lineWithResetProductResolution(auto);
+  const corrected = lineWithExistingProductResolution(reset, { id: "p3", name: "Limes" });
+
+  assert.equal(reset.productResolution, "unresolved");
+  assert.equal(reset.matchedProductId, "");
+  assert.equal(reset.automaticProductMatch.productId, "p1");
+  assert.equal(corrected.productResolution, "manually_matched");
+  assert.equal(corrected.productMatchSource, "manual_selection");
+  assert.equal(corrected.matchedProductId, "p3");
 });
 
 test("learning records Kitchen, Bar, Bought In and Split decisions only from saved invoices", () => {
@@ -578,6 +731,6 @@ test("description-only mapping uses normalized description, unit and pack size a
   assert.equal(second[0].confirmationCount, 2);
   assert.equal(differentPack.length, 2);
   assert.equal(differentPack.filter((mapping) => mapping.active !== false).length, 2);
-  assert.equal(match.productMatchSource, "supplier_description_mapping");
+  assert.equal(match.productMatchSource, "learned_rule");
   assert.equal(match.department, "Bar");
 });

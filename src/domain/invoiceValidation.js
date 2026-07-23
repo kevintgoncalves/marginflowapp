@@ -1,5 +1,11 @@
 import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
-import { clearProductMatchReviewReasons, isCreateNewProductResolution } from "./invoiceProductResolution.js";
+import {
+  clearProductMatchReviewReasons,
+  isAmbiguousProductResolution,
+  isCreateNewProductResolution,
+  isResolvedExistingProductResolution,
+  isUnresolvedProductResolution,
+} from "./invoiceProductResolution.js";
 import {
   CREDIT_REASONS,
   INVENTORY_EFFECTS,
@@ -32,7 +38,6 @@ export const REVIEW_REASON_SEVERITY = Object.freeze({
   supplier_code_product_conflict: "error",
 
   low_extraction_confidence: "warning",
-  ambiguous_product_match: "warning",
   price_deviation: "warning",
   invoice_total_mismatch: "warning",
   invoice_subtotal_mismatch: "warning",
@@ -44,6 +49,7 @@ export const REVIEW_REASON_SEVERITY = Object.freeze({
   unit_conflict: "warning",
   pack_size_conflict: "warning",
   unaccounted_invoice_charge: "warning",
+  ambiguous_product_match: "error",
 });
 
 export function reviewReasonSeverity(reason = "") {
@@ -165,14 +171,18 @@ export function validateInvoiceExtraction({
     const unitCost = numberValue(line.unitCost, 0);
     const lineTotal = lineTotalValue(line, signedDocumentType);
     const confidence = numberValue(line.confidence ?? line.extractionConfidence, 1);
+    const resolvedExistingProduct = isResolvedExistingProductResolution(line);
+    const unresolvedProduct = isUnresolvedProductResolution(line);
+    const ambiguousProduct = isAmbiguousProductResolution(line)
+      || (!createsNewProduct && line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75);
 
     if (confidence > 0 && confidence < 0.65) addReason(reviewReasons, "low_extraction_confidence");
     if (!String(requiredProductText || "").trim()) addReason(reviewReasons, "missing_product_name");
     if (!Number.isFinite(quantity) || (!isNonReceivedLine(line) && quantity <= 0)) addReason(reviewReasons, "invalid_quantity");
     if (!Number.isFinite(unitCost) || (!isNonReceivedLine(line) && unitCost < 0)) addReason(reviewReasons, "invalid_unit_cost");
     if (line.lineTotal !== undefined && (!Number.isFinite(lineTotal) || (!isCreditNote && !isNonReceivedLine(line) && lineTotal < 0))) addReason(reviewReasons, "invalid_line_total");
-    if (!line.matchedProductId && !createsNewProduct && line.matchStatus !== "Manual invoice") addReason(reviewReasons, "no_confirmed_product_match");
-    if (!createsNewProduct && line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75) addReason(reviewReasons, "ambiguous_product_match");
+    if (!createsNewProduct && line.matchStatus !== "Manual invoice" && (unresolvedProduct || !resolvedExistingProduct)) addReason(reviewReasons, "no_confirmed_product_match");
+    if (ambiguousProduct) addReason(reviewReasons, "ambiguous_product_match");
 
     const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
     const splitTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);

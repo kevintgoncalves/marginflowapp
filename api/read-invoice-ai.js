@@ -1,5 +1,6 @@
 import { invoiceUnitCostFromExtraction } from "../src/domain/invoiceParsing.js";
 import { matchInvoiceLineToExistingProduct } from "../src/domain/invoiceProductMatching.js";
+import { PRODUCT_RESOLUTION_MODES, canonicalProductMatchSource } from "../src/domain/invoiceProductResolution.js";
 import { extractionQualityScore, fallbackReasonsForExtraction, validateInvoiceExtraction } from "../src/domain/invoiceValidation.js";
 import {
   PURCHASING_DOCUMENT_TYPES,
@@ -275,6 +276,11 @@ function normalizeInvoice(invoice, sourceText, {
         existingProducts: products,
         supplierMappings,
       });
+      const productResolution = match.matchedProductId
+        ? PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+        : (match.reviewReasons || []).includes("ambiguous_product_match")
+          ? PRODUCT_RESOLUTION_MODES.AMBIGUOUS
+          : PRODUCT_RESOLUTION_MODES.UNRESOLVED;
 
       return {
         productName,
@@ -293,6 +299,13 @@ function normalizeInvoice(invoice, sourceText, {
         department: asString(line.department || line.suggested_department, "Kitchen Made"),
         confidence: clampConfidence(line.confidence),
         ...match,
+        productResolution,
+        productMatchSource: canonicalProductMatchSource(match.productMatchSource),
+        matchStatus: match.matchedProductId
+          ? "Automatically matched"
+          : productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS
+            ? "Review product match"
+            : "No confirmed existing product match",
       };
     })
     .filter((line) => (line.productName || line.rawDescription) && (line.lineTotal || line.unitCost || line.quantity));
@@ -663,8 +676,8 @@ async function handleReadInvoiceAi(event) {
       processingDuration: Date.now() - started,
       pageCount: attachedFiles.length || (invoiceText ? 1 : 0),
       lineCount: normalized.lines.length,
-      confirmedMappingCount: normalized.lines.filter((line) => line.productMatchSource === "supplier_code_mapping" || line.productMatchSource === "supplier_description_mapping").length,
-      exactProductMatchCount: normalized.lines.filter((line) => line.productMatchSource === "exact_product_match").length,
+      confirmedMappingCount: normalized.lines.filter((line) => ["supplier_code", "learned_rule", "supplier_mapping", "supplier_code_mapping", "supplier_description_mapping"].includes(line.productMatchSource)).length,
+      exactProductMatchCount: normalized.lines.filter((line) => ["exact_name", "alias", "exact_product_match"].includes(line.productMatchSource)).length,
       suggestedProductMatchCount: normalized.lines.filter((line) => line.suggestedProducts?.length).length,
       unmatchedProductCount: normalized.lines.filter((line) => !line.matchedProductId).length,
       invoiceNeedsReview: normalized.invoiceNeedsReview,
