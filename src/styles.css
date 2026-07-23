@@ -628,6 +628,7 @@ nav button.active {
 }
 .form-grid.six { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .form-grid.five { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.form-grid.four { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .form-grid.three { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .form-grid .wide-field {
   grid-column: 1 / -1;
@@ -709,6 +710,34 @@ label {
 .invoice-status.warn {
   border-color: rgba(245, 158, 11, 0.4);
   color: #fcd34d;
+}
+.credit-note-summary {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px 14px;
+  padding: 14px;
+  border: 1px solid rgba(245, 158, 11, 0.42);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+.credit-note-summary.compact {
+  margin: 0;
+}
+.credit-note-summary > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.credit-note-summary strong {
+  color: var(--text);
+  font-size: 16px;
+}
+.credit-note-summary p {
+  margin: 0;
+  color: #fcd34d;
+  font-size: 13px;
+  font-weight: 800;
 }
 .button-row {
   display: flex;
@@ -857,6 +886,8 @@ label {
 
 .table-toolbar {
   display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
 }
@@ -864,6 +895,14 @@ label {
   position: relative;
   max-width: 340px;
   width: 100%;
+}
+.table-toolbar .inline-filter {
+  display: grid;
+  grid-template-columns: auto minmax(130px, 1fr);
+  align-items: center;
+  gap: 8px;
+  max-width: 230px;
+  margin-left: auto;
 }
 .table-toolbar svg {
   position: absolute;

@@ -1,4 +1,5 @@
 import { numberValue } from "./numberUtils.js";
+import { normalizePurchasingLineForDocument } from "./purchasingDocuments.js";
 import { sameSupplierIdentity } from "./supplierIdentity.js";
 
 export function propagateInvoiceSupplierToLines(lines = [], nextSupplier = "", previousSupplier = "") {
@@ -12,9 +13,9 @@ export function propagateInvoiceSupplierToLines(lines = [], nextSupplier = "", p
   });
 }
 
-export function validateInvoiceLinesForApproval(lines = [], { splitValidator = null, netTotalForLine = null } = {}) {
+export function validateInvoiceLinesForApproval(lines = [], { documentType = "invoice", splitValidator = null, netTotalForLine = null } = {}) {
   const errors = [];
-  lines.forEach((line, index) => {
+  lines.map((line) => normalizePurchasingLineForDocument(line, documentType)).forEach((line, index) => {
     const rowLabel = line.productName?.trim() || `line ${index + 1}`;
     if (!line.productName?.trim()) errors.push(`Add a product name on line ${index + 1}.`);
     if (numberValue(line.quantity, 0) <= 0) errors.push(`${rowLabel}: quantity must be greater than 0.`);

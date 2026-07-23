@@ -1,13 +1,25 @@
 import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
 import { clearProductMatchReviewReasons, isCreateNewProductResolution } from "./invoiceProductResolution.js";
+import {
+  CREDIT_REASONS,
+  INVENTORY_EFFECTS,
+  absolutePurchasingAmount,
+  isCreditNoteDocument,
+  normalizeCreditReason,
+  normalizeDocumentType,
+  normalizeInventoryEffect,
+  normalizePurchasingLineForDocument,
+} from "./purchasingDocuments.js";
 
 const DEFAULT_PRICE_DEVIATION_THRESHOLD = 0.25;
 const DEFAULT_MIN_PRICE_SAMPLES = 3;
 const DEFAULT_SMALL_CHARGE_LIMIT = 10;
+const signSensitiveLineReasons = new Set(["invalid_quantity", "invalid_unit_cost", "invalid_line_total"]);
 
 export const REVIEW_REASON_SEVERITY = Object.freeze({
   missing_supplier: "error",
   no_invoice_lines: "error",
+  missing_document_type: "error",
   no_confirmed_product_match: "error",
   missing_product_name: "error",
   invalid_quantity: "error",
@@ -15,6 +27,7 @@ export const REVIEW_REASON_SEVERITY = Object.freeze({
   invalid_line_total: "error",
   invalid_split: "error",
   missing_department: "error",
+  missing_credit_treatment: "error",
   exact_product_duplicate: "error",
   supplier_code_product_conflict: "error",
 
@@ -63,8 +76,9 @@ function isNonReceivedLine(line = {}) {
   return ["Missing", "Damaged", "Sent back", "Not ordered", "Credit note received"].includes(line.lineStatus || line.status || "");
 }
 
-function lineTotalValue(line = {}) {
-  return numberValue(line.lineTotal ?? line.netLineTotal, numberValue(line.quantity, 0) * numberValue(line.unitCost, 0));
+function lineTotalValue(line = {}, documentType = "invoice") {
+  const value = numberValue(line.lineTotal ?? line.netLineTotal, numberValue(line.quantity, 0) * numberValue(line.unitCost, 0));
+  return isCreditNoteDocument(documentType) ? absolutePurchasingAmount(value) : value;
 }
 
 function sumChargeLines(charges = []) {
@@ -135,21 +149,28 @@ export function validateInvoiceExtraction({
   priceDeviationThreshold = DEFAULT_PRICE_DEVIATION_THRESHOLD,
   minHistoricalPriceSamples = DEFAULT_MIN_PRICE_SAMPLES,
 } = {}) {
-  const validatedLines = lines.map((line) => {
+  const documentType = normalizeDocumentType(invoice.documentType ?? invoice.document_type ?? "invoice", { allowUnknown: true });
+  const signedDocumentType = normalizeDocumentType(documentType);
+  const isCreditNote = isCreditNoteDocument(signedDocumentType);
+  const validatedLines = lines.map((sourceLine) => {
+    const line = normalizePurchasingLineForDocument(sourceLine, signedDocumentType);
     const createsNewProduct = isCreateNewProductResolution(line);
-    const reviewReasons = createsNewProduct ? clearProductMatchReviewReasons(line.reviewReasons || []) : [...(line.reviewReasons || [])];
+    const existingReviewReasons = isCreditNote
+      ? (line.reviewReasons || []).filter((reason) => !signSensitiveLineReasons.has(reason))
+      : (line.reviewReasons || []);
+    const reviewReasons = createsNewProduct ? clearProductMatchReviewReasons(existingReviewReasons) : [...existingReviewReasons];
     const rawDescription = line.rawDescription || line.productName || "";
     const requiredProductText = createsNewProduct ? line.productName : rawDescription;
     const quantity = numberValue(line.quantity, 0);
     const unitCost = numberValue(line.unitCost, 0);
-    const lineTotal = lineTotalValue(line);
+    const lineTotal = lineTotalValue(line, signedDocumentType);
     const confidence = numberValue(line.confidence ?? line.extractionConfidence, 1);
 
     if (confidence > 0 && confidence < 0.65) addReason(reviewReasons, "low_extraction_confidence");
     if (!String(requiredProductText || "").trim()) addReason(reviewReasons, "missing_product_name");
     if (!Number.isFinite(quantity) || (!isNonReceivedLine(line) && quantity <= 0)) addReason(reviewReasons, "invalid_quantity");
     if (!Number.isFinite(unitCost) || (!isNonReceivedLine(line) && unitCost < 0)) addReason(reviewReasons, "invalid_unit_cost");
-    if (line.lineTotal !== undefined && (!Number.isFinite(lineTotal) || (!isNonReceivedLine(line) && lineTotal < 0))) addReason(reviewReasons, "invalid_line_total");
+    if (line.lineTotal !== undefined && (!Number.isFinite(lineTotal) || (!isCreditNote && !isNonReceivedLine(line) && lineTotal < 0))) addReason(reviewReasons, "invalid_line_total");
     if (!line.matchedProductId && !createsNewProduct && line.matchStatus !== "Manual invoice") addReason(reviewReasons, "no_confirmed_product_match");
     if (!createsNewProduct && line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75) addReason(reviewReasons, "ambiguous_product_match");
 
@@ -178,19 +199,29 @@ export function validateInvoiceExtraction({
 
   const invoiceReviewReasons = [...(invoice.invoiceReviewReasons || [])];
   const supplier = invoice.supplier || "";
-  const invoiceNumber = invoice.invoiceNumber || invoice.invoice_number || "";
+  const invoiceNumber = invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number || "";
   const invoiceDate = invoice.invoiceDate || invoice.date || "";
+  const creditReason = normalizeCreditReason(invoice.creditReason ?? invoice.credit_reason ?? "", "");
+  const inventoryEffect = normalizeInventoryEffect(invoice.inventoryEffect ?? invoice.inventory_effect ?? "", "");
   if (!supplier || /^unknown supplier$/i.test(supplier)) addReason(invoiceReviewReasons, "missing_supplier");
+  if (documentType === "unknown") addReason(invoiceReviewReasons, "missing_document_type");
   if (!invoiceNumber) addReason(invoiceReviewReasons, "missing_invoice_number");
   if (!invoiceDate) addReason(invoiceReviewReasons, "missing_invoice_date");
   if (duplicateInvoiceNumbers.includes(invoiceNumber)) addReason(invoiceReviewReasons, "duplicate_invoice_number");
   if (!validatedLines.length) addReason(invoiceReviewReasons, "no_invoice_lines");
+  if (isCreditNote && (
+    !inventoryEffect
+    || !Object.values(INVENTORY_EFFECTS).includes(inventoryEffect)
+    || ([CREDIT_REASONS.DAMAGED_GOODS, CREDIT_REASONS.INVOICE_CORRECTION, CREDIT_REASONS.OTHER].includes(creditReason) && !inventoryEffect)
+  )) {
+    addReason(invoiceReviewReasons, "missing_credit_treatment");
+  }
 
-  const lineNetTotal = roundMoney(validatedLines.reduce((sum, line) => sum + lineTotalValue(line), 0));
-  const invoiceSubtotal = numberValue(invoice.invoiceSubtotal ?? invoice.subtotalBeforeDiscount ?? invoice.subtotal, 0);
-  const invoiceTotal = numberValue(invoice.invoiceTotal ?? invoice.finalInvoiceTotal ?? invoice.total_amount, 0);
-  const vatTotal = numberValue(invoice.vatTotal ?? invoice.taxAmount ?? invoice.tax_amount, 0);
-  const explicitChargeTotal = explicitAdditionalCharges(invoice);
+  const lineNetTotal = roundMoney(validatedLines.reduce((sum, line) => sum + lineTotalValue(line, signedDocumentType), 0));
+  const invoiceSubtotal = absolutePurchasingAmount(invoice.invoiceSubtotal ?? invoice.netTotal ?? invoice.net_total ?? invoice.subtotalBeforeDiscount ?? invoice.subtotal);
+  const invoiceTotal = absolutePurchasingAmount(invoice.invoiceTotal ?? invoice.grossTotal ?? invoice.gross_total ?? invoice.finalInvoiceTotal ?? invoice.total_amount);
+  const vatTotal = absolutePurchasingAmount(invoice.vatTotal ?? invoice.taxAmount ?? invoice.tax_amount ?? invoice.vat_total);
+  const explicitChargeTotal = absolutePurchasingAmount(explicitAdditionalCharges(invoice));
   const inferredFromTotal = invoiceTotal ? roundMoney(invoiceTotal - vatTotal - lineNetTotal) : 0;
   const inferredFromSubtotal = invoiceSubtotal ? roundMoney(invoiceSubtotal - lineNetTotal) : 0;
   const inferredChargeTotal = explicitChargeTotal
@@ -220,6 +251,8 @@ export function validateInvoiceExtraction({
   const invoiceHasBlockers = hasBlockingReviewReasons(invoiceReviewReasons) || validatedLines.some((line) => line.hasBlockingReview);
   return {
     ...invoice,
+    documentType: signedDocumentType,
+    document_type: signedDocumentType,
     additionalCharges,
     inferredAdditionalCharges: additionalCharges && !explicitChargeTotal ? additionalCharges : 0,
     lines: validatedLines,

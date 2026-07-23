@@ -1,6 +1,16 @@
 import { invoiceUnitCostFromExtraction } from "../src/domain/invoiceParsing.js";
 import { matchInvoiceLineToExistingProduct } from "../src/domain/invoiceProductMatching.js";
 import { extractionQualityScore, fallbackReasonsForExtraction, validateInvoiceExtraction } from "../src/domain/invoiceValidation.js";
+import {
+  PURCHASING_DOCUMENT_TYPES,
+  defaultInventoryEffectForCreditReason,
+  inferCreditReasonFromText,
+  inferDocumentTypeFromText,
+  normalizeCreditReason,
+  normalizeDocumentType,
+  normalizeInventoryEffect,
+  normalizePurchasingLineForDocument,
+} from "../src/domain/purchasingDocuments.js";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_PRIMARY_MODEL = "gpt-5.4-mini";
@@ -10,14 +20,41 @@ const DEFAULT_LEGACY_MODEL = "gpt-4o-mini";
 const invoiceSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["supplier", "invoiceDate", "invoiceNumber", "invoiceSubtotal", "vatTotal", "invoiceTotal", "additionalCharges", "additionalChargesDescription", "confidence", "lines"],
+  required: [
+    "supplier",
+    "document_type",
+    "document_number",
+    "invoiceDate",
+    "invoiceNumber",
+    "original_invoice_number",
+    "credit_reason",
+    "invoiceSubtotal",
+    "net_total",
+    "vatTotal",
+    "vat_total",
+    "invoiceTotal",
+    "gross_total",
+    "currency",
+    "additionalCharges",
+    "additionalChargesDescription",
+    "confidence",
+    "lines",
+  ],
   properties: {
     supplier: { type: "string" },
+    document_type: { type: "string", enum: ["invoice", "credit_note", "unknown"] },
+    document_number: { type: "string" },
     invoiceDate: { type: "string" },
     invoiceNumber: { type: "string" },
+    original_invoice_number: { type: "string" },
+    credit_reason: { type: "string" },
     invoiceSubtotal: { type: "number" },
+    net_total: { type: "number" },
     vatTotal: { type: "number" },
+    vat_total: { type: "number" },
     invoiceTotal: { type: "number" },
+    gross_total: { type: "number" },
+    currency: { type: "string" },
     additionalCharges: { type: "number" },
     additionalChargesDescription: { type: "string" },
     confidence: { type: "number" },
@@ -120,6 +157,8 @@ function inferSupplier(text) {
 
 function inferInvoiceNumber(text) {
   const patterns = [
+    /\b(?:credit\s*(?:note|memo)|credit)\s*(?:number|no\.?|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,})\b/i,
+    /\b(?:document|doc)\s*(?:number|no\.?|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,})\b/i,
     /\b(?:invoice|inv)\s*(?:number|no\.?|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,})\b/i,
     /\b(?:ticket|ref)\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{2,})\b/i,
     /^\s*(\d{5,})\s+invoice\b/i,
@@ -203,6 +242,10 @@ function normalizeInvoice(invoice, sourceText, {
   fallbackReason = "",
 } = {}) {
   const supplier = asString(invoice.supplier, inferSupplier(sourceText));
+  const inferredDocumentType = inferDocumentTypeFromText(sourceText, invoice);
+  const documentType = normalizeDocumentType(inferredDocumentType, { allowUnknown: true });
+  const creditReason = normalizeCreditReason(invoice.credit_reason || invoice.creditReason || inferCreditReasonFromText(sourceText));
+  const inventoryEffect = normalizeInventoryEffect(invoice.inventory_effect || invoice.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason));
   const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
 
   const normalizedLines = lines
@@ -211,6 +254,12 @@ function normalizeInvoice(invoice, sourceText, {
       const rawUnitCost = asNumber(line.unitCost, 0);
       const lineTotal = asNumber(line.lineTotal, quantity * rawUnitCost);
       const unitCost = invoiceUnitCostFromExtraction({ quantity, unitCost: rawUnitCost, lineTotal });
+      const signedSafeLine = normalizePurchasingLineForDocument({
+        quantity,
+        unitCost,
+        vat: asNumber(line.vat, 0),
+        lineTotal,
+      }, documentType === PURCHASING_DOCUMENT_TYPES.UNKNOWN ? PURCHASING_DOCUMENT_TYPES.INVOICE : documentType);
       const rawDescription = asString(line.rawDescription || line.productName || line.product || line.name);
       const productName = asString(line.productName || line.product || line.name || rawDescription);
       const supplierProductCode = asString(line.supplierProductCode || line.productCode || line.code);
@@ -232,12 +281,15 @@ function normalizeInvoice(invoice, sourceText, {
         rawDescription,
         supplierProductCode,
         packSize: asString(line.packSize || line.size),
-        quantity,
+        quantity: signedSafeLine.quantity,
         unit: asString(line.unit || unitOfMeasure),
         unitOfMeasure,
-        unitCost,
-        vat: asNumber(line.vat, 0),
-        lineTotal,
+        unitCost: signedSafeLine.unitCost,
+        vat: signedSafeLine.vat,
+        lineTotal: signedSafeLine.lineTotal,
+        sourceQuantity: quantity,
+        sourceUnitCost: rawUnitCost,
+        sourceLineTotal: lineTotal,
         department: asString(line.department || line.suggested_department, "Kitchen Made"),
         confidence: clampConfidence(line.confidence),
         ...match,
@@ -247,12 +299,28 @@ function normalizeInvoice(invoice, sourceText, {
 
   const normalized = {
     supplier,
+    documentType,
+    document_type: documentType,
+    documentNumber: asString(invoice.document_number || invoice.documentNumber || invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
+    document_number: asString(invoice.document_number || invoice.documentNumber || invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
+    originalInvoiceNumber: asString(invoice.original_invoice_number || invoice.originalInvoiceNumber || ""),
+    original_invoice_number: asString(invoice.original_invoice_number || invoice.originalInvoiceNumber || ""),
+    creditReason,
+    credit_reason: creditReason,
+    inventoryEffect,
+    inventory_effect: inventoryEffect,
+    currency: asString(invoice.currency, "GBP"),
     invoiceDate: preferredInvoiceDate(supplier, sourceText, invoice.invoiceDate || invoice.date),
-    invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number, inferInvoiceNumber(sourceText)),
-    invoiceSubtotal: asNumber(invoice.invoiceSubtotal || invoice.subtotal, 0),
-    vatTotal: asNumber(invoice.vatTotal || invoice.taxAmount || invoice.vat, 0),
-    invoiceTotal: asNumber(invoice.invoiceTotal || invoice.total, 0),
-    additionalCharges: asNumber(invoice.additionalCharges || invoice.handlingCharge || invoice.deliveryCharge || invoice.carriageCharge || invoice.serviceCharge, 0),
+    invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number || invoice.document_number || invoice.documentNumber, inferInvoiceNumber(sourceText)),
+    invoiceSubtotal: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
+    netTotal: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
+    net_total: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
+    vatTotal: Math.abs(asNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat, 0)),
+    vat_total: Math.abs(asNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat, 0)),
+    invoiceTotal: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
+    grossTotal: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
+    gross_total: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
+    additionalCharges: Math.abs(asNumber(invoice.additionalCharges || invoice.handlingCharge || invoice.deliveryCharge || invoice.carriageCharge || invoice.serviceCharge, 0)),
     additionalChargesDescription: asString(invoice.additionalChargesDescription || invoice.handlingChargeDescription || invoice.deliveryChargeDescription || ""),
     confidence: clampConfidence(invoice.confidence),
     lines: normalizedLines,
@@ -359,6 +427,12 @@ Rules:
 - Unit cost should be the cost per pack/unit on the invoice, not the total unless only total is available.
 - Line total should be quantity × unit cost when possible.
 - Preserve negative values for credit notes and returns.
+- Detect whether the purchasing document is an invoice, credit note/credit memo, or unknown.
+- If the document is a credit note, preserve the supplier's document number separately from document_type. Never prepend "Credit Note" to document_number or invoiceNumber.
+- Credit-note source values may be negative in the PDF; return the visible values, and document_type must carry the financial sign.
+- Recognise credit wording such as Credit Note, Credit Memo, Goods Returned, Goods Return, Rebate, Allowance, Adjustment, Pricing Correction and Invoice Correction.
+- Return original_invoice_number where visible, otherwise "".
+- Return credit_reason where visible or inferred, using goods_return, price_adjustment, rebate, damaged_goods, invoice_correction or other.
 - Ignore repeated page headers as product rows.
 - Ignore bank details, payment instructions, subtotals, VAT totals, grand totals and deposits as product rows.
 - Never calculate missing values unless the calculation is mathematically safe from visible invoice values.
@@ -599,8 +673,8 @@ async function handleReadInvoiceAi(event) {
 
     if (!normalized.lines.length) {
       return json(422, {
-        error: "AI did not find invoice lines",
-        detail: "AI could not find chargeable product lines. Try a clearer photo, upload a PDF, or enter the invoice manually.",
+        error: "AI did not find purchasing document lines",
+        detail: "AI could not find chargeable product or credit lines. Try a clearer photo, upload a PDF, or enter the document manually.",
         supplier: normalized.supplier,
         invoiceDate: normalized.invoiceDate,
         invoiceNumber: normalized.invoiceNumber,

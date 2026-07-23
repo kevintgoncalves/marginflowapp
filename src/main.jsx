@@ -44,6 +44,30 @@ import {
   lineWithResetProductResolution,
   resolveExplicitNewProductLines,
 } from "./domain/invoiceProductResolution.js";
+import {
+  CREDIT_REASONS,
+  INVENTORY_EFFECTS,
+  PURCHASING_DOCUMENT_TYPES,
+  confirmationLabelForDocument,
+  confirmingLabelForDocument,
+  defaultInventoryEffectForCreditReason,
+  documentNumberFor,
+  documentTypeBadgeLabel,
+  documentTypeFor,
+  documentTypeLabel,
+  findDuplicatePurchasingDocument,
+  getDocumentSign,
+  inferCreditReasonFromText,
+  inferDocumentTypeFromText,
+  isCreditNoteDocument,
+  isInvoiceDocument,
+  normalizeCreditReason,
+  normalizeDocumentType,
+  normalizeInventoryEffect,
+  normalizePurchasingLineForDocument,
+  purchasingDocumentNoun,
+  toSignedPurchasingAmount,
+} from "./domain/purchasingDocuments.js";
 import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import {
   activeSupplierRows,
@@ -66,6 +90,23 @@ const uid = () => crypto.randomUUID();
 const today = () => new Date().toISOString().slice(0, 10);
 const invoiceLineStatuses = ["Received", "Missing", "Damaged", "Sent back", "Not ordered", "Credit note received"];
 const creditNoteStatuses = ["To chase", "Chased", "Credit received", "Rejected"];
+const purchasingDocumentTypes = [
+  { value: PURCHASING_DOCUMENT_TYPES.INVOICE, label: "Invoice" },
+  { value: PURCHASING_DOCUMENT_TYPES.CREDIT_NOTE, label: "Credit note" },
+];
+const creditReasonOptions = [
+  { value: CREDIT_REASONS.GOODS_RETURN, label: "Goods returned" },
+  { value: CREDIT_REASONS.PRICE_ADJUSTMENT, label: "Price adjustment" },
+  { value: CREDIT_REASONS.REBATE, label: "Rebate" },
+  { value: CREDIT_REASONS.DAMAGED_GOODS, label: "Damaged goods" },
+  { value: CREDIT_REASONS.INVOICE_CORRECTION, label: "Invoice correction" },
+  { value: CREDIT_REASONS.OTHER, label: "Other" },
+];
+const inventoryEffectOptions = [
+  { value: INVENTORY_EFFECTS.DECREASE_STOCK, label: "Goods returned - reduce stock" },
+  { value: INVENTORY_EFFECTS.FINANCIAL_ONLY, label: "Financial adjustment only - do not change stock" },
+  { value: INVENTORY_EFFECTS.NONE, label: "No stock movement" },
+];
 const emptyInvoiceDraft = () => ({
   files: [],
   invoiceText: "",
@@ -73,6 +114,13 @@ const emptyInvoiceDraft = () => ({
   supplier: "",
   date: today(),
   invoiceNumber: "",
+  documentType: PURCHASING_DOCUMENT_TYPES.INVOICE,
+  documentNumber: "",
+  originalInvoiceId: "",
+  originalInvoiceNumber: "",
+  creditReason: CREDIT_REASONS.PRICE_ADJUSTMENT,
+  inventoryEffect: INVENTORY_EFFECTS.FINANCIAL_ONLY,
+  currency: "GBP",
   subtotalBeforeDiscount: 0,
   discountAmount: 0,
   discountPercent: 0,
@@ -1066,6 +1114,34 @@ function invoiceFinalTotal(invoice = {}) {
   return (invoice.items || []).reduce((sum, item) => sum + netLineTotal(item, invoice), 0) + numberValue(invoice.additionalCharges, 0);
 }
 
+function absoluteInvoiceTotal(invoice = {}) {
+  const stored = invoice.absoluteNetTotal ?? invoice.absolute_net_total ?? invoice.finalInvoiceTotal ?? invoice.total ?? invoice.total_amount;
+  const calculated = invoiceFinalTotal(invoice);
+  return Math.abs(numberValue(stored, calculated));
+}
+
+function signedDocumentAmount(amount, invoice = {}) {
+  return toSignedPurchasingAmount(amount, documentTypeFor(invoice));
+}
+
+function signedLineTotal(item, invoice = {}) {
+  return signedDocumentAmount(netLineTotal(item, invoice.items ? invoice : { items: [item], discountAmount: 0, discountPercent: 0 }), invoice);
+}
+
+function normalizeInvoiceItemsForDocument(items = [], documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
+  return items.map((item) => normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(item, documentType)));
+}
+
+function creditReasonLabel(value = "") {
+  const normalized = normalizeCreditReason(value);
+  return creditReasonOptions.find((option) => option.value === normalized)?.label || "Price adjustment";
+}
+
+function inventoryEffectLabel(value = "") {
+  const normalized = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
+  return inventoryEffectOptions.find((option) => option.value === normalized)?.label || "Financial adjustment only - do not change stock";
+}
+
 function amountsAlmostEqual(a, b) {
   const left = Number(a);
   const right = Number(b);
@@ -1588,10 +1664,11 @@ function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
 
 function lineTotalForDepartment(item, selectedDepartment, invoice = {}) {
   const total = netLineTotal(item, invoice.items ? invoice : { items: [item], discountAmount: 0, discountPercent: 0 });
-  if (selectedDepartment === "All departments") return total;
+  const signedTotal = signedDocumentAmount(total, invoice);
+  if (selectedDepartment === "All departments") return signedTotal;
   return normalizeDepartmentSplits(item, item.department)
     .filter((split) => split.department === selectedDepartment)
-    .reduce((sum, split) => sum + total * (numberValue(split.percentage) / 100), 0);
+    .reduce((sum, split) => sum + signedTotal * (numberValue(split.percentage) / 100), 0);
 }
 
 function primaryDepartment(item) {
@@ -1599,7 +1676,7 @@ function primaryDepartment(item) {
 }
 
 function invoiceTotal(invoice) {
-  return invoiceFinalTotal(invoice);
+  return signedDocumentAmount(absoluteInvoiceTotal(invoice), invoice);
 }
 
 function departmentMatches(rowDepartment, selectedDepartment) {
@@ -1721,13 +1798,17 @@ function productMatchStatusText(source = "") {
   return labels[source] || "No confirmed existing product match";
 }
 
-function reviewReasonText(reason = "") {
+function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
+  const documentNoun = purchasingDocumentNoun(documentType);
+  const documentLabel = documentTypeLabel(documentType);
+  const unitValueLabel = isCreditNoteDocument(documentType) ? "unit credit" : "unit price";
+  const lineValueLabel = isCreditNoteDocument(documentType) ? "line credit" : "line total";
   const labels = {
     low_extraction_confidence: "Low reading confidence",
     missing_product_name: "Missing product description",
     invalid_quantity: "Check the quantity",
-    invalid_unit_cost: "Check the unit price",
-    invalid_line_total: "Check the line total",
+    invalid_unit_cost: `Check the ${unitValueLabel}`,
+    invalid_line_total: `Check the ${lineValueLabel}`,
     no_confirmed_product_match: "Select an existing product or create a new one",
     exact_product_duplicate: "Exact product already exists. Choose the existing product.",
     supplier_code_product_conflict: "Supplier item code is already mapped to an existing product.",
@@ -1738,13 +1819,15 @@ function reviewReasonText(reason = "") {
     pack_size_conflict: "Pack size conflicts with the matched product",
     invalid_split: "Split allocation must be corrected",
     missing_department: "Select a department",
-    invoice_total_mismatch: "Extracted lines do not reconcile with the invoice total",
-    invoice_subtotal_mismatch: "Extracted lines do not reconcile with the invoice subtotal",
+    invoice_total_mismatch: `${documentLabel} total does not match the sum of its lines`,
+    invoice_subtotal_mismatch: `${documentLabel} subtotal does not match the sum of its lines`,
     vat_mismatch: "VAT does not reconcile",
-    duplicate_invoice_number: "Invoice number may already exist",
+    duplicate_invoice_number: "Document number may already exist",
+    missing_document_type: "Choose the document type",
+    missing_credit_treatment: "Choose the credit treatment",
     missing_supplier: "Select the supplier",
-    missing_invoice_number: "Add the invoice number",
-    missing_invoice_date: "Add the invoice date",
+    missing_invoice_number: `Add the ${documentNoun} number`,
+    missing_invoice_date: `Add the ${documentNoun} date`,
     fallback_model_required: "Fallback model review was required",
   };
   return labels[reason] || reason.replace(/_/g, " ");
@@ -2477,6 +2560,7 @@ function removeInvoiceProductHistory(products, invoiceId) {
 }
 
 function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
+  if (isCreditNoteDocument(documentTypeFor(invoiceContext))) return products;
   const next = [...products];
 
   items.filter(isReceivedInvoiceLine).forEach((item) => {
@@ -2589,6 +2673,14 @@ function normalizeInvoiceDiscountFields(invoice) {
 }
 
 function prepareApprovedInvoice(invoice) {
+  const documentType = normalizeDocumentType(documentTypeFor(invoice));
+  const documentNumber = documentNumberFor(invoice) || invoice.invoiceNumber || "";
+  const creditReason = isCreditNoteDocument(documentType)
+    ? normalizeCreditReason(invoice.creditReason ?? invoice.credit_reason ?? CREDIT_REASONS.PRICE_ADJUSTMENT)
+    : "";
+  const inventoryEffect = isCreditNoteDocument(documentType)
+    ? normalizeInventoryEffect(invoice.inventoryEffect ?? invoice.inventory_effect, defaultInventoryEffectForCreditReason(creditReason))
+    : "";
   const discountFields = normalizeInvoiceDiscountFields(invoice);
   const context = { ...invoice, ...discountFields };
   const items = (invoice.items || []).map((item) => ({
@@ -2602,37 +2694,98 @@ function prepareApprovedInvoice(invoice) {
     netLineTotal: Number(netLineTotal(item, context).toFixed(2)),
   }));
   const finalContext = { ...invoice, ...discountFields, items };
+  const absoluteNetTotal = Number(invoiceFinalTotal(finalContext).toFixed(2));
+  const absoluteVatTotal = Math.abs(numberValue(invoice.vatTotal ?? invoice.vat_total ?? 0, 0));
+  const absoluteGrossTotal = Number((absoluteNetTotal + absoluteVatTotal).toFixed(2));
   return {
     ...invoice,
-    additionalCharges: Number(numberValue(invoice.additionalCharges, 0).toFixed(2)),
+    documentType,
+    document_type: documentType,
+    documentNumber,
+    document_number: documentNumber,
+    invoiceNumber: documentNumber || invoice.invoiceNumber,
+    originalInvoiceId: invoice.originalInvoiceId || invoice.original_invoice_id || "",
+    original_invoice_id: invoice.originalInvoiceId || invoice.original_invoice_id || "",
+    originalInvoiceNumber: invoice.originalInvoiceNumber || invoice.original_invoice_number || "",
+    original_invoice_number: invoice.originalInvoiceNumber || invoice.original_invoice_number || "",
+    creditReason,
+    credit_reason: creditReason,
+    inventoryEffect,
+    inventory_effect: inventoryEffect,
+    currency: invoice.currency || "GBP",
+    additionalCharges: Math.abs(Number(numberValue(invoice.additionalCharges, 0).toFixed(2))),
     ...normalizeInvoiceDiscountFields(finalContext),
+    absoluteNetTotal,
+    absolute_net_total: absoluteNetTotal,
+    absoluteVatTotal,
+    absolute_vat_total: absoluteVatTotal,
+    absoluteGrossTotal,
+    absolute_gross_total: absoluteGrossTotal,
+    signedNetTotal: toSignedPurchasingAmount(absoluteNetTotal, documentType),
+    signed_net_total: toSignedPurchasingAmount(absoluteNetTotal, documentType),
+    signedVatTotal: toSignedPurchasingAmount(absoluteVatTotal, documentType),
+    signed_vat_total: toSignedPurchasingAmount(absoluteVatTotal, documentType),
+    signedGrossTotal: toSignedPurchasingAmount(absoluteGrossTotal, documentType),
+    signed_gross_total: toSignedPurchasingAmount(absoluteGrossTotal, documentType),
+    inventoryMovements: invoice.inventoryMovements || [],
+    auditEvents: [
+      ...(invoice.auditEvents || []),
+      ...(isCreditNoteDocument(documentType) ? [{
+        id: uid(),
+        event: "credit_treatment_selected",
+        documentType,
+        documentNumber,
+        creditReason,
+        inventoryEffect,
+        createdAt: new Date().toISOString(),
+      }] : []),
+      ...(isCreditNoteDocument(documentType) && (invoice.originalInvoiceId || invoice.original_invoice_id || invoice.originalInvoiceNumber || invoice.original_invoice_number) ? [{
+        id: uid(),
+        event: "original_invoice_linked",
+        documentType,
+        documentNumber,
+        originalInvoiceId: invoice.originalInvoiceId || invoice.original_invoice_id || "",
+        originalInvoiceNumber: invoice.originalInvoiceNumber || invoice.original_invoice_number || "",
+        createdAt: new Date().toISOString(),
+      }] : []),
+      {
+        id: uid(),
+        event: isCreditNoteDocument(documentType) ? "credit_note_approved" : "invoice_approved",
+        documentType,
+        documentNumber,
+        createdAt: new Date().toISOString(),
+      },
+    ],
     items: items.map((item) => ({
       ...item,
       discountApplied: Number(discountAppliedToLine(item, finalContext).toFixed(2)),
       netLineTotal: Number(netLineTotal(item, finalContext).toFixed(2)),
+      signedNetLineTotal: toSignedPurchasingAmount(netLineTotal(item, finalContext), documentType),
+      signed_net_line_total: toSignedPurchasingAmount(netLineTotal(item, finalContext), documentType),
     })),
   };
 }
 
-function normalizeInvoiceLineForSave(item, supplier, fallbackDepartment = "Kitchen Made") {
-  const status = invoiceLineStatus(item);
-  const quantity = numberValue(item.quantity, 1);
-  const unitCost = normalizeInvoiceUnitCost({ ...item, quantity });
+function normalizeInvoiceLineForSave(item, supplier, fallbackDepartment = "Kitchen Made", documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
+  const normalizedSource = normalizePurchasingLineForDocument(item, documentType);
+  const status = invoiceLineStatus(normalizedSource);
+  const quantity = numberValue(normalizedSource.quantity, 1);
+  const unitCost = normalizeInvoiceUnitCost({ ...normalizedSource, quantity });
   const discounted = syncInvoiceLineDiscounts({
-    ...item,
-    id: item.id || uid(),
+    ...normalizedSource,
+    id: normalizedSource.id || uid(),
     quantity,
     unitCost,
-    supplier: item.supplier || supplier,
+    supplier: normalizedSource.supplier || supplier,
     lineTotal: quantity * unitCost,
     status,
     lineStatus: status,
-    creditReason: status === "Received" ? "" : (item.creditReason || status),
+    creditReason: status === "Received" ? "" : (normalizedSource.creditReason || status),
   });
-  const departmentSplits = normalizeDepartmentSplits(discounted, item.department || fallbackDepartment);
+  const departmentSplits = normalizeDepartmentSplits(discounted, normalizedSource.department || fallbackDepartment);
   return {
     ...discounted,
-    department: departmentSplits[0]?.department || item.department || fallbackDepartment,
+    department: departmentSplits[0]?.department || normalizedSource.department || fallbackDepartment,
     departmentMode: departmentSplits.length > 1 ? "Split" : "Single",
     departmentSplits,
   };
@@ -2721,15 +2874,18 @@ function extractInvoiceTotals(invoiceText = "") {
     return 0;
   };
   return {
-    subtotalBeforeDiscount: pickAmount([/(?:subtotal|sub total|goods|net value)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    subtotalBeforeDiscount: pickAmount([/(?:subtotal|sub total|goods|net value)\s*[:£]?\s*(-?[0-9,]+\.\d{2})/i]),
     discountAmount: pickAmount([/(?:discount|disc)\s*[:£]?\s*-?\s*([0-9,]+\.\d{2})/i]),
-    finalInvoiceTotal: pickAmount([/(?:invoice total|ticket total|grand total|total)\s*[:£]?\s*([0-9,]+\.\d{2})/i]),
+    finalInvoiceTotal: pickAmount([/(?:credit note total|credit total|invoice total|ticket total|grand total|total)\s*[:£]?\s*(-?[0-9,]+\.\d{2})/i]),
   };
 }
 
 function extractInvoiceNumberFromText(invoiceText = "") {
   const normalized = invoiceText.replace(/\s+/g, " ");
   const patterns = [
+    /Credit Note No\.?\s*[:#]?\s*([A-Z0-9-]{3,})/i,
+    /Credit Memo No\.?\s*[:#]?\s*([A-Z0-9-]{3,})/i,
+    /Document No\.?\s*[:#]?\s*([A-Z0-9-]{3,})/i,
     /Invoice No\.?\s*[:#]?\s*(\d{4,})/i,
     /Invoice Number\s*[:#]?\s*(\d{4,})/i,
     /Invoice no\s*[:#]?\s*(\d{4,})/i,
@@ -2768,6 +2924,8 @@ function supplierParserStatus(supplierName = "") {
 function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = "") {
   const text = invoiceText || "";
   const key = text.toLowerCase();
+  const inferredDocumentType = inferDocumentTypeFromText(text);
+  const documentType = normalizeDocumentType(inferredDocumentType, { allowUnknown: true });
   const detectedSupplier = detectSupplierFromInvoiceText(text, fallbackSupplier);
   let parserName = detectedSupplier || "Generic parser";
   let lines = [];
@@ -2805,6 +2963,8 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
   return {
     supplier: detectedSupplier || fallbackSupplier,
     parserName,
+    documentType,
+    documentNumber: extractInvoiceNumberFromText(text),
     invoiceNumber: extractInvoiceNumberFromText(text),
     invoiceDate: extractInvoiceDateFromText(text),
     subtotalBeforeDiscount: subtotal,
@@ -2817,10 +2977,13 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
 
 function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
   return activeSupplierRows(suppliers).map((supplier) => {
-    const spend = invoices
-      .filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange))
+    const supplierDocuments = invoices.filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange));
+    const totalFor = (predicate) => supplierDocuments
+      .filter(predicate)
       .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
-    return { ...supplier, spend };
+    const invoiceSpend = totalFor((invoice) => isInvoiceDocument(documentTypeFor(invoice)));
+    const creditTotal = totalFor((invoice) => isCreditNoteDocument(documentTypeFor(invoice)));
+    return { ...supplier, invoiceSpend, creditTotal, netSpend: invoiceSpend + creditTotal, spend: invoiceSpend + creditTotal };
   });
 }
 
@@ -4484,12 +4647,16 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     invoiceApprovalRef.current = true;
     setInvoiceApprovalBusy(true);
     try {
+      const documentType = normalizeDocumentType(draft.documentType || draft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      const documentNoun = purchasingDocumentNoun(documentType);
+      const documentNumber = (draft.documentNumber || draft.invoiceNumber || "").trim();
       const validation = validateInvoiceLinesForApproval(draft.items, {
+        documentType,
         splitValidator: splitIsValid,
         netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
       });
       if (!validation.valid) {
-        setDraft((current) => ({ ...current, status: validation.errors[0] || "Review invoice lines before confirming." }));
+        setDraft((current) => ({ ...current, status: validation.errors[0] || `Review ${documentNoun} lines before confirming.` }));
         return;
       }
       const invalidSplit = draft.items.find((item) => !splitIsValid(item));
@@ -4500,12 +4667,20 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       const approvalReview = validateInvoiceExtraction({
         invoice: {
           supplier: draft.supplier || draft.items[0]?.supplier,
-          invoiceNumber: draft.invoiceNumber,
+          documentType,
+          document_type: documentType,
+          documentNumber,
+          document_number: documentNumber,
+          invoiceNumber: documentNumber,
           invoiceDate: draft.date,
           invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
           invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
           vatTotal: draft.vatTotal,
           additionalCharges: draft.additionalCharges,
+          creditReason: draft.creditReason,
+          credit_reason: draft.creditReason,
+          inventoryEffect: draft.inventoryEffect,
+          inventory_effect: draft.inventoryEffect,
           invoiceReviewReasons: draft.invoiceReviewReasons || [],
         },
         lines: draft.items,
@@ -4513,7 +4688,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       });
       const invoiceBlockers = (approvalReview.invoiceReviewReasons || []).filter((reason) => reviewReasonSeverity(reason) === "error");
       if (invoiceBlockers.length) {
-        setDraft((current) => ({ ...current, status: `Invoice needs correction before confirming: ${invoiceBlockers.map(reviewReasonText).join(", ")}.` }));
+        setDraft((current) => ({ ...current, status: `${documentTypeLabel(documentType)} needs correction before confirming: ${invoiceBlockers.map((reason) => reviewReasonText(reason, documentType)).join(", ")}.` }));
         return;
       }
       const unresolvedLine = approvalReview.lines.find((item) => (
@@ -4521,7 +4696,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         && ((!item.matchedProductId && !isCreateNewProductResolution(item)) || invoiceLineHasBlockingReview(item))
       ));
       if (unresolvedLine) {
-        setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
+        setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Document line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map((reason) => reviewReasonText(reason, documentType)).join(", ")}.` }));
         return;
       }
       const supplierRecord = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier);
@@ -4530,7 +4705,17 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         setDraft((current) => ({ ...current, status: "Select the supplier before confirming." }));
         return;
       }
-      const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
+      const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
+        supplier,
+        supplierId: supplierRecord?.id || "",
+        documentType,
+        documentNumber,
+      }, { companyId: cloudScope.companyId, excludeId: draft.editingInvoiceId });
+      if (duplicateDocument) {
+        setDraft((current) => ({ ...current, status: `${documentTypeLabel(documentType)} already exists for ${supplier}: ${documentNumber}.` }));
+        return;
+      }
+      const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
       const invoiceId = draft.editingInvoiceId || uid();
       const explicitResolution = resolveExplicitNewProductLines({
         products,
@@ -4557,17 +4742,36 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       }
       const invoice = prepareApprovedInvoice({
         id: invoiceId,
-        invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+        documentType,
+        document_type: documentType,
+        documentNumber: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+        document_number: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+        invoiceNumber: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
         supplier,
         date: draft.date || today(),
         status: "Approved",
         discountAmount: numberValue(draft.discountAmount, 0),
         discountPercent: numberValue(draft.discountPercent, 0),
-        additionalCharges: numberValue(draft.additionalCharges, 0),
+        additionalCharges: Math.abs(numberValue(draft.additionalCharges, 0)),
         additionalChargesDescription: draft.additionalChargesDescription || (numberValue(draft.inferredAdditionalCharges, 0) ? "Inferred non-product charge" : ""),
         sourceInvoiceTotal: numberValue(draft.invoiceTotal ?? draft.sourceInvoiceTotal, 0),
         sourceInvoiceSubtotal: numberValue(draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal, 0),
-        vatTotal: numberValue(draft.vatTotal, 0),
+        vatTotal: Math.abs(numberValue(draft.vatTotal, 0)),
+        originalInvoiceId: draft.originalInvoiceId || "",
+        originalInvoiceNumber: draft.originalInvoiceNumber || "",
+        creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(draft.creditReason) : "",
+        inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(draft.inventoryEffect, defaultInventoryEffectForCreditReason(draft.creditReason)) : "",
+        currency: draft.currency || financialSettings.currency || "GBP",
+        auditEvents: [
+          ...(draft.auditEvents || []),
+          ...(isCreditNoteDocument(documentType) ? [{
+            id: uid(),
+            event: "credit_note_detected",
+            documentType,
+            documentNumber: documentNumber || "",
+            createdAt: new Date().toISOString(),
+          }] : []),
+        ],
         items: explicitResolution.items,
       });
       const productsForLearning = [
@@ -4747,6 +4951,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setDraft={setDraft}
             invoices={invoices}
             invoiceSettings={invoiceSettings}
+            financialSettings={financialSettings}
             companyId={cloudScope.companyId}
             locationId={cloudScope.locationId || ""}
             departmentSettings={departmentSettings}
@@ -4983,7 +5188,7 @@ function invoiceForSupplierDate(supplier, date, invoices = []) {
 }
 
 function supplierAverageInvoiceAmount(supplier, invoices = []) {
-  const rows = invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name)).slice(0, 12);
+  const rows = invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && isInvoiceDocument(documentTypeFor(invoice))).slice(0, 12);
   return rows.length ? rows.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0) / rows.length : 0;
 }
 
@@ -5289,7 +5494,7 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
   const dashboardSupplierSpend = shouldUseAllDepartments ? supplierSpend : spendBySupplier(invoices, suppliers, dateRange, dashboardDepartment);
   const recentInvoices = [...dashboardMetrics.invoices]
     .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
-    .filter((invoice) => dashboardDepartment === "All departments" || invoice.departmentTotal > 0)
+    .filter((invoice) => dashboardDepartment === "All departments" || Math.abs(invoice.departmentTotal) > 0.01)
     .sort((a, b) => b.date.localeCompare(a.date));
 
   return (
@@ -5301,13 +5506,14 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
       )}
       <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
       <div className="dashboard-layout secondary">
-        <Panel title="Recent invoices">
+        <Panel title="Recent purchasing documents">
           <DataTable
             columns={[
-              { key: "invoiceNumber", label: "Invoice" },
+              { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
+              { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
               { key: "supplier", label: "Supplier" },
               { key: "date", label: "Date" },
-              { key: "total", label: "Total", render: (_, row) => money(row.departmentTotal) },
+              { key: "total", label: "Signed total", render: (_, row) => money(row.departmentTotal) },
             ]}
             rows={recentInvoices}
           />
@@ -5349,6 +5555,7 @@ function Invoices({
   invoiceApprovalBusy = false,
   setDraft,
   invoiceSettings,
+  financialSettings = defaultFinancialSettings,
   companyId = "",
   locationId = "",
   departmentSettings = [],
@@ -5371,6 +5578,7 @@ function Invoices({
   const [editDraft, setEditDraft] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualMode, setManualMode] = useState("Simple Mode");
+  const [approvedDocumentFilter, setApprovedDocumentFilter] = useState("All");
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const visibleSuppliers = activeSupplierRows(suppliers);
@@ -5378,10 +5586,14 @@ function Invoices({
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
   const createManualDraft = () => ({
     supplier: defaultManualSupplier,
+    documentType: PURCHASING_DOCUMENT_TYPES.INVOICE,
+    documentNumber: "",
     invoiceNumber: "",
     date: today(),
     total: "",
     department: defaultManualDepartment,
+    creditReason: CREDIT_REASONS.PRICE_ADJUSTMENT,
+    inventoryEffect: INVENTORY_EFFECTS.FINANCIAL_ONLY,
     invoiceDiscountAmount: 0,
     invoiceDiscountPercent: 0,
     items: [
@@ -5391,23 +5603,46 @@ function Invoices({
     ],
   });
   const [manualDraft, setManualDraft] = useState(createManualDraft);
-  const isReading = draft.status === "Reading invoice with AI...";
+  const isReading = draft.status === "Reading purchasing document with AI..." || draft.status === "Reading invoice with AI...";
   const statusTone = draft.status.startsWith("AI failed") ? "error" : draft.status.startsWith("AI extracted") ? "success" : "info";
   const showCreateSupplier = draft.supplier.trim() && !supplierExists(suppliers, draft.supplier);
   const hasUploadDraft = Boolean(draft.files.length || draft.items.length || draft.invoiceText || draft.status !== "Idle" || draft.supplier || draft.invoiceNumber);
+  const draftDocumentType = normalizeDocumentType(draft.documentType || draft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+  const draftIsCreditNote = isCreditNoteDocument(draftDocumentType);
+  const draftDocumentNumber = draft.documentNumber || draft.invoiceNumber || "";
+  const originalInvoiceSuggestion = draft.originalInvoiceNumber
+    ? invoices.find((invoice) => (
+      invoice.supplier === draft.supplier
+      && isInvoiceDocument(documentTypeFor(invoice))
+      && documentNumberFor(invoice) === draft.originalInvoiceNumber
+    ))
+    : null;
+  const approvedDocuments = invoices.filter((invoice) => (
+    approvedDocumentFilter === "All"
+    || (approvedDocumentFilter === "Invoices" && isInvoiceDocument(documentTypeFor(invoice)))
+    || (approvedDocumentFilter === "Credit notes" && isCreditNoteDocument(documentTypeFor(invoice)))
+  ));
   const draftValidationState = useMemo(() => validateInvoiceExtraction({
     invoice: {
       supplier: draft.supplier || draft.items[0]?.supplier,
-      invoiceNumber: draft.invoiceNumber,
+      documentType: draftDocumentType,
+      document_type: draftDocumentType,
+      documentNumber: draftDocumentNumber,
+      document_number: draftDocumentNumber,
+      invoiceNumber: draftDocumentNumber,
       invoiceDate: draft.date,
       invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
       invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
       vatTotal: draft.vatTotal,
       additionalCharges: draft.additionalCharges,
+      creditReason: draft.creditReason,
+      credit_reason: draft.creditReason,
+      inventoryEffect: draft.inventoryEffect,
+      inventory_effect: draft.inventoryEffect,
       invoiceReviewReasons: draft.invoiceReviewReasons || [],
     },
     lines: draft.items,
-  }), [draft.additionalCharges, draft.date, draft.invoiceNumber, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal]);
+  }), [draft.additionalCharges, draft.creditReason, draft.date, draftDocumentNumber, draftDocumentType, draft.inventoryEffect, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal]);
   const draftHasBlockingReview = invoiceHasBlockingReview(draftValidationState);
 
   const resetUploadDraft = () => {
@@ -5466,6 +5701,54 @@ function Invoices({
     }));
   };
 
+  const updateDraftDocumentType = (value) => {
+    const nextDocumentType = normalizeDocumentType(value);
+    setDraft((current) => {
+      const creditReason = normalizeCreditReason(current.creditReason || inferCreditReasonFromText(current.invoiceText || ""));
+      const inventoryEffect = normalizeInventoryEffect(current.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason));
+      return {
+        ...current,
+        documentType: nextDocumentType,
+        document_type: nextDocumentType,
+        documentNumber: current.documentNumber || current.invoiceNumber || "",
+        creditReason: isCreditNoteDocument(nextDocumentType) ? creditReason : "",
+        inventoryEffect: isCreditNoteDocument(nextDocumentType) ? inventoryEffect : "",
+        items: normalizeInvoiceItemsForDocument(current.items, nextDocumentType),
+        auditEvents: [
+          ...(current.auditEvents || []),
+          {
+            id: uid(),
+            event: "document_type_changed",
+            previousValue: current.documentType || current.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE,
+            newValue: nextDocumentType,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        status: `${documentTypeLabel(nextDocumentType)} selected. Review values before confirming.`,
+      };
+    });
+  };
+
+  const updateDraftCreditReason = (value) => {
+    const creditReason = normalizeCreditReason(value);
+    setDraft((current) => ({
+      ...current,
+      creditReason,
+      credit_reason: creditReason,
+      inventoryEffect: defaultInventoryEffectForCreditReason(creditReason),
+      inventory_effect: defaultInventoryEffectForCreditReason(creditReason),
+    }));
+  };
+
+  const updateDraftInventoryEffect = (value) => {
+    const inventoryEffect = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
+    setDraft((current) => ({
+      ...current,
+      inventoryEffect,
+      inventory_effect: inventoryEffect,
+    }));
+  };
+
   const readInvoice = async () => {
     if (!permissions.canImport) return;
     if (!aiSettings.enableAiInvoiceReading) {
@@ -5481,7 +5764,7 @@ function Invoices({
       return;
     }
 
-    setDraft((current) => ({ ...current, invoiceText, status: "Reading invoice with AI..." }));
+    setDraft((current) => ({ ...current, invoiceText, status: "Reading purchasing document with AI..." }));
 
     try {
       const response = await fetch("/api/read-invoice-ai", {
@@ -5509,6 +5792,13 @@ function Invoices({
 
       const supplierRecord = canonicalSupplierForName(suppliers, payload.supplier || draft.supplier);
       const supplier = supplierRecord?.name || payload.supplier || draft.supplier || "Unknown Supplier";
+      const detectedDocumentType = normalizeDocumentType(
+        payload.documentType || payload.document_type || inferDocumentTypeFromText(invoiceText, payload),
+        { allowUnknown: true }
+      );
+      const documentType = detectedDocumentType === PURCHASING_DOCUMENT_TYPES.UNKNOWN ? PURCHASING_DOCUMENT_TYPES.INVOICE : detectedDocumentType;
+      const creditReason = normalizeCreditReason(payload.creditReason || payload.credit_reason || inferCreditReasonFromText(invoiceText));
+      const inventoryEffect = normalizeInventoryEffect(payload.inventoryEffect || payload.inventory_effect, defaultInventoryEffectForCreditReason(creditReason));
       const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
         mapping.active !== false
         && (!companyId || !mapping.companyId || mapping.companyId === companyId)
@@ -5524,6 +5814,12 @@ function Invoices({
       const items = (payload.lines || []).map((line) => {
         const quantity = numberValue(line.quantity, 1);
         const unitCost = extractedInvoiceUnitCost(line);
+        const normalizedLine = normalizePurchasingLineForDocument({
+          ...line,
+          quantity,
+          unitCost,
+          lineTotal: line.lineTotal || quantity * unitCost,
+        }, documentType);
         return enrichInvoiceLine(
           {
             id: uid(),
@@ -5531,9 +5827,9 @@ function Invoices({
             rawDescription: line.rawDescription || line.productName || "",
             supplierProductCode: line.supplierProductCode || "",
             packSize: line.packSize || "",
-            quantity,
-            unitCost,
-            lineTotal: line.lineTotal || quantity * unitCost,
+            quantity: normalizedLine.quantity,
+            unitCost: normalizedLine.unitCost,
+            lineTotal: normalizedLine.lineTotal,
             unit: line.unit || line.unitOfMeasure || "",
             unitOfMeasure: line.unitOfMeasure || line.unit || "",
             supplier,
@@ -5545,6 +5841,9 @@ function Invoices({
             source: "OpenAI",
             sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [], originalExtraction: line },
             originalExtraction: line,
+            sourceQuantity: normalizedLine.sourceQuantity,
+            sourceUnitCost: normalizedLine.sourceUnitCost,
+            sourceLineTotal: normalizedLine.sourceLineTotal,
             matchedProductId: line.matchedProductId || "",
             matchedProductName: line.matchedProductName || "",
             suggestedProductId: line.suggestedProducts?.[0]?.id || line.suggestedProductId || "",
@@ -5567,13 +5866,21 @@ function Invoices({
       const validated = validateInvoiceExtraction({
         invoice: {
           supplier,
-          invoiceNumber: payload.invoiceNumber || draft.invoiceNumber,
+          documentType,
+          document_type: documentType,
+          documentNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || draft.documentNumber || draft.invoiceNumber,
+          document_number: payload.documentNumber || payload.document_number || payload.invoiceNumber || draft.documentNumber || draft.invoiceNumber,
+          invoiceNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || draft.invoiceNumber,
           invoiceDate: payload.invoiceDate || draft.date,
-          invoiceSubtotal: payload.invoiceSubtotal,
-          invoiceTotal: payload.invoiceTotal,
-          vatTotal: payload.vatTotal,
+          invoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+          invoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+          vatTotal: payload.vatTotal ?? payload.vat_total,
           additionalCharges: payload.additionalCharges ?? payload.handlingCharge ?? payload.deliveryCharge ?? 0,
           additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || "",
+          creditReason,
+          credit_reason: creditReason,
+          inventoryEffect,
+          inventory_effect: inventoryEffect,
         },
         lines: items,
         historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
@@ -5582,14 +5889,36 @@ function Invoices({
       setDraft((current) => ({
         ...current,
         supplier,
-        invoiceNumber: payload.invoiceNumber || current.invoiceNumber,
+        documentType,
+        document_type: documentType,
+        documentNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || current.documentNumber || current.invoiceNumber,
+        document_number: payload.documentNumber || payload.document_number || payload.invoiceNumber || current.documentNumber || current.invoiceNumber,
+        invoiceNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || current.invoiceNumber,
         date: preferredInvoiceDateForSupplier(supplier, invoiceText, payload.invoiceDate || current.date || today()),
         items: validated.lines,
-        invoiceSubtotal: payload.invoiceSubtotal,
-        invoiceTotal: payload.invoiceTotal,
-        sourceInvoiceSubtotal: payload.invoiceSubtotal,
-        sourceInvoiceTotal: payload.invoiceTotal,
-        vatTotal: payload.vatTotal,
+        invoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+        invoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+        sourceInvoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+        sourceInvoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+        vatTotal: payload.vatTotal ?? payload.vat_total,
+        originalInvoiceNumber: payload.originalInvoiceNumber || payload.original_invoice_number || current.originalInvoiceNumber || "",
+        original_invoice_number: payload.originalInvoiceNumber || payload.original_invoice_number || current.originalInvoiceNumber || "",
+        originalInvoiceId: current.originalInvoiceId || "",
+        creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+        credit_reason: isCreditNoteDocument(documentType) ? creditReason : "",
+        inventoryEffect: isCreditNoteDocument(documentType) ? inventoryEffect : "",
+        inventory_effect: isCreditNoteDocument(documentType) ? inventoryEffect : "",
+        currency: payload.currency || current.currency || financialSettings.currency || "GBP",
+        auditEvents: [
+          ...(current.auditEvents || []),
+          ...(isCreditNoteDocument(documentType) ? [{
+            id: uid(),
+            event: "credit_note_detected_by_ai",
+            documentType,
+            documentNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || current.documentNumber || current.invoiceNumber,
+            createdAt: new Date().toISOString(),
+          }] : []),
+        ],
         additionalCharges: validated.additionalCharges || 0,
         additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || (validated.inferredAdditionalCharges ? "Inferred non-product charge" : ""),
         inferredAdditionalCharges: validated.inferredAdditionalCharges || 0,
@@ -5600,17 +5929,21 @@ function Invoices({
         extractionModel: payload.extractionModel,
         fallbackModelUsed: payload.fallbackModelUsed,
         fallbackReason: payload.fallbackReason,
-        status: `AI extracted ${items.length} lines${payload.fallbackModelUsed ? " using fallback review" : ""}. Please review before approving.`,
+        status: `AI extracted ${items.length} ${documentTypeLabel(documentType).toLowerCase()} line(s)${payload.fallbackModelUsed ? " using fallback review" : ""}. Please review before approving.`,
       }));
     } catch (error) {
-      setDraft((current) => ({ ...current, status: `AI could not read this invoice. Please try a clearer photo, upload a PDF, or enter it manually. ${error.message}` }));
+      setDraft((current) => ({ ...current, status: `AI could not read this purchasing document. Please try a clearer photo, upload a PDF, or enter it manually. ${error.message}` }));
     }
   };
 
   const updateDraftItem = (id, field, value) => {
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
+      }),
     }));
   };
 
@@ -5695,7 +6028,7 @@ function Invoices({
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => item.id === id ? lineWithCreateNewProductResolution(item) : item),
-      status: `New product will be created when you confirm the invoice: ${line.productName.trim()}.`,
+      status: `New product will be created when you confirm the ${purchasingDocumentNoun(draftDocumentType)}: ${line.productName.trim()}.`,
     }));
   };
 
@@ -5735,10 +6068,14 @@ function Invoices({
     setManualMode("Simple Mode");
     setManualDraft({
       supplier,
+      documentType: PURCHASING_DOCUMENT_TYPES.INVOICE,
+      documentNumber: "",
       invoiceNumber: "",
       date: today(),
       total: "",
       department,
+      creditReason: CREDIT_REASONS.PRICE_ADJUSTMENT,
+      inventoryEffect: INVENTORY_EFFECTS.FINANCIAL_ONLY,
       invoiceDiscountAmount: 0,
       invoiceDiscountPercent: 0,
       items: [emptyInvoiceLine(supplier, department), emptyInvoiceLine(supplier, department), emptyInvoiceLine(supplier, department)],
@@ -5748,6 +6085,22 @@ function Invoices({
 
   const updateManualField = (field, value) => {
     setManualDraft((current) => {
+      if (field === "documentType") {
+        const documentType = normalizeDocumentType(value);
+        return {
+          ...current,
+          documentType,
+          items: normalizeInvoiceItemsForDocument(current.items || [], documentType),
+          creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(current.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT) : "",
+          inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(current.inventoryEffect, defaultInventoryEffectForCreditReason(current.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)) : "",
+        };
+      }
+      if (field === "documentNumber" || field === "invoiceNumber") return { ...current, documentNumber: value, invoiceNumber: value };
+      if (field === "creditReason") {
+        const creditReason = normalizeCreditReason(value);
+        return { ...current, creditReason, inventoryEffect: defaultInventoryEffectForCreditReason(creditReason) };
+      }
+      if (field === "inventoryEffect") return { ...current, inventoryEffect: normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY) };
       if (field !== "supplier") return { ...current, [field]: value };
       return {
         ...current,
@@ -5760,7 +6113,11 @@ function Invoices({
   const updateManualLine = (id, field, value) => {
     setManualDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
+      }),
     }));
   };
 
@@ -5808,14 +6165,24 @@ function Invoices({
     const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
     const supplier = supplierRecord?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
     const date = manualDraft.date || today();
+    const documentType = normalizeDocumentType(manualDraft.documentType || PURCHASING_DOCUMENT_TYPES.INVOICE);
+    const documentNumber = (manualDraft.documentNumber || manualDraft.invoiceNumber || "").trim();
+    const documentFallback = `${isCreditNoteDocument(documentType) ? "CN" : "MAN"}-${String(invoices.length + 1).padStart(4, "0")}`;
+    const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
+      supplier,
+      supplierId: supplierRecord?.id || "",
+      documentType,
+      documentNumber: documentNumber || documentFallback,
+    }, { companyId });
+    if (duplicateDocument) return;
     let items = [];
 
     if (manualMode === "Simple Mode") {
-      const total = numberValue(manualDraft.total, 0);
+      const total = Math.abs(numberValue(manualDraft.total, 0));
       if (total <= 0) return;
       items = [{
         id: uid(),
-        productName: "Manual invoice total",
+        productName: isCreditNoteDocument(documentType) ? "Manual credit note total" : "Manual invoice total",
         packSize: "",
         quantity: 1,
         unitCost: total,
@@ -5831,12 +6198,13 @@ function Invoices({
     } else {
       items = manualDraft.items
         .filter((item) => item.productName?.trim() && invoiceEditorNetLineTotal(item) > 0)
-        .map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment));
+        .map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
       if (!items.length) return;
     }
 
-    items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment));
+    items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
     const validation = validateInvoiceLinesForApproval(items, {
+      documentType,
       splitValidator: splitIsValid,
       netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
     });
@@ -5845,13 +6213,27 @@ function Invoices({
 
     const invoice = prepareApprovedInvoice({
       id: uid(),
-      invoiceNumber: manualDraft.invoiceNumber?.trim() || `MAN-${String(invoices.length + 1).padStart(4, "0")}`,
+      documentType,
+      document_type: documentType,
+      documentNumber: documentNumber || documentFallback,
+      document_number: documentNumber || documentFallback,
+      invoiceNumber: documentNumber || documentFallback,
       supplier,
       date,
       status: "Approved",
-      source: "Manual invoice",
+      source: isCreditNoteDocument(documentType) ? "Manual credit note" : "Manual invoice",
       discountAmount: numberValue(manualDraft.invoiceDiscountAmount, 0),
       discountPercent: numberValue(manualDraft.invoiceDiscountPercent, 0),
+      creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(manualDraft.creditReason) : "",
+      inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(manualDraft.inventoryEffect, defaultInventoryEffectForCreditReason(manualDraft.creditReason)) : "",
+      currency: financialSettings.currency || "GBP",
+      auditEvents: isCreditNoteDocument(documentType) ? [{
+        id: uid(),
+        event: "credit_note_created",
+        documentType,
+        documentNumber: documentNumber || documentFallback,
+        createdAt: new Date().toISOString(),
+      }] : [],
       items,
     });
 
@@ -5877,12 +6259,29 @@ function Invoices({
     if (!permissions.canEdit) return;
     setEditDraft({
       ...invoice,
+      documentType: documentTypeFor(invoice),
+      documentNumber: documentNumberFor(invoice),
       items: (invoice.items || []).map((item) => ({ ...item, id: item.id || uid() })),
     });
   };
 
   const updateEditInvoice = (field, value) => {
     setEditDraft((current) => {
+      if (field === "documentType") {
+        const documentType = normalizeDocumentType(value);
+        const creditReason = normalizeCreditReason(current.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT);
+        return {
+          ...current,
+          documentType,
+          document_type: documentType,
+          creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+          inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(current.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason)) : "",
+          items: normalizeInvoiceItemsForDocument(current.items || [], documentType),
+        };
+      }
+      if (field === "documentNumber" || field === "invoiceNumber") {
+        return { ...current, documentNumber: value, document_number: value, invoiceNumber: value };
+      }
       if (field !== "supplier") return { ...current, [field]: value };
       return {
         ...current,
@@ -5895,7 +6294,11 @@ function Invoices({
   const updateEditLine = (id, field, value) => {
     setEditDraft((current) => ({
       ...current,
-      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId }) : item),
+      items: (current.items || []).map((item) => {
+        if (item.id !== id) return item;
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
+      }),
     }));
   };
 
@@ -5943,8 +6346,18 @@ function Invoices({
     if (!editDraft) return;
     const supplierRecord = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier);
     const supplier = supplierRecord?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
-    const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
+    const documentType = normalizeDocumentType(editDraft.documentType || editDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+    const documentNumber = documentNumberFor(editDraft);
+    const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
+      supplier,
+      supplierId: supplierRecord?.id || "",
+      documentType,
+      documentNumber,
+    }, { companyId, excludeId: editDraft.id });
+    if (duplicateDocument) return;
+    const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
     const validation = validateInvoiceLinesForApproval(items, {
+      documentType,
       splitValidator: splitIsValid,
       netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
     });
@@ -5953,6 +6366,13 @@ function Invoices({
     const cleaned = prepareApprovedInvoice({
       ...editDraft,
       supplier,
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber,
+      creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(editDraft.creditReason) : "",
+      inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(editDraft.inventoryEffect, defaultInventoryEffectForCreditReason(editDraft.creditReason)) : "",
       status: editDraft.status || "Approved",
       items,
     });
@@ -6000,18 +6420,45 @@ function Invoices({
           }}
         >
           <Upload size={30} />
-          <h3>Upload invoice PDF or image</h3>
+          <h3>Upload purchasing document PDF or image</h3>
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           {permissions.canImport && <label className="file-button">
-            Choose invoice
+            Choose document
             <input key={uploadInputKey} accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
           </label>}
         </div>
         <div className="invoice-meta">
           <SupplierSelector id="supplier-list" suppliers={suppliers} value={draft.supplier} onChange={setDraftSupplier} />
+          <label>Document type<select value={draftDocumentType} onChange={(event) => updateDraftDocumentType(event.target.value)}>
+            {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select></label>
           <label>Date<input type="date" value={draft.date} onChange={(event) => setDraft({ ...draft, date: event.target.value })} /></label>
-          <label>Invoice number<input value={draft.invoiceNumber} onChange={(event) => setDraft({ ...draft, invoiceNumber: event.target.value })} /></label>
+          <label>Document number<input value={draftDocumentNumber} onChange={(event) => setDraft({ ...draft, documentNumber: event.target.value, document_number: event.target.value, invoiceNumber: event.target.value })} /></label>
         </div>
+        {draftIsCreditNote && (
+          <div className="credit-note-summary">
+            <div>
+              <Badge tone="amber">{documentTypeBadgeLabel(draftDocumentType)}</Badge>
+              <strong>{draftDocumentNumber || "Document number needed"}</strong>
+            </div>
+            <p>This document will reduce supplier purchases and cost of goods.</p>
+            <div className="form-grid four compact-form">
+              <label>Credit reason<select value={normalizeCreditReason(draft.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => updateDraftCreditReason(event.target.value)}>
+                {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Credit treatment<select value={normalizeInventoryEffect(draft.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => updateDraftInventoryEffect(event.target.value)}>
+                {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Original invoice number<input value={draft.originalInvoiceNumber || ""} onChange={(event) => setDraft({ ...draft, originalInvoiceNumber: event.target.value, original_invoice_number: event.target.value, originalInvoiceId: "" })} /></label>
+              <div className="read-only-field"><span>Financial effect</span><strong>{money(toSignedPurchasingAmount(draftValidationState.additionalCharges + draftValidationState.lines.reduce((sum, line) => sum + invoiceEditorNetLineTotal(line), 0), draftDocumentType))}</strong></div>
+            </div>
+            {originalInvoiceSuggestion && (
+              <div className="button-row left tight">
+                <button className="ghost" onClick={() => setDraft((current) => ({ ...current, originalInvoiceId: originalInvoiceSuggestion.id }))} type="button">Link original invoice {documentNumberFor(originalInvoiceSuggestion)}</button>
+              </div>
+            )}
+          </div>
+        )}
         {showCreateSupplier && (
           <div className="button-row left tight">
             {permissions.canAdd && <button className="ghost" onClick={createSupplier} type="button"><Plus size={16} />Create supplier</button>}
@@ -6023,9 +6470,9 @@ function Invoices({
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
-        {draft.invoiceReviewReasons?.length > 0 && (
+        {draftValidationState.invoiceReviewReasons?.length > 0 && (
           <div className={`invoice-status ${draftValidationState.invoiceHasBlockingReview ? "error" : "warn"}`}>
-            {draft.invoiceReviewReasons.map((reason) => reviewReasonText(reason)).join(" ")}
+            {draftValidationState.invoiceReviewReasons.map((reason) => reviewReasonText(reason, draftDocumentType)).join(" ")}
           </div>
         )}
         {numberValue(draft.additionalCharges, 0) !== 0 && (
@@ -6034,16 +6481,16 @@ function Invoices({
           </div>
         )}
         <div className="button-row left">
-          {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>}
-          {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>}
-          {permissions.canApprove && <button disabled={!draft.items.length || isReading || invoiceApprovalBusy || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />{invoiceApprovalBusy ? "Confirming..." : "Confirm Invoice"}</button>}
+          {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Document</button>}
+          {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Document</button>}
+          {permissions.canApprove && <button disabled={!draft.items.length || isReading || invoiceApprovalBusy || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />{invoiceApprovalBusy ? confirmingLabelForDocument(draftDocumentType) : confirmationLabelForDocument(draftDocumentType)}</button>}
           {hasUploadDraft && (
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
         </div>
       </Panel>
 
-      <Panel title="Review invoice lines" action={`${draft.items.length} line(s)`}>
+      <Panel title={`Review ${documentTypeLabel(draftDocumentType).toLowerCase()} lines`} action={`${draft.items.length} line(s)`}>
         <InvoiceLineEditor
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
@@ -6052,6 +6499,7 @@ function Invoices({
           departmentNames={departmentNames}
           forgetLearnedRule={forgetLearnedRuleForDraftLine}
           items={draft.items}
+          documentType={draftDocumentType}
           products={products}
           removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
           removeSplit={removeDraftSplit}
@@ -6067,19 +6515,27 @@ function Invoices({
         )}
       </Panel>
 
-      <Panel title="Approved invoices">
+      <Panel title="Approved purchasing documents">
         <DataTable
           columns={[
-            { key: "invoiceNumber", label: "Invoice" },
+            { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
+            { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
             { key: "supplier", label: "Supplier" },
             { key: "date", label: "Date" },
             { key: "items", label: "Lines", render: (items) => items.length },
-            { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
+            { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
           ]}
           onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
           onEdit={permissions.canEdit ? (row) => openEditInvoice(row) : null}
-          rows={invoices}
+          rows={approvedDocuments}
+          toolbarAction={(
+            <label className="inline-filter">Type<select value={approvedDocumentFilter} onChange={(event) => setApprovedDocumentFilter(event.target.value)}>
+              <option>All</option>
+              <option>Invoices</option>
+              <option>Credit notes</option>
+            </select></label>
+          )}
         />
       </Panel>
 
@@ -6094,14 +6550,14 @@ function Invoices({
           </>
         )}
       >
-        <p className="modal-copy">This will clear the uploaded file, extracted invoice lines and current review draft. Approved invoices will not be deleted.</p>
+        <p className="modal-copy">This will clear the uploaded file, extracted document lines and current review draft. Approved purchasing documents will not be deleted.</p>
       </AppModal>
 
       <ConfirmDeleteModal
         open={Boolean(deleteTarget)}
-        title="Delete invoice?"
-        message={<span>This will remove invoice <strong>{deleteTarget?.invoiceNumber}</strong> from supplier spend, GP calculations, product history and price history.</span>}
-        confirmLabel="Delete invoice"
+        title={`Delete ${purchasingDocumentNoun(documentTypeFor(deleteTarget || {}))}?`}
+        message={<span>This will remove <strong>{documentNumberFor(deleteTarget || {})}</strong> from supplier spend, GP calculations, product history and price history.</span>}
+        confirmLabel="Delete document"
         onCancel={() => setDeleteTarget(null)}
         onConfirm={confirmDeleteInvoice}
         confirmIcon={<Trash2 size={16} />}
@@ -6124,12 +6580,30 @@ function Invoices({
           <div className="modal-stack">
             <div className="form-grid six">
               <SupplierSelector id="supplier-list-edit" suppliers={suppliers} value={editDraft.supplier || ""} onChange={(value) => updateEditInvoice("supplier", value)} />
-              <label>Invoice number<input value={editDraft.invoiceNumber || ""} onChange={(event) => updateEditInvoice("invoiceNumber", event.target.value)} /></label>
+              <label>Document type<select value={normalizeDocumentType(editDraft.documentType || editDraft.document_type)} onChange={(event) => updateEditInvoice("documentType", event.target.value)}>
+                {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Document number<input value={documentNumberFor(editDraft)} onChange={(event) => updateEditInvoice("documentNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={editDraft.date || today()} onChange={(event) => updateEditInvoice("date", event.target.value)} /></label>
-              <Field label="Invoice total" readOnly value={money(invoiceTotal(editDraft))} />
+              <Field label="Signed total" readOnly value={money(invoiceTotal(editDraft))} />
             </div>
+            {isCreditNoteDocument(editDraft.documentType || editDraft.document_type) && (
+              <div className="credit-note-summary compact">
+                <div><Badge tone="amber">{documentTypeBadgeLabel(editDraft.documentType)}</Badge><strong>{documentNumberFor(editDraft)}</strong></div>
+                <div className="form-grid four compact-form">
+                  <label>Credit reason<select value={normalizeCreditReason(editDraft.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => setEditDraft((current) => ({ ...current, creditReason: normalizeCreditReason(event.target.value), inventoryEffect: defaultInventoryEffectForCreditReason(event.target.value) }))}>
+                    {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Credit treatment<select value={normalizeInventoryEffect(editDraft.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => setEditDraft((current) => ({ ...current, inventoryEffect: normalizeInventoryEffect(event.target.value, INVENTORY_EFFECTS.FINANCIAL_ONLY) }))}>
+                    {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Original invoice number<input value={editDraft.originalInvoiceNumber || ""} onChange={(event) => setEditDraft((current) => ({ ...current, originalInvoiceNumber: event.target.value, original_invoice_number: event.target.value }))} /></label>
+                </div>
+              </div>
+            )}
             <InvoiceLineEditor
               addSplit={addEditSplit}
+              documentType={normalizeDocumentType(editDraft.documentType || editDraft.document_type)}
               departmentNames={departmentNames}
               items={editDraft.items || []}
               products={products}
@@ -6146,14 +6620,14 @@ function Invoices({
       </AppModal>
 
       <AppModal
-        title="Add Manual Invoice"
+        title="Add Manual Purchasing Document"
         open={manualOpen}
         onClose={() => setManualOpen(false)}
         wide
         footer={(
           <>
             <button className="ghost" onClick={() => setManualOpen(false)} type="button">Cancel</button>
-            <button onClick={saveManualInvoice} type="button"><Save size={16} />Save Invoice</button>
+            <button onClick={saveManualInvoice} type="button"><Save size={16} />Save Document</button>
           </>
         )}
       >
@@ -6164,19 +6638,40 @@ function Invoices({
             ))}
           </div>
 
+          {isCreditNoteDocument(manualDraft.documentType) && (
+            <div className="credit-note-summary compact">
+              <div><Badge tone="amber">CREDIT NOTE</Badge><strong>{manualDraft.documentNumber || manualDraft.invoiceNumber || "Document number needed"}</strong></div>
+              <p>This document will reduce supplier purchases and cost of goods.</p>
+              <div className="form-grid four compact-form">
+                <label>Credit reason<select value={normalizeCreditReason(manualDraft.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => updateManualField("creditReason", event.target.value)}>
+                  {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select></label>
+                <label>Credit treatment<select value={normalizeInventoryEffect(manualDraft.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => updateManualField("inventoryEffect", event.target.value)}>
+                  {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select></label>
+              </div>
+            </div>
+          )}
+
           {manualMode === "Simple Mode" ? (
             <div className="form-grid five">
               <SupplierSelector id="supplier-list-manual" suppliers={suppliers} value={manualDraft.supplier} onChange={(value) => updateManualField("supplier", value)} />
-              <label>Invoice number<input value={manualDraft.invoiceNumber} onChange={(event) => updateManualField("invoiceNumber", event.target.value)} /></label>
+              <label>Document type<select value={normalizeDocumentType(manualDraft.documentType)} onChange={(event) => updateManualField("documentType", event.target.value)}>
+                {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Document number<input value={manualDraft.documentNumber || manualDraft.invoiceNumber} onChange={(event) => updateManualField("documentNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={manualDraft.date} onChange={(event) => updateManualField("date", event.target.value)} /></label>
-              <label>Total price<input min="0" step="0.01" type="number" value={manualDraft.total} onChange={(event) => updateManualField("total", event.target.value)} /></label>
+              <label>{isCreditNoteDocument(manualDraft.documentType) ? "Total credit" : "Total price"}<input min="0" step="0.01" type="number" value={manualDraft.total} onChange={(event) => updateManualField("total", event.target.value)} /></label>
               <label>Department<select value={manualDraft.department} onChange={(event) => updateManualField("department", event.target.value)}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
             </div>
           ) : (
             <>
               <div className="form-grid five">
                 <SupplierSelector id="supplier-list-manual-complete" suppliers={suppliers} value={manualDraft.supplier} onChange={(value) => updateManualField("supplier", value)} />
-                <label>Invoice number<input value={manualDraft.invoiceNumber} onChange={(event) => updateManualField("invoiceNumber", event.target.value)} /></label>
+                <label>Document type<select value={normalizeDocumentType(manualDraft.documentType)} onChange={(event) => updateManualField("documentType", event.target.value)}>
+                  {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select></label>
+                <label>Document number<input value={manualDraft.documentNumber || manualDraft.invoiceNumber} onChange={(event) => updateManualField("documentNumber", event.target.value)} /></label>
                 <label>Date<input type="date" value={manualDraft.date} onChange={(event) => updateManualField("date", event.target.value)} /></label>
                 <DiscountEditor
                   amount={manualDraft.invoiceDiscountAmount}
@@ -6189,6 +6684,7 @@ function Invoices({
               </div>
               <InvoiceLineEditor
                 addSplit={addManualSplit}
+                documentType={normalizeDocumentType(manualDraft.documentType)}
                 departmentNames={departmentNames}
                 items={manualDraft.items}
                 products={products}
@@ -6256,6 +6752,7 @@ function InvoiceLineEditor({
   applySuggestion,
   createProductFromLine,
   departmentNames,
+  documentType = PURCHASING_DOCUMENT_TYPES.INVOICE,
   forgetLearnedRule,
   items,
   products = [],
@@ -6267,7 +6764,8 @@ function InvoiceLineEditor({
   updateSplit,
   wrapClassName = "table-wrap invoice-review-table-wrap",
 }) {
-  const headers = ["Product", "Match", "Pack size", "Quantity", "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", "Net line total", ""];
+  const isCreditNote = isCreditNoteDocument(documentType);
+  const headers = ["Product", "Match", "Pack size", "Quantity", isCreditNote ? "Unit credit" : "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", isCreditNote ? "Line credit" : "Net line total", ""];
 
   return (
     <div className={wrapClassName}>
@@ -6279,6 +6777,7 @@ function InvoiceLineEditor({
           {items.map((item) => {
             const status = invoiceLineStatus(item);
             const netTotal = invoiceEditorNetLineTotal(item);
+            const signedNetTotal = toSignedPurchasingAmount(netTotal, documentType);
             const productListId = `invoice-product-options-${item.id}`;
             const productMatches = productAutocomplete(products, item.productName, 12);
             const reviewReasons = item.reviewReasons || [];
@@ -6352,7 +6851,7 @@ function InvoiceLineEditor({
                     )}
                     {reviewReasons.length > 0 && (
                       <ul className="review-reason-list">
-                        {reviewReasons.map((reason) => <li key={reason}>{reviewReasonText(reason)}</li>)}
+                        {reviewReasons.map((reason) => <li key={reason}>{reviewReasonText(reason, documentType)}</li>)}
                       </ul>
                     )}
                   </div>
@@ -6372,7 +6871,7 @@ function InvoiceLineEditor({
                     addSplit={() => addSplit(item.id)}
                     departmentNames={departmentNames}
                     item={item}
-                    lineTotalValue={netTotal}
+                    lineTotalValue={isCreditNote ? signedNetTotal : netTotal}
                     removeSplit={(splitIndex) => removeSplit(item.id, splitIndex)}
                     setMode={(mode) => setDepartmentMode(item.id, mode)}
                     updateDepartment={(value) => updateLine(item.id, "department", value)}
@@ -6385,7 +6884,7 @@ function InvoiceLineEditor({
                   </select>
                 </td>
                 <td><input value={item.supplier || ""} onChange={(event) => updateLine(item.id, "supplier", event.target.value)} /></td>
-                <td>{money(netTotal)}</td>
+                <td>{money(isCreditNote ? signedNetTotal : netTotal)}</td>
                 <td><button className="icon danger" onClick={() => removeLine(item.id)} type="button"><Trash2 size={15} /></button></td>
               </tr>
             );
@@ -6494,7 +6993,10 @@ function InvoiceControlCentre({
   const expectedCells = allCells.filter((cell) => cell.state === "expected");
   const missingCells = allCells.filter((cell) => cell.state === "missing");
   const notOrderedCells = allCells.filter((cell) => cell.state === "not_ordered");
-  const weeklySupplierSpend = invoices.filter((invoice) => dateInRange(invoice.date, weekRange)).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const weeklyDocuments = invoices.filter((invoice) => dateInRange(invoice.date, weekRange));
+  const weeklyInvoiceSpend = weeklyDocuments.filter((invoice) => isInvoiceDocument(documentTypeFor(invoice))).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const weeklyCreditTotal = weeklyDocuments.filter((invoice) => isCreditNoteDocument(documentTypeFor(invoice))).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const weeklySupplierSpend = weeklyInvoiceSpend + weeklyCreditTotal;
   const weeklyFoodPurchases = departmentPurchaseTotalForDate(invoices, weekDates[0], "Kitchen Made")
     + departmentPurchaseTotalForDate(invoices, weekDates[0], "Bought In")
     + weekDates.slice(1).reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made") + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
@@ -6553,7 +7055,9 @@ function InvoiceControlCentre({
         <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
         <Metric label="Missing" value={missingCells.length} delta="past due" tone={missingCells.length ? "warn" : "good"} />
         <Metric label="Not ordered" value={notOrderedCells.length} delta="manual override" />
-        <Metric label="Supplier spend" value={money(weeklySupplierSpend)} delta="weekly total" />
+        <Metric label="Invoices" value={money(weeklyInvoiceSpend)} delta="weekly invoice total" />
+        <Metric label="Credit notes" value={money(weeklyCreditTotal)} delta="weekly credit total" />
+        <Metric label="Net purchases" value={money(weeklySupplierSpend)} delta="weekly total" />
         <Metric label="Food purchases" value={money(weeklyFoodPurchases)} delta="make-in + bought-in" />
         <Metric label="Make-in" value={money(weeklyMakeInPurchases)} delta="Kitchen Made" />
         <Metric label="Bought-in" value={money(weeklyBoughtInPurchases)} delta="Bought In" />
@@ -6706,22 +7210,23 @@ function InvoiceControlCentre({
           footer={<button onClick={() => setViewInvoice(null)} type="button">Close</button>}
           onClose={() => setViewInvoice(null)}
           open={Boolean(viewInvoice)}
-          title={`Invoice ${viewInvoice.invoiceNumber || ""}`}
+          title={`${documentTypeLabel(documentTypeFor(viewInvoice))} ${documentNumberFor(viewInvoice) || ""}`}
           wide
         >
           <div className="modal-stack">
             <div className="form-grid six">
               <div className="read-only-field"><span>Supplier</span><strong>{viewInvoice.supplier}</strong></div>
               <div className="read-only-field"><span>Date</span><strong>{formatRangeDate(viewInvoice.date)}</strong></div>
-              <div className="read-only-field"><span>Total</span><strong>{money(invoiceTotal(viewInvoice))}</strong></div>
+              <div className="read-only-field"><span>Signed total</span><strong>{money(invoiceTotal(viewInvoice))}</strong></div>
+              {isCreditNoteDocument(documentTypeFor(viewInvoice)) && <div className="read-only-field"><span>Treatment</span><strong>{inventoryEffectLabel(viewInvoice.inventoryEffect || viewInvoice.inventory_effect)}</strong></div>}
             </div>
             <DataTable
               columns={[
                 { key: "productName", label: "Product" },
                 { key: "packSize", label: "Pack" },
                 { key: "quantity", label: "Qty" },
-                { key: "unitCost", label: "Unit cost", render: money },
-                { key: "netLineTotal", label: "Net", render: (_, row) => money(netLineTotal(row, viewInvoice)) },
+                { key: "unitCost", label: isCreditNoteDocument(documentTypeFor(viewInvoice)) ? "Unit credit" : "Unit cost", render: money },
+                { key: "netLineTotal", label: isCreditNoteDocument(documentTypeFor(viewInvoice)) ? "Line credit" : "Net", render: (_, row) => money(signedLineTotal(row, viewInvoice)) },
               ]}
               rows={(viewInvoice.items || []).map((item) => ({ ...item, id: item.id || `${item.productName}-${item.packSize}` }))}
             />
@@ -6739,7 +7244,7 @@ function InvoiceControlCell({ cell, onClick }) {
   return (
     <td>
       <button className={`invoice-control-cell ${cell.state}`} onClick={onClick} type="button">
-        <strong>{cell.label}</strong>
+        <strong>{cell.invoice ? documentTypeBadgeLabel(documentTypeFor(cell.invoice)) : cell.label}</strong>
         {cell.total ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
       </button>
     </td>
@@ -7173,7 +7678,9 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
             { key: "email", label: "Email" },
             { key: "phone", label: "Phone" },
             { key: "deliveryDaysLabel", label: "Delivery days" },
-            { key: "spend", label: "Spend total", render: (value) => money(value) },
+            { key: "invoiceSpend", label: "Invoice purchases", render: (value) => money(value) },
+            { key: "creditTotal", label: "Supplier credits", render: (value) => money(value) },
+            { key: "netSpend", label: "Net spend", render: (value) => money(value) },
             { key: "openIssues", label: "Open issues", render: (value) => value > 0 ? <Badge tone="amber">{value} open</Badge> : <Badge tone="green">0</Badge> },
             { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
@@ -7262,10 +7769,11 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
           {activeSupplierTab === "Invoices" && (
             <DataTable
               columns={[
-                { key: "invoiceNumber", label: "Invoice" },
+                { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
+                { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
                 { key: "date", label: "Date" },
                 { key: "items", label: "Lines", render: (items) => items.length },
-                { key: "total", label: "Total", render: (_, row) => money(invoiceTotal(row)) },
+                { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
                 { key: "issueCount", label: "Issues", render: (value) => value > 0 ? <Badge tone="amber">{value}</Badge> : <Badge tone="green">0</Badge> },
               ]}
               rows={selectedSupplierInvoices}
@@ -10874,7 +11382,7 @@ function DailyGpChart({ rows, targetGp }) {
 function SalesPurchasesChart({ rows }) {
   const validRows = rows.filter((row) => row.netSales || row.purchases);
   if (!validRows.length) return <EmptyState />;
-  const max = Math.max(...validRows.flatMap((row) => [row.netSales, row.purchases]), 1);
+  const max = Math.max(...validRows.flatMap((row) => [Math.abs(row.netSales), Math.abs(row.purchases)]), 1);
 
   return (
     <div className="grouped-bars">
@@ -10882,7 +11390,7 @@ function SalesPurchasesChart({ rows }) {
         <div className="grouped-bar" key={row.id}>
           <div className="group-track">
             <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-            <span className="purchase-bar" style={{ height: `${(row.purchases / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
+            <span className="purchase-bar" style={{ height: `${(Math.abs(row.purchases) / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
           </div>
           <small>{row.label || formatRangeDate(row.date)}</small>
         </div>
@@ -10933,9 +11441,9 @@ function DepartmentBreakdown({ rows }) {
 }
 
 function SupplierSpendChart({ rows, total }) {
-  const visibleRows = rows.filter((row) => row.spend > 0);
+  const visibleRows = rows.filter((row) => Math.abs(numberValue(row.spend, 0)) > 0.01);
   if (!visibleRows.length) return <EmptyState />;
-  const max = Math.max(...visibleRows.map((row) => row.spend), 1);
+  const max = Math.max(...visibleRows.map((row) => Math.abs(row.spend)), 1);
   return (
     <div className="donut-list">
       {visibleRows.map((row) => {
@@ -10944,7 +11452,7 @@ function SupplierSpendChart({ rows, total }) {
           <div key={row.id || row.name} title={`${row.name}\nSpend: ${money(row.spend)}\n${percent(share)} of total purchases`}>
             <span>{row.name}</span>
             <strong>{money(row.spend)} · {percent(share)}</strong>
-            <i style={{ width: `${(row.spend / max) * 100}%` }} />
+            <i style={{ width: `${(Math.abs(row.spend) / max) * 100}%` }} />
           </div>
         );
       })}
@@ -11002,8 +11510,8 @@ function LineSeries({ rows, valueKey }) {
 }
 
 function DonutBars({ rows }) {
-  const max = Math.max(...rows.map((row) => row.spend), 1);
-  return <div className="donut-list">{rows.map((row) => <div key={row.id || row.name}><span>{row.name}</span><strong>{money(row.spend)}</strong><i style={{ width: `${(row.spend / max) * 100}%` }} /></div>)}</div>;
+  const max = Math.max(...rows.map((row) => Math.abs(row.spend)), 1);
+  return <div className="donut-list">{rows.map((row) => <div key={row.id || row.name}><span>{row.name}</span><strong>{money(row.spend)}</strong><i style={{ width: `${(Math.abs(row.spend) / max) * 100}%` }} /></div>)}</div>;
 }
 
 function InsightList({ metrics }) {
