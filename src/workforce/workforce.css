@@ -1,0 +1,511 @@
+.workforce-shell {
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.workforce-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  height: 100vh;
+  padding: 24px 18px;
+  border-right: 1px solid var(--line);
+  background: #111827;
+  overflow: auto;
+}
+
+.workforce-home-button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.workforce-company-card {
+  display: grid;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #172033;
+}
+
+.workforce-company-card span,
+.workforce-company-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workforce-company-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workforce-nav {
+  display: grid;
+  gap: 16px;
+}
+
+.workforce-nav div {
+  display: grid;
+  gap: 4px;
+}
+
+.workforce-nav div > span {
+  padding: 0 11px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workforce-workspace {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  min-width: 0;
+  padding: 28px;
+}
+
+.workforce-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.workforce-topbar h1 {
+  margin: 0;
+  font-size: 34px;
+}
+
+.workforce-stack {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.workforce-loading,
+.workforce-denied {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  text-align: center;
+}
+
+.workforce-denied {
+  gap: 10px;
+}
+
+.workforce-denied h2,
+.workforce-denied p {
+  margin: 0;
+}
+
+.workforce-denied p {
+  max-width: 560px;
+  color: var(--muted);
+}
+
+.workforce-panel-body {
+  padding: 18px;
+}
+
+.workforce-card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 18px;
+}
+
+.workforce-action-grid,
+.employee-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.workforce-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.workforce-toolbar > button {
+  min-height: 40px;
+}
+
+.search-field,
+.workforce-select {
+  position: relative;
+  display: grid;
+  min-width: 180px;
+  gap: 5px;
+}
+
+.search-field svg,
+.workforce-select svg {
+  position: absolute;
+  left: 11px;
+  bottom: 12px;
+  color: var(--muted);
+}
+
+.search-field input,
+.workforce-select select {
+  padding-left: 34px;
+}
+
+.workforce-select span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.workforce-table-wrap {
+  max-height: 680px;
+}
+
+.workforce-table-wrap td strong,
+.workforce-table-wrap td small {
+  display: block;
+}
+
+.workforce-table-wrap td small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workforce-form-grid {
+  padding: 4px 0 18px;
+}
+
+.workforce-form-grid input[type="color"] {
+  padding: 4px;
+}
+
+.permission-set-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.permission-set-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #142035;
+}
+
+.permission-set-card strong,
+.permission-set-card span {
+  display: block;
+}
+
+.permission-set-card span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.permission-set-card button {
+  grid-column: 1 / -1;
+}
+
+.permission-check-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111c31;
+}
+
+.permission-check-list label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.permission-check-list input,
+.checkbox-field input {
+  width: auto;
+  min-height: auto;
+}
+
+.rota-scroll {
+  max-height: 74vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #10192b;
+}
+
+.rota-grid {
+  display: grid;
+  min-width: 1450px;
+}
+
+.rota-cell {
+  min-height: 92px;
+  padding: 10px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #10192b;
+}
+
+.rota-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 58px;
+  background: #172033;
+  color: var(--text);
+  font-weight: 900;
+}
+
+.rota-head small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #172033;
+}
+
+.rota-head.sticky-col {
+  z-index: 4;
+}
+
+.rota-employee strong,
+.rota-employee small,
+.rota-total strong,
+.rota-total span,
+.rota-total small {
+  display: block;
+}
+
+.rota-employee small,
+.rota-total span,
+.rota-total small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rota-day {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.shift-card {
+  display: grid;
+  width: 100%;
+  min-height: 70px;
+  justify-content: stretch;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--primary);
+  border-radius: 8px;
+  background: #1c2a42;
+  color: var(--text);
+  text-align: left;
+}
+
+.shift-card span,
+.shift-card small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shift-card.warning {
+  border-color: rgba(245, 158, 11, 0.7);
+}
+
+.shift-card.blocking {
+  border-color: rgba(239, 68, 68, 0.7);
+}
+
+.shift-card.informational {
+  border-color: rgba(59, 130, 246, 0.65);
+}
+
+.availability-grid {
+  display: grid;
+  grid-template-columns: 210px repeat(7, minmax(120px, 1fr));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.availability-head,
+.availability-employee,
+.availability-day {
+  min-height: 58px;
+  padding: 10px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #10192b;
+}
+
+.availability-head {
+  position: sticky;
+  top: 0;
+  background: #172033;
+  font-weight: 900;
+}
+
+.availability-employee {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #172033;
+  font-weight: 900;
+}
+
+.availability-day {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.availability-day span {
+  display: inline-flex;
+  width: fit-content;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.14);
+  color: #86efac;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.availability-day span.unavailable {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
+
+.request-list,
+.holiday-list,
+.working-day-list {
+  display: grid;
+  gap: 10px;
+}
+
+.request-card,
+.working-day-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #142035;
+}
+
+.request-card strong,
+.request-card span,
+.working-day-list strong,
+.working-day-list span {
+  display: block;
+}
+
+.request-card span,
+.working-day-list span,
+.working-day-list small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.holiday-list div {
+  display: grid;
+  gap: 4px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #142035;
+}
+
+.holiday-list span,
+.holiday-list small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .workforce-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .workforce-sidebar {
+    position: static;
+    height: auto;
+  }
+
+  .workforce-nav {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+
+  .workforce-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .workforce-workspace {
+    padding: 18px;
+  }
+
+  .workforce-topbar {
+    display: grid;
+  }
+
+  .workforce-topbar h1 {
+    font-size: 28px;
+  }
+
+  .workforce-toolbar,
+  .workforce-toolbar > label,
+  .workforce-toolbar > button {
+    width: 100%;
+  }
+
+  .request-card,
+  .working-day-list article {
+    grid-template-columns: 1fr;
+  }
+}

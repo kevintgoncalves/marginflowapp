@@ -36,6 +36,7 @@ import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
 import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
+import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import {
   activeSupplierRows,
   canonicalSupplierForName,
@@ -128,6 +129,18 @@ function isDemoUrl() {
 function authModeFromUrl() {
   const mode = currentSearchParams().get("mode");
   return authModes.includes(mode) ? mode : "login";
+}
+
+function currentPathname() {
+  try {
+    return window.location.pathname;
+  } catch {
+    return "/";
+  }
+}
+
+function isWorkforcePathname(pathname) {
+  return pathname === "/horario" || pathname === "/horario/" || pathname.startsWith("/horario/");
 }
 
 function cloneData(value) {
@@ -4090,6 +4103,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
   const [active, setActive] = useState("dashboard");
+  const [pathname, setPathname] = useState(currentPathname);
   const [departmentSettings, setDepartmentSettingsState] = useState(() => demoInitialData?.departmentSettings || safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
   const departmentNames = useMemo(() => activeDepartmentNames(departmentSettings), [departmentSettings]);
   const [department, setDepartmentState] = useState(() => {
@@ -4408,6 +4422,12 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setDeleteConfirmation(null);
   };
 
+  useEffect(() => {
+    const syncPathname = () => setPathname(currentPathname());
+    window.addEventListener("popstate", syncPathname);
+    return () => window.removeEventListener("popstate", syncPathname);
+  }, []);
+
   const approveInvoice = () => {
     if (!userCanAction(currentUser, "invoices", "approve")) return;
     if (!draft.items.length) return;
@@ -4504,6 +4524,23 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     }));
     setActive("invoices");
   };
+
+  const leaveWorkforce = () => {
+    window.history.pushState({}, "", "/");
+    setPathname("/");
+  };
+
+  if (isWorkforcePathname(pathname)) {
+    return (
+      <WorkforceModule
+        authMembership={effectiveAuthMembership}
+        authUser={effectiveAuthUser}
+        demoMode={demoMode}
+        onExit={leaveWorkforce}
+        supabase={supabase}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
