@@ -36,6 +36,14 @@ import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
 import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
+import {
+  PRODUCT_RESOLUTION_MODES,
+  isCreateNewProductResolution,
+  lineWithCreateNewProductResolution,
+  lineWithExistingProductResolution,
+  lineWithResetProductResolution,
+  resolveExplicitNewProductLines,
+} from "./domain/invoiceProductResolution.js";
 import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import {
   activeSupplierRows,
@@ -1488,21 +1496,28 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
 
   if (field === "productName") {
     const selectedProduct = productForEnteredName(products, value);
-    if (selectedProduct) {
+    if (isCreateNewProductResolution(item)) {
       updated = {
         ...updated,
-        productName: selectedProduct.name,
-        matchedProductId: selectedProduct.id,
-        matchedProductName: selectedProduct.name,
+        productName: value,
+        matchedProductId: "",
+        matchedProductName: "",
+        productId: "",
         suggestedProductId: "",
         suggestedProductName: "",
         suggestedProducts: [],
-        matchStatus: productMatchStatusText("user_selected"),
-        productMatchSource: "user_selected",
+        duplicateProductCandidates: [],
+        productResolution: PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT,
+        productMatchSource: "new_product",
         productMatchConfidence: 1,
         matchConfidence: 1,
+        matchStatus: value?.trim() ? `New product will be created: ${value.trim().toUpperCase()}` : "New product will be created",
         needsReview: false,
         reviewReasons: [],
+      };
+    } else if (selectedProduct) {
+      updated = {
+        ...lineWithExistingProductResolution(updated, selectedProduct),
         packSize: updated.packSize || selectedProduct.packSize || "",
         unitCost: numberValue(updated.unitCost, 0) || numberValue(selectedProduct.unitCost, 0),
         supplier: updated.supplier || selectedProduct.supplier || "",
@@ -1567,6 +1582,7 @@ function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
     departmentSplits: [{ id: uid(), department, percentage: 100, amount: 0 }],
     status: "Received",
     lineStatus: "Received",
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
   };
 }
 
@@ -1699,7 +1715,7 @@ function productMatchStatusText(source = "") {
     exact_product_match: "Exact existing product match",
     fuzzy_product_match: "Suggested existing product",
     user_selected: "Product selected from database",
-    new_product: "New product selected by user",
+    new_product: "New product will be created",
     no_product_match: "No confirmed existing product match",
   };
   return labels[source] || "No confirmed existing product match";
@@ -1713,6 +1729,8 @@ function reviewReasonText(reason = "") {
     invalid_unit_cost: "Check the unit price",
     invalid_line_total: "Check the line total",
     no_confirmed_product_match: "Select an existing product or create a new one",
+    exact_product_duplicate: "Exact product already exists. Choose the existing product.",
+    supplier_code_product_conflict: "Supplier item code is already mapped to an existing product.",
     ambiguous_product_match: "More than one existing product may match",
     price_deviation: "Price differs from recent accepted invoices",
     unaccounted_invoice_charge: "Invoice includes a non-product charge",
@@ -1739,6 +1757,9 @@ function recipeAutocomplete(recipes, query, limit = 8) {
 }
 
 function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "" } = {}) {
+  if (isCreateNewProductResolution(line)) {
+    return lineWithCreateNewProductResolution(line);
+  }
   const matchingEnabled = matchingSettings.enableProductMatching ?? matchingSettings.enableAiProductMatching ?? true;
   if (!matchingEnabled) {
     return { ...line, matchConfidence: 0, matchStatus: "Product matching disabled", matchedProductId: "", suggestedProductId: "", suggestedProductName: "", needsReview: true, reviewReasons: ["no_confirmed_product_match"] };
@@ -2527,6 +2548,32 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
   });
 
   return next;
+}
+
+function explicitProductFromInvoiceLine(line, productId, { supplier = "", invoiceDate = today(), fallbackDepartment = "Kitchen Made", departmentNames = defaultDepartments } = {}) {
+  const supplierFormat = supplierFormatFromLine(line, invoiceDate);
+  const productName = String(line.productName || line.rawDescription || "").trim();
+  const rawDescription = line.rawDescription || line.originalExtraction?.rawDescription || "";
+  return {
+    id: productId,
+    name: productName,
+    supplier: line.supplier || supplier,
+    packSize: line.packSize || "",
+    quantity: numberValue(line.quantity, 1),
+    unitCost: numberValue(line.unitCost, 0),
+    normalizedCost: supplierFormat.normalizedCost,
+    normalizedUnit: supplierFormat.baseUnit,
+    conversionReviewRequired: supplierFormat.conversionReviewRequired,
+    conversionReason: supplierFormat.conversionReason,
+    department: line.department || fallbackDepartment || departmentNames[0] || "Kitchen Made",
+    departmentSplits: normalizeDepartmentSplits(line, line.department || fallbackDepartment || departmentNames[0] || "Kitchen Made"),
+    aliases: rawDescription && rawDescription.toLowerCase() !== productName.toLowerCase() ? [rawDescription] : [],
+    supplierFormats: [],
+    supplierPrices: [],
+    priceHistory: [],
+    explicitInvoiceCreation: true,
+    createdFromInvoiceLineId: line.id,
+  };
 }
 
 function normalizeInvoiceDiscountFields(invoice) {
@@ -4099,9 +4146,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const cloudEnabled = !demoMode && Boolean(supabase && cloudScope.companyId);
   const cloudReadyRef = useRef(false);
   const cloudSaveTimerRef = useRef(null);
+  const invoiceApprovalRef = useRef(false);
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
+  const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [active, setActive] = useState("dashboard");
   const [pathname, setPathname] = useState(currentPathname);
   const [departmentSettings, setDepartmentSettingsState] = useState(() => demoInitialData?.departmentSettings || safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
@@ -4431,88 +4480,130 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const approveInvoice = () => {
     if (!userCanAction(currentUser, "invoices", "approve")) return;
     if (!draft.items.length) return;
-    const validation = validateInvoiceLinesForApproval(draft.items, {
-      splitValidator: splitIsValid,
-      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
-    });
-    if (!validation.valid) {
-      setDraft((current) => ({ ...current, status: validation.errors[0] || "Review invoice lines before confirming." }));
-      return;
+    if (invoiceApprovalRef.current) return;
+    invoiceApprovalRef.current = true;
+    setInvoiceApprovalBusy(true);
+    try {
+      const validation = validateInvoiceLinesForApproval(draft.items, {
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) {
+        setDraft((current) => ({ ...current, status: validation.errors[0] || "Review invoice lines before confirming." }));
+        return;
+      }
+      const invalidSplit = draft.items.find((item) => !splitIsValid(item));
+      if (invalidSplit) {
+        setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
+        return;
+      }
+      const approvalReview = validateInvoiceExtraction({
+        invoice: {
+          supplier: draft.supplier || draft.items[0]?.supplier,
+          invoiceNumber: draft.invoiceNumber,
+          invoiceDate: draft.date,
+          invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
+          invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
+          vatTotal: draft.vatTotal,
+          additionalCharges: draft.additionalCharges,
+          invoiceReviewReasons: draft.invoiceReviewReasons || [],
+        },
+        lines: draft.items,
+        historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
+      });
+      const invoiceBlockers = (approvalReview.invoiceReviewReasons || []).filter((reason) => reviewReasonSeverity(reason) === "error");
+      if (invoiceBlockers.length) {
+        setDraft((current) => ({ ...current, status: `Invoice needs correction before confirming: ${invoiceBlockers.map(reviewReasonText).join(", ")}.` }));
+        return;
+      }
+      const unresolvedLine = approvalReview.lines.find((item) => (
+        item.matchStatus !== "Manual invoice"
+        && ((!item.matchedProductId && !isCreateNewProductResolution(item)) || invoiceLineHasBlockingReview(item))
+      ));
+      if (unresolvedLine) {
+        setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
+        return;
+      }
+      const supplierRecord = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier);
+      const supplier = supplierRecord?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
+      if (!supplier || /^unknown supplier$/i.test(supplier)) {
+        setDraft((current) => ({ ...current, status: "Select the supplier before confirming." }));
+        return;
+      }
+      const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
+      const invoiceId = draft.editingInvoiceId || uid();
+      const explicitResolution = resolveExplicitNewProductLines({
+        products,
+        items: normalizedItems,
+        supplierMappings: supplierProductMappings,
+        supplier,
+        supplierId: supplierRecord?.id || "",
+        organisationId: cloudScope.companyId,
+        idFactory: uid,
+        createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
+          supplier,
+          invoiceDate: draft.date || today(),
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment,
+          departmentNames,
+        }),
+      });
+      if (explicitResolution.conflicts.length) {
+        setDraft((current) => ({
+          ...current,
+          items: current.items.map((item) => explicitResolution.items.find((resolved) => resolved.id === item.id) || item),
+          status: "Exact product or supplier-code duplicate found. Choose the existing product before confirming.",
+        }));
+        return;
+      }
+      const invoice = prepareApprovedInvoice({
+        id: invoiceId,
+        invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+        supplier,
+        date: draft.date || today(),
+        status: "Approved",
+        discountAmount: numberValue(draft.discountAmount, 0),
+        discountPercent: numberValue(draft.discountPercent, 0),
+        additionalCharges: numberValue(draft.additionalCharges, 0),
+        additionalChargesDescription: draft.additionalChargesDescription || (numberValue(draft.inferredAdditionalCharges, 0) ? "Inferred non-product charge" : ""),
+        sourceInvoiceTotal: numberValue(draft.invoiceTotal ?? draft.sourceInvoiceTotal, 0),
+        sourceInvoiceSubtotal: numberValue(draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal, 0),
+        vatTotal: numberValue(draft.vatTotal, 0),
+        items: explicitResolution.items,
+      });
+      const productsForLearning = [
+        ...products,
+        ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
+      ];
+      setInvoices((current) => (
+        draft.editingInvoiceId
+          ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
+          : [invoice, ...current]
+      ));
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
+      setSuppliers((current) => ensureSupplierList(current, supplier));
+      setProducts((current) => {
+        const withCreatedProducts = [
+          ...current,
+          ...explicitResolution.createdProducts.filter((product) => !current.some((existing) => existing.id === product.id)),
+        ];
+        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, invoice.id), invoice.items, invoice.date, invoice);
+      });
+      setSupplierProductMappings((current) => learnSupplierProductMappings({
+        mappings: current,
+        invoice,
+        products: productsForLearning,
+        companyId: cloudScope.companyId,
+        locationId: cloudScope.locationId || "",
+        supplierId: supplierRecord?.id || "",
+        supplierName: supplier,
+        departments: departmentSettings,
+      }).mappings);
+      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
+      setDraft(emptyInvoiceDraft());
+    } finally {
+      invoiceApprovalRef.current = false;
+      setInvoiceApprovalBusy(false);
     }
-    const invalidSplit = draft.items.find((item) => !splitIsValid(item));
-    if (invalidSplit) {
-      setDraft((current) => ({ ...current, status: `Department split must total 100% for ${invalidSplit.productName}.` }));
-      return;
-    }
-    const approvalReview = validateInvoiceExtraction({
-      invoice: {
-        supplier: draft.supplier || draft.items[0]?.supplier,
-        invoiceNumber: draft.invoiceNumber,
-        invoiceDate: draft.date,
-        invoiceSubtotal: draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal,
-        invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
-        vatTotal: draft.vatTotal,
-        additionalCharges: draft.additionalCharges,
-        invoiceReviewReasons: draft.invoiceReviewReasons || [],
-      },
-      lines: draft.items,
-      historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
-    });
-    const invoiceBlockers = (approvalReview.invoiceReviewReasons || []).filter((reason) => reviewReasonSeverity(reason) === "error");
-    if (invoiceBlockers.length) {
-      setDraft((current) => ({ ...current, status: `Invoice needs correction before confirming: ${invoiceBlockers.map(reviewReasonText).join(", ")}.` }));
-      return;
-    }
-    const unresolvedLine = approvalReview.lines.find((item) => (
-      item.matchStatus !== "Manual invoice"
-      && ((!item.matchedProductId && item.productMatchSource !== "new_product") || invoiceLineHasBlockingReview(item))
-    ));
-    if (unresolvedLine) {
-      setDraft((current) => ({ ...current, status: `${unresolvedLine.productName || "Invoice line"} needs review before confirming: ${(unresolvedLine.reviewReasons || ["no_confirmed_product_match"]).map(reviewReasonText).join(", ")}.` }));
-      return;
-    }
-    const supplierRecord = canonicalSupplierForName(suppliers, draft.supplier || draft.items[0]?.supplier);
-    const supplier = supplierRecord?.name || draft.supplier || draft.items[0]?.supplier || "Unknown Supplier";
-    if (!supplier || /^unknown supplier$/i.test(supplier)) {
-      setDraft((current) => ({ ...current, status: "Select the supplier before confirming." }));
-      return;
-    }
-    const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment));
-    const invoice = prepareApprovedInvoice({
-      id: draft.editingInvoiceId || uid(),
-      invoiceNumber: draft.invoiceNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
-      supplier,
-      date: draft.date || today(),
-      status: "Approved",
-      discountAmount: numberValue(draft.discountAmount, 0),
-      discountPercent: numberValue(draft.discountPercent, 0),
-      additionalCharges: numberValue(draft.additionalCharges, 0),
-      additionalChargesDescription: draft.additionalChargesDescription || (numberValue(draft.inferredAdditionalCharges, 0) ? "Inferred non-product charge" : ""),
-      sourceInvoiceTotal: numberValue(draft.invoiceTotal ?? draft.sourceInvoiceTotal, 0),
-      sourceInvoiceSubtotal: numberValue(draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal, 0),
-      vatTotal: numberValue(draft.vatTotal, 0),
-      items: normalizedItems,
-    });
-    setInvoices((current) => (
-      draft.editingInvoiceId
-        ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
-        : [invoice, ...current]
-    ));
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
-    setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, invoice.date, invoice));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({
-      mappings: current,
-      invoice,
-      products,
-      companyId: cloudScope.companyId,
-      locationId: cloudScope.locationId || "",
-      supplierId: supplierRecord?.id || "",
-      supplierName: supplier,
-      departments: departmentSettings,
-    }).mappings);
-    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
-    setDraft(emptyInvoiceDraft());
   };
 
   const prepareInvoiceUploadFromControl = (supplierName, date) => {
@@ -4652,6 +4743,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             aiSettings={aiSettings}
             creditNotes={creditNotes}
             draft={draft}
+            invoiceApprovalBusy={invoiceApprovalBusy}
             setDraft={setDraft}
             invoices={invoices}
             invoiceSettings={invoiceSettings}
@@ -5254,6 +5346,7 @@ function Invoices({
   aiSettings,
   departmentNames,
   draft,
+  invoiceApprovalBusy = false,
   setDraft,
   invoiceSettings,
   companyId = "",
@@ -5567,19 +5660,10 @@ function Invoices({
         const product = products.find((candidate) => candidate.id === item.suggestedProductId);
         return product
           ? {
-            ...item,
-            productName: product.name,
-            matchedProductId: product.id,
-            matchedProductName: product.name,
+            ...lineWithExistingProductResolution(item, product),
             suggestedProductId: "",
             suggestedProductName: "",
             suggestedProducts: [],
-            matchStatus: productMatchStatusText("user_selected"),
-            productMatchSource: "user_selected",
-            productMatchConfidence: 1,
-            matchConfidence: 1,
-            needsReview: false,
-            reviewReasons: [],
           }
           : item;
       }),
@@ -5595,23 +5679,10 @@ function Invoices({
         if (item.id !== id) return item;
         const department = item.department || product.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
         return normalizeInvoiceLineForEditor({
-          ...item,
-          productName: product.name,
-          matchedProductId: product.id,
-          matchedProductName: product.name,
-          suggestedProductId: "",
-          suggestedProductName: "",
-          suggestedProducts: [],
-          duplicateProductCandidates: [],
-          productMatchSource: "user_selected",
-          productMatchConfidence: 1,
-          matchStatus: productMatchStatusText("user_selected"),
-          matchConfidence: 1,
+          ...lineWithExistingProductResolution(item, product),
           packSize: item.packSize || product.packSize || "",
           supplier: item.supplier || product.supplier || current.supplier,
           department,
-          needsReview: false,
-          reviewReasons: [],
         }, departmentNames);
       }),
     }));
@@ -5621,71 +5692,22 @@ function Invoices({
     if (!permissions.canAdd) return;
     const line = draft.items.find((item) => item.id === id);
     if (!line?.productName?.trim()) return;
-    const duplicates = findProductDuplicateCandidates(products, {
-      name: line.productName,
-      packSize: line.packSize,
-      unit: line.unitOfMeasure || line.unit,
-    }, { threshold: 0.75 });
-    if (duplicates.length) {
-      setDraft((current) => ({
-        ...current,
-        items: current.items.map((item) => item.id === id ? {
-          ...item,
-          duplicateProductCandidates: duplicates.slice(0, 5).map((entry) => ({
-            id: entry.product.id,
-            name: entry.product.name,
-            score: entry.score,
-            packSize: entry.product.packSize || "",
-            supplier: entry.product.supplier || "",
-          })),
-          needsReview: true,
-          reviewReasons: [...new Set([...(item.reviewReasons || []), "ambiguous_product_match"])],
-          matchStatus: "Possible existing product found",
-        } : item),
-      }));
-      return;
-    }
-
-    const productId = uid();
-    const supplier = line.supplier || draft.supplier || visibleSuppliers[0]?.name || "";
-    const supplierFormat = supplierFormatFromLine(line, draft.date || today());
-    const product = {
-      id: productId,
-      name: line.productName.trim(),
-      supplier,
-      packSize: line.packSize || "",
-      quantity: numberValue(line.quantity, 1),
-      unitCost: numberValue(line.unitCost, 0),
-      normalizedCost: supplierFormat.normalizedCost,
-      normalizedUnit: supplierFormat.baseUnit,
-      conversionReviewRequired: supplierFormat.conversionReviewRequired,
-      conversionReason: supplierFormat.conversionReason,
-      department: line.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
-      departmentSplits: normalizeDepartmentSplits(line, line.department || invoiceSettings.defaultInvoiceDepartment),
-      aliases: line.rawDescription && line.rawDescription !== line.productName ? [line.rawDescription] : [],
-      supplierFormats: [],
-      supplierPrices: [],
-      priceHistory: [],
-      explicitInvoiceCreation: true,
-      createdFromInvoiceLineId: line.id,
-    };
-    setProducts((current) => [...current, product]);
     setDraft((current) => ({
       ...current,
-      items: current.items.map((item) => item.id === id ? {
-        ...item,
-        matchedProductId: productId,
-        matchedProductName: product.name,
-        productMatchSource: "new_product",
-        productMatchConfidence: 1,
-        matchStatus: productMatchStatusText("new_product"),
-        matchConfidence: 1,
-        explicitNewProductCreated: true,
-        duplicateProductCandidates: [],
-        needsReview: false,
-        reviewReasons: [],
-      } : item),
-      status: `${product.name} created from reviewed invoice line.`,
+      items: current.items.map((item) => item.id === id ? lineWithCreateNewProductResolution(item) : item),
+      status: `New product will be created when you confirm the invoice: ${line.productName.trim()}.`,
+    }));
+  };
+
+  const resetProductResolutionForDraftLine = (id) => {
+    setDraft((current) => ({
+      ...current,
+      items: current.items.map((item) => {
+        if (item.id !== id) return item;
+        const reset = lineWithResetProductResolution(item);
+        return updateInvoiceLineForEditor(reset, "productName", reset.productName || "", { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+      }),
+      status: "Product decision reset. Choose an existing product or create a new one.",
     }));
   };
 
@@ -6014,7 +6036,7 @@ function Invoices({
         <div className="button-row left">
           {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Invoice</button>}
           {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Invoice</button>}
-          {permissions.canApprove && <button disabled={!draft.items.length || isReading || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />Confirm Invoice</button>}
+          {permissions.canApprove && <button disabled={!draft.items.length || isReading || invoiceApprovalBusy || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />{invoiceApprovalBusy ? "Confirming..." : "Confirm Invoice"}</button>}
           {hasUploadDraft && (
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
@@ -6026,13 +6048,14 @@ function Invoices({
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
           applyExistingProduct={applyExistingProductToDraftLine}
-          createProductFromLine={createProductFromDraftLine}
+          createProductFromLine={permissions.canAdd ? createProductFromDraftLine : null}
           departmentNames={departmentNames}
           forgetLearnedRule={forgetLearnedRuleForDraftLine}
           items={draft.items}
           products={products}
           removeLine={(id) => setDraft((current) => ({ ...current, items: current.items.filter((line) => line.id !== id) }))}
           removeSplit={removeDraftSplit}
+          resetProductResolution={resetProductResolutionForDraftLine}
           setDepartmentMode={setDraftDepartmentMode}
           updateLine={updateDraftItem}
           updateSplit={updateDraftSplit}
@@ -6238,6 +6261,7 @@ function InvoiceLineEditor({
   products = [],
   removeLine,
   removeSplit,
+  resetProductResolution,
   setDepartmentMode,
   updateLine,
   updateSplit,
@@ -6258,7 +6282,9 @@ function InvoiceLineEditor({
             const productListId = `invoice-product-options-${item.id}`;
             const productMatches = productAutocomplete(products, item.productName, 12);
             const reviewReasons = item.reviewReasons || [];
-            const matchTone = item.needsReview ? "amber" : item.productMatchSource ? "green" : "gray";
+            const createNewSelected = isCreateNewProductResolution(item);
+            const existingSelected = Boolean(item.matchedProductId) && !createNewSelected;
+            const matchTone = item.needsReview ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
             return (
               <tr className={item.needsReview ? "review-needed-row" : ""} key={item.id}>
                 <td>
@@ -6274,12 +6300,12 @@ function InvoiceLineEditor({
                       <option key={product.id} label={productOptionLabel(product)} value={product.name} />
                     ))}
                   </datalist>
-                  {item.suggestedProductName && applySuggestion && (
+                  {item.suggestedProductName && applySuggestion && !createNewSelected && !existingSelected && (
                     <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
                       Did you mean: {item.suggestedProductName}?
                     </button>
                   )}
-                  {applyExistingProduct && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
+                  {applyExistingProduct && !createNewSelected && !existingSelected && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
                     <div className="line-suggestions">
                       {item.suggestedProducts.slice(0, 3).map((suggestion) => (
                         <button className="match-hint" key={suggestion.id} onClick={() => applyExistingProduct?.(item.id, suggestion.id)} type="button">
@@ -6298,10 +6324,22 @@ function InvoiceLineEditor({
                       ))}
                     </div>
                   )}
-                  {createProductFromLine && !item.matchedProductId && (
+                  {createProductFromLine && !item.matchedProductId && !createNewSelected && (
                     <button className="ghost mini-button" onClick={() => createProductFromLine(item.id)} type="button">
                       <Plus size={12} />Create new product
                     </button>
+                  )}
+                  {createNewSelected && (
+                    <div className="line-decision new-product">
+                      <small>New product will be created: {(item.productName || "").toUpperCase()}</small>
+                      {resetProductResolution && <button className="ghost mini-button" onClick={() => resetProductResolution(item.id)} type="button">Choose an existing product instead</button>}
+                    </div>
+                  )}
+                  {existingSelected && (
+                    <div className="line-decision existing-product">
+                      <small>Matched to existing product: {item.matchedProductName || item.productName}</small>
+                      {resetProductResolution && <button className="ghost mini-button" onClick={() => resetProductResolution(item.id)} type="button">Change decision</button>}
+                    </div>
                   )}
                   {!item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
                 </td>

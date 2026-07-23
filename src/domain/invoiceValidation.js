@@ -1,4 +1,5 @@
 import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
+import { clearProductMatchReviewReasons, isCreateNewProductResolution } from "./invoiceProductResolution.js";
 
 const DEFAULT_PRICE_DEVIATION_THRESHOLD = 0.25;
 const DEFAULT_MIN_PRICE_SAMPLES = 3;
@@ -14,6 +15,8 @@ export const REVIEW_REASON_SEVERITY = Object.freeze({
   invalid_line_total: "error",
   invalid_split: "error",
   missing_department: "error",
+  exact_product_duplicate: "error",
+  supplier_code_product_conflict: "error",
 
   low_extraction_confidence: "warning",
   ambiguous_product_match: "warning",
@@ -133,20 +136,22 @@ export function validateInvoiceExtraction({
   minHistoricalPriceSamples = DEFAULT_MIN_PRICE_SAMPLES,
 } = {}) {
   const validatedLines = lines.map((line) => {
-    const reviewReasons = [...(line.reviewReasons || [])];
+    const createsNewProduct = isCreateNewProductResolution(line);
+    const reviewReasons = createsNewProduct ? clearProductMatchReviewReasons(line.reviewReasons || []) : [...(line.reviewReasons || [])];
     const rawDescription = line.rawDescription || line.productName || "";
+    const requiredProductText = createsNewProduct ? line.productName : rawDescription;
     const quantity = numberValue(line.quantity, 0);
     const unitCost = numberValue(line.unitCost, 0);
     const lineTotal = lineTotalValue(line);
     const confidence = numberValue(line.confidence ?? line.extractionConfidence, 1);
 
     if (confidence > 0 && confidence < 0.65) addReason(reviewReasons, "low_extraction_confidence");
-    if (!String(rawDescription || "").trim()) addReason(reviewReasons, "missing_product_name");
+    if (!String(requiredProductText || "").trim()) addReason(reviewReasons, "missing_product_name");
     if (!Number.isFinite(quantity) || (!isNonReceivedLine(line) && quantity <= 0)) addReason(reviewReasons, "invalid_quantity");
     if (!Number.isFinite(unitCost) || (!isNonReceivedLine(line) && unitCost < 0)) addReason(reviewReasons, "invalid_unit_cost");
     if (line.lineTotal !== undefined && (!Number.isFinite(lineTotal) || (!isNonReceivedLine(line) && lineTotal < 0))) addReason(reviewReasons, "invalid_line_total");
-    if (!line.matchedProductId && line.productMatchSource !== "new_product" && line.matchStatus !== "Manual invoice") addReason(reviewReasons, "no_confirmed_product_match");
-    if (line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75) addReason(reviewReasons, "ambiguous_product_match");
+    if (!line.matchedProductId && !createsNewProduct && line.matchStatus !== "Manual invoice") addReason(reviewReasons, "no_confirmed_product_match");
+    if (!createsNewProduct && line.productMatchSource === "no_product_match" && line.suggestedProducts?.length > 1 && numberValue(line.productMatchConfidence, 0) >= 0.75) addReason(reviewReasons, "ambiguous_product_match");
 
     const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
     const splitTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);

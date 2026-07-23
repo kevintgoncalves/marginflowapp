@@ -3,6 +3,11 @@ import test from "node:test";
 import { findProductDuplicateCandidates, matchInvoiceLineToExistingProduct, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./invoiceLearning.js";
 import { fallbackReasonsForExtraction, invoiceHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./invoiceValidation.js";
+import {
+  lineWithCreateNewProductResolution,
+  lineWithExistingProductResolution,
+  resolveExplicitNewProductLines,
+} from "./invoiceProductResolution.js";
 
 const products = [
   { id: "p1", companyId: "c1", name: "Cherry Tomatoes 250g", packSize: "250g", aliases: ["Cherry Toms"] },
@@ -104,6 +109,134 @@ test("pack-size conflicts prevent unsafe automatic mapping", () => {
 test("duplicate protection finds similar explicit product creations", () => {
   const duplicates = findProductDuplicateCandidates(products, { name: "Cherry Tomato", packSize: "250g" }, { organisationId: "c1" });
   assert.equal(duplicates[0].product.id, "p1");
+});
+
+test("explicit create-new product decision overrides fuzzy suggestions without changing the product name", () => {
+  const radishProducts = [{ id: "radish", companyId: "c1", name: "RADISH", packSize: "kg", supplier: "TG Fruits" }];
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierName: "TG Fruits",
+    supplierProductCode: "HRS123",
+    rawDescription: "horseradish",
+    productName: "horseradish",
+    packSize: "kg",
+    existingProducts: radishProducts,
+  });
+  assert.equal(match.matchedProductId, null);
+  assert.equal(match.suggestedProducts[0].id, "radish");
+
+  const createNewLine = lineWithCreateNewProductResolution({
+    id: "line-horseradish",
+    supplier: "TG Fruits",
+    supplierProductCode: "HRS123",
+    rawDescription: "horseradish",
+    productName: "horseradish",
+    packSize: "kg",
+    quantity: 1,
+    unitCost: 2.5,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+    suggestedProducts: match.suggestedProducts,
+    reviewReasons: match.reviewReasons,
+  });
+
+  assert.equal(createNewLine.productName, "horseradish");
+  assert.equal(createNewLine.matchedProductId, "");
+  assert.equal(createNewLine.productMatchSource, "new_product");
+  assert.deepEqual(createNewLine.suggestedProducts, []);
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "H-1", invoiceDate: "2026-07-23" },
+    lines: [createNewLine],
+  });
+  assert.equal(reviewed.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
+  assert.equal(reviewed.lines[0].reviewReasons.includes("ambiguous_product_match"), false);
+  assert.equal(reviewed.invoiceHasBlockingReview, false);
+
+  const resolved = resolveExplicitNewProductLines({
+    products: radishProducts,
+    items: [createNewLine],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "horseradish-product",
+    createProductFromLine: (line, productId) => ({
+      id: productId,
+      companyId: "c1",
+      name: line.productName,
+      supplier: line.supplier,
+      packSize: line.packSize,
+      department: line.department,
+    }),
+  });
+  assert.equal(resolved.conflicts.length, 0);
+  assert.equal(resolved.createdProducts.length, 1);
+  assert.equal(resolved.createdProducts[0].name, "horseradish");
+  assert.equal(resolved.items[0].matchedProductId, "horseradish-product");
+  assert.equal(radishProducts[0].name, "RADISH");
+
+  const invoice = { id: "invoice-h", supplier: "TG Fruits", items: resolved.items };
+  const learned = learnSupplierProductMappings({
+    mappings: [],
+    invoice,
+    products: resolved.products,
+    companyId: "c1",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const future = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierName: "TG Fruits",
+    supplierProductCode: "HRS123",
+    rawDescription: "horseradish",
+    productName: "horseradish",
+    existingProducts: resolved.products,
+    supplierMappings: learned,
+  });
+  assert.equal(future.matchedProductId, "horseradish-product");
+  assert.equal(future.productMatchSource, "supplier_code_mapping");
+});
+
+test("explicit create-new is materialized once per confirmation and exact duplicates block", () => {
+  const createLine = lineWithCreateNewProductResolution({
+    id: "line-1",
+    supplier: "TG Fruits",
+    supplierProductCode: "HRS123",
+    productName: "horseradish",
+    quantity: 1,
+    unitCost: 2,
+    department: "Kitchen Made",
+  });
+  const duplicateLine = { ...createLine, id: "line-2" };
+  const resolved = resolveExplicitNewProductLines({
+    products: [],
+    items: [createLine, duplicateLine],
+    supplier: "TG Fruits",
+    idFactory: () => "new-horseradish",
+  });
+  assert.equal(resolved.createdProducts.length, 1);
+  assert.equal(resolved.items[0].matchedProductId, "new-horseradish");
+  assert.equal(resolved.items[1].matchedProductId, "new-horseradish");
+
+  const blocked = resolveExplicitNewProductLines({
+    products: [{ id: "existing-h", companyId: "c1", name: "horseradish" }],
+    items: [createLine],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "should-not-create",
+  });
+  assert.equal(blocked.createdProducts.length, 0);
+  assert.equal(blocked.conflicts[0].type, "exact_product");
+  assert.equal(blocked.items[0].reviewReasons.includes("exact_product_duplicate"), true);
+  assert.equal(reviewReasonSeverity("exact_product_duplicate"), "error");
+});
+
+test("existing-product selection clears create-new state", () => {
+  const createLine = lineWithCreateNewProductResolution({ id: "line-1", productName: "horseradish", suggestedProducts: [{ id: "radish", name: "RADISH" }] });
+  const existing = lineWithExistingProductResolution(createLine, { id: "radish", name: "RADISH" });
+  assert.equal(existing.productResolution, "existing_product");
+  assert.equal(existing.productMatchSource, "user_selected");
+  assert.equal(existing.matchedProductId, "radish");
+  assert.equal(existing.suggestedProducts.length, 0);
 });
 
 test("learning records Kitchen, Bar, Bought In and Split decisions only from saved invoices", () => {

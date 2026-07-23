@@ -2007,6 +2007,38 @@ code {
   background: rgba(245, 158, 11, 0.08);
 }
 
+.line-decision {
+  display: grid;
+  gap: 5px;
+  width: 260px;
+  margin-top: 6px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #142035;
+  white-space: normal;
+}
+
+.line-decision small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.line-decision.new-product {
+  border-color: rgba(16, 185, 129, 0.34);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.line-decision.new-product small {
+  color: #86efac;
+}
+
+.line-decision.existing-product {
+  border-color: rgba(59, 130, 246, 0.34);
+  background: rgba(59, 130, 246, 0.1);
+}
+
 .invoice-review-table td:nth-child(3) input {
   min-width: 160px;
   width: 160px;
