@@ -1,5 +1,6 @@
 import {
   WORKFORCE_FEATURE,
+  canAccessFeature,
   shiftDurationHours,
   workforcePermissionSetTemplates,
 } from "../domain/workforce.js";
@@ -31,25 +32,65 @@ export async function loadWorkforceAccess(client, { companyId, membership, user 
     return { canAccess: false, featureRow: null, reason: "Authentication and company membership are required." };
   }
 
-  const [{ data: featureRow, error: featureError }, { data: rpcAccess, error: rpcError }] = await Promise.all([
-    client
-      .from("company_features")
-      .select("company_id, feature_key, enabled, beta_access")
-      .eq("company_id", companyId)
-      .eq("feature_key", WORKFORCE_FEATURE)
-      .maybeSingle(),
-    client.rpc("can_access_feature", {
+  const { data: featureRow, error: featureError } = await client
+    .from("company_features")
+    .select("company_id, feature_key, enabled, beta_access")
+    .eq("company_id", companyId)
+    .eq("feature_key", WORKFORCE_FEATURE)
+    .maybeSingle();
+  throwIfError(featureError);
+
+  // The route decision is intentionally derived from the authenticated membership
+  // and the company-scoped feature row. Database RLS remains the security boundary
+  // for every Workforce query and mutation.
+  const canAccess = canAccessFeature({
+    user,
+    companyId,
+    feature: WORKFORCE_FEATURE,
+    featureRow,
+    membership,
+  });
+
+  // Keep the server helper as a diagnostic consistency check, but do not let an
+  // outdated RPC definition incorrectly lock an authorised owner out of the UI.
+  // Migration 025 reconciles the production helper and RLS policies.
+  let serverAccess = null;
+  let serverAccessError = null;
+  try {
+    const { data, error } = await client.rpc("can_access_feature", {
       target_company_id: companyId,
       target_feature_key: WORKFORCE_FEATURE,
-    }),
-  ]);
-  throwIfError(featureError);
-  throwIfError(rpcError);
+    });
+    serverAccess = error ? null : Boolean(data);
+    serverAccessError = error || null;
+  } catch (error) {
+    serverAccessError = error;
+  }
+
+  if (canAccess && (serverAccess === false || serverAccessError)) {
+    console.warn(
+      "Workforce access RPC is out of sync with the company feature row. Apply migration 025_workforce_access_compatibility.sql.",
+      serverAccessError || { companyId, feature: WORKFORCE_FEATURE },
+    );
+  }
+
+  let reason = "";
+  if (!canAccess) {
+    if (!featureRow?.enabled) {
+      reason = "Workforce Scheduling não está ativo para esta empresa.";
+    } else if (featureRow.beta_access) {
+      reason = "A sua conta não está autorizada para esta versão privada do Workforce Scheduling.";
+    } else {
+      reason = "Authentication and an active company membership are required.";
+    }
+  }
 
   return {
-    canAccess: Boolean(rpcAccess),
+    canAccess,
     featureRow: featureRow || null,
-    reason: rpcAccess ? "" : "Workforce Scheduling is disabled for this company or your account is not authorised for the private beta.",
+    reason,
+    serverAccess,
+    serverAccessError,
   };
 }
 
