@@ -1,6 +1,7 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
 import { sameSupplierIdentity } from "./supplierIdentity.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
+import { normalizeDepartmentSplitRows, validDepartmentSplitRows } from "./departmentAssignment.js";
 
 export const PRODUCT_MATCH_SOURCES = {
   SUPPLIER_CODE: "supplier_code",
@@ -116,18 +117,19 @@ function mappingProduct(mapping = {}, products = []) {
 function allocationFromMapping(mapping = {}) {
   if (!mapping) return {};
   const splitLines = Array.isArray(mapping.departmentSplits || mapping.splitRule || mapping.splitLines)
-    ? (mapping.departmentSplits || mapping.splitRule || mapping.splitLines)
+    ? normalizeDepartmentSplitRows(mapping.departmentSplits || mapping.splitRule || mapping.splitLines)
     : [];
   const department = mapping.department || mapping.departmentName || mapping.destination || "";
   const departmentId = mapping.departmentId || mapping.department_id || "";
-  const allocationMode = mapping.allocationMode || mapping.allocation_mode || (splitLines.length > 1 ? "split" : "department");
-  const splitMode = /^split$/i.test(allocationMode) || allocationMode === "Split";
+  const rawAllocationMode = mapping.allocationMode || mapping.allocation_mode || (validDepartmentSplitRows(splitLines) ? "split" : "department");
+  const splitMode = /^split$/i.test(rawAllocationMode) && validDepartmentSplitRows(splitLines);
+  const allocationMode = splitMode ? "split" : "department";
   return {
     allocationMode,
     departmentId,
     department,
     departmentMode: splitMode ? "Split" : "Single",
-    departmentSplits: splitLines,
+    departmentSplits: splitMode ? splitLines : [],
   };
 }
 
@@ -317,14 +319,6 @@ export function matchInvoiceLineToExistingProduct({
 
   const best = scored[0];
   const second = scored[1];
-  if (best && best.score >= autoMatchThreshold && (!second || best.score - second.score >= 0.04) && !best.unitConflict && !best.packSizeConflict) {
-    return withMatchDebug(resultFromProduct({
-      product: best.product,
-      source: PRODUCT_MATCH_SOURCES.FUZZY_MATCH,
-      confidence: Number(best.score.toFixed(2)),
-    }), context);
-  }
-
   if (best) {
     return withMatchDebug({
       matchedProductId: null,

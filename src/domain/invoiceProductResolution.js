@@ -10,6 +10,9 @@ import { sameSupplierIdentity } from "./supplierIdentity.js";
 
 export const PRODUCT_RESOLUTION_MODES = Object.freeze({
   UNRESOLVED: "unresolved",
+  EXACT_MATCH: "exact_match",
+  LEARNED_MATCH: "learned_match",
+  MANUAL_MATCH: "manual_match",
   AUTO_MATCHED: "auto_matched",
   MANUALLY_MATCHED: "manually_matched",
   EXISTING_PRODUCT: "existing_product",
@@ -62,13 +65,19 @@ export function isManualProductMatchSource(source = "") {
 }
 
 export function isAutoMatchedProductResolution(line = {}) {
-  return line.productResolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.EXACT_MATCH
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.LEARNED_MATCH
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXACT_MATCH
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.LEARNED_MATCH
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
     || (Boolean(line.matchedProductId || line.productId) && isAutomaticProductMatchSource(line.productMatchSource));
 }
 
 export function isManuallyMatchedProductResolution(line = {}) {
-  return line.productResolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
+  return line.productResolution === PRODUCT_RESOLUTION_MODES.MANUAL_MATCH
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUAL_MATCH
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
     || (Boolean(line.matchedProductId || line.productId) && isManualProductMatchSource(line.productMatchSource));
 }
@@ -92,9 +101,15 @@ export function isCreateNewProductResolution(line = {}) {
 
 export function isExistingProductResolution(line = {}) {
   return line.productResolution === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.EXACT_MATCH
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.LEARNED_MATCH
+    || line.productResolution === PRODUCT_RESOLUTION_MODES.MANUAL_MATCH
     || line.productResolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
     || line.productResolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXACT_MATCH
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.LEARNED_MATCH
+    || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUAL_MATCH
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
     || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED
     || Boolean(line.matchedProductId || line.productId);
@@ -105,7 +120,17 @@ export function isResolvedExistingProductResolution(line = {}) {
   if (!productId) return false;
   if (isUnresolvedProductResolution(line) || isCreateNewProductResolution(line)) return false;
   if (isAutoMatchedProductResolution(line) || isManuallyMatchedProductResolution(line)) return true;
-  if (line.productResolution === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT || line.product_resolution_mode === PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT) return true;
+  if ([
+    PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT,
+    PRODUCT_RESOLUTION_MODES.EXACT_MATCH,
+    PRODUCT_RESOLUTION_MODES.LEARNED_MATCH,
+    PRODUCT_RESOLUTION_MODES.MANUAL_MATCH,
+  ].includes(line.productResolution) || [
+    PRODUCT_RESOLUTION_MODES.EXISTING_PRODUCT,
+    PRODUCT_RESOLUTION_MODES.EXACT_MATCH,
+    PRODUCT_RESOLUTION_MODES.LEARNED_MATCH,
+    PRODUCT_RESOLUTION_MODES.MANUAL_MATCH,
+  ].includes(line.product_resolution_mode)) return true;
   return !line.productResolution && !line.product_resolution_mode;
 }
 
@@ -152,7 +177,7 @@ export function lineWithExistingProductResolution(line = {}, product = {}) {
     suggestedProducts: [],
     rejectedSuggestedProducts: [],
     duplicateProductCandidates: [],
-    productResolution: PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED,
+    productResolution: PRODUCT_RESOLUTION_MODES.MANUAL_MATCH,
     productMatchSource: PRODUCT_MATCH_SOURCES.MANUAL_SELECTION,
     productMatchConfidence: 1,
     matchConfidence: 1,
@@ -177,10 +202,13 @@ function automaticMatchCandidate(line = {}, product = {}, { source = "", confide
   };
 }
 
-export function lineWithAutoMatchedProductResolution(line = {}, product = {}, { source = "", confidence = null, matchStatus = "Automatically matched" } = {}) {
+export function lineWithAutoMatchedProductResolution(line = {}, product = {}, { source = "", confidence = null, matchStatus = "Matched product" } = {}) {
   const productId = product.id || product.productId || line.matchedProductId || line.productId || "";
   const productName = product.name || product.productName || line.matchedProductName || line.productName || "";
   const productMatchSource = canonicalProductMatchSource(source || line.productMatchSource);
+  const productResolution = [PRODUCT_MATCH_SOURCES.LEARNED_RULE, PRODUCT_MATCH_SOURCES.SUPPLIER_MAPPING].includes(productMatchSource)
+    ? PRODUCT_RESOLUTION_MODES.LEARNED_MATCH
+    : PRODUCT_RESOLUTION_MODES.EXACT_MATCH;
   return {
     ...line,
     productName,
@@ -192,7 +220,7 @@ export function lineWithAutoMatchedProductResolution(line = {}, product = {}, { 
     suggestedProducts: [],
     rejectedSuggestedProducts: [],
     duplicateProductCandidates: [],
-    productResolution: PRODUCT_RESOLUTION_MODES.AUTO_MATCHED,
+    productResolution,
     productMatchSource,
     productMatchConfidence: confidence ?? line.productMatchConfidence ?? 1,
     matchConfidence: confidence ?? line.matchConfidence ?? line.productMatchConfidence ?? 1,

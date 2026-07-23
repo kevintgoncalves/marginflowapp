@@ -1,5 +1,10 @@
 import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
 import {
+  departmentAssignmentForLine,
+  departmentAssignmentIsValid,
+  lineUsesSplitDepartmentMode,
+} from "./departmentAssignment.js";
+import {
   clearProductMatchReviewReasons,
   isAmbiguousProductResolution,
   isCreateNewProductResolution,
@@ -184,12 +189,11 @@ export function validateInvoiceExtraction({
     if (!createsNewProduct && line.matchStatus !== "Manual invoice" && (unresolvedProduct || !resolvedExistingProduct)) addReason(reviewReasons, "no_confirmed_product_match");
     if (ambiguousProduct) addReason(reviewReasons, "ambiguous_product_match");
 
-    const splits = Array.isArray(line.departmentSplits) ? line.departmentSplits : [];
-    const splitTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);
-    const splitMode = line.departmentMode === "Split" || splits.length > 1;
-    if (splitMode && (!splits.length || Math.abs(splitTotal - 100) > 0.01)) addReason(reviewReasons, "invalid_split");
-    if (!isNonReceivedLine(line) && splitMode && splits.some((split) => !String(split.department || split.departmentId || split.department_id || "").trim())) addReason(reviewReasons, "missing_department");
-    if (!isNonReceivedLine(line) && !splitMode && !String(line.department || line.departmentId || line.department_id || "").trim()) addReason(reviewReasons, "missing_department");
+    const splitMode = lineUsesSplitDepartmentMode(line);
+    const departmentAssignment = departmentAssignmentForLine(line);
+    if (splitMode && !departmentAssignmentIsValid(line)) addReason(reviewReasons, "invalid_split");
+    if (!isNonReceivedLine(line) && splitMode && departmentAssignment.departmentSplits.some((split) => !String(split.department || split.departmentId || split.department_id || "").trim())) addReason(reviewReasons, "missing_department");
+    if (!isNonReceivedLine(line) && !splitMode && !String(departmentAssignment.department || departmentAssignment.departmentId || "").trim()) addReason(reviewReasons, "missing_department");
 
     const priceDeviation = priceDeviationForLine(line, historicalPrices, {
       threshold: priceDeviationThreshold,

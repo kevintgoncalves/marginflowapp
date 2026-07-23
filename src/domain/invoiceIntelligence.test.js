@@ -4,6 +4,11 @@ import { findProductDuplicateCandidates, matchInvoiceLineToExistingProduct, norm
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./invoiceLearning.js";
 import { fallbackReasonsForExtraction, invoiceHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./invoiceValidation.js";
 import {
+  departmentAssignmentForLine,
+  departmentAssignmentIsValid,
+  lineUsesSplitDepartmentMode,
+} from "./departmentAssignment.js";
+import {
   PRODUCT_RESOLUTION_MODES,
   lineWithAutoMatchedProductResolution,
   lineWithCreateNewProductResolution,
@@ -77,7 +82,7 @@ test("auto-matched supplier code lines validate without a manual click for invoi
     confidence: match.productMatchConfidence,
   });
 
-  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.AUTO_MATCHED);
+  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.EXACT_MATCH);
   assert.equal(line.productMatchSource, "supplier_code");
   assert.equal(line.matchedProductId, "p1");
 
@@ -174,7 +179,7 @@ test("learned supplier rules auto-resolve product validation", () => {
     invoice: { supplier: "TG Fruits", invoiceNumber: "LR-1", invoiceDate: "2026-07-23" },
     lines: [line],
   });
-  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.AUTO_MATCHED);
+  assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.LEARNED_MATCH);
   assert.equal(line.productMatchSource, "learned_rule");
   assert.equal(reviewed.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
   assert.equal(reviewed.invoiceHasBlockingReview, false);
@@ -366,7 +371,7 @@ test("explicit create-new is materialized once per confirmation and exact duplic
 test("existing-product selection clears create-new state", () => {
   const createLine = lineWithCreateNewProductResolution({ id: "line-1", productName: "horseradish", suggestedProducts: [{ id: "radish", name: "RADISH" }] });
   const existing = lineWithExistingProductResolution(createLine, { id: "radish", name: "RADISH" });
-  assert.equal(existing.productResolution, "manually_matched");
+  assert.equal(existing.productResolution, "manual_match");
   assert.equal(existing.productMatchSource, "manual_selection");
   assert.equal(existing.matchedProductId, "radish");
   assert.equal(existing.suggestedProducts.length, 0);
@@ -387,9 +392,72 @@ test("manual correction takes priority after changing an automatic match", () =>
   assert.equal(reset.productResolution, "unresolved");
   assert.equal(reset.matchedProductId, "");
   assert.equal(reset.automaticProductMatch.productId, "p1");
-  assert.equal(corrected.productResolution, "manually_matched");
+  assert.equal(corrected.productResolution, "manual_match");
   assert.equal(corrected.productMatchSource, "manual_selection");
   assert.equal(corrected.matchedProductId, "p3");
+});
+
+test("department fallback stays single and idempotent without saved split history", () => {
+  const line = {
+    productName: "CASTER SUGAR BAG TATE & LYLE",
+    matchedProductId: "caster-sugar",
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [],
+  };
+  const first = departmentAssignmentForLine(line, { departmentNames: ["Kitchen Made", "Bar"], fallbackDepartment: "Kitchen Made" });
+  const second = departmentAssignmentForLine(first, { departmentNames: ["Kitchen Made", "Bar"], fallbackDepartment: "Kitchen Made" });
+
+  assert.equal(first.departmentMode, "Single");
+  assert.equal(first.department, "Kitchen Made");
+  assert.deepEqual(first.departmentSplits, []);
+  assert.deepEqual(second, first);
+  assert.equal(departmentAssignmentIsValid(first), true);
+});
+
+test("duplicated automatic Kitchen 100 rows collapse to single mode instead of a 200% split", () => {
+  const duplicated = {
+    productName: "PUMPKIN SEEDS SPENCE",
+    matchedProductId: "pumpkin-seeds",
+    department: "Kitchen Made",
+    departmentMode: "Split",
+    allocationSource: "learned_mapping",
+    departmentSplits: [
+      { department: "Kitchen Made", percentage: 100 },
+      { department: "Kitchen Made", percentage: 100 },
+    ],
+  };
+  const assignment = departmentAssignmentForLine(duplicated, { departmentNames: ["Kitchen Made", "Bar"], fallbackDepartment: "Kitchen Made" });
+
+  assert.equal(lineUsesSplitDepartmentMode(duplicated, { departmentNames: ["Kitchen Made", "Bar"], fallbackDepartment: "Kitchen Made" }), false);
+  assert.equal(assignment.departmentMode, "Single");
+  assert.equal(assignment.department, "Kitchen Made");
+  assert.deepEqual(assignment.departmentSplits, []);
+  assert.equal(departmentAssignmentIsValid(assignment), true);
+});
+
+test("valid saved split loads once and duplicate split rows remain invalid for user-created splits", () => {
+  const savedSplit = {
+    productName: "Wine",
+    departmentMode: "Split",
+    allocationSource: "learned_split_rule",
+    departmentSplits: [{ department: "Bar", percentage: 80 }, { department: "Kitchen Made", percentage: 20 }],
+  };
+  const userDuplicate = {
+    productName: "Wine",
+    departmentMode: "Split",
+    allocationSource: "user_selected",
+    departmentSplits: [{ department: "Bar", percentage: 100 }, { department: "Bar", percentage: 100 }],
+  };
+  const first = departmentAssignmentForLine(savedSplit, { departmentNames: ["Kitchen Made", "Bar"] });
+  const second = departmentAssignmentForLine(first, { departmentNames: ["Kitchen Made", "Bar"] });
+
+  assert.equal(first.departmentMode, "Split");
+  assert.deepEqual(first.departmentSplits.map((split) => [split.department, split.percentage]), [["Bar", 80], ["Kitchen Made", 20]]);
+  assert.deepEqual(second.departmentSplits, first.departmentSplits);
+  assert.equal(departmentAssignmentIsValid(first), true);
+  assert.equal(lineUsesSplitDepartmentMode(userDuplicate, { departmentNames: ["Kitchen Made", "Bar"] }), true);
+  assert.equal(departmentAssignmentIsValid(userDuplicate, { departmentNames: ["Kitchen Made", "Bar"] }), false);
 });
 
 test("learning records Kitchen, Bar, Bought In and Split decisions only from saved invoices", () => {

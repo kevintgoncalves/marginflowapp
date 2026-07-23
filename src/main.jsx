@@ -37,6 +37,14 @@ import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSup
 import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
 import {
+  departmentAllocationRows,
+  departmentAssignmentForLine,
+  departmentAssignmentIsValid,
+  lineUsesSplitDepartmentMode,
+  normalizeDepartmentSplitRows,
+  validDepartmentSplitRows,
+} from "./domain/departmentAssignment.js";
+import {
   PRODUCT_RESOLUTION_MODES,
   canonicalProductMatchSource,
   isAutoMatchedProductResolution,
@@ -1442,16 +1450,8 @@ function normalizeInvoiceUnitCost(item) {
   return unitCost;
 }
 
-function defaultDepartmentSplits(department = "Kitchen Made") {
-  return [{ id: uid(), department: canonicalDepartmentName(department, "Kitchen Made"), percentage: 100 }];
-}
-
 function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
-  const source = Array.isArray(item.departmentSplits) && item.departmentSplits.length
-    ? item.departmentSplits
-    : defaultDepartmentSplits(item.department || fallbackDepartment);
-
-  return source.map((split) => ({
+  return departmentAllocationRows(item, { fallbackDepartment }).map((split) => ({
     id: split.id || uid(),
     departmentId: split.departmentId || split.department_id || "",
     department: canonicalDepartmentName(split.department, fallbackDepartment),
@@ -1464,7 +1464,7 @@ function departmentSplitTotal(item) {
 }
 
 function splitIsValid(item) {
-  return Math.abs(departmentSplitTotal(item) - 100) < 0.01;
+  return departmentAssignmentIsValid(item, { fallbackDepartment: item.department || "Kitchen Made" });
 }
 
 function normalizedDepartmentSplits(item, departmentNames = defaultDepartments) {
@@ -1472,13 +1472,11 @@ function normalizedDepartmentSplits(item, departmentNames = defaultDepartments) 
     { ...item, lineDiscountAmount: item.lineDiscountAmount ?? item.discountAmount, lineDiscountPercent: item.lineDiscountPercent ?? item.discountPercent },
     { items: [item], discountAmount: 0, discountPercent: 0 }
   );
-  const source = Array.isArray(item.departmentSplits) && item.departmentSplits.length
-    ? item.departmentSplits
-    : [{ department: item.department || departmentNames[0] || "Kitchen Made", percentage: 100 }];
+  const source = departmentAllocationRows(item, { departmentNames, fallbackDepartment: item.department || departmentNames[0] || "Kitchen Made" });
   return source.map((split) => {
     const percentage = numberValue(split.percentage, 0);
     return {
-      id: split.id,
+      id: split.id || uid(),
       departmentId: split.departmentId || split.department_id || "",
       department: split.department || departmentNames[0] || "Kitchen Made",
       percentage,
@@ -1529,15 +1527,22 @@ function syncInvoiceLineDiscounts(item, changedField = "") {
 
 function withCalculatedSplitAmounts(item, departmentNames = defaultDepartments) {
   const netTotal = invoiceEditorNetLineTotal(item);
-  const splits = normalizedDepartmentSplits(item, departmentNames).map((split) => ({
+  const assignment = departmentAssignmentForLine(item, {
+    departmentNames,
+    fallbackDepartment: item.department || departmentNames[0] || "Kitchen Made",
+  });
+  const allocationRows = assignment.departmentMode === "Split" ? assignment.departmentSplits : [];
+  const splits = allocationRows.map((split) => ({
     ...split,
+    id: split.id || uid(),
     amount: Number(((netTotal * numberValue(split.percentage, 0)) / 100).toFixed(2)),
   }));
   return {
     ...item,
-    department: splits[0]?.department || item.department || departmentNames[0] || "Kitchen Made",
-    departmentMode: splits.length > 1 ? "Split" : "Single",
-    departmentSplits: splits,
+    department: assignment.department || item.department || departmentNames[0] || "Kitchen Made",
+    departmentId: assignment.departmentId || item.departmentId || "",
+    departmentMode: assignment.departmentMode,
+    departmentSplits: assignment.departmentMode === "Split" ? splits : [],
   };
 }
 
@@ -1575,7 +1580,7 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
     updated.departmentId = "";
     updated.allocationSource = "user_selected";
     updated.departmentMode = "Single";
-    updated.departmentSplits = [{ id: uid(), department: value, percentage: 100 }];
+    updated.departmentSplits = [];
   }
 
   if (field === "productName") {
@@ -1600,12 +1605,20 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         reviewReasons: [],
       };
     } else if (selectedProduct) {
+      const assignment = departmentAssignmentForResolvedLine({
+        line: updated,
+        product: selectedProduct,
+        departmentNames,
+        fallbackDepartment: departmentNames[0] || "Kitchen Made",
+      });
       updated = {
         ...lineWithExistingProductResolution(updated, selectedProduct),
         packSize: updated.packSize || selectedProduct.packSize || "",
         unitCost: numberValue(updated.unitCost, 0) || numberValue(selectedProduct.unitCost, 0),
         supplier: updated.supplier || selectedProduct.supplier || "",
-        department: updated.department || selectedProduct.department || departmentNames[0] || "Kitchen Made",
+        department: assignment.department,
+        departmentMode: assignment.departmentMode,
+        departmentSplits: assignment.departmentSplits,
       };
     } else if (item.productMatchCorrectionMode) {
       updated = {
@@ -1617,7 +1630,7 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         matchStatus: value?.trim() ? "Choose a product match" : "No existing product found",
       };
     } else {
-      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId });
+      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId, departmentNames });
       updated = { ...enriched, productName: value };
     }
   }
@@ -1636,23 +1649,27 @@ function setInvoiceLineDepartmentMode(item, mode, departmentNames = defaultDepar
   }
 
   const department = item.department || normalizeDepartmentSplits(item, fallbackDepartment)[0]?.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Single", department, departmentId: "", departmentSplits: [{ id: uid(), department, percentage: 100 }] }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Single", department, departmentId: "", departmentSplits: [] }, departmentNames);
 }
 
 function updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames = defaultDepartments) {
-  const splits = normalizedDepartmentSplits(item, departmentNames).map((split, index) => (
+  const splits = normalizeDepartmentSplitRows(item.departmentSplits, { departmentNames, fallbackDepartment: item.department || departmentNames[0] || "Kitchen Made", combineDuplicates: false }).map((split, index) => (
     index === splitIndex ? { ...split, [field]: field === "percentage" ? numberValue(value, 0) : value } : split
   ));
   return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function addInvoiceLineSplit(item, departmentNames = defaultDepartments) {
-  const splits = [...normalizedDepartmentSplits(item, departmentNames), { id: uid(), department: departmentNames[0] || "Kitchen Made", percentage: 0 }];
+  const existingSplits = lineUsesSplitDepartmentMode(item, { departmentNames })
+    ? normalizeDepartmentSplitRows(item.departmentSplits, { departmentNames, fallbackDepartment: item.department || departmentNames[0] || "Kitchen Made", combineDuplicates: false })
+    : [{ id: uid(), department: item.department || departmentNames[0] || "Kitchen Made", percentage: 100 }];
+  const nextDepartment = departmentNames.find((department) => !existingSplits.some((split) => split.department === department)) || departmentNames[0] || "Kitchen Made";
+  const splits = [...existingSplits, { id: uid(), department: nextDepartment, percentage: 0 }];
   return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepartments, fallbackDepartment = "Kitchen Made") {
-  const splits = normalizedDepartmentSplits(item, departmentNames).filter((_, index) => index !== splitIndex);
+  const splits = normalizeDepartmentSplitRows(item.departmentSplits, { departmentNames, fallbackDepartment, combineDuplicates: false }).filter((_, index) => index !== splitIndex);
   if (splits.length <= 1) {
     const department = splits[0]?.department || item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
     return setInvoiceLineDepartmentMode({ ...item, department }, "Single", departmentNames, department);
@@ -1672,7 +1689,7 @@ function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
     supplier,
     department,
     departmentMode: "Single",
-    departmentSplits: [{ id: uid(), department, percentage: 100, amount: 0 }],
+    departmentSplits: [],
     status: "Received",
     lineStatus: "Received",
     productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
@@ -1802,6 +1819,41 @@ function productForEnteredName(products, value) {
   return products.find((product) => productAliases(product).some((alias) => alias.toLowerCase() === key)) || null;
 }
 
+function departmentAssignmentForResolvedLine({
+  line = {},
+  product = {},
+  match = {},
+  departmentNames = defaultDepartments,
+  fallbackDepartment = "Kitchen Made",
+} = {}) {
+  const options = { departmentNames, fallbackDepartment };
+  if (line.allocationSource === "user_selected") {
+    return departmentAssignmentForLine(line, options);
+  }
+
+  if (validDepartmentSplitRows(match.departmentSplits, options)) {
+    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: match.departmentSplits }, options);
+  }
+
+  const learnedDepartment = match.department || match.departmentName || match.destination || "";
+  if (learnedDepartment) {
+    return departmentAssignmentForLine({ ...line, department: learnedDepartment, departmentId: match.departmentId || match.department_id || "", departmentMode: "Single", departmentSplits: [] }, options);
+  }
+
+  if (validDepartmentSplitRows(product.departmentSplits, options)) {
+    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: product.departmentSplits }, options);
+  }
+
+  const productDepartment = product.department || product.departmentName || product.defaultDepartment || "";
+  return departmentAssignmentForLine({
+    ...line,
+    department: productDepartment || line.department || fallbackDepartment,
+    departmentId: product.departmentId || product.department_id || line.departmentId || "",
+    departmentMode: "Single",
+    departmentSplits: [],
+  }, options);
+}
+
 function productMatchSourceText(source = "") {
   const canonicalSource = canonicalProductMatchSource(source);
   const labels = {
@@ -1821,16 +1873,15 @@ function productMatchSourceText(source = "") {
 }
 
 function productMatchStatusText(source = "", resolution = "") {
-  if (resolution === PRODUCT_RESOLUTION_MODES.AUTO_MATCHED) return "Automatically matched";
-  if (resolution === PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED) return "Manually matched";
+  if ([PRODUCT_RESOLUTION_MODES.EXACT_MATCH, PRODUCT_RESOLUTION_MODES.LEARNED_MATCH, PRODUCT_RESOLUTION_MODES.AUTO_MATCHED].includes(resolution)) return "Matched product";
+  if ([PRODUCT_RESOLUTION_MODES.MANUAL_MATCH, PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED].includes(resolution)) return "Matched product";
   if (resolution === PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT) return "New product will be created";
-  if (resolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS) return "Review product match";
-  if (resolution === PRODUCT_RESOLUTION_MODES.UNRESOLVED) return "No existing product found";
+  if (resolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS) return "Possible product matches";
+  if (resolution === PRODUCT_RESOLUTION_MODES.UNRESOLVED) return "No product match found";
   const canonicalSource = canonicalProductMatchSource(source);
-  if (isAutomaticProductMatchSource(canonicalSource)) return "Automatically matched";
-  if (canonicalSource === "manual_selection") return "Manually matched";
+  if (isAutomaticProductMatchSource(canonicalSource) || canonicalSource === "manual_selection") return "Matched product";
   if (canonicalSource === "new_product") return "New product will be created";
-  return "No existing product found";
+  return "No product match found";
 }
 
 function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
@@ -1874,7 +1925,7 @@ function recipeAutocomplete(recipes, query, limit = 8) {
   return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
 }
 
-function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "" } = {}) {
+function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "", departmentNames = defaultDepartments } = {}) {
   if (isCreateNewProductResolution(line)) {
     return lineWithCreateNewProductResolution(line);
   }
@@ -1882,19 +1933,29 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
     ? products.find((product) => product.id === (line.matchedProductId || line.productId))
     : null;
   if (currentProduct && isManuallyMatchedProductResolution(line)) {
-    const department = line.department || currentProduct.department || "Kitchen Made";
+    const assignment = departmentAssignmentForResolvedLine({
+      line,
+      product: currentProduct,
+      departmentNames,
+      fallbackDepartment: departmentNames[0] || "Kitchen Made",
+    });
     return {
       ...lineWithExistingProductResolution(line, currentProduct),
       packSize: line.packSize || currentProduct.packSize || "",
       supplier: line.supplier || currentProduct.supplier || "",
-      department,
-      departmentMode: line.departmentMode || "Single",
-      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
+      department: assignment.department,
+      departmentId: assignment.departmentId || line.departmentId || "",
+      departmentMode: assignment.departmentMode,
+      departmentSplits: assignment.departmentSplits,
     };
   }
   if (currentProduct && isAutoMatchedProductResolution(line)) {
-    const learnedSplit = line.departmentMode === "Split" || /^split$/i.test(line.allocationMode || "");
-    const department = learnedSplit ? (line.departmentSplits?.[0]?.department || line.department || currentProduct.department || "Kitchen Made") : (line.department || currentProduct.department || "Kitchen Made");
+    const assignment = departmentAssignmentForResolvedLine({
+      line,
+      product: currentProduct,
+      departmentNames,
+      fallbackDepartment: departmentNames[0] || "Kitchen Made",
+    });
     return {
       ...lineWithAutoMatchedProductResolution(line, currentProduct, {
         source: line.productMatchSource,
@@ -1902,10 +1963,11 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       }),
       packSize: line.packSize || currentProduct.packSize || "",
       supplier: line.supplier || currentProduct.supplier || "",
-      department,
-      departmentMode: learnedSplit ? "Split" : (line.departmentMode || "Single"),
-      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
-      allocationSource: line.allocationSource || (learnedSplit ? "learned_split_rule" : line.allocationSource),
+      department: assignment.department,
+      departmentId: assignment.departmentId || line.departmentId || "",
+      departmentMode: assignment.departmentMode,
+      departmentSplits: assignment.departmentSplits,
+      allocationSource: line.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : line.allocationSource),
       learnedMappingId: line.learnedMappingId || "",
     };
   }
@@ -1921,20 +1983,25 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
     ? products.find((product) => product.id === line.matchedProductId)
     : null;
   if (existingLearnedProduct) {
-    const learnedSplit = line.departmentMode === "Split" || /^split$/i.test(line.allocationMode || "");
-    const department = learnedSplit ? (line.departmentSplits?.[0]?.department || line.department || existingLearnedProduct.department || "Kitchen Made") : (line.department || existingLearnedProduct.department || "Kitchen Made");
+    const assignment = departmentAssignmentForResolvedLine({
+      line,
+      product: existingLearnedProduct,
+      departmentNames,
+      fallbackDepartment: departmentNames[0] || "Kitchen Made",
+    });
     return {
       ...lineWithAutoMatchedProductResolution(line, existingLearnedProduct, {
         source: line.productMatchSource,
         confidence: line.productMatchConfidence ?? 1,
-        matchStatus: "Automatically matched",
+        matchStatus: "Matched product",
       }),
       packSize: line.packSize || existingLearnedProduct.packSize || "",
       supplier: line.supplier || existingLearnedProduct.supplier || "",
-      department,
-      departmentMode: learnedSplit ? "Split" : "Single",
-      departmentSplits: line.departmentSplits?.length ? line.departmentSplits : [{ id: uid(), department, percentage: 100 }],
-      allocationSource: line.allocationSource || (learnedSplit ? "learned_split_rule" : "learned_mapping"),
+      department: assignment.department,
+      departmentId: assignment.departmentId || line.departmentId || "",
+      departmentMode: assignment.departmentMode,
+      departmentSplits: assignment.departmentSplits,
+      allocationSource: line.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : "learned_mapping"),
       needsReview: false,
       reviewReasons: [],
     };
@@ -1954,21 +2021,26 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
   });
   const matchedProduct = products.find((product) => product.id === match.matchedProductId);
   if (matchedProduct) {
-    const learnedSplit = match.departmentMode === "Split" || /^split$/i.test(match.allocationMode || "");
-    const department = learnedSplit ? (match.departmentSplits?.[0]?.department || line.department || matchedProduct.department || "Kitchen Made") : (match.department || line.department || matchedProduct.department || "Kitchen Made");
+    const assignment = departmentAssignmentForResolvedLine({
+      line,
+      product: matchedProduct,
+      match,
+      departmentNames,
+      fallbackDepartment: departmentNames[0] || "Kitchen Made",
+    });
     return {
       ...lineWithAutoMatchedProductResolution(line, matchedProduct, {
         source: match.productMatchSource,
         confidence: match.productMatchConfidence ?? 1,
-        matchStatus: "Automatically matched",
+        matchStatus: "Matched product",
       }),
       packSize: line.packSize || matchedProduct.packSize || "",
       supplier: line.supplier || matchedProduct.supplier || "",
-      department,
-      departmentId: match.departmentId || line.departmentId || "",
-      departmentMode: match.departmentMode || line.departmentMode || "Single",
-      departmentSplits: match.departmentSplits?.length ? match.departmentSplits : (line.departmentSplits || [{ id: uid(), department, percentage: 100 }]),
-      allocationSource: match.allocationSource,
+      department: assignment.department,
+      departmentId: assignment.departmentId || match.departmentId || line.departmentId || "",
+      departmentMode: assignment.departmentMode,
+      departmentSplits: assignment.departmentSplits,
+      allocationSource: match.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : ""),
       learnedMappingId: match.learnedMappingId || line.learnedMappingId || "",
       needsReview: false,
       reviewReasons: [],
@@ -2688,7 +2760,7 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       conversionReviewRequired: supplierFormat.conversionReviewRequired,
       conversionReason: supplierFormat.conversionReason,
       department: primaryDepartment(item),
-      departmentSplits: normalizeDepartmentSplits(item, item.department),
+      departmentSplits: lineUsesSplitDepartmentMode(item) ? normalizeDepartmentSplitRows(item.departmentSplits, { fallbackDepartment: item.department }) : [],
       aliases: [...aliases],
       supplierFormats,
       supplierPrices,
@@ -2715,7 +2787,7 @@ function explicitProductFromInvoiceLine(line, productId, { supplier = "", invoic
     conversionReviewRequired: supplierFormat.conversionReviewRequired,
     conversionReason: supplierFormat.conversionReason,
     department: line.department || fallbackDepartment || departmentNames[0] || "Kitchen Made",
-    departmentSplits: normalizeDepartmentSplits(line, line.department || fallbackDepartment || departmentNames[0] || "Kitchen Made"),
+    departmentSplits: lineUsesSplitDepartmentMode(line, { departmentNames, fallbackDepartment }) ? normalizeDepartmentSplitRows(line.departmentSplits, { departmentNames, fallbackDepartment }) : [],
     aliases: rawDescription && rawDescription.toLowerCase() !== productName.toLowerCase() ? [rawDescription] : [],
     supplierFormats: [],
     supplierPrices: [],
@@ -2847,12 +2919,15 @@ function normalizeInvoiceLineForSave(item, supplier, fallbackDepartment = "Kitch
     lineStatus: status,
     creditReason: status === "Received" ? "" : (normalizedSource.creditReason || status),
   });
-  const departmentSplits = normalizeDepartmentSplits(discounted, normalizedSource.department || fallbackDepartment);
+  const assignment = departmentAssignmentForLine(discounted, {
+    fallbackDepartment: normalizedSource.department || fallbackDepartment,
+  });
   return {
     ...discounted,
-    department: departmentSplits[0]?.department || normalizedSource.department || fallbackDepartment,
-    departmentMode: departmentSplits.length > 1 ? "Split" : "Single",
-    departmentSplits,
+    department: assignment.department || normalizedSource.department || fallbackDepartment,
+    departmentId: assignment.departmentId || normalizedSource.departmentId || "",
+    departmentMode: assignment.departmentMode,
+    departmentSplits: assignment.departmentMode === "Split" ? assignment.departmentSplits : [],
   };
 }
 
@@ -5926,7 +6001,7 @@ function Invoices({
           products,
           aiSettings,
           supplierScopedMappings,
-          { organisationId: companyId }
+          { organisationId: companyId, departmentNames }
         );
       });
       const validated = validateInvoiceExtraction({
@@ -6141,7 +6216,7 @@ function Invoices({
         ...item,
         learnedMappingId: "",
         allocationSource: "",
-        productResolution: PRODUCT_RESOLUTION_MODES.MANUALLY_MATCHED,
+        productResolution: PRODUCT_RESOLUTION_MODES.MANUAL_MATCH,
         productMatchSource: "manual_selection",
         productMatchOverridden: true,
         matchStatus: "Learned rule disabled for future invoices",
@@ -6879,7 +6954,6 @@ function InvoiceLineEditor({
               || (Boolean(item.matchedProductId) && !createNewSelected && !isUnresolvedProductResolution(item));
             const ambiguousMatch = item.productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS || reviewReasons.includes("ambiguous_product_match");
             const automaticCandidate = item.automaticProductMatch || null;
-            const confidence = Number.isFinite(numberValue(item.productMatchConfidence, NaN)) ? `${Math.round(numberValue(item.productMatchConfidence, 0) * 100)}%` : "";
             const matchTone = item.hasBlockingReview || ambiguousMatch ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
             return (
               <tr className={item.needsReview ? "review-needed-row" : ""} key={item.id}>
@@ -6898,18 +6972,18 @@ function InvoiceLineEditor({
                   </datalist>
                   {autoMatched && existingSelected && (
                     <div className="product-resolution auto-match">
-                      <strong>Automatically matched</strong>
-                      <small>Document: {item.rawDescription || item.productName}</small>
-                      <small>MarginFlow: {item.matchedProductName || item.productName}</small>
-                      <small>{productMatchSourceText(item.productMatchSource)}{confidence ? ` · ${confidence}` : ""}</small>
-                      {resetProductResolution && <button className="ghost mini-button subtle-action" onClick={() => resetProductResolution(item.id)} type="button">Change</button>}
+                      <strong>Matched product</strong>
+                      <small>{item.matchedProductName || item.productName}</small>
+                      <small>Matched by {productMatchSourceText(item.productMatchSource).toLowerCase()}</small>
+                      {resetProductResolution && <button className="icon small subtle-action" onClick={() => resetProductResolution(item.id)} title="Change matched product" type="button"><Edit3 size={12} /></button>}
                     </div>
                   )}
                   {manualMatched && existingSelected && !autoMatched && (
                     <div className="product-resolution manual-match">
-                      <strong>Selected product</strong>
-                      <small>MarginFlow: {item.matchedProductName || item.productName}</small>
-                      {resetProductResolution && <button className="ghost mini-button subtle-action" onClick={() => resetProductResolution(item.id)} type="button">Change</button>}
+                      <strong>Matched product</strong>
+                      <small>{item.matchedProductName || item.productName}</small>
+                      <small>Matched by manual selection</small>
+                      {resetProductResolution && <button className="icon small subtle-action" onClick={() => resetProductResolution(item.id)} title="Change matched product" type="button"><Edit3 size={12} /></button>}
                     </div>
                   )}
                   {item.productMatchCorrectionMode && automaticCandidate?.productId && restoreAutomaticProductMatch && !existingSelected && (
@@ -6924,6 +6998,7 @@ function InvoiceLineEditor({
                   )}
                   {applyExistingProduct && !createNewSelected && !existingSelected && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
                     <div className="line-suggestions">
+                      <small className="line-note">Possible product matches</small>
                       {item.suggestedProducts.slice(0, 3).map((suggestion) => (
                         <button className="match-hint" key={suggestion.id} onClick={() => applyExistingProduct?.(item.id, suggestion.id)} type="button">
                           Use {suggestion.name}
@@ -6957,7 +7032,7 @@ function InvoiceLineEditor({
                 <td>
                   <div className="match-state-cell">
                     <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "manual_selection" : "no_product_match"), item.productResolution)}</Badge>
-                    {existingSelected && <small className="line-note">{productMatchSourceText(item.productMatchSource)}{confidence ? ` · ${confidence}` : ""}</small>}
+                    {existingSelected && <small className="line-note">{productMatchSourceText(item.productMatchSource)}</small>}
                     {["learned_mapping", "learned_split_rule"].includes(item.allocationSource) && <small className="line-note">Learned from previous invoice</small>}
                     {item.learnedMappingId && forgetLearnedRule && (
                       <button className="ghost mini-button" onClick={() => forgetLearnedRule(item.id)} type="button">Forget learned rule</button>
@@ -7010,7 +7085,7 @@ function InvoiceLineEditor({
 
 
 function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode, updateDepartment, updateSplit, addSplit, removeSplit }) {
-  const mode = item.departmentMode === "Split" || (Array.isArray(item.departmentSplits) && item.departmentSplits.length > 1) ? "Split" : "Single";
+  const mode = lineUsesSplitDepartmentMode(item, { departmentNames }) ? "Split" : "Single";
   const splits = normalizedDepartmentSplits(item, departmentNames);
   const percentTotal = splits.reduce((sum, split) => sum + numberValue(split.percentage, 0), 0);
   if (mode === "Single") {

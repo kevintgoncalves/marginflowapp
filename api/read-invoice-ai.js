@@ -276,8 +276,9 @@ function normalizeInvoice(invoice, sourceText, {
         existingProducts: products,
         supplierMappings,
       });
+      const matchSource = canonicalProductMatchSource(match.productMatchSource);
       const productResolution = match.matchedProductId
-        ? PRODUCT_RESOLUTION_MODES.AUTO_MATCHED
+        ? (["learned_rule", "supplier_mapping"].includes(matchSource) ? PRODUCT_RESOLUTION_MODES.LEARNED_MATCH : PRODUCT_RESOLUTION_MODES.EXACT_MATCH)
         : (match.reviewReasons || []).includes("ambiguous_product_match")
           ? PRODUCT_RESOLUTION_MODES.AMBIGUOUS
           : PRODUCT_RESOLUTION_MODES.UNRESOLVED;
@@ -300,12 +301,12 @@ function normalizeInvoice(invoice, sourceText, {
         confidence: clampConfidence(line.confidence),
         ...match,
         productResolution,
-        productMatchSource: canonicalProductMatchSource(match.productMatchSource),
+        productMatchSource: matchSource,
         matchStatus: match.matchedProductId
-          ? "Automatically matched"
+          ? "Matched product"
           : productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS
-            ? "Review product match"
-            : "No confirmed existing product match",
+            ? "Possible product matches"
+            : "No product match found",
       };
     })
     .filter((line) => (line.productName || line.rawDescription) && (line.lineTotal || line.unitCost || line.quantity));
