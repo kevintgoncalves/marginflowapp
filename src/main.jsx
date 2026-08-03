@@ -86,6 +86,7 @@ import {
   toSignedPurchasingAmount,
 } from "./domain/purchasingDocuments.js";
 import WorkforceModule from "./workforce/WorkforceModule.jsx";
+import StocktakeDownloadMenu from "./components/stocktake/StocktakeDownloadMenu.jsx";
 import {
   activeSupplierRows,
   canonicalSupplierForName,
@@ -4603,6 +4604,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
   const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
+  const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
   const permissionsByPage = useMemo(
@@ -5167,6 +5169,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         )}
         {active === "stocktake" && (
           <Stocktake
+            companyName={stocktakeCompanyName}
+            companyScope={cloudScope}
+            currency={financialSettings.currency || "GBP"}
             department={department}
             departmentNames={allowedDepartmentNames}
             permissions={permissionsByPage.stocktake}
@@ -8148,7 +8153,7 @@ function stocktakeProductSuggestions(products = [], query = "") {
   return suggestions;
 }
 
-function Stocktake({ department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "GBP", department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes }) {
   const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const blankModal = (type = "Stocktake") => ({
     type,
@@ -8164,6 +8169,7 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
   });
   const [modal, setModal] = useState(null);
   const [viewingStocktake, setViewingStocktake] = useState(null);
+  const [reportStocktake, setReportStocktake] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
 
   const downloadStocktakeProductsCsv = () => {
@@ -8333,6 +8339,7 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
             { key: "actions", label: "Actions", render: (_, row) => (
               <div className="row-actions">
                 <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
+                <button className="ghost" onClick={() => setReportStocktake(row)} type="button"><Download size={15} />Download Report</button>
                 {permissions.canEdit && <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>}
                 {permissions.canDelete && <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>}
               </div>
@@ -8431,9 +8438,20 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
             {[...(viewingStocktake.openingLines || []), ...(viewingStocktake.lines || [])].map((line) => (
               <div className="compact-row" key={line.id}><span>{line.productName}</span><span>{line.quantity} x {money(line.unitCost)}</span><strong>{money(line.stockValue)}</strong></div>
             ))}
+            <div className="button-row left">
+              <button className="ghost" onClick={() => setReportStocktake(viewingStocktake)} type="button"><Download size={16} />Download Report</button>
+            </div>
           </div>
         </div>
       )}
+      <StocktakeDownloadMenu
+        companyName={companyName}
+        companyScope={companyScope}
+        currency={currency}
+        onClose={() => setReportStocktake(null)}
+        open={Boolean(reportStocktake)}
+        stocktake={reportStocktake}
+      />
     </div>
   );
 }
