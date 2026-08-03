@@ -7,6 +7,7 @@ import {
   ArrowDownUp,
   Boxes,
   ChefHat,
+  Download,
   Edit3,
   Eye,
   Gauge,
@@ -2247,6 +2248,13 @@ function parseCsvText(text) {
   return rows;
 }
 
+function csvTextFromRows(rows = []) {
+  return rows.map((row) => row.map((value) => {
+    const text = String(value ?? "");
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }).join(",")).join("\r\n");
+}
+
 function findHeaderIndex(headers, names) {
   const normalized = headers.map(normalizeHeader);
   return normalized.findIndex((header) => names.includes(header));
@@ -3363,6 +3371,18 @@ function buildFullBackupPayloadFromSnapshot(snapshot = {}, source = "cloud") {
 
 function downloadJsonFile(filename, payload) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadTextFile(filename, text, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -8097,6 +8117,37 @@ function stocktakeBlankLine(department, product = {}) {
   };
 }
 
+function stocktakeProductsCsv(products = []) {
+  const rows = [["Product", "Quantity", "Unit Cost", "Supplier", "Pack Size", "Department", "Product ID"]];
+  const productRows = [...products]
+    .filter((product) => product.active !== false)
+    .sort((left, right) => (left.department || "").localeCompare(right.department || "") || (left.name || "").localeCompare(right.name || ""));
+  productRows.forEach((product) => {
+    rows.push([
+      product.name || product.productName || "",
+      "",
+      numberValue(product.unitCost, 0) || "",
+      product.supplier || "",
+      product.packSize || "",
+      product.department || "",
+      product.id || "",
+    ]);
+  });
+  return csvTextFromRows(rows);
+}
+
+function stocktakeProductSuggestions(products = [], query = "") {
+  const activeProducts = products.filter((product) => product.active !== false);
+  const term = String(query || "").trim();
+  if (!term) return activeProducts.slice(0, 80);
+  const suggestions = productAutocomplete(activeProducts, term, 30);
+  const exactProduct = productForEnteredName(activeProducts, term);
+  if (exactProduct && !suggestions.some((product) => product.id === exactProduct.id)) {
+    return [exactProduct, ...suggestions].slice(0, 30);
+  }
+  return suggestions;
+}
+
 function Stocktake({ department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes }) {
   const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const blankModal = (type = "Stocktake") => ({
@@ -8114,6 +8165,10 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
   const [modal, setModal] = useState(null);
   const [viewingStocktake, setViewingStocktake] = useState(null);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
+
+  const downloadStocktakeProductsCsv = () => {
+    downloadTextFile(`marginflow-stocktake-products-${today()}.csv`, stocktakeProductsCsv(products), "text/csv;charset=utf-8");
+  };
 
   const openModal = (type, stocktake = null) => {
     if (!stocktake && !permissions.canAdd) return;
@@ -8144,9 +8199,20 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
         if (line.id !== id) return line;
         let updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
         if (field === "productName") {
-          const match = matchProduct(value, products);
-          if (match) updated = stocktakeBlankLine(current.department, match.product);
-          else updated = { ...updated, matchedProductId: "", supplier: "", packSize: "", matchStatus: "Create product on save" };
+          const product = productForEnteredName(products, value);
+          if (product) {
+            const productLine = stocktakeBlankLine(current.department, product);
+            const quantity = numberValue(line.quantity, productLine.quantity) || productLine.quantity;
+            updated = { ...productLine, id: line.id, quantity, stockValue: quantity * numberValue(productLine.unitCost) };
+          } else {
+            updated = {
+              ...updated,
+              matchedProductId: "",
+              supplier: "",
+              packSize: "",
+              matchStatus: String(value || "").trim() ? "Create product on save" : "Manual entry",
+            };
+          }
         }
         updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
         return updated;
@@ -8156,14 +8222,35 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
 
   const importStocktakeCsv = async (file) => {
     if (!permissions.canImport || !file || !modal) return;
-    const rows = (await file.text()).split(/\r?\n/).map((row) => row.split(",").map((cell) => cell.trim())).filter((row) => row[0]);
-    const hasHeader = normalizeHeader(rows[0]?.[0]).includes("product");
-    const imported = (hasHeader ? rows.slice(1) : rows).map(([productName, quantity, unitCost]) => {
-      const match = matchProduct(productName, products);
-      const product = match?.product;
-      const line = product ? stocktakeBlankLine(modal.department, product) : stocktakeBlankLine(modal.department, { name: productName, quantity: 1, unitCost: numberValue(unitCost) });
-      const nextQuantity = numberValue(quantity, line.quantity);
-      const nextUnitCost = unitCost ? numberValue(unitCost) : line.unitCost;
+    const rows = parseCsvText(await file.text());
+    const headers = rows[0] || [];
+    const normalizedHeaders = headers.map(normalizeHeader);
+    const hasHeader = normalizedHeaders.some((cell) => ["product", "productname", "name", "quantity", "qty", "unitcost", "productid"].includes(cell));
+    const dataRows = hasHeader ? rows.slice(1) : rows;
+    const productIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Product", "Product Name", "Name"]) : 0;
+    const quantityIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Quantity", "Qty", "Count", "Stock Quantity"]) : 1;
+    const unitCostIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Unit Cost", "UnitCost", "Cost", "Price"]) : 2;
+    const supplierIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Supplier", "Supplier Name"]) : -1;
+    const packSizeIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Pack Size", "Pack", "Size"]) : -1;
+    const productIdIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Product ID", "ProductId", "ID"]) : -1;
+    const cellAt = (cells, index) => (index >= 0 ? cells[index] || "" : "");
+    const imported = dataRows.map((cells) => {
+      const productId = cellAt(cells, productIdIndex);
+      const productName = cellAt(cells, productIndex);
+      const quantity = cellAt(cells, quantityIndex);
+      const unitCost = cellAt(cells, unitCostIndex);
+      const product = products.find((candidate) => candidate.id === productId) || matchProduct(productName, products)?.product;
+      const line = product
+        ? stocktakeBlankLine(modal.department, product)
+        : stocktakeBlankLine(modal.department, {
+          name: productName,
+          quantity: 1,
+          unitCost: numberValue(unitCost),
+          supplier: cellAt(cells, supplierIndex),
+          packSize: cellAt(cells, packSizeIndex),
+        });
+      const nextQuantity = quantity === "" ? line.quantity : numberValue(quantity, line.quantity);
+      const nextUnitCost = unitCost === "" ? line.unitCost : numberValue(unitCost, line.unitCost);
       return { ...line, quantity: nextQuantity, unitCost: nextUnitCost, stockValue: nextQuantity * nextUnitCost };
     }).filter((line) => line.productName.trim());
     setModal((current) => ({ ...current, pendingImport: imported, status: `${imported.length} row(s) ready for review.` }));
@@ -8231,6 +8318,7 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
         <div className="button-row left">
           {permissions.canAdd && <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
           {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
+          <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />Download Products CSV</button>
         </div>
       </Panel>
       <Panel title="Saved stocktakes">
@@ -8304,7 +8392,12 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
                     <tbody>
                       {modal.lines.map((line) => (
                         <tr key={line.id}>
-                          <td><input list="stocktake-product-list" value={line.productName} onChange={(event) => updateModalLine(line.id, "productName", event.target.value)} /></td>
+                          <td>
+                            <input list={`stocktake-product-list-${line.id}`} value={line.productName} onChange={(event) => updateModalLine(line.id, "productName", event.target.value)} />
+                            <datalist id={`stocktake-product-list-${line.id}`}>
+                              {stocktakeProductSuggestions(products, line.productName).map((product) => <option key={product.id} label={productOptionLabel(product)} value={product.name} />)}
+                            </datalist>
+                          </td>
                           <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateModalLine(line.id, "quantity", event.target.value)} /></td>
                           <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateModalLine(line.id, "unitCost", event.target.value)} /></td>
                           <td>{money(line.stockValue)}</td>
@@ -8314,7 +8407,6 @@ function Stocktake({ department, departmentNames, permissions = permissionsForPa
                     </tbody>
                   </table>
                 </div>
-                <datalist id="stocktake-product-list">{products.map((product) => <option key={product.id} value={product.name} />)}</datalist>
                 <div className="button-row left tight">
                   {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>}
                 </div>
