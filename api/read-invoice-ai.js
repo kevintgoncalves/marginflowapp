@@ -38,6 +38,7 @@ const invoiceSchema = {
     "currency",
     "additionalCharges",
     "additionalChargesDescription",
+    "adjustments",
     "confidence",
     "lines",
   ],
@@ -49,15 +50,28 @@ const invoiceSchema = {
     invoiceNumber: { type: "string" },
     original_invoice_number: { type: "string" },
     credit_reason: { type: "string" },
-    invoiceSubtotal: { type: "number" },
-    net_total: { type: "number" },
-    vatTotal: { type: "number" },
-    vat_total: { type: "number" },
-    invoiceTotal: { type: "number" },
-    gross_total: { type: "number" },
+    invoiceSubtotal: { type: ["number", "null"] },
+    net_total: { type: ["number", "null"] },
+    vatTotal: { type: ["number", "null"] },
+    vat_total: { type: ["number", "null"] },
+    invoiceTotal: { type: ["number", "null"] },
+    gross_total: { type: ["number", "null"] },
     currency: { type: "string" },
     additionalCharges: { type: "number" },
     additionalChargesDescription: { type: "string" },
+    adjustments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["type", "description", "amount"],
+        properties: {
+          type: { type: "string", enum: ["handling", "delivery", "carriage", "shipping", "service_charge", "discount", "credit", "rounding", "other"] },
+          description: { type: "string" },
+          amount: { type: "number" },
+        },
+      },
+    },
     confidence: { type: "number" },
     lines: {
       type: "array",
@@ -117,6 +131,23 @@ function asNumber(value, fallback = 0) {
   }
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function asNullableNumber(value) {
+  if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) return null;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[^0-9.-]/g, "");
+    if (!cleaned) return null;
+    const number = Number(cleaned);
+    return Number.isFinite(number) ? number : null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function absoluteNullableNumber(value) {
+  const number = asNullableNumber(value);
+  return number === null ? null : Math.abs(number);
 }
 
 function clampConfidence(value, fallback = 0.5) {
@@ -238,6 +269,7 @@ function normalizeInvoice(invoice, sourceText, {
   products = [],
   supplierMappings = [],
   organisationId = "",
+  locationId = "",
   modelUsed = "",
   fallbackUsed = false,
   fallbackReason = "",
@@ -267,6 +299,7 @@ function normalizeInvoice(invoice, sourceText, {
       const unitOfMeasure = asString(line.unitOfMeasure || line.unit);
       const match = matchInvoiceLineToExistingProduct({
         organisationId,
+        locationId,
         supplierName: supplier,
         supplierProductCode,
         rawDescription,
@@ -326,16 +359,21 @@ function normalizeInvoice(invoice, sourceText, {
     currency: asString(invoice.currency, "GBP"),
     invoiceDate: preferredInvoiceDate(supplier, sourceText, invoice.invoiceDate || invoice.date),
     invoiceNumber: asString(invoice.invoiceNumber || invoice.invoice_number || invoice.document_number || invoice.documentNumber, inferInvoiceNumber(sourceText)),
-    invoiceSubtotal: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
-    netTotal: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
-    net_total: Math.abs(asNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal, 0)),
-    vatTotal: Math.abs(asNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat, 0)),
-    vat_total: Math.abs(asNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat, 0)),
-    invoiceTotal: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
-    grossTotal: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
-    gross_total: Math.abs(asNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total, 0)),
-    additionalCharges: Math.abs(asNumber(invoice.additionalCharges || invoice.handlingCharge || invoice.deliveryCharge || invoice.carriageCharge || invoice.serviceCharge, 0)),
+    invoiceSubtotal: absoluteNullableNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal),
+    netTotal: absoluteNullableNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal),
+    net_total: absoluteNullableNumber(invoice.net_total ?? invoice.invoiceSubtotal ?? invoice.subtotal),
+    vatTotal: absoluteNullableNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat),
+    vat_total: absoluteNullableNumber(invoice.vat_total ?? invoice.vatTotal ?? invoice.taxAmount ?? invoice.vat),
+    invoiceTotal: absoluteNullableNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total),
+    grossTotal: absoluteNullableNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total),
+    gross_total: absoluteNullableNumber(invoice.gross_total ?? invoice.invoiceTotal ?? invoice.total),
+    additionalCharges: Math.abs(asNumber(invoice.additionalCharges ?? invoice.handlingCharge ?? invoice.deliveryCharge ?? invoice.carriageCharge ?? invoice.serviceCharge, 0)),
     additionalChargesDescription: asString(invoice.additionalChargesDescription || invoice.handlingChargeDescription || invoice.deliveryChargeDescription || ""),
+    adjustments: Array.isArray(invoice.adjustments) ? invoice.adjustments.map((adjustment) => ({
+      type: asString(adjustment.type, "other").toLowerCase().replace(/[\s-]+/g, "_"),
+      description: asString(adjustment.description || adjustment.label, "Invoice adjustment"),
+      amount: asNumber(adjustment.amount ?? adjustment.value ?? adjustment.total, 0),
+    })).filter((adjustment) => adjustment.amount !== 0) : [],
     confidence: clampConfidence(invoice.confidence),
     lines: normalizedLines,
     extractionModel: modelUsed,
@@ -436,7 +474,9 @@ Rules:
 - Preserve meaningful pack-size information such as 2x5kg, 24x330ml, box, case, punnet.
 - For each item, identify pack size, quantity, unit cost, VAT and line total where possible.
 - If a field is unknown, use "" or 0.
-- Return invoice-level handling, delivery, carriage or service fees as additionalCharges/additionalChargesDescription. Do not include those fees as product lines.
+- Read printed final totals labelled Invoice Total, Ticket Total, Grand Total, Total Due, Amount Due or Total. Return the printed figure as invoiceTotal/gross_total; if it is genuinely unreadable, return null.
+- Return invoice-level handling, delivery, carriage, shipping, service charges, discounts, credits and rounding in adjustments with their printed descriptions and amounts. Also return the combined positive non-product charges in additionalCharges for backwards compatibility. Do not include adjustments as product lines.
+- Do not invent a printed subtotal. Return invoiceSubtotal/net_total as null when the document does not show one.
 - Return unreadable text as "" rather than guessing.
 - Unit cost should be the cost per pack/unit on the invoice, not the total unless only total is available.
 - Line total should be quantity × unit cost when possible.
@@ -622,6 +662,7 @@ async function handleReadInvoiceAi(event) {
       products: payload.products || [],
       supplierMappings: payload.supplierMappings || payload.supplier_product_mappings || [],
       organisationId: payload.organisationId || payload.organizationId || payload.companyId || "",
+      locationId: payload.locationId || "",
       modelUsed: primary.model,
     });
     let fallbackReason = fallbackReasonsForExtraction(normalized);
@@ -640,6 +681,7 @@ async function handleReadInvoiceAi(event) {
           products: payload.products || [],
           supplierMappings: payload.supplierMappings || payload.supplier_product_mappings || [],
           organisationId: payload.organisationId || payload.organizationId || payload.companyId || "",
+          locationId: payload.locationId || "",
           modelUsed: fallback.model,
           fallbackUsed: true,
           fallbackReason: fallbackReason.join(","),

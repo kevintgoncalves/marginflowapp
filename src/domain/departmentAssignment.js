@@ -106,6 +106,50 @@ export function departmentAssignmentForLine(line = {}, {
   };
 }
 
+export function departmentAssignmentForResolvedLine({
+  line = {},
+  product = {},
+  match = {},
+  departmentNames = [],
+  fallbackDepartment = DEFAULT_DEPARTMENT,
+} = {}) {
+  const options = { departmentNames, fallbackDepartment };
+  const lineAllocationSource = String(line.allocationSource || "").toLowerCase();
+  const lineHasCommittedAllocation = ["user_selected", "learned_mapping", "learned_split_rule"].includes(lineAllocationSource);
+
+  if (lineHasCommittedAllocation) {
+    return departmentAssignmentForLine(line, options);
+  }
+
+  if (validDepartmentSplitRows(match.departmentSplits, options)) {
+    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: match.departmentSplits }, options);
+  }
+
+  const learnedDepartment = match.department || match.departmentName || match.destination || "";
+  if (learnedDepartment) {
+    return departmentAssignmentForLine({
+      ...line,
+      department: learnedDepartment,
+      departmentId: match.departmentId || match.department_id || "",
+      departmentMode: "Single",
+      departmentSplits: [],
+    }, options);
+  }
+
+  if (validDepartmentSplitRows(product.departmentSplits, options)) {
+    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: product.departmentSplits }, options);
+  }
+
+  const productDepartment = product.department || product.departmentName || product.defaultDepartment || "";
+  return departmentAssignmentForLine({
+    ...line,
+    department: productDepartment || line.department || fallbackDepartment,
+    departmentId: product.departmentId || product.department_id || line.departmentId || "",
+    departmentMode: "Single",
+    departmentSplits: [],
+  }, options);
+}
+
 export function departmentAllocationRows(line = {}, options = {}) {
   const assignment = departmentAssignmentForLine(line, options);
   if (assignment.departmentMode === "Split") return assignment.departmentSplits;

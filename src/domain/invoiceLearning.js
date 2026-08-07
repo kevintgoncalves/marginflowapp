@@ -17,8 +17,8 @@ function sameScope(mapping = {}, { companyId = "", locationId = "", supplierId =
   const mappingCompanyId = mapping.companyId || mapping.company_id || "";
   const mappingLocationId = mapping.locationId || mapping.location_id || "";
   const mappingSupplierId = mapping.supplierId || mapping.supplier_id || "";
-  const companyMatches = !companyId || !mappingCompanyId || mappingCompanyId === companyId;
-  const locationMatches = !locationId || !mappingLocationId || mappingLocationId === locationId;
+  const companyMatches = companyId ? mappingCompanyId === companyId : !mappingCompanyId;
+  const locationMatches = locationId ? mappingLocationId === locationId : !mappingLocationId;
   const supplierMatches = supplierId && mappingSupplierId
     ? mappingSupplierId === supplierId
     : (supplierId && mappingSupplierId === supplierId) || sameSupplier(mapping, supplierName);
@@ -54,9 +54,9 @@ function lineAllocation(line = {}, departments = []) {
   };
 }
 
-function mappingKeyForLine({ companyId = "", supplierId = "", supplierName = "", line = {} } = {}) {
+function mappingKeyForLine({ companyId = "", locationId = "", supplierId = "", supplierName = "", line = {} } = {}) {
   const code = normalizeSupplierProductCode(line.supplierProductCode);
-  const scope = [companyId || "local", supplierId || normalizeHeader(supplierName)].filter(Boolean).join(":");
+  const scope = [companyId || "local", locationId || "company", supplierId || normalizeHeader(supplierName)].filter(Boolean).join(":");
   if (code) return `code:${scope}:${code}`;
   const description = normalizeSupplierDescription(line.rawDescription || line.productName);
   const unit = normalizeHeader(line.unitOfMeasure || line.unit || "");
@@ -106,7 +106,7 @@ export function learnSupplierProductMappings({
   (invoice.items || invoice.lines || []).forEach((line) => {
     const productId = line.matchedProductId || line.productId || "";
     if (!productId || line.forgetLearnedRule || line.matchStatus === "Manual invoice") return;
-    const key = mappingKeyForLine({ companyId, supplierId: resolvedSupplierId, supplierName: supplier, line });
+    const key = mappingKeyForLine({ companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier, line });
     if (!key) return;
 
     const code = normalizeSupplierProductCode(line.supplierProductCode);
@@ -206,7 +206,9 @@ export function learnSupplierProductMappings({
 
 export function deactivateSupplierProductMapping(mappings = [], mappingId = "", now = new Date().toISOString()) {
   return mappings.map((mapping) => (
-    mapping.id === mappingId ? { ...mapping, active: false, autoApply: false, updatedAt: now } : mapping
+    mapping.id === mappingId || mapping.relationalId === mappingId
+      ? { ...mapping, active: false, autoApply: false, updatedAt: now }
+      : mapping
   ));
 }
 

@@ -2,9 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { findProductDuplicateCandidates, matchInvoiceLineToExistingProduct, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./invoiceLearning.js";
-import { fallbackReasonsForExtraction, invoiceHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./invoiceValidation.js";
+import {
+  canConfirmInvoice,
+  fallbackReasonsForExtraction,
+  getBlockingInvoiceIssues,
+  getWarningInvoiceIssues,
+  invoiceHasBlockingReview,
+  priceDeviationForLine,
+  reconcileInvoiceTotals,
+  reviewReasonSeverity,
+  validateInvoiceExtraction,
+} from "./invoiceValidation.js";
 import {
   departmentAssignmentForLine,
+  departmentAssignmentForResolvedLine,
   departmentAssignmentIsValid,
   lineUsesSplitDepartmentMode,
 } from "./departmentAssignment.js";
@@ -16,6 +27,11 @@ import {
   lineWithResetProductResolution,
   resolveExplicitNewProductLines,
 } from "./invoiceProductResolution.js";
+import {
+  mergeRelationalSupplierProductMappings,
+  persistRelationalSupplierProductMappings,
+  relationalMappingFromRow,
+} from "../lib/invoiceLearningRepository.js";
 
 const products = [
   { id: "p1", companyId: "c1", name: "Cherry Tomatoes 250g", packSize: "250g", aliases: ["Cherry Toms"] },
@@ -26,6 +42,27 @@ const products = [
 
 test("normalizes supplier product codes without losing displayed code elsewhere", () => {
   assert.equal(normalizeSupplierProductCode("AB-001 45"), "AB00145");
+});
+
+test("confirmed learned allocation stays ahead of a matched product default", () => {
+  const learnedSingle = departmentAssignmentForResolvedLine({
+    line: { department: "Bar", departmentMode: "Single", allocationSource: "learned_mapping" },
+    product: { department: "Kitchen Made" },
+    departmentNames: ["Kitchen Made", "Bar"],
+  });
+  const learnedSplit = departmentAssignmentForResolvedLine({
+    line: {
+      departmentMode: "Split",
+      allocationSource: "learned_split_rule",
+      departmentSplits: [{ department: "Bar", percentage: 75 }, { department: "Kitchen Made", percentage: 25 }],
+    },
+    product: { department: "Kitchen Made" },
+    departmentNames: ["Kitchen Made", "Bar"],
+  });
+
+  assert.equal(learnedSingle.department, "Bar");
+  assert.equal(learnedSplit.departmentMode, "Split");
+  assert.deepEqual(learnedSplit.departmentSplits.map((split) => [split.department, split.percentage]), [["Bar", 75], ["Kitchen Made", 25]]);
 });
 
 test("exact supplier code mapping returns the confirmed product", () => {
@@ -544,6 +581,22 @@ test("TG Fruits handling charge reconciles ticket total without blocking confirm
   assert.equal(invoiceHasBlockingReview(validated), false);
 });
 
+test("structured handling adjustment reconciles a printed total and absent subtotal stays absent", () => {
+  const reconciliation = reconcileInvoiceTotals({
+    invoiceSubtotal: null,
+    invoiceTotal: 360.65,
+    vatTotal: 0,
+    adjustments: [{ type: "handling", description: "Handling", amount: 0.5 }],
+  }, [{ quantity: 1, unitCost: 360.15, lineTotal: 360.15 }]);
+
+  assert.equal(reconciliation.lineSubtotal, 360.15);
+  assert.equal(reconciliation.printedSubtotal, null);
+  assert.equal(reconciliation.adjustmentTotal, 0.5);
+  assert.equal(reconciliation.calculatedTotal, 360.65);
+  assert.equal(reconciliation.subtotalMismatch, false);
+  assert.equal(reconciliation.totalMismatch, false);
+});
+
 test("soft invoice and price warnings remain visible without blocking confirmation", () => {
   const validated = validateInvoiceExtraction({
     invoice: {
@@ -562,12 +615,18 @@ test("soft invoice and price warnings remain visible without blocking confirmati
       quantity: 1,
       unitCost: 100,
       lineTotal: 100,
+      confidence: 0.5,
       supplier: "TG Fruits",
       department: "Bar",
       departmentMode: "Single",
       departmentSplits: [{ department: "Bar", percentage: 100 }],
       reviewReasons: ["price_deviation", "low_extraction_confidence"],
     }],
+    historicalPrices: [
+      { productId: "p3", supplier: "TG Fruits", price: 70 },
+      { productId: "p3", supplier: "TG Fruits", price: 70 },
+      { productId: "p3", supplier: "TG Fruits", price: 70 },
+    ],
   });
 
   assert.equal(reviewReasonSeverity("invoice_total_mismatch"), "warning");
@@ -577,6 +636,40 @@ test("soft invoice and price warnings remain visible without blocking confirmati
   assert.equal(validated.invoiceHasBlockingReview, false);
   assert.equal(validated.lines[0].needsReview, true);
   assert.equal(validated.lines[0].hasBlockingReview, false);
+  assert.equal(getBlockingInvoiceIssues(validated).length, 0);
+  assert.ok(getWarningInvoiceIssues(validated).length >= 2);
+  assert.equal(canConfirmInvoice(validated), true);
+});
+
+test("price warnings require like-for-like unit, pack, currency, company and VAT history", () => {
+  const line = {
+    matchedProductId: "p3",
+    supplier: "TG Fruits",
+    companyId: "c1",
+    unitCost: 100,
+    unitOfMeasure: "case",
+    packSize: "4kg",
+    currency: "GBP",
+    vatBasis: "exclusive",
+  };
+  const incompleteOrDifferentHistory = [
+    { productId: "p3", supplier: "TG Fruits", companyId: "c1", price: 50 },
+    { productId: "p3", supplier: "TG Fruits", companyId: "c1", price: 50, unitOfMeasure: "each", packSize: "4kg", currency: "GBP", vatBasis: "exclusive" },
+    { productId: "p3", supplier: "TG Fruits", companyId: "c1", price: 50, unitOfMeasure: "case", packSize: "10kg", currency: "GBP", vatBasis: "exclusive" },
+  ];
+  const comparableHistory = Array.from({ length: 3 }, () => ({
+    productId: "p3",
+    supplier: "TG Fruits",
+    companyId: "c1",
+    price: 50,
+    unitOfMeasure: "case",
+    packSize: "4kg",
+    currency: "GBP",
+    vatBasis: "exclusive",
+  }));
+
+  assert.equal(priceDeviationForLine(line, incompleteOrDifferentHistory), null);
+  assert.equal(priceDeviationForLine(line, comparableHistory)?.exceedsThreshold, true);
 });
 
 test("hard review reasons still block unsafe invoice confirmation", () => {
@@ -599,6 +692,45 @@ test("hard review reasons still block unsafe invoice confirmation", () => {
   assert.equal(validated.lines[0].reviewReasons.includes("no_confirmed_product_match"), true);
   assert.equal(validated.lines[0].hasBlockingReview, true);
   assert.equal(validated.invoiceHasBlockingReview, true);
+  assert.ok(getBlockingInvoiceIssues(validated).length >= 1);
+  assert.equal(canConfirmInvoice(validated), false);
+});
+
+test("confirming a price warning still persists and reapplies department learning", () => {
+  const learned = learnSupplierProductMappings({
+    mappings: [],
+    invoice: {
+      id: "warning-invoice",
+      supplier: "TG Fruits",
+      invoiceReviewReasons: ["price_deviation"],
+      items: [{
+        id: "warning-line",
+        supplierProductCode: "7742",
+        rawDescription: "LIMES 4KG",
+        productName: "Limes",
+        matchedProductId: "p3",
+        department: "Bar",
+        departmentMode: "Single",
+        reviewReasons: ["price_deviation"],
+      }],
+    },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const reloaded = JSON.parse(JSON.stringify(learned));
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: reloaded,
+  });
+
+  assert.equal(match.department, "Bar");
+  assert.equal(match.allocationSource, "learned_mapping");
 });
 
 test("correction history is idempotent for repeated saves", () => {
@@ -678,6 +810,92 @@ test("application restart does not require reusing the in-memory mapping object"
   assert.equal(match.department, "Bar");
 });
 
+test("relational learning wins over snapshot fallback and inactive tombstones stay forgotten", () => {
+  const snapshot = [{
+    id: "snapshot-1",
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierProductCode: "7742",
+    productId: "p3",
+    department: "Kitchen Made",
+    active: true,
+  }];
+  const relationalActive = [{
+    id: "relational-1",
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierProductCode: "7742",
+    productId: "p3",
+    department: "Bar",
+    active: true,
+    updatedAt: "2026-08-07T10:00:00.000Z",
+  }];
+  const relationalForgotten = [{ ...relationalActive[0], active: false, updatedAt: "2026-08-07T11:00:00.000Z" }];
+
+  const activeMerged = mergeRelationalSupplierProductMappings(snapshot, relationalActive);
+  const forgottenMerged = mergeRelationalSupplierProductMappings(snapshot, relationalForgotten);
+  assert.equal(activeMerged.length, 1);
+  assert.equal(activeMerged[0].department, "Bar");
+  assert.equal(forgottenMerged.length, 1);
+  assert.equal(forgottenMerged[0].active, false);
+});
+
+test("relational split rows hydrate into the same learned allocation shape", () => {
+  const mapping = relationalMappingFromRow({
+    id: "map-1",
+    company_id: "c1",
+    supplier_id: "sup-tg",
+    product_id: "p3",
+    supplier_product_code: "7742",
+    allocation_mode: "split",
+    active: true,
+    auto_apply: true,
+  }, {
+    suppliers: [{ id: "sup-tg", name: "TG Fruits" }],
+    products: [{ id: "p3", name: "Limes" }],
+    departments: [{ id: "d-bar", name: "Bar" }, { id: "d-kit", name: "Kitchen Made" }],
+    splitRules: [{ id: "rule-1", supplier_product_mapping_id: "map-1", active: true }],
+    splitLines: [
+      { id: "split-1", split_rule_id: "rule-1", department_id: "d-bar", percentage: 75, sort_order: 0 },
+      { id: "split-2", split_rule_id: "rule-1", department_id: "d-kit", percentage: 25, sort_order: 1 },
+    ],
+  });
+
+  assert.equal(mapping.persistenceSource, "relational");
+  assert.equal(mapping.allocationMode, "split");
+  assert.deepEqual(mapping.departmentSplits.map((split) => [split.department, split.percentage]), [["Bar", 75], ["Kitchen Made", 25]]);
+});
+
+test("relational persistence sends the centrally normalized supplier code and complete split", async () => {
+  const calls = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      return { data: [{ mapping_id: "99999999-9999-4999-8999-999999999999" }], error: null };
+    },
+  };
+  const result = await persistRelationalSupplierProductMappings(client, [{
+    id: "local-map",
+    supplierId: "22222222-2222-4222-8222-222222222222",
+    supplierName: "TG Fruits",
+    supplierProductCode: "AB-001 45",
+    supplierDescription: "LIMES 4KG",
+    productId: "33333333-3333-4333-8333-333333333333",
+    productName: "Limes",
+    allocationMode: "split",
+    departmentSplits: [
+      { departmentId: "44444444-4444-4444-8444-444444444444", department: "Bar", percentage: 75 },
+      { departmentId: "55555555-5555-4555-8555-555555555555", department: "Kitchen Made", percentage: 25 },
+    ],
+    autoApply: true,
+  }], { companyId: "11111111-1111-4111-8111-111111111111" });
+
+  assert.equal(result.persisted.length, 1);
+  assert.equal(calls[0].name, "persist_supplier_product_learning");
+  assert.equal(calls[0].payload.p_normalized_supplier_product_code, "AB00145");
+  assert.deepEqual(calls[0].payload.p_split_lines.map((line) => line.percentage), [75, 25]);
+});
+
 test("same supplier product code from a different supplier does not reuse learned department", () => {
   const mappings = learnSupplierProductMappings({
     mappings: [],
@@ -697,6 +915,70 @@ test("same supplier product code from a different supplier does not reuse learne
   });
   assert.equal(match.matchedProductId, null);
   assert.equal(match.productMatchSource, "no_product_match");
+});
+
+test("location-specific learned mapping does not leak into another location", () => {
+  const mappings = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-1", supplier: "TG Fruits", items: [{ id: "line-1", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Bar", departmentMode: "Single" }] },
+    products,
+    companyId: "c1",
+    locationId: "location-a",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    locationId: "location-b",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: mappings,
+  });
+  assert.equal(match.matchedProductId, null);
+});
+
+test("location-specific learning overrides but does not replace the company fallback", () => {
+  const companyMappings = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "inv-company", supplier: "TG Fruits", items: [{ id: "line-company", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Kitchen Made", departmentMode: "Single" }] },
+    products,
+    companyId: "c1",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+  const scopedMappings = learnSupplierProductMappings({
+    mappings: companyMappings,
+    invoice: { id: "inv-site", supplier: "TG Fruits", items: [{ id: "line-site", supplierProductCode: "7742", rawDescription: "LIMES 4KG", productName: "Limes", matchedProductId: "p3", department: "Bar", departmentMode: "Single" }] },
+    products,
+    companyId: "c1",
+    locationId: "location-a",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+  }).mappings;
+
+  assert.equal(scopedMappings.filter((mapping) => mapping.active !== false).length, 2);
+  const siteMatch = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    locationId: "location-a",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: [...companyMappings, scopedMappings.find((mapping) => mapping.locationId === "location-a")],
+  });
+  const otherSiteMatch = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    locationId: "location-b",
+    supplierId: "sup-tg",
+    supplierName: "TG Fruits",
+    supplierProductCode: "7742",
+    existingProducts: products,
+    supplierMappings: scopedMappings,
+  });
+  assert.equal(siteMatch.department, "Bar");
+  assert.equal(otherSiteMatch.department, "Kitchen Made");
 });
 
 test("department correction updates the active mapping instead of creating a conflicting rule", () => {

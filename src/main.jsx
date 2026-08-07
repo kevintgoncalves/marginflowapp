@@ -7,6 +7,7 @@ import {
   ArrowDownUp,
   Boxes,
   ChefHat,
+  Check,
   Download,
   Edit3,
   Eye,
@@ -28,18 +29,38 @@ import {
 } from "lucide-react";
 import { labourImportedSeed } from "./labourSeedData.js";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
+import {
+  forgetRelationalSupplierProductMapping,
+  loadRelationalSupplierProductMappings,
+  mergeRelationalSupplierProductMappings,
+  persistRelationalSupplierProductMappings,
+} from "./lib/invoiceLearningRepository.js";
 import { invoiceUnitCostFromExtraction as extractedInvoiceUnitCost, parseCheesemanInvoiceRows } from "./domain/invoiceParsing.js";
 import {
   findProductDuplicateCandidates,
   matchInvoiceLineToExistingProduct,
 } from "./domain/invoiceProductMatching.js";
+import {
+  PRODUCT_NAME_MATCH_TYPES,
+  matchProductName,
+  rankProductCandidates,
+} from "./domain/productMatching.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
-import { invoiceHasBlockingReview, invoiceLineHasBlockingReview, reviewReasonSeverity, validateInvoiceExtraction } from "./domain/invoiceValidation.js";
+import {
+  getBlockingInvoiceIssues,
+  getWarningInvoiceIssues,
+  invoiceHasBlockingReview,
+  invoiceLineHasBlockingReview,
+  reviewReasonSeverity,
+  validateInvoiceExtraction,
+} from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
+import { productRecordFromInput } from "./domain/productCreation.js";
 import {
   departmentAllocationRows,
   departmentAssignmentForLine,
+  departmentAssignmentForResolvedLine,
   departmentAssignmentIsValid,
   lineUsesSplitDepartmentMode,
   normalizeDepartmentSplitRows,
@@ -86,7 +107,9 @@ import {
   toSignedPurchasingAmount,
 } from "./domain/purchasingDocuments.js";
 import WorkforceModule from "./workforce/WorkforceModule.jsx";
+import LiveStocktakeEntry from "./components/stocktake/LiveStocktakeEntry.jsx";
 import StocktakeDownloadMenu from "./components/stocktake/StocktakeDownloadMenu.jsx";
+import StocktakeImportReview from "./components/stocktake/StocktakeImportReview.jsx";
 import {
   activeSupplierRows,
   canonicalSupplierForName,
@@ -100,6 +123,15 @@ import {
   supplierSortKey,
 } from "./domain/supplierIdentity.js";
 import { propagateInvoiceSupplierToLines, validateInvoiceLinesForApproval } from "./domain/invoiceWorkflow.js";
+import {
+  applyStocktakeEntries,
+  confirmedStocktakeImportEntries,
+  parseStocktakeImportRows,
+  resolveStocktakeImportReviewRow,
+  stocktakeTemplateRows,
+} from "./domain/stocktakeImport.js";
+import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
+import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -144,7 +176,11 @@ const emptyInvoiceDraft = () => ({
   discountPercent: 0,
   additionalCharges: 0,
   additionalChargesDescription: "",
+  adjustments: [],
   inferredAdditionalCharges: 0,
+  invoiceSubtotal: null,
+  invoiceTotal: null,
+  vatTotal: null,
   finalInvoiceTotal: 0,
   status: "Idle",
   editingInvoiceId: "",
@@ -978,7 +1014,15 @@ function UpdatePasswordScreen({ onSignOut, onUpdated }) {
 }
 
 function money(value) {
-  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Number(value) || 0);
+  return moneyForCurrency(value, "GBP");
+}
+
+function moneyForCurrency(value, currency = "GBP") {
+  try {
+    return new Intl.NumberFormat("en-GB", { style: "currency", currency: currency || "GBP" }).format(Number(value) || 0);
+  } catch {
+    return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Number(value) || 0);
+  }
 }
 
 function percent(value) {
@@ -1562,7 +1606,7 @@ function normalizeInvoiceLineForEditor(item, departmentNames = defaultDepartment
   }), departmentNames);
 }
 
-function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments, supplierMappings = [], organisationId = "" } = {}) {
+function updateInvoiceLineForEditor(item, field, value, { products = [], matchingSettings = defaultMatchingSettings, departmentNames = defaultDepartments, supplierMappings = [], organisationId = "", locationId = "" } = {}) {
   const numericFields = ["quantity", "unitCost", "discountAmount", "discountPercent", "lineDiscountAmount", "lineDiscountPercent"];
   const nextValue = numericFields.includes(field) ? numberValue(value, 0) : value;
   let updated = { ...item, [field]: nextValue };
@@ -1581,11 +1625,13 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
     updated.department = value;
     updated.departmentId = "";
     updated.allocationSource = "user_selected";
+    updated.forgetLearnedRule = false;
     updated.departmentMode = "Single";
     updated.departmentSplits = [];
   }
 
   if (field === "productName") {
+    updated.forgetLearnedRule = false;
     const selectedProduct = productForEnteredName(products, value);
     if (isCreateNewProductResolution(item)) {
       updated = {
@@ -1632,7 +1678,7 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         matchStatus: value?.trim() ? "Choose a product match" : "No existing product found",
       };
     } else {
-      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId, departmentNames });
+      const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId, locationId, departmentNames });
       updated = { ...enriched, productName: value };
     }
   }
@@ -1644,21 +1690,21 @@ function setInvoiceLineDepartmentMode(item, mode, departmentNames = defaultDepar
   if (mode === "Split") {
     const first = item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
     const second = departmentNames.find((dept) => dept !== first) || first;
-    return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: [
+    return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Split", departmentSplits: [
       { id: uid(), department: first, percentage: 50 },
       { id: uid(), department: second, percentage: 50 },
     ] }, departmentNames);
   }
 
   const department = item.department || normalizeDepartmentSplits(item, fallbackDepartment)[0]?.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Single", department, departmentId: "", departmentSplits: [] }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Single", department, departmentId: "", departmentSplits: [] }, departmentNames);
 }
 
 function updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames = defaultDepartments) {
   const splits = normalizeDepartmentSplitRows(item.departmentSplits, { departmentNames, fallbackDepartment: item.department || departmentNames[0] || "Kitchen Made", combineDuplicates: false }).map((split, index) => (
     index === splitIndex ? { ...split, [field]: field === "percentage" ? numberValue(value, 0) : value } : split
   ));
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function addInvoiceLineSplit(item, departmentNames = defaultDepartments) {
@@ -1667,7 +1713,7 @@ function addInvoiceLineSplit(item, departmentNames = defaultDepartments) {
     : [{ id: uid(), department: item.department || departmentNames[0] || "Kitchen Made", percentage: 100 }];
   const nextDepartment = departmentNames.find((department) => !existingSplits.some((split) => split.department === department)) || departmentNames[0] || "Kitchen Made";
   const splits = [...existingSplits, { id: uid(), department: nextDepartment, percentage: 0 }];
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepartments, fallbackDepartment = "Kitchen Made") {
@@ -1676,7 +1722,7 @@ function removeInvoiceLineSplit(item, splitIndex, departmentNames = defaultDepar
     const department = splits[0]?.department || item.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
     return setInvoiceLineDepartmentMode({ ...item, department }, "Single", departmentNames, department);
   }
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", departmentMode: "Split", departmentSplits: splits }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Split", departmentSplits: splits }, departmentNames);
 }
 
 function emptyInvoiceLine(supplier = "", department = "Kitchen Made") {
@@ -1720,95 +1766,17 @@ function departmentMatches(rowDepartment, selectedDepartment) {
   return selected === "All departments" || canonicalDepartmentName(rowDepartment, "") === selected;
 }
 
-function compactPlural(token) {
-  if (token.endsWith("ies") && token.length > 4) return `${token.slice(0, -3)}y`;
-  if (token.endsWith("s") && !token.endsWith("ss") && token.length > 3) return token.slice(0, -1);
-  return token;
-}
-
-function productTokens(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(compactPlural);
-}
-
-function orderedProductKey(value = "") {
-  return productTokens(value).join("");
-}
-
-function unorderedProductKey(value = "") {
-  return [...productTokens(value)].sort().join("");
-}
-
-function productAliases(product) {
-  return [product.name, ...(product.aliases || [])].filter(Boolean);
-}
-
-function productSimilarity(a, b) {
-  const aTokens = new Set(productTokens(a));
-  const bTokens = new Set(productTokens(b));
-  if (!aTokens.size || !bTokens.size) return 0;
-  const intersection = [...aTokens].filter((token) => bTokens.has(token)).length;
-  const union = new Set([...aTokens, ...bTokens]).size;
-  const jaccard = intersection / union;
-  const orderedMatch = orderedProductKey(a).includes(orderedProductKey(b)) || orderedProductKey(b).includes(orderedProductKey(a));
-  return Math.max(jaccard, orderedMatch ? 0.72 : 0);
-}
-
 function matchProduct(productName, products) {
-  const lower = productName.trim().toLowerCase();
-  if (!lower) return null;
-
-  for (const product of products) {
-    if (productAliases(product).some((alias) => alias.toLowerCase() === lower)) {
-      return { product, confidence: 1, method: "Exact match" };
-    }
-  }
-
-  const ordered = orderedProductKey(productName);
-  const unordered = unorderedProductKey(productName);
-  for (const product of products) {
-    if (productAliases(product).some((alias) => orderedProductKey(alias) === ordered || unorderedProductKey(alias) === unordered)) {
-      return { product, confidence: 0.94, method: "Normalized match" };
-    }
-  }
-
-  let best = null;
-  products.forEach((product) => {
-    productAliases(product).forEach((alias) => {
-      const score = productSimilarity(productName, alias);
-      if (!best || score > best.score) best = { product, score };
-    });
-  });
-
-  if (!best || best.score < 0.45) return null;
-  return { product: best.product, confidence: Math.min(0.89, 0.55 + best.score * 0.42), method: "Similarity match" };
+  const result = matchProductName(productName, products, { strongThreshold: 0.45, suggestThreshold: 0.45 });
+  if (!result.match || result.matchType === PRODUCT_NAME_MATCH_TYPES.AMBIGUOUS) return null;
+  const method = result.matchType === PRODUCT_NAME_MATCH_TYPES.FUZZY
+    ? "Similarity match"
+    : result.matchType === PRODUCT_NAME_MATCH_TYPES.ALIAS ? "Alias match" : "Exact match";
+  return { product: result.match, confidence: result.confidence, method };
 }
 
 function productAutocomplete(products, query, limit = 8) {
-  const term = String(query || "").trim().toLowerCase();
-  if (!term) return [];
-  return products
-    .map((product) => {
-      const scores = productAliases(product).map((alias) => {
-        const lowerAlias = alias.toLowerCase();
-        if (lowerAlias === term) return 100;
-        if (lowerAlias.startsWith(term)) return 90;
-        if (lowerAlias.includes(term)) return 75;
-        const similarity = productSimilarity(query, alias);
-        return similarity >= 0.45 ? Math.round(similarity * 70) : 0;
-      });
-      return { product, score: Math.max(...scores, 0) };
-    })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score || a.product.name.localeCompare(b.product.name))
-    .slice(0, limit)
-    .map((entry) => entry.product);
+  return rankProductCandidates(query, products, { limit, minimumScore: 0.28 }).map((entry) => entry.product);
 }
 
 function productOptionLabel(product) {
@@ -1816,44 +1784,8 @@ function productOptionLabel(product) {
 }
 
 function productForEnteredName(products, value) {
-  const key = String(value || "").trim().toLowerCase();
-  if (!key) return null;
-  return products.find((product) => productAliases(product).some((alias) => alias.toLowerCase() === key)) || null;
-}
-
-function departmentAssignmentForResolvedLine({
-  line = {},
-  product = {},
-  match = {},
-  departmentNames = defaultDepartments,
-  fallbackDepartment = "Kitchen Made",
-} = {}) {
-  const options = { departmentNames, fallbackDepartment };
-  if (line.allocationSource === "user_selected") {
-    return departmentAssignmentForLine(line, options);
-  }
-
-  if (validDepartmentSplitRows(match.departmentSplits, options)) {
-    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: match.departmentSplits }, options);
-  }
-
-  const learnedDepartment = match.department || match.departmentName || match.destination || "";
-  if (learnedDepartment) {
-    return departmentAssignmentForLine({ ...line, department: learnedDepartment, departmentId: match.departmentId || match.department_id || "", departmentMode: "Single", departmentSplits: [] }, options);
-  }
-
-  if (validDepartmentSplitRows(product.departmentSplits, options)) {
-    return departmentAssignmentForLine({ ...line, departmentMode: "Split", departmentSplits: product.departmentSplits }, options);
-  }
-
-  const productDepartment = product.department || product.departmentName || product.defaultDepartment || "";
-  return departmentAssignmentForLine({
-    ...line,
-    department: productDepartment || line.department || fallbackDepartment,
-    departmentId: product.departmentId || product.department_id || line.departmentId || "",
-    departmentMode: "Single",
-    departmentSplits: [],
-  }, options);
+  const result = matchProductName(value, products, { strongThreshold: 1, suggestThreshold: 1, autoSelectFuzzy: false });
+  return [PRODUCT_NAME_MATCH_TYPES.EXACT_NAME, PRODUCT_NAME_MATCH_TYPES.ALIAS].includes(result.matchType) ? result.match : null;
 }
 
 function productMatchSourceText(source = "") {
@@ -1921,13 +1853,43 @@ function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.
   return labels[reason] || reason.replace(/_/g, " ");
 }
 
+function InvoiceFinancialSummary({ invoice = {}, currency = "GBP" }) {
+  const reconciliation = invoice.reconciliation;
+  if (!reconciliation) return null;
+  const hasPrintedSummary = reconciliation.printedSubtotal !== null
+    || reconciliation.printedVat !== null
+    || reconciliation.printedTotal !== null
+    || reconciliation.adjustments.length > 0;
+  if (!hasPrintedSummary && !reconciliation.lineSubtotal) return null;
+
+  return (
+    <section className="invoice-financial-summary" aria-label="Invoice summary">
+      <div className="invoice-financial-summary-head">
+        <div><span>Invoice summary</span><strong>{invoice.documentNumber || invoice.invoiceNumber || "Current document"}</strong></div>
+        {reconciliation.printedTotal !== null && <strong>{moneyForCurrency(reconciliation.printedTotal, currency)}</strong>}
+      </div>
+      <div className="invoice-financial-summary-rows">
+        <div><span>{reconciliation.printedSubtotal !== null ? "Products / line subtotal" : "Extracted line total"}</span><strong>{moneyForCurrency(reconciliation.lineSubtotal, currency)}</strong></div>
+        {reconciliation.adjustments.map((adjustment) => (
+          <div key={adjustment.id}><span>{adjustment.description}</span><strong>{moneyForCurrency(adjustment.amount, currency)}</strong></div>
+        ))}
+        {reconciliation.printedVat !== null && <div><span>VAT</span><strong>{moneyForCurrency(reconciliation.vatTotal, currency)}</strong></div>}
+        <div className="invoice-financial-total">
+          <span>{reconciliation.printedTotal !== null ? "Invoice total" : "Calculated total"}</span>
+          <strong>{moneyForCurrency(reconciliation.printedTotal ?? reconciliation.calculatedTotal, currency)}</strong>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function recipeAutocomplete(recipes, query, limit = 8) {
   const term = String(query || "").trim().toLowerCase();
   if (!term) return [];
   return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
 }
 
-function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "", departmentNames = defaultDepartments } = {}) {
+function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "", locationId = "", departmentNames = defaultDepartments } = {}) {
   if (isCreateNewProductResolution(line)) {
     return lineWithCreateNewProductResolution(line);
   }
@@ -2010,6 +1972,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
   }
   const match = matchInvoiceLineToExistingProduct({
     organisationId,
+    locationId,
     supplierId: line.supplierId || "",
     supplierName: line.supplier || "",
     supplierProductCode: line.supplierProductCode || "",
@@ -2722,6 +2685,9 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       supplier: item.supplier,
       price: invoiceUnitCost,
       packSize: item.packSize,
+      unitOfMeasure: item.unitOfMeasure || item.unit || "",
+      currency: invoiceContext.currency || "GBP",
+      vatBasis: item.vatBasis ?? item.vat ?? null,
       normalizedCost: supplierFormat.normalizedCost,
       normalizedUnit: supplierFormat.baseUnit,
       conversionReviewRequired: supplierFormat.conversionReviewRequired,
@@ -2733,6 +2699,9 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       supplier: item.supplier,
       price: invoiceUnitCost,
       packSize: item.packSize,
+      unitOfMeasure: item.unitOfMeasure || item.unit || "",
+      currency: invoiceContext.currency || "GBP",
+      vatBasis: item.vatBasis ?? item.vat ?? null,
       normalizedCost: supplierFormat.normalizedCost,
       normalizedUnit: supplierFormat.baseUnit,
       conversionReviewRequired: supplierFormat.conversionReviewRequired,
@@ -4677,6 +4646,61 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     }
   };
 
+  const withRelationalLearning = async (snapshot) => {
+    if (!cloudEnabled) return snapshot;
+    try {
+      const relationalMappings = await loadRelationalSupplierProductMappings(supabase, {
+        companyId: cloudScope.companyId,
+        locationId: cloudScope.locationId || "",
+        suppliers: snapshot.suppliers,
+        products: snapshot.products,
+        departments: snapshot.departmentSettings,
+      });
+      invoiceLearningDebug("relational-mappings-loaded", { mappingCount: relationalMappings.length });
+      return {
+        ...snapshot,
+        supplierProductMappings: mergeRelationalSupplierProductMappings(snapshot.supplierProductMappings || [], relationalMappings),
+      };
+    } catch (error) {
+      invoiceLearningDebug("relational-mappings-load-failed", { message: error.message || "Unknown relational learning error" });
+      return snapshot;
+    }
+  };
+
+  const persistConfirmedLearning = async (learnedMappings = []) => {
+    if (!cloudEnabled || !learnedMappings.length) return { persisted: [], skipped: [] };
+    try {
+      const result = await persistRelationalSupplierProductMappings(supabase, learnedMappings, {
+        companyId: cloudScope.companyId,
+        locationId: cloudScope.locationId || "",
+      });
+      if (result.persisted.length) {
+        const relationalIds = new Map(result.persisted.map((entry) => [entry.mappingId, entry.relationalId]));
+        setSupplierProductMappings((current) => current.map((mapping) => (
+          relationalIds.has(mapping.id) ? { ...mapping, relationalId: relationalIds.get(mapping.id), persistenceSource: "relational+snapshot" } : mapping
+        )));
+      }
+      invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
+      return result;
+    } catch (error) {
+      invoiceLearningDebug("relational-mappings-save-failed", { message: error.message || "Unknown relational learning error" });
+      return { persisted: [], skipped: learnedMappings.map((mapping) => ({ mappingId: mapping.id, reason: error.message || "Relational save failed" })) };
+    }
+  };
+
+  const forgetPersistentLearning = async (mapping = {}) => {
+    if (!cloudEnabled) return { persisted: false, skipped: true };
+    try {
+      return await forgetRelationalSupplierProductMapping(supabase, mapping, {
+        companyId: cloudScope.companyId,
+        locationId: cloudScope.locationId || "",
+      });
+    } catch (error) {
+      invoiceLearningDebug("relational-mapping-forget-failed", { mappingId: mapping.id || "", message: error.message || "Unknown relational learning error" });
+      return { persisted: false, skipped: false, error: error.message || "Relational forget failed" };
+    }
+  };
+
   const migrateLocalDataToCloud = async () => {
     if (!cloudEnabled) return;
     const snapshot = cloudSnapshotFromStorage(readMarginFlowLocalStorage());
@@ -4724,13 +4748,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           const merged = hasLocalMarginFlowData
             ? mergeMarginFlowStorage(cloudStorage, localStorageData, false).nextStorage
             : cloudStorage;
-          const nextSnapshot = cloudSnapshotFromStorage(merged);
+          const nextSnapshot = await withRelationalLearning(cloudSnapshotFromStorage(merged));
           applyCloudSnapshot(nextSnapshot);
           if (hasLocalMarginFlowData) await saveCloudState(cloudScope, nextSnapshot, true);
           if (cancelled) return;
           setCloudStatus("synced");
         } else {
-          const firstSnapshot = hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot;
+          const firstSnapshot = await withRelationalLearning(hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot);
           applyCloudSnapshot(firstSnapshot);
           await saveCloudState(cloudScope, firstSnapshot, hasLocalMarginFlowData);
           if (cancelled) return;
@@ -4802,7 +4826,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     return () => window.removeEventListener("popstate", syncPathname);
   }, []);
 
-  const approveInvoice = () => {
+  const approveInvoice = async () => {
     if (!userCanAction(currentUser, "invoices", "approve")) return;
     if (!draft.items.length) return;
     if (invoiceApprovalRef.current) return;
@@ -4839,6 +4863,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
           vatTotal: draft.vatTotal,
           additionalCharges: draft.additionalCharges,
+          adjustments: draft.adjustments || [],
           creditReason: draft.creditReason,
           credit_reason: draft.creditReason,
           inventoryEffect: draft.inventoryEffect,
@@ -4916,6 +4941,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         discountPercent: numberValue(draft.discountPercent, 0),
         additionalCharges: Math.abs(numberValue(draft.additionalCharges, 0)),
         additionalChargesDescription: draft.additionalChargesDescription || (numberValue(draft.inferredAdditionalCharges, 0) ? "Inferred non-product charge" : ""),
+        adjustments: draft.adjustments || [],
         sourceInvoiceTotal: numberValue(draft.invoiceTotal ?? draft.sourceInvoiceTotal, 0),
         sourceInvoiceSubtotal: numberValue(draft.invoiceSubtotal ?? draft.sourceInvoiceSubtotal, 0),
         vatTotal: Math.abs(numberValue(draft.vatTotal, 0)),
@@ -4954,8 +4980,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         ];
         return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, invoice.id), invoice.items, invoice.date, invoice);
       });
-      setSupplierProductMappings((current) => learnSupplierProductMappings({
-        mappings: current,
+      const learningResult = learnSupplierProductMappings({
+        mappings: supplierProductMappings,
         invoice,
         products: productsForLearning,
         companyId: cloudScope.companyId,
@@ -4963,8 +4989,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         supplierId: supplierRecord?.id || "",
         supplierName: supplier,
         departments: departmentSettings,
-      }).mappings);
+        storageTarget: cloudEnabled ? "relational+snapshot" : "snapshot",
+      });
+      setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
+      await persistConfirmedLearning(learningResult.learned);
       setDraft(emptyInvoiceDraft());
     } finally {
       invoiceApprovalRef.current = false;
@@ -5127,6 +5156,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setProducts={setProducts}
             departmentNames={allowedDepartmentNames}
             approveInvoice={approveInvoice}
+            persistInvoiceLearning={persistConfirmedLearning}
+            forgetPersistentLearning={forgetPersistentLearning}
             permissions={permissionsByPage.invoices}
             requestDelete={requestDelete}
             setCreditNotes={setCreditNotes}
@@ -5180,6 +5211,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setProducts={setProducts}
             setStocktakes={setStocktakes}
             stocktakes={stocktakes}
+            suppliers={suppliers}
           />
         )}
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
@@ -5735,6 +5767,8 @@ function Invoices({
   products,
   setProducts,
   approveInvoice,
+  persistInvoiceLearning = async () => ({ persisted: [], skipped: [] }),
+  forgetPersistentLearning = async () => ({ persisted: false, skipped: true }),
   setCreditNotes,
   setInvoices,
 }) {
@@ -5745,6 +5779,7 @@ function Invoices({
   const [manualMode, setManualMode] = useState("Simple Mode");
   const [approvedDocumentFilter, setApprovedDocumentFilter] = useState("All");
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
+  const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
@@ -5800,6 +5835,7 @@ function Invoices({
       invoiceTotal: draft.invoiceTotal ?? draft.sourceInvoiceTotal,
       vatTotal: draft.vatTotal,
       additionalCharges: draft.additionalCharges,
+      adjustments: draft.adjustments || [],
       creditReason: draft.creditReason,
       credit_reason: draft.creditReason,
       inventoryEffect: draft.inventoryEffect,
@@ -5807,8 +5843,11 @@ function Invoices({
       invoiceReviewReasons: draft.invoiceReviewReasons || [],
     },
     lines: draft.items,
-  }), [draft.additionalCharges, draft.creditReason, draft.date, draftDocumentNumber, draftDocumentType, draft.inventoryEffect, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal]);
+    historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
+  }), [draft.additionalCharges, draft.adjustments, draft.creditReason, draft.date, draftDocumentNumber, draftDocumentType, draft.inventoryEffect, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal, products]);
   const draftHasBlockingReview = invoiceHasBlockingReview(draftValidationState);
+  const blockingReviewIssues = getBlockingInvoiceIssues(draftValidationState);
+  const warningReviewIssues = getWarningInvoiceIssues(draftValidationState);
 
   const resetUploadDraft = () => {
     setDraft(emptyInvoiceDraft());
@@ -5967,6 +6006,7 @@ function Invoices({
       const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
         mapping.active !== false
         && (!companyId || !mapping.companyId || mapping.companyId === companyId)
+        && (!locationId || !mapping.locationId || mapping.locationId === locationId)
         && (supplierRecord?.id && mapping.supplierId
           ? mapping.supplierId === supplierRecord.id
           : sameSupplierIdentity(mapping.supplierName || mapping.supplier || "", supplier))
@@ -5999,6 +6039,7 @@ function Invoices({
             unitOfMeasure: line.unitOfMeasure || line.unit || "",
             supplier,
             supplierId: supplierRecord?.id || "",
+            currency: payload.currency || financialSettings.currency || "GBP",
             departmentId: line.departmentId || "",
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
             departmentMode: line.departmentMode || (/^split$/i.test(line.allocationMode || "") ? "Split" : "Single"),
@@ -6026,7 +6067,7 @@ function Invoices({
           products,
           aiSettings,
           supplierScopedMappings,
-          { organisationId: companyId, departmentNames }
+          { organisationId: companyId, locationId, departmentNames }
         );
       });
       const validated = validateInvoiceExtraction({
@@ -6043,6 +6084,7 @@ function Invoices({
           vatTotal: payload.vatTotal ?? payload.vat_total,
           additionalCharges: payload.additionalCharges ?? payload.handlingCharge ?? payload.deliveryCharge ?? 0,
           additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || "",
+          adjustments: payload.adjustments || [],
           creditReason,
           credit_reason: creditReason,
           inventoryEffect,
@@ -6087,6 +6129,8 @@ function Invoices({
         ],
         additionalCharges: validated.additionalCharges || 0,
         additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || (validated.inferredAdditionalCharges ? "Inferred non-product charge" : ""),
+        adjustments: validated.adjustments || payload.adjustments || [],
+        discountAmount: Math.abs(numberValue(validated.reconciliation?.negativeAdjustmentTotal, 0)),
         inferredAdditionalCharges: validated.inferredAdditionalCharges || 0,
         invoiceNeedsReview: validated.invoiceNeedsReview,
         invoiceHasBlockingReview: validated.invoiceHasBlockingReview,
@@ -6107,7 +6151,7 @@ function Invoices({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
         return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
       }),
     }));
@@ -6160,6 +6204,7 @@ function Invoices({
         return product
           ? {
             ...lineWithExistingProductResolution(item, product),
+            forgetLearnedRule: false,
             suggestedProductId: "",
             suggestedProductName: "",
             suggestedProducts: [],
@@ -6179,6 +6224,7 @@ function Invoices({
         const department = item.department || product.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
         return normalizeInvoiceLineForEditor({
           ...lineWithExistingProductResolution(item, product),
+          forgetLearnedRule: false,
           packSize: item.packSize || product.packSize || "",
           supplier: item.supplier || product.supplier || current.supplier,
           department,
@@ -6231,9 +6277,21 @@ function Invoices({
     }));
   };
 
-  const forgetLearnedRuleForDraftLine = (id) => {
+  const forgetLearnedRuleForDraftLine = async (id) => {
     const line = draft.items.find((item) => item.id === id);
     if (!line?.learnedMappingId) return;
+    const mapping = supplierProductMappings.find((candidate) => candidate.id === line.learnedMappingId || candidate.relationalId === line.learnedMappingId) || {
+      id: line.learnedMappingId,
+      relationalId: line.learnedMappingId,
+      companyId,
+      locationId,
+      supplierId: line.supplierId || canonicalSupplierForName(suppliers, line.supplier || draft.supplier)?.id || "",
+      supplierName: line.supplier || draft.supplier || "",
+      supplierProductCode: line.supplierProductCode || "",
+      supplierDescription: line.rawDescription || line.productName || "",
+      unitOfMeasure: line.unitOfMeasure || line.unit || "",
+      packSize: line.packSize || "",
+    };
     setSupplierProductMappings((current) => deactivateSupplierProductMapping(current, line.learnedMappingId));
     setDraft((current) => ({
       ...current,
@@ -6241,13 +6299,18 @@ function Invoices({
         ...item,
         learnedMappingId: "",
         allocationSource: "",
+        forgetLearnedRule: true,
         productResolution: PRODUCT_RESOLUTION_MODES.MANUAL_MATCH,
         productMatchSource: "manual_selection",
         productMatchOverridden: true,
         matchStatus: "Learned rule disabled for future invoices",
       } : item),
-      status: "Learned rule disabled. Save the invoice to keep your corrected choice.",
+      status: "Learned rule disabled for future invoices. Choose a new allocation and confirm to teach a replacement.",
     }));
+    const result = await forgetPersistentLearning(mapping);
+    if (result.error) {
+      setDraft((current) => ({ ...current, status: "Learned rule disabled in this company snapshot. Relational learning storage could not be reached." }));
+    }
   };
 
   const openManualInvoice = () => {
@@ -6304,7 +6367,7 @@ function Invoices({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
         return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
       }),
     }));
@@ -6349,7 +6412,25 @@ function Invoices({
     setManualDraft((current) => ({ ...current, items: current.items.filter((item) => item.id !== id) }));
   };
 
-  const saveManualInvoice = () => {
+  const learnFromCommittedInvoice = async (invoice, learningProducts = products) => {
+    const supplierRecord = canonicalSupplierForName(suppliers, invoice.supplier || invoice.items?.[0]?.supplier);
+    const learningResult = learnSupplierProductMappings({
+      mappings: supplierProductMappings,
+      invoice,
+      products: learningProducts,
+      companyId,
+      locationId,
+      supplierId: supplierRecord?.id || "",
+      supplierName: supplierRecord?.name || invoice.supplier || "",
+      departments: departmentSettings,
+      storageTarget: companyId ? "relational+snapshot" : "snapshot",
+    });
+    setSupplierProductMappings(learningResult.mappings);
+    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
+    await persistInvoiceLearning(learningResult.learned);
+  };
+
+  const saveManualInvoice = async () => {
     if (!permissions.canAdd && !permissions.canApprove) return;
     const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
     const supplier = supplierRecord?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
@@ -6430,17 +6511,7 @@ function Invoices({
     setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, date, invoice));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({
-      mappings: current,
-      invoice,
-      products,
-      companyId,
-      locationId,
-      supplierId: supplierRecord?.id || "",
-      supplierName: supplier,
-      departments: departmentSettings,
-    }).mappings);
-    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
+    await learnFromCommittedInvoice(invoice);
     setManualOpen(false);
   };
 
@@ -6485,7 +6556,7 @@ function Invoices({
       ...current,
       items: (current.items || []).map((item) => {
         if (item.id !== id) return item;
-        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId });
+        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
         return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
       }),
     }));
@@ -6530,7 +6601,7 @@ function Invoices({
     }));
   };
 
-  const saveEditInvoice = () => {
+  const saveEditInvoice = async () => {
     if (!permissions.canEdit) return;
     if (!editDraft) return;
     const supplierRecord = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier);
@@ -6569,17 +6640,7 @@ function Invoices({
     setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
     setSuppliers((current) => ensureSupplierList(current, supplier));
     setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
-    setSupplierProductMappings((current) => learnSupplierProductMappings({
-      mappings: current,
-      invoice: cleaned,
-      products,
-      companyId,
-      locationId,
-      supplierId: supplierRecord?.id || "",
-      supplierName: supplier,
-      departments: departmentSettings,
-    }).mappings);
-    setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: cleaned }));
+    await learnFromCommittedInvoice(cleaned);
     setEditDraft(null);
   };
 
@@ -6659,20 +6720,23 @@ function Invoices({
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
-        {draftValidationState.invoiceReviewReasons?.length > 0 && (
-          <div className={`invoice-status ${draftValidationState.invoiceHasBlockingReview ? "error" : "warn"}`}>
-            {draftValidationState.invoiceReviewReasons.map((reason) => reviewReasonText(reason, draftDocumentType)).join(" ")}
+        <InvoiceFinancialSummary invoice={{ ...draftValidationState, documentNumber: draftDocumentNumber }} currency={draft.currency || financialSettings.currency || "GBP"} />
+        {blockingReviewIssues.length > 0 && (
+          <div className="invoice-status error review-issue-list">
+            <strong>Required corrections</strong>
+            {[...new Set(blockingReviewIssues.map((issue) => reviewReasonText(issue.reason, draftDocumentType)))].map((message) => <span key={message}>{message}</span>)}
           </div>
         )}
-        {numberValue(draft.additionalCharges, 0) !== 0 && (
-          <div className="invoice-status info">
-            Non-product charges included: {money(draft.additionalCharges)}
+        {warningReviewIssues.length > 0 && (
+          <div className="invoice-status warn review-issue-list">
+            <strong>Warnings</strong>
+            {[...new Set(warningReviewIssues.map((issue) => reviewReasonText(issue.reason, draftDocumentType)))].map((message) => <span key={message}>{message}</span>)}
           </div>
         )}
         <div className="button-row left">
           {permissions.canImport && <button disabled={isReading} onClick={readInvoice} type="button"><Sparkles size={16} />Read Document</button>}
           {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button"><Plus size={16} />Add Manual Document</button>}
-          {permissions.canApprove && <button disabled={!draft.items.length || isReading || invoiceApprovalBusy || draftHasBlockingReview} onClick={approveInvoice} type="button"><Save size={16} />{invoiceApprovalBusy ? confirmingLabelForDocument(draftDocumentType) : confirmationLabelForDocument(draftDocumentType)}</button>}
+          {permissions.canApprove && <button disabled={!draft.items.length || isReading || invoiceApprovalBusy || draftHasBlockingReview} onClick={() => warningReviewIssues.length ? setWarningConfirmationOpen(true) : approveInvoice()} type="button"><Save size={16} />{invoiceApprovalBusy ? confirmingLabelForDocument(draftDocumentType) : confirmationLabelForDocument(draftDocumentType)}</button>}
           {hasUploadDraft && (
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
@@ -6728,6 +6792,20 @@ function Invoices({
           )}
         />
       </Panel>
+
+      <AppModal
+        title={`Confirm ${purchasingDocumentNoun(draftDocumentType)} with warnings?`}
+        open={warningConfirmationOpen}
+        onClose={() => setWarningConfirmationOpen(false)}
+        footer={(
+          <>
+            <button className="ghost" onClick={() => setWarningConfirmationOpen(false)} type="button">Cancel</button>
+            <button onClick={() => { setWarningConfirmationOpen(false); approveInvoice(); }} type="button"><Save size={16} />{confirmationLabelForDocument(draftDocumentType)}</button>
+          </>
+        )}
+      >
+        <p className="modal-copy">{warningReviewIssues.length} warning{warningReviewIssues.length === 1 ? "" : "s"} will remain on this document. These warnings do not necessarily mean the invoice is incorrect.</p>
+      </AppModal>
 
       <AppModal
         title="Cancel upload?"
@@ -7479,39 +7557,11 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
   const rows = useMemo(() => buildProductRows(products), [products]);
 
   const productPayload = (row) => {
-    const aliases = String(row.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
-    const unitCost = numberValue(row.unitCost);
-    const supplier = row.supplier || visibleSuppliers[0]?.name || "";
-    const conversion = normalisedCostForPrice(unitCost, row.packSize, row);
-    const supplierFormat = {
-      supplier,
-      packSize: row.packSize || "",
-      purchaseUnitCost: unitCost,
-      quantity: numberValue(row.quantity, 1),
+    return productRecordFromInput(row, {
+      defaultSupplier: visibleSuppliers[0]?.name || "",
+      defaultDepartment: departmentNames[0] || "Kitchen Made",
       date: today(),
-      baseQuantity: conversion.baseQuantity,
-      baseUnit: conversion.baseUnit,
-      normalizedCost: conversion.normalizedCost,
-      conversionConfidence: conversion.confidence,
-      conversionReviewRequired: conversion.reviewRequired,
-      conversionReason: conversion.reason,
-    };
-    return {
-      ...row,
-      supplier,
-      aliases,
-      unitCost,
-      quantity: numberValue(row.quantity, 1),
-      baseQuantity: row.baseQuantity || conversion.baseQuantity,
-      baseUnit: row.baseUnit || conversion.baseUnit,
-      normalizedCost: conversion.normalizedCost,
-      normalizedUnit: conversion.baseUnit,
-      conversionReviewRequired: conversion.reviewRequired,
-      conversionReason: conversion.reason,
-      supplierFormats: [supplierFormat],
-      supplierPrices: [{ supplier, price: unitCost, packSize: row.packSize || "", date: today(), normalizedCost: conversion.normalizedCost, normalizedUnit: conversion.baseUnit }],
-      priceHistory: [{ date: today(), supplier, price: unitCost, packSize: row.packSize || "", normalizedCost: conversion.normalizedCost, normalizedUnit: conversion.baseUnit }],
-    };
+    });
   };
 
   const saveProduct = () => {
@@ -8105,75 +8155,41 @@ function BulkSuppliersTable({ rows, setRows, updateRow }) {
   );
 }
 
-function stocktakeBlankLine(department, product = {}) {
-  const quantity = numberValue(product.quantity, 1) || 1;
-  const unitCost = numberValue(product.unitCost);
-  return {
-    id: uid(),
-    productName: product.name || "",
-    matchedProductId: product.id || "",
-    supplier: product.supplier || "",
-    packSize: product.packSize || "",
-    department: product.department || department,
-    quantity,
-    unitCost,
-    stockValue: quantity * unitCost,
-    matchStatus: product.id ? "Matched" : "Manual entry",
-  };
-}
-
 function stocktakeProductsCsv(products = []) {
-  const rows = [["Product", "Quantity", "Unit Cost", "Supplier", "Pack Size", "Department", "Product ID"]];
-  const productRows = [...products]
-    .filter((product) => product.active !== false)
-    .sort((left, right) => (left.department || "").localeCompare(right.department || "") || (left.name || "").localeCompare(right.name || ""));
-  productRows.forEach((product) => {
-    rows.push([
-      product.name || product.productName || "",
-      "",
-      numberValue(product.unitCost, 0) || "",
-      product.supplier || "",
-      product.packSize || "",
-      product.department || "",
-      product.id || "",
-    ]);
-  });
-  return csvTextFromRows(rows);
+  return csvTextFromRows(stocktakeTemplateRows(products));
 }
 
-function stocktakeProductSuggestions(products = [], query = "") {
-  const activeProducts = products.filter((product) => product.active !== false);
-  const term = String(query || "").trim();
-  if (!term) return activeProducts.slice(0, 80);
-  const suggestions = productAutocomplete(activeProducts, term, 30);
-  const exactProduct = productForEnteredName(activeProducts, term);
-  if (exactProduct && !suggestions.some((product) => product.id === exactProduct.id)) {
-    return [exactProduct, ...suggestions].slice(0, 30);
-  }
-  return suggestions;
-}
-
-function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "GBP", department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes }) {
+function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "GBP", department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes, suppliers = [] }) {
   const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
+  const visibleSuppliers = activeSupplierRows(suppliers);
   const blankModal = (type = "Stocktake") => ({
     type,
     id: "",
+    originalStatus: "",
     department: defaultDepartment,
     date: today(),
-    entryMode: "Product List",
+    entryMode: "Live Count",
     manualValue: 0,
-    lines: [stocktakeBlankLine(defaultDepartment), stocktakeBlankLine(defaultDepartment)],
+    lines: [],
     pendingImport: [],
+    importSummary: null,
     status: "",
     importFileKey: 0,
+    reviewing: false,
   });
   const [modal, setModal] = useState(null);
   const [viewingStocktake, setViewingStocktake] = useState(null);
   const [reportStocktake, setReportStocktake] = useState(null);
+  const [productCreation, setProductCreation] = useState(null);
+  const productIndex = useMemo(() => createStocktakeProductIndex(products, { organisationId: companyScope.companyId || "" }), [companyScope.companyId, products]);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
 
   const downloadStocktakeProductsCsv = () => {
     downloadTextFile(`marginflow-stocktake-products-${today()}.csv`, stocktakeProductsCsv(products), "text/csv;charset=utf-8");
+  };
+
+  const downloadStocktakeProductsExcel = async () => {
+    await downloadStocktakeTemplateExcel(stocktakeTemplateRows(products), `marginflow-stocktake-products-${today()}.xlsx`);
   };
 
   const openModal = (type, stocktake = null) => {
@@ -8183,125 +8199,133 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       setModal(blankModal(type));
       return;
     }
-    const isOpening = numberValue(stocktake.openingStockValue) && !numberValue(stocktake.totalValue);
+    const isOpening = stocktake.stocktakeType === "opening"
+      || Boolean(stocktake.openingLines?.length)
+      || (numberValue(stocktake.openingStockValue) > 0 && !numberValue(stocktake.totalValue));
     setModal({
       ...blankModal(isOpening ? "Opening Stock" : "Stocktake"),
       id: stocktake.id,
+      originalStatus: stocktake.status || "Saved",
       department: stocktake.department,
       date: stocktake.date,
-      entryMode: stocktake.manualOpeningType === "Manual Value" || stocktake.entryMode === "Manual Value" ? "Manual Value" : "Product List",
+      entryMode: stocktake.manualOpeningType === "Manual Value" || stocktake.entryMode === "Manual Value" ? "Manual Value" : "Live Count",
       manualValue: isOpening ? stocktake.openingStockValue : stocktake.totalValue,
       lines: ((isOpening ? stocktake.openingLines : stocktake.lines) || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
       pendingImport: [],
+      importSummary: null,
       status: "",
       importFileKey: 0,
     });
   };
 
-  const updateModalLine = (id, field, value) => {
+  const applyEntries = (entries = []) => setModal((current) => current ? ({ ...current, lines: applyStocktakeEntries(current.lines, entries), reviewing: false }) : current);
+  const removeCount = (productId) => setModal((current) => current ? ({ ...current, lines: current.lines.filter((line) => line.matchedProductId !== productId) }) : current);
+
+  const importStocktakeFile = async (file) => {
+    if (!permissions.canImport || !file || !modal) return;
+    try {
+      const rows = /\.xlsx?$/i.test(file.name)
+        ? await rowsFromStocktakeExcelFile(file)
+        : parseCsvText(await file.text());
+      const summary = parseStocktakeImportRows(rows, products, { department: modal.department, organisationId: companyScope.companyId || "", productIndex });
+      const status = summary.missingCountColumn
+        ? "The import needs a Count column. No stock values were changed."
+        : "";
+      setModal((current) => ({ ...current, pendingImport: summary.reviewRows, importSummary: summary, status, reviewing: false }));
+    } catch (error) {
+      setModal((current) => ({ ...current, pendingImport: [], importSummary: null, status: `Could not read the stocktake file: ${error.message}` }));
+    }
+  };
+
+  const applyPendingImport = () => {
+    if (!modal?.importSummary) return;
+    const entries = confirmedStocktakeImportEntries(modal.pendingImport, products, { department: modal.department });
     setModal((current) => ({
       ...current,
-      lines: current.lines.map((line) => {
-        if (line.id !== id) return line;
-        let updated = { ...line, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-        if (field === "productName") {
-          const product = productForEnteredName(products, value);
-          if (product) {
-            const productLine = stocktakeBlankLine(current.department, product);
-            const quantity = numberValue(line.quantity, productLine.quantity) || productLine.quantity;
-            updated = { ...productLine, id: line.id, quantity, stockValue: quantity * numberValue(productLine.unitCost) };
-          } else {
-            updated = {
-              ...updated,
-              matchedProductId: "",
-              supplier: "",
-              packSize: "",
-              matchStatus: String(value || "").trim() ? "Create product on save" : "Manual entry",
-            };
-          }
-        }
-        updated.stockValue = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        return updated;
-      }),
+      lines: applyStocktakeEntries(current.lines, entries),
+      pendingImport: [],
+      importSummary: null,
+      importFileKey: current.importFileKey + 1,
+      status: `Import complete: ${entries.length} count(s) applied.`,
     }));
   };
 
-  const importStocktakeCsv = async (file) => {
-    if (!permissions.canImport || !file || !modal) return;
-    const rows = parseCsvText(await file.text());
-    const headers = rows[0] || [];
-    const normalizedHeaders = headers.map(normalizeHeader);
-    const hasHeader = normalizedHeaders.some((cell) => ["product", "productname", "name", "quantity", "qty", "unitcost", "productid"].includes(cell));
-    const dataRows = hasHeader ? rows.slice(1) : rows;
-    const productIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Product", "Product Name", "Name"]) : 0;
-    const quantityIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Quantity", "Qty", "Count", "Stock Quantity"]) : 1;
-    const unitCostIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Unit Cost", "UnitCost", "Cost", "Price"]) : 2;
-    const supplierIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Supplier", "Supplier Name"]) : -1;
-    const packSizeIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Pack Size", "Pack", "Size"]) : -1;
-    const productIdIndex = hasHeader ? findHeaderIndexByPriority(headers, ["Product ID", "ProductId", "ID"]) : -1;
-    const cellAt = (cells, index) => (index >= 0 ? cells[index] || "" : "");
-    const imported = dataRows.map((cells) => {
-      const productId = cellAt(cells, productIdIndex);
-      const productName = cellAt(cells, productIndex);
-      const quantity = cellAt(cells, quantityIndex);
-      const unitCost = cellAt(cells, unitCostIndex);
-      const product = products.find((candidate) => candidate.id === productId) || matchProduct(productName, products)?.product;
-      const line = product
-        ? stocktakeBlankLine(modal.department, product)
-        : stocktakeBlankLine(modal.department, {
-          name: productName,
-          quantity: 1,
-          unitCost: numberValue(unitCost),
-          supplier: cellAt(cells, supplierIndex),
-          packSize: cellAt(cells, packSizeIndex),
-        });
-      const nextQuantity = quantity === "" ? line.quantity : numberValue(quantity, line.quantity);
-      const nextUnitCost = unitCost === "" ? line.unitCost : numberValue(unitCost, line.unitCost);
-      return { ...line, quantity: nextQuantity, unitCost: nextUnitCost, stockValue: nextQuantity * nextUnitCost };
-    }).filter((line) => line.productName.trim());
-    setModal((current) => ({ ...current, pendingImport: imported, status: `${imported.length} row(s) ready for review.` }));
-  };
+  const cancelImport = () => setModal((current) => ({ ...current, pendingImport: [], importSummary: null, importFileKey: current.importFileKey + 1, status: "Import cancelled." }));
 
-  const ensureStocktakeProducts = (lines, selectedDepartment, selectedDate) => {
-    let nextProducts = [...products];
-    const savedLines = lines.map((line) => {
-      const match = line.matchedProductId ? nextProducts.find((product) => product.id === line.matchedProductId) : matchProduct(line.productName, nextProducts)?.product;
-      if (match) return { ...line, matchedProductId: match.id, supplier: match.supplier || line.supplier };
-      const product = {
-        id: uid(),
-        name: line.productName,
-        supplier: line.supplier || "Stocktake",
-        packSize: line.packSize || "",
+  const openProductCreation = (seed = {}, source = "live") => {
+    if (!permissions.canAdd) return;
+    setProductCreation({
+      source,
+      rowId: seed.id || "",
+      duplicates: [],
+      form: {
+        name: seed.name || seed.productName || "",
+        supplier: visibleSuppliers[0]?.name || "",
+        unit: seed.unit || "",
+        packSize: seed.packSize || "",
         quantity: 1,
-        unitCost: numberValue(line.unitCost),
-        department: selectedDepartment,
-        aliases: [],
-        supplierPrices: [],
-        priceHistory: [{ date: selectedDate, supplier: "Stocktake", price: numberValue(line.unitCost) }],
-      };
-      nextProducts = [...nextProducts, product];
-      return { ...line, matchedProductId: product.id, supplier: product.supplier, matchStatus: "Created product" };
+        unitCost: 0,
+        department: seed.department || modal?.department || defaultDepartment,
+        aliases: "",
+      },
     });
-    return { nextProducts, savedLines };
   };
 
-  const saveModal = () => {
+  const useProductForCreation = (product) => {
+    if (productCreation?.source === "import" && productCreation.rowId) {
+      setModal((current) => ({ ...current, pendingImport: current.pendingImport.map((row) => row.id === productCreation.rowId ? resolveStocktakeImportReviewRow(row, product) : row) }));
+    }
+    setProductCreation(null);
+  };
+
+  const saveCreatedProduct = (allowDuplicate = false) => {
+    if (!productCreation?.form.name.trim() || !permissions.canAdd) return;
+    const duplicates = findProductDuplicateCandidates(products, productCreation.form, { organisationId: companyScope.companyId || "", threshold: 0.72 });
+    if (duplicates.length && !allowDuplicate) {
+      setProductCreation((current) => ({ ...current, duplicates }));
+      return;
+    }
+    const product = productRecordFromInput(productCreation.form, {
+      id: uid(),
+      defaultSupplier: visibleSuppliers[0]?.name || "",
+      defaultDepartment: modal?.department || defaultDepartment,
+      date: modal?.date || today(),
+    });
+    setProducts((current) => [product, ...current]);
+    if (productCreation.source === "import" && productCreation.rowId) {
+      setModal((current) => ({ ...current, pendingImport: current.pendingImport.map((row) => row.id === productCreation.rowId ? resolveStocktakeImportReviewRow(row, product) : row) }));
+    }
+    setProductCreation(null);
+  };
+
+  const saveModal = (finalise = false) => {
     if (!modal) return;
     if (modal.id ? !permissions.canEdit : !permissions.canAdd) return;
     const isManual = modal.entryMode === "Manual Value";
-    const sourceLines = isManual ? [] : modal.lines.filter((line) => line.productName.trim());
-    const incomplete = sourceLines.some((line) => !line.productName.trim() || !numberValue(line.quantity) || !numberValue(line.unitCost));
-    if (!isManual && (!sourceLines.length || incomplete)) {
-      setModal((current) => ({ ...current, status: "Every row needs product, quantity and unit cost." }));
+    const sourceLines = isManual ? [] : modal.lines.filter((line) => line.matchedProductId);
+    const incomplete = sourceLines.some((line) => {
+      const productExists = products.some((product) => product.id === line.matchedProductId && product.active !== false);
+      const quantityBlank = line.quantity === null || line.quantity === undefined || String(line.quantity).trim() === "";
+      const quantity = Number(line.quantity);
+      const unitCost = Number(line.unitCost);
+      return !productExists || quantityBlank || !Number.isFinite(quantity) || quantity < 0 || !Number.isFinite(unitCost) || unitCost < 0;
+    });
+    if (!isManual && ((finalise && !sourceLines.length) || incomplete)) {
+      setModal((current) => ({ ...current, status: "Every counted row needs an existing product, a zero or positive count, and a valid unit cost." }));
       return;
     }
-    const { nextProducts, savedLines } = ensureStocktakeProducts(sourceLines, modal.department, modal.date);
-    const normalizedLines = savedLines.map((line) => ({ ...line, stockValue: numberValue(line.quantity) * numberValue(line.unitCost) }));
+    const normalizedLines = sourceLines.map((line) => {
+      const product = products.find((candidate) => candidate.id === line.matchedProductId);
+      return { ...line, productName: product?.name || line.productName, stockValue: Number(line.quantity) * Number(line.unitCost) };
+    });
     const value = isManual ? numberValue(modal.manualValue) : normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
     const isOpening = modal.type === "Opening Stock";
+    const existing = stocktakes.find((stocktake) => stocktake.id === modal.id) || {};
     const stocktake = {
+      ...existing,
       id: modal.id || uid(),
       date: modal.date,
+      stocktakeType: isOpening ? "opening" : "closing",
       department: modal.department,
       entryMode: modal.entryMode,
       openingStockMode: "Manual",
@@ -8311,12 +8335,28 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       openingStockValue: isOpening ? value : 0,
       lines: isOpening ? [] : normalizedLines,
       totalValue: isOpening ? 0 : value,
-      status: "Saved",
+      status: finalise || modal.originalStatus === "Saved" ? "Saved" : "In progress",
     };
-    setProducts(nextProducts);
     setStocktakes((current) => modal.id ? current.map((item) => (item.id === modal.id ? stocktake : item)) : [stocktake, ...current]);
     setModal(null);
   };
+
+  const beginFinalReview = () => {
+    if (modal.entryMode === "Manual Value") {
+      saveModal(true);
+      return;
+    }
+    if (!modal.lines.length) {
+      setModal((current) => ({ ...current, status: "Count at least one product before finalising." }));
+      return;
+    }
+    setModal((current) => ({ ...current, reviewing: true, status: "" }));
+  };
+
+  const updateReviewQuantity = (productId, value) => setModal((current) => ({
+    ...current,
+    lines: current.lines.map((line) => line.matchedProductId === productId ? { ...line, quantity: value, stockValue: numberValue(value) * numberValue(line.unitCost) } : line),
+  }));
 
   return (
     <div className="page-grid">
@@ -8324,7 +8364,8 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
         <div className="button-row left">
           {permissions.canAdd && <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
           {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
-          <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />Download Products CSV</button>
+          <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsExcel} type="button"><Download size={16} />Download Products Excel</button>
+          <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />CSV</button>
         </div>
       </Panel>
       <Panel title="Saved stocktakes">
@@ -8335,12 +8376,12 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
             { key: "openingStockValue", label: "Opening stock value", render: (value) => money(value) },
             { key: "totalValue", label: "Closing stock value", render: (value) => money(value) },
             { key: "lines", label: "Lines", render: (lines, row) => (row.openingLines?.length || 0) + (lines?.length || 0) },
-            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value || "Saved"}</Badge> },
+            { key: "status", label: "Status", render: (value) => <Badge tone={value === "In progress" ? "amber" : "green"}>{value || "Saved"}</Badge> },
             { key: "actions", label: "Actions", render: (_, row) => (
               <div className="row-actions">
                 <button className="ghost" onClick={() => setViewingStocktake(row)} type="button"><Eye size={15} />View</button>
                 <button className="ghost" onClick={() => setReportStocktake(row)} type="button"><Download size={15} />Download Report</button>
-                {permissions.canEdit && <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />Edit</button>}
+                {permissions.canEdit && <button className="ghost" onClick={() => openModal("Stocktake", row)} type="button"><Edit3 size={15} />{row.status === "In progress" ? "Continue" : "Edit"}</button>}
                 {permissions.canDelete && <button className="ghost danger" onClick={() => requestDelete({ title: "Delete stocktake", message: "Are you sure you want to delete this stocktake?", onConfirm: () => setStocktakes((current) => current.filter((stocktake) => stocktake.id !== row.id)) })} type="button"><Trash2 size={15} />Delete</button>}
               </div>
             ) },
@@ -8359,71 +8400,67 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
               <label>Department<select value={modal.department} onChange={(event) => setModal({ ...modal, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
               <Field label="Date" type="date" value={modal.date} onChange={(value) => setModal({ ...modal, date: value })} />
             </div>
-            <div className="radio-section">
+            <div className="stocktake-mode-bar">
               <strong>Entry mode</strong>
-              <div className="radio-row">
-                {["Manual Value", "Product List", ...(permissions.canImport ? ["CSV Import"] : [])].map((mode) => <label key={mode}><input checked={modal.entryMode === mode} onChange={() => setModal({ ...modal, entryMode: mode })} type="radio" />{mode}</label>)}
+              <div className="segmented-control" aria-label="Stock Take entry mode">
+                {["Live Count", ...(permissions.canImport ? ["Spreadsheet"] : []), "Manual Value"].map((mode) => <button className={modal.entryMode === mode ? "active" : ""} key={mode} onClick={() => setModal({ ...modal, entryMode: mode, reviewing: false })} type="button">{mode}</button>)}
               </div>
             </div>
-            {modal.entryMode === "Manual Value" ? (
+            {modal.reviewing ? (
+              <div className="stocktake-final-review">
+                <div className="panel-head"><div><h2>Final review</h2><span>{modal.lines.length} products counted</span></div><strong>{money(modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
+                <div className="table-wrap stocktake-review-table"><table>
+                  <thead><tr><th>Product</th><th>Unit</th><th>Count</th><th>Stock value</th><th></th></tr></thead>
+                  <tbody>{modal.lines.map((line) => <tr key={line.matchedProductId || line.id}>
+                    <td data-label="Product"><strong>{line.productName}</strong></td>
+                    <td data-label="Unit">{line.unit || line.packSize || "-"}</td>
+                    <td data-label="Count"><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateReviewQuantity(line.matchedProductId, event.target.value)} /></td>
+                    <td data-label="Stock value">{money(line.stockValue)}</td>
+                    <td><button className="icon danger" title="Remove count" onClick={() => removeCount(line.matchedProductId)} type="button"><Trash2 size={15} /></button></td>
+                  </tr>)}</tbody>
+                </table></div>
+              </div>
+            ) : modal.entryMode === "Manual Value" ? (
               <div className="form-grid six">
                 <Field label={modal.type === "Opening Stock" ? "Opening stock value" : "Stock value"} type="number" value={modal.manualValue} onChange={(value) => setModal({ ...modal, manualValue: value })} />
               </div>
-            ) : (
-              <>
-                {modal.entryMode === "CSV Import" && (
-                  <>
-                    <div className="button-row left tight">
-                      {permissions.canImport && <label className="file-button secondary">CSV Import<input accept=".csv,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeCsv(event.target.files?.[0])} type="file" /></label>}
-                    </div>
-                    {modal.pendingImport.length > 0 && (
-                      <div className="import-review">
-                        <div className="panel-head"><h2>Review import</h2><span>{modal.pendingImport.length} row(s)</span></div>
-                        <DataTable columns={[
-                          { key: "productName", label: "Product" },
-                          { key: "quantity", label: "Quantity" },
-                          { key: "unitCost", label: "Unit cost", render: money },
-                          { key: "stockValue", label: "Stock value", render: money },
-                        ]} rows={modal.pendingImport} />
-                        <div className="button-row left">
-                          {permissions.canImport && <button onClick={() => setModal((current) => ({ ...current, lines: current.pendingImport, pendingImport: [], status: "Import confirmed." }))} type="button"><Save size={16} />Confirm Import</button>}
-                          <button className="ghost danger" onClick={() => setModal((current) => ({ ...current, pendingImport: [], importFileKey: current.importFileKey + 1, status: "Import cancelled." }))} type="button"><X size={16} />Cancel Import</button>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-                <div className="table-wrap bulk-entry-table stocktake-entry-table">
-                  <table>
-                    <thead><tr>{["Product search", "Quantity", "Unit cost", "Stock value", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-                    <tbody>
-                      {modal.lines.map((line) => (
-                        <tr key={line.id}>
-                          <td>
-                            <input list={`stocktake-product-list-${line.id}`} value={line.productName} onChange={(event) => updateModalLine(line.id, "productName", event.target.value)} />
-                            <datalist id={`stocktake-product-list-${line.id}`}>
-                              {stocktakeProductSuggestions(products, line.productName).map((product) => <option key={product.id} label={productOptionLabel(product)} value={product.name} />)}
-                            </datalist>
-                          </td>
-                          <td><input min="0" step="0.01" type="number" value={line.quantity} onChange={(event) => updateModalLine(line.id, "quantity", event.target.value)} /></td>
-                          <td><input min="0" step="0.01" type="number" value={line.unitCost} onChange={(event) => updateModalLine(line.id, "unitCost", event.target.value)} /></td>
-                          <td>{money(line.stockValue)}</td>
-                          <td>{(permissions.canAdd || permissions.canEdit) && <button className="icon danger" onClick={() => setModal((current) => ({ ...current, lines: current.lines.length > 1 ? current.lines.filter((item) => item.id !== line.id) : current.lines }))} type="button"><Trash2 size={15} /></button>}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            ) : modal.entryMode === "Spreadsheet" ? (
+              <div className="stocktake-spreadsheet-entry">
                 <div className="button-row left tight">
-                  {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setModal((current) => ({ ...current, lines: [...current.lines, stocktakeBlankLine(current.department)] }))} type="button"><Plus size={16} />Add Row</button>}
+                  {permissions.canImport && <label className="file-button secondary"><Upload size={16} />Import XLSX or CSV<input accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeFile(event.target.files?.[0])} type="file" /></label>}
                 </div>
-              </>
-            )}
+                {modal.importSummary && <StocktakeImportReview
+                  blankRows={modal.importSummary.blankRows}
+                  canImport={permissions.canImport}
+                  mode={modal.importSummary.mode}
+                  onApply={applyPendingImport}
+                  onCancel={cancelImport}
+                  onCreateProduct={(row) => openProductCreation(row, "import")}
+                  onRowsChange={(pendingImport) => setModal((current) => ({ ...current, pendingImport }))}
+                  products={products}
+                  reviewRows={modal.pendingImport}
+                />}
+                {!modal.importSummary && <div className="stocktake-import-empty"><Upload size={24} /><strong>{modal.lines.length} products counted</strong><span>Counts already applied remain in this Stock Take.</span></div>}
+              </div>
+            ) : <LiveStocktakeEntry
+              canEdit={permissions.canAdd || permissions.canEdit}
+              department={modal.department}
+              departmentNames={departmentNames}
+              lines={modal.lines}
+              onApplyEntries={applyEntries}
+              onCreateProduct={(seed) => openProductCreation(seed, "live")}
+              onRemove={removeCount}
+              productIndex={productIndex}
+              products={products}
+            />}
             {modal.status && <div className="invoice-status info">{modal.status}</div>}
             <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.entryMode === "Manual Value" ? modal.manualValue : modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
             <div className="button-row left">
-              <button className="ghost" onClick={() => setModal(null)} type="button">Cancel</button>
-              {(modal.id ? permissions.canEdit : permissions.canAdd) && <button onClick={saveModal} type="button"><Save size={16} />Save</button>}
+              <button className="ghost" onClick={() => setModal(null)} type="button">Close</button>
+              {(modal.id ? permissions.canEdit : permissions.canAdd) && <button className="ghost" onClick={() => saveModal(false)} type="button"><Save size={16} />{modal.originalStatus === "Saved" ? "Save Changes" : "Save Progress"}</button>}
+              {(modal.id ? permissions.canEdit : permissions.canAdd) && (modal.reviewing
+                ? <><button className="ghost" onClick={() => setModal((current) => ({ ...current, reviewing: false }))} type="button">Return to Counting</button><button onClick={() => saveModal(true)} type="button"><Check size={16} />Finalise</button></>
+                : <button onClick={beginFinalReview} type="button"><Check size={16} />{modal.entryMode === "Manual Value" ? "Save" : "Review & Finalise"}</button>)}
             </div>
           </div>
         </div>
@@ -8452,6 +8489,34 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
         open={Boolean(reportStocktake)}
         stocktake={reportStocktake}
       />
+      {productCreation && (
+        <AppModal
+          title="Create product"
+          open={Boolean(productCreation)}
+          onClose={() => setProductCreation(null)}
+          footer={<>
+            <button className="ghost" onClick={() => setProductCreation(null)} type="button">Cancel</button>
+            {productCreation.duplicates.length
+              ? <button className="danger-button" onClick={() => saveCreatedProduct(true)} type="button">Create Anyway</button>
+              : <button onClick={() => saveCreatedProduct(false)} type="button"><Save size={16} />Save Product</button>}
+          </>}
+        >
+          <div className="modal-stack">
+            <div className="form-grid six">
+              <Field label="Product name" value={productCreation.form.name} onChange={(value) => setProductCreation((current) => ({ ...current, duplicates: [], form: { ...current.form, name: value } }))} />
+              <label>Supplier<select value={productCreation.form.supplier} onChange={(event) => setProductCreation((current) => ({ ...current, form: { ...current.form, supplier: event.target.value } }))}>{visibleSuppliers.map((supplier) => <option key={supplier.id} value={supplier.name}>{supplier.name}</option>)}</select></label>
+              <Field label="Unit" value={productCreation.form.unit} onChange={(value) => setProductCreation((current) => ({ ...current, form: { ...current.form, unit: value } }))} />
+              <Field label="Pack size" value={productCreation.form.packSize} onChange={(value) => setProductCreation((current) => ({ ...current, form: { ...current.form, packSize: value } }))} />
+              <Field label="Unit cost" type="number" value={productCreation.form.unitCost} onChange={(value) => setProductCreation((current) => ({ ...current, form: { ...current.form, unitCost: value } }))} />
+              <label>Department<select value={productCreation.form.department} onChange={(event) => setProductCreation((current) => ({ ...current, form: { ...current.form, department: event.target.value } }))}>{departmentNames.map((name) => <option key={name}>{name}</option>)}</select></label>
+              <Field label="Aliases" value={productCreation.form.aliases} onChange={(value) => setProductCreation((current) => ({ ...current, form: { ...current.form, aliases: value } }))} />
+            </div>
+            {productCreation.duplicates.length > 0 && <div className="duplicate-list">
+              {productCreation.duplicates.map((candidate) => <button className="duplicate-row" key={candidate.product.id} onClick={() => useProductForCreation(candidate.product)} type="button"><span><strong>{candidate.product.name}</strong><small>{Math.round(candidate.score * 100)}% similar{candidate.product.packSize ? ` · ${candidate.product.packSize}` : ""}</small></span><Badge tone="amber">Use existing</Badge></button>)}
+            </div>}
+          </div>
+        </AppModal>
+      )}
     </div>
   );
 }
@@ -8514,17 +8579,12 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
   const saveCreatedProduct = () => {
     if (!permissions.canAdd && !permissions.canEdit) return;
     if (!productForm.name.trim()) return;
-    const aliases = String(productForm.aliases || "").split(",").map((alias) => alias.trim()).filter(Boolean);
-    const unitCost = numberValue(productForm.unitCost);
-    const product = {
-      ...productForm,
+    const product = productRecordFromInput(productForm, {
       id: uid(),
-      aliases,
-      quantity: numberValue(productForm.quantity, 1),
-      unitCost,
-      supplierPrices: [{ supplier: productForm.supplier, price: unitCost, date: today() }],
-      priceHistory: [{ date: today(), supplier: productForm.supplier, price: unitCost }],
-    };
+      defaultSupplier: visibleSuppliers[0]?.name || "",
+      defaultDepartment: departmentNames[0] || "Kitchen Made",
+      date: today(),
+    });
     setProducts((current) => [product, ...current]);
     setForm((current) => ({
       ...current,

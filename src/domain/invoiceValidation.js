@@ -1,4 +1,4 @@
-import { amountsAlmostEqual, numberValue, roundMoney } from "./numberUtils.js";
+import { amountsAlmostEqual, normalizeHeader, numberValue, roundMoney } from "./numberUtils.js";
 import {
   departmentAssignmentForLine,
   departmentAssignmentIsValid,
@@ -26,6 +26,21 @@ const DEFAULT_PRICE_DEVIATION_THRESHOLD = 0.25;
 const DEFAULT_MIN_PRICE_SAMPLES = 3;
 const DEFAULT_SMALL_CHARGE_LIMIT = 10;
 const signSensitiveLineReasons = new Set(["invalid_quantity", "invalid_unit_cost", "invalid_line_total"]);
+const recalculatedLineReasons = new Set([
+  "low_extraction_confidence",
+  "missing_product_name",
+  "invalid_quantity",
+  "invalid_unit_cost",
+  "invalid_line_total",
+  "no_confirmed_product_match",
+  "ambiguous_product_match",
+  "invalid_split",
+  "missing_department",
+  "price_deviation",
+]);
+const recalculatedInvoiceReasons = new Set(["invoice_total_mismatch", "invoice_subtotal_mismatch", "vat_mismatch", "unaccounted_invoice_charge"]);
+const reducingAdjustmentTypes = new Set(["discount", "credit"]);
+const chargeAdjustmentTypes = new Set(["handling", "delivery", "carriage", "shipping", "service_charge", "other"]);
 
 export const REVIEW_REASON_SEVERITY = Object.freeze({
   missing_supplier: "error",
@@ -79,6 +94,26 @@ export function invoiceHasBlockingReview(invoice = {}) {
     || lines.some(invoiceLineHasBlockingReview);
 }
 
+export function getBlockingInvoiceIssues(invoice = {}) {
+  const lines = invoice.lines || invoice.items || [];
+  return [
+    ...(invoice.invoiceReviewReasons || []).map((reason) => ({ reason, scope: "invoice" })),
+    ...lines.flatMap((line) => (line.reviewReasons || []).map((reason) => ({ reason, scope: "line", lineId: line.id || "", productName: line.productName || line.rawDescription || "" }))),
+  ].filter((issue) => reviewReasonSeverity(issue.reason) === "error");
+}
+
+export function getWarningInvoiceIssues(invoice = {}) {
+  const lines = invoice.lines || invoice.items || [];
+  return [
+    ...(invoice.invoiceReviewReasons || []).map((reason) => ({ reason, scope: "invoice" })),
+    ...lines.flatMap((line) => (line.reviewReasons || []).map((reason) => ({ reason, scope: "line", lineId: line.id || "", productName: line.productName || line.rawDescription || "" }))),
+  ].filter((issue) => reviewReasonSeverity(issue.reason) === "warning");
+}
+
+export function canConfirmInvoice(invoice = {}) {
+  return getBlockingInvoiceIssues(invoice).length === 0;
+}
+
 function addReason(reasons, reason) {
   if (reason && !reasons.includes(reason)) reasons.push(reason);
 }
@@ -92,16 +127,73 @@ function lineTotalValue(line = {}, documentType = "invoice") {
   return isCreditNoteDocument(documentType) ? absolutePurchasingAmount(value) : value;
 }
 
-function sumChargeLines(charges = []) {
-  if (!Array.isArray(charges)) return 0;
-  return charges.reduce((sum, charge) => sum + numberValue(charge.amount ?? charge.value ?? charge.total, 0), 0);
+function optionalPurchasingAmount(...values) {
+  const value = values.find((candidate) => candidate !== null && candidate !== undefined && String(candidate).trim() !== "");
+  if (value === undefined) return null;
+  const amount = Number(typeof value === "string" ? value.replace(/,/g, "").replace(/[^0-9.-]/g, "") : value);
+  return Number.isFinite(amount) ? absolutePurchasingAmount(amount) : null;
 }
 
-function explicitAdditionalCharges(invoice = {}) {
-  return roundMoney(
-    numberValue(invoice.additionalCharges ?? invoice.handlingCharge ?? invoice.deliveryCharge ?? invoice.carriageCharge ?? invoice.serviceCharge, 0)
-    + sumChargeLines(invoice.invoiceCharges || invoice.additionalChargeLines || invoice.charges),
-  );
+function adjustmentType(value = "") {
+  const type = String(value || "other").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (type === "service" || type === "servicecharge") return "service_charge";
+  if (type === "rounding_adjustment") return "rounding";
+  return type || "other";
+}
+
+function normalizedAdjustment(entry = {}, index = 0) {
+  const type = adjustmentType(entry.type || entry.category || entry.description);
+  const rawAmount = numberValue(entry.amount ?? entry.value ?? entry.total, 0);
+  const amount = reducingAdjustmentTypes.has(type)
+    ? -Math.abs(rawAmount)
+    : type === "rounding"
+      ? rawAmount
+      : Math.abs(rawAmount);
+  return {
+    id: entry.id || `adjustment-${index}`,
+    type,
+    description: String(entry.description || entry.label || type.replace(/_/g, " ")).trim(),
+    amount: roundMoney(amount),
+    inferred: Boolean(entry.inferred),
+  };
+}
+
+export function normalizeInvoiceAdjustments(invoice = {}) {
+  const structured = invoice.adjustments || invoice.invoiceAdjustments || invoice.invoice_adjustments;
+  if (Array.isArray(structured) && structured.length) {
+    return structured.map(normalizedAdjustment).filter((entry) => entry.amount !== 0);
+  }
+
+  const chargeLines = invoice.invoiceCharges || invoice.additionalChargeLines || invoice.charges;
+  if (Array.isArray(chargeLines) && chargeLines.length) {
+    return chargeLines.map(normalizedAdjustment).filter((entry) => entry.amount !== 0);
+  }
+
+  const legacy = [];
+  const additionalCharges = optionalPurchasingAmount(invoice.additionalCharges);
+  if (additionalCharges) {
+    legacy.push({ type: "other", description: invoice.additionalChargesDescription || "Additional charges", amount: additionalCharges });
+  } else {
+    [
+      ["handling", "Handling", invoice.handlingCharge ?? invoice.handling],
+      ["delivery", "Delivery", invoice.deliveryCharge ?? invoice.delivery],
+      ["carriage", "Carriage", invoice.carriageCharge ?? invoice.carriage],
+      ["shipping", "Shipping", invoice.shippingCharge ?? invoice.shipping],
+      ["service_charge", "Service charge", invoice.serviceCharge ?? invoice.service_charge],
+    ].forEach(([type, description, value]) => {
+      const amount = optionalPurchasingAmount(value);
+      if (amount) legacy.push({ type, description, amount });
+    });
+  }
+  [
+    ["discount", "Discount", invoice.invoiceLevelDiscount ?? invoice.invoice_level_discount],
+    ["credit", "Credit", invoice.invoiceCredit ?? invoice.invoice_credit],
+    ["rounding", "Rounding", invoice.roundingAdjustment ?? invoice.rounding_adjustment],
+  ].forEach(([type, description, value]) => {
+    const amount = optionalPurchasingAmount(value);
+    if (amount) legacy.push({ type, description, amount });
+  });
+  return legacy.map(normalizedAdjustment);
 }
 
 function likelySmallInvoiceCharge(amount = 0, invoiceTotal = 0) {
@@ -113,7 +205,66 @@ function likelySmallInvoiceCharge(amount = 0, invoiceTotal = 0) {
 function totalMatchesAny(expected = 0, candidates = []) {
   return candidates
     .map(roundMoney)
-    .some((candidate) => candidate && amountsAlmostEqual(candidate, expected, Math.max(0.5, Math.abs(expected) * 0.01), 0.01));
+    .some((candidate) => amountsAlmostEqual(candidate, expected, Math.max(0.5, Math.abs(expected) * 0.01), 0.01));
+}
+
+export function reconcileInvoiceTotals(invoice = {}, lines = invoice.lines || invoice.items || []) {
+  const documentType = normalizeDocumentType(invoice.documentType ?? invoice.document_type ?? "invoice");
+  const lineSubtotal = roundMoney(lines.reduce((sum, line) => sum + lineTotalValue(line, documentType), 0));
+  const printedSubtotal = optionalPurchasingAmount(invoice.invoiceSubtotal, invoice.netTotal, invoice.net_total, invoice.subtotal);
+  const printedTotal = optionalPurchasingAmount(invoice.invoiceTotal, invoice.grossTotal, invoice.gross_total, invoice.finalInvoiceTotal, invoice.total_amount);
+  const printedVat = optionalPurchasingAmount(invoice.vatTotal, invoice.taxAmount, invoice.tax_amount, invoice.vat_total);
+  const vatTotal = printedVat ?? 0;
+  let adjustments = normalizeInvoiceAdjustments(invoice);
+  let adjustmentTotal = roundMoney(adjustments.reduce((sum, adjustment) => sum + adjustment.amount, 0));
+  const inferredFromTotal = printedTotal === null ? 0 : roundMoney(printedTotal - vatTotal - lineSubtotal);
+  const inferredFromSubtotal = printedSubtotal === null ? 0 : roundMoney(printedSubtotal - lineSubtotal);
+
+  if (!adjustments.length) {
+    const inferredAmount = likelySmallInvoiceCharge(inferredFromTotal, printedTotal ?? 0)
+      ? inferredFromTotal
+      : (likelySmallInvoiceCharge(inferredFromSubtotal, printedSubtotal ?? 0) ? inferredFromSubtotal : 0);
+    if (inferredAmount) {
+      adjustments = [normalizedAdjustment({ type: inferredAmount < 0 ? "discount" : "other", description: "Inferred invoice adjustment", amount: inferredAmount, inferred: true })];
+      adjustmentTotal = roundMoney(adjustments[0].amount);
+    }
+  }
+
+  const calculatedTotal = roundMoney(lineSubtotal + adjustmentTotal + vatTotal);
+  const subtotalCandidates = [lineSubtotal, lineSubtotal + adjustmentTotal];
+  const totalCandidates = [calculatedTotal];
+  if (printedSubtotal !== null) {
+    totalCandidates.push(printedSubtotal + vatTotal, printedSubtotal + adjustmentTotal + vatTotal);
+  }
+  const subtotalMismatch = printedSubtotal !== null && !totalMatchesAny(printedSubtotal, subtotalCandidates);
+  const totalMismatch = printedTotal !== null && !totalMatchesAny(printedTotal, totalCandidates);
+  const positiveAdjustmentTotal = roundMoney(adjustments
+    .filter((adjustment) => adjustment.amount > 0)
+    .reduce((sum, adjustment) => sum + adjustment.amount, 0));
+  const negativeAdjustmentTotal = roundMoney(adjustments
+    .filter((adjustment) => adjustment.amount < 0)
+    .reduce((sum, adjustment) => sum + adjustment.amount, 0));
+  const chargeTotal = roundMoney(adjustments
+    .filter((adjustment) => chargeAdjustmentTypes.has(adjustment.type) && adjustment.amount > 0)
+    .reduce((sum, adjustment) => sum + adjustment.amount, 0));
+
+  return {
+    lineSubtotal,
+    printedSubtotal,
+    vatTotal,
+    printedVat,
+    printedTotal,
+    adjustments,
+    adjustmentTotal,
+    additionalCharges: positiveAdjustmentTotal,
+    chargeTotal,
+    positiveAdjustmentTotal,
+    negativeAdjustmentTotal,
+    inferredAdditionalCharges: adjustments.some((adjustment) => adjustment.inferred) ? adjustmentTotal : 0,
+    calculatedTotal,
+    subtotalMismatch,
+    totalMismatch,
+  };
 }
 
 function median(values = []) {
@@ -131,11 +282,20 @@ export function priceDeviationForLine(line = {}, historicalPrices = [], {
   const supplier = line.supplier || "";
   const currentPrice = numberValue(line.unitCost, 0);
   if (!productId || !supplier || currentPrice <= 0) return null;
+  const companyId = line.companyId || line.company_id || "";
+  const packSize = line.packSize || line.pack_size || "";
+  const unitOfMeasure = line.unitOfMeasure || line.unit_of_measure || line.unit || "";
+  const currency = line.currency || "";
+  const vatBasis = line.vatBasis ?? line.vat_basis;
 
   const comparable = historicalPrices
     .filter((entry) => (entry.productId || entry.product_id) === productId)
-    .filter((entry) => !supplier || (entry.supplier || entry.supplierName || "") === supplier)
-    .filter((entry) => !line.packSize || !entry.packSize || String(entry.packSize).toLowerCase() === String(line.packSize).toLowerCase())
+    .filter((entry) => !supplier || normalizeHeader(entry.supplier || entry.supplierName || "") === normalizeHeader(supplier))
+    .filter((entry) => !companyId || (entry.companyId || entry.company_id) === companyId)
+    .filter((entry) => !packSize || ((entry.packSize || entry.pack_size) && normalizeHeader(entry.packSize || entry.pack_size) === normalizeHeader(packSize)))
+    .filter((entry) => !unitOfMeasure || ((entry.unitOfMeasure || entry.unit_of_measure || entry.unit) && normalizeHeader(entry.unitOfMeasure || entry.unit_of_measure || entry.unit) === normalizeHeader(unitOfMeasure)))
+    .filter((entry) => !currency || (entry.currency && String(entry.currency).toUpperCase() === String(currency).toUpperCase()))
+    .filter((entry) => vatBasis === undefined || ((entry.vatBasis ?? entry.vat_basis) !== undefined && vatBasis === (entry.vatBasis ?? entry.vat_basis)))
     .map((entry) => numberValue(entry.price ?? entry.unitCost ?? entry.unit_cost, 0))
     .filter((price) => price > 0);
 
@@ -166,9 +326,10 @@ export function validateInvoiceExtraction({
   const validatedLines = lines.map((sourceLine) => {
     const line = normalizePurchasingLineForDocument(sourceLine, signedDocumentType);
     const createsNewProduct = isCreateNewProductResolution(line);
-    const existingReviewReasons = isCreditNote
+    const sourceReviewReasons = isCreditNote
       ? (line.reviewReasons || []).filter((reason) => !signSensitiveLineReasons.has(reason))
       : (line.reviewReasons || []);
+    const existingReviewReasons = sourceReviewReasons.filter((reason) => !recalculatedLineReasons.has(reason));
     const reviewReasons = createsNewProduct ? clearProductMatchReviewReasons(existingReviewReasons) : [...existingReviewReasons];
     const rawDescription = line.rawDescription || line.productName || "";
     const requiredProductText = createsNewProduct ? line.productName : rawDescription;
@@ -211,7 +372,7 @@ export function validateInvoiceExtraction({
     };
   });
 
-  const invoiceReviewReasons = [...(invoice.invoiceReviewReasons || [])];
+  const invoiceReviewReasons = (invoice.invoiceReviewReasons || []).filter((reason) => !recalculatedInvoiceReasons.has(reason));
   const supplier = invoice.supplier || "";
   const invoiceNumber = invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number || "";
   const invoiceDate = invoice.invoiceDate || invoice.date || "";
@@ -231,44 +392,21 @@ export function validateInvoiceExtraction({
     addReason(invoiceReviewReasons, "missing_credit_treatment");
   }
 
-  const lineNetTotal = roundMoney(validatedLines.reduce((sum, line) => sum + lineTotalValue(line, signedDocumentType), 0));
-  const invoiceSubtotal = absolutePurchasingAmount(invoice.invoiceSubtotal ?? invoice.netTotal ?? invoice.net_total ?? invoice.subtotalBeforeDiscount ?? invoice.subtotal);
-  const invoiceTotal = absolutePurchasingAmount(invoice.invoiceTotal ?? invoice.grossTotal ?? invoice.gross_total ?? invoice.finalInvoiceTotal ?? invoice.total_amount);
-  const vatTotal = absolutePurchasingAmount(invoice.vatTotal ?? invoice.taxAmount ?? invoice.tax_amount ?? invoice.vat_total);
-  const explicitChargeTotal = absolutePurchasingAmount(explicitAdditionalCharges(invoice));
-  const inferredFromTotal = invoiceTotal ? roundMoney(invoiceTotal - vatTotal - lineNetTotal) : 0;
-  const inferredFromSubtotal = invoiceSubtotal ? roundMoney(invoiceSubtotal - lineNetTotal) : 0;
-  const inferredChargeTotal = explicitChargeTotal
-    ? 0
-    : (likelySmallInvoiceCharge(inferredFromTotal, invoiceTotal) ? inferredFromTotal : (
-      likelySmallInvoiceCharge(inferredFromSubtotal, invoiceSubtotal) ? inferredFromSubtotal : 0
-    ));
-  const additionalCharges = roundMoney(explicitChargeTotal || inferredChargeTotal);
-  if (additionalCharges && !explicitChargeTotal) addReason(invoiceReviewReasons, "unaccounted_invoice_charge");
-
-  if (invoiceSubtotal && !totalMatchesAny(invoiceSubtotal, [lineNetTotal, lineNetTotal + additionalCharges])) {
-    addReason(invoiceReviewReasons, "invoice_subtotal_mismatch");
-  }
-
-  if (invoiceTotal) {
-    const totalCandidates = [
-      lineNetTotal + vatTotal,
-      lineNetTotal + vatTotal + additionalCharges,
-      invoiceSubtotal + vatTotal,
-      invoiceSubtotal + vatTotal + additionalCharges,
-    ];
-    if (!totalMatchesAny(invoiceTotal, totalCandidates)) {
-      addReason(invoiceReviewReasons, "invoice_total_mismatch");
-    }
-  }
+  const reconciliation = reconcileInvoiceTotals(invoice, validatedLines);
+  if (reconciliation.inferredAdditionalCharges) addReason(invoiceReviewReasons, "unaccounted_invoice_charge");
+  if (reconciliation.subtotalMismatch) addReason(invoiceReviewReasons, "invoice_subtotal_mismatch");
+  if (reconciliation.totalMismatch) addReason(invoiceReviewReasons, "invoice_total_mismatch");
 
   const invoiceHasBlockers = hasBlockingReviewReasons(invoiceReviewReasons) || validatedLines.some((line) => line.hasBlockingReview);
   return {
     ...invoice,
     documentType: signedDocumentType,
     document_type: signedDocumentType,
-    additionalCharges,
-    inferredAdditionalCharges: additionalCharges && !explicitChargeTotal ? additionalCharges : 0,
+    adjustments: reconciliation.adjustments,
+    adjustmentTotal: reconciliation.adjustmentTotal,
+    additionalCharges: reconciliation.additionalCharges,
+    inferredAdditionalCharges: reconciliation.inferredAdditionalCharges,
+    reconciliation,
     lines: validatedLines,
     invoiceNeedsReview: invoiceReviewReasons.length > 0 || validatedLines.some((line) => line.needsReview),
     invoiceReviewSeverity: highestReviewSeverity(invoiceReviewReasons),
