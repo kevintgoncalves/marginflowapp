@@ -2014,6 +2014,33 @@ code {
   border-top: 1px solid var(--line);
 }
 
+.recovery-catalog-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.recovery-conflict-list {
+  max-height: 240px;
+  overflow: auto;
+  border-block: 1px solid var(--line);
+}
+
+.recovery-conflict-list > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.recovery-conflict-list > div:last-child {
+  border-bottom: 0;
+}
+
+.recovery-conflict-list span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .recovery-invoice-numbers {
   max-height: 110px;
   overflow: auto;
@@ -2028,6 +2055,11 @@ code {
 @media (max-width: 760px) {
   .recovery-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .recovery-conflict-list > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 

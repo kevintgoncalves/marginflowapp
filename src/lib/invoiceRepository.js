@@ -2,11 +2,15 @@ import { compareInvoiceCollections } from "../domain/emergencyRecovery.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export function isCanonicalUuid(value = "") {
+  return uuidPattern.test(value);
+}
+
 function validScope({ companyId = "", locationId = "" } = {}) {
   return uuidPattern.test(companyId) && (!locationId || uuidPattern.test(locationId));
 }
 
-async function deterministicUuid(seed = "") {
+export async function deterministicRecoveryUuid(seed = "") {
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed)));
   digest[6] = (digest[6] & 0x0f) | 0x40;
   digest[8] = (digest[8] & 0x3f) | 0x80;
@@ -22,17 +26,17 @@ export async function ensureInvoicePersistenceIds(invoice = {}, scope = {}) {
     invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number || "unnumbered",
     invoice.date || invoice.invoiceDate || invoice.invoice_date || "undated",
   ].join("|");
-  const invoiceId = uuidPattern.test(invoice.id || "") ? invoice.id : await deterministicUuid(`invoice|${identitySeed}|${invoice.id || ""}`);
+  const invoiceId = uuidPattern.test(invoice.id || "") ? invoice.id : await deterministicRecoveryUuid(`invoice|${identitySeed}|${invoice.id || ""}`);
   const items = [];
   for (const [lineIndex, line] of (invoice.items || invoice.lines || []).entries()) {
     const lineId = uuidPattern.test(line.id || "")
       ? line.id
-      : await deterministicUuid(`line|${invoiceId}|${lineIndex}|${line.id || ""}|${line.productName || line.product_name || ""}`);
+      : await deterministicRecoveryUuid(`line|${invoiceId}|${lineIndex}|${line.id || ""}|${line.productName || line.product_name || ""}`);
     const departmentSplits = [];
     for (const [splitIndex, split] of (line.departmentSplits || line.department_splits || []).entries()) {
       const splitId = uuidPattern.test(split.id || "")
         ? split.id
-        : await deterministicUuid(`split|${lineId}|${splitIndex}|${split.id || ""}|${split.departmentId || split.department_id || split.department || ""}`);
+        : await deterministicRecoveryUuid(`split|${lineId}|${splitIndex}|${split.id || ""}|${split.departmentId || split.department_id || split.department || ""}`);
       departmentSplits.push({ ...split, id: splitId });
     }
     items.push({ ...line, id: lineId, departmentSplits });

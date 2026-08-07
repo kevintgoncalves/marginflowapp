@@ -8,33 +8,67 @@ This procedure is deliberately non-destructive. Do not clear browser storage, si
 - No IndexedDB use exists in the application.
 - Draft invoice/editor state, date ranges, filters, open dialogs and transient status values exist only in React memory until converted into a saved record.
 - Before this change, every state change scheduled one batch `upsert` of every module into `marginflow_cloud_state` after 900 ms. The invoices module was one whole JSONB array. There was no revision predicate, so a stale device could overwrite a newer invoice array.
-- Relational invoice, line and department-split tables existed, but the application did not write or load confirmed invoices through them. Supplier-product learning already used relational mappings and split-rule tables.
+- Relational invoice, line and department-split tables existed. Migration `028_invoice_recovery_sync.sql` added atomic invoice persistence, but legacy invoices were not submitted automatically and unknown supplier/product IDs were deliberately left null by the normal persistence RPC.
 - The reported PostgreSQL error surfaced from the old batch `marginflow_cloud_state` upsert path. That operation serialized and rewrote all modules, including the growing invoice JSONB payload. Production statement logs were not available in this workspace, so the database-internal stage (conflict update, trigger, RLS, lock wait or JSONB write) cannot be truthfully separated further from repository evidence alone.
 
 ## Current data locations before recovery
 
-For both laptop and mobile, any invoice that still appears on that device should be treated as present in that device's `marginflow.invoices` localStorage. It may also be in the legacy `marginflow_cloud_state` invoices payload if a snapshot write succeeded. It should not be assumed to be in relational `invoices` unless the recovery diagnostic confirms it. The repository cannot inspect a remote phone or laptop browser profile, so the emergency exports are the authoritative evidence for each device.
+For both laptop and mobile, any invoice that still appears on that device should be treated as present in that device's `marginflow.invoices` localStorage. It may also be in the legacy `marginflow_cloud_state` invoices payload if a snapshot write succeeded. It is `Saved to cloud` only after the canonical relational invoice and its active lines/splits are verified. Module snapshot success is displayed separately as `Cloud modules synced`.
 
 ## Recovery order
 
-1. Stop entering or editing invoices temporarily. Keep both devices signed in and do not clear site data, uninstall the app, reset modules or log out.
-2. Deploy the frontend containing `Download Emergency Backup`. Deploying the frontend before migration is safe for existing local data: failed relational calls remain `Pending sync` or `Sync failed` locally.
-3. On the laptop, open Settings and select `Download Emergency Backup`. Record its invoice count and keep the JSON file unchanged.
-4. On the mobile, repeat the same action. Store the two files with distinct names.
-5. Before applying database migrations, create a Supabase project/database backup. Separately export `marginflow_cloud_state`, `invoices`, `invoice_lines`, `invoice_line_department_splits`, `products`, `suppliers`, `supplier_product_mappings`, `supplier_product_split_rules`, `supplier_product_split_rule_lines` and `invoice_line_corrections`.
-6. Check migration history with `supabase migration list --linked`. Production currently records `001` through `020` and `20260625222516`, but not `021` through `028`. Because those numbered migrations sort before the applied timestamp, preview them with `supabase db push --linked --dry-run --include-all` and validate the same list in staging.
-7. Apply the reviewed set through the normal migration pipeline with `supabase db push --linked --include-all`. Migration `028_invoice_recovery_sync.sql` creates the revision column and RPCs. Migration `20260807233000_harden_cloud_state_module_rpc.sql` retains the canonical six-argument signature, tightens tenant/scope/module validation and requests a PostgREST schema reload. Neither migration deletes existing rows or resets cloud-state payloads.
-8. Re-run `supabase migration list --linked`, then make one controlled module change or use `Retry cloud sync`. Confirm the error clears and the returned module revision advances. A stale expected revision must remain a conflict.
-9. On one controlled device, reload MarginFlow and open Settings. Select `Compare Device With Cloud`. Save the device/relational/legacy counts before importing anything.
-10. Select `Inspect Emergency Backup` for the laptop file. Review company/location, date range, invoice numbers, existing records, missing records, ambiguous matches and conflicts. Do not import while a company mismatch is shown.
-11. If the preview is correct, select `Import Missing Invoices Only`. This sends only `onlyLocal` records to the atomic relational invoice RPC. Existing and conflicting identities are not selected.
-12. Repeat inspection and missing-only import for the mobile file. A record imported from the first file should now show as existing when the second file is inspected.
-13. Resolve every conflict manually by comparing both complete versions. Do not remove either version until supplier, document type, document number, date, lines, splits and totals have been checked.
-14. Run `Compare Device With Cloud` again. Verify relational invoice counts, date coverage, document numbers, line counts, split allocations and purchasing totals against both backup files and the database export.
-15. Retry any row marked `Pending sync` or `Retry sync`. Confirm it becomes `Saved to cloud` and that retrying does not add another invoice.
-16. Open a fresh second browser/device for the same company/location. Confirm the relational invoices load there, then create one controlled test invoice and verify it appears on the other device.
-17. Keep both emergency JSON files and the Supabase backup until financial reconciliation is complete. The legacy invoice snapshot remains read-only after migration and should only be retired in a later, separately verified change.
+1. Stop entering or editing invoices temporarily. Do not use the mobile device during laptop recovery. Do not clear site data, reset modules or sign out on either device.
+2. On the laptop, open Settings and select `Download Emergency Backup`. Record its invoice/product/supplier counts and keep the JSON unchanged.
+3. Create a Supabase logical backup and record counts/checksums for `marginflow_cloud_state`, `suppliers`, `products`, `invoices`, `invoice_lines` and `invoice_line_department_splits`.
+4. Deploy `20260808120000_legacy_relational_recovery.sql` through the normal migration pipeline. Installation creates functions only and performs no recovery DML.
+5. Deploy the frontend containing `Preview laptop migration`. Backup-file import remains preview-only during this phase.
+6. On the laptop, open Settings and select `Preview laptop migration`. This reads the current in-memory/device snapshot and relational tables without writing.
+7. Review supplier/product/invoice totals, exact department mappings, eligible line/split counts and every conflict. Missing departments, ambiguous suppliers/products, existing content differences and non-approved documents are excluded from submission.
+8. If the preview is correct, select `Migrate legacy data to cloud`. The application rebuilds the preview immediately, migrates the reviewed supplier/product catalog atomically, then sends each eligible invoice through `recover_legacy_invoice_v1`.
+9. Each invoice wrapper validates supplier, product and department ownership, calls the existing `persist_invoice_document_v2` transaction, and verifies active line/split counts before the device row becomes `Saved to cloud`.
+10. If the browser closes, run the preview again. Stable UUIDs, exact identity checks and existing-row detection make retry idempotent.
+11. Run the SQL checks below. Compare totals, document numbers, dates, line counts and split allocations with the laptop backup.
+12. Open a fresh browser profile for the same company/location and confirm recovered relational invoices load. Do not process mobile yet.
+13. Keep the laptop emergency JSON and database backup until financial reconciliation is complete. Do not delete legacy or conflict records.
+
+## Verification SQL
+
+```sql
+select count(*) from public.suppliers;
+select count(*) from public.products;
+select count(*) from public.invoices;
+select count(*) from public.invoice_lines;
+select count(*) from public.invoice_line_department_splits;
+
+select id from public.invoices where company_id is null;
+select id, invoice_number from public.invoices where supplier_id is null;
+
+select line.id
+from public.invoice_lines line
+left join public.invoices invoice on invoice.id = line.invoice_id
+where invoice.id is null;
+
+select line.id
+from public.invoice_lines line
+left join public.products product on product.id = line.product_id
+where line.active and product.id is null;
+
+select split.id
+from public.invoice_line_department_splits split
+left join public.invoice_lines line on line.id = split.invoice_line_id
+left join public.departments department on department.id = split.department_id
+where split.active and (line.id is null or department.id is null);
+
+select invoice.id, invoice.document_number,
+  count(distinct line.id) filter (where line.active) as active_lines,
+  count(distinct split.id) filter (where line.active and split.active) as active_splits
+from public.invoices invoice
+left join public.invoice_lines line on line.invoice_id = invoice.id
+left join public.invoice_line_department_splits split on split.invoice_line_id = line.id
+group by invoice.id, invoice.document_number
+order by invoice.invoice_date, invoice.document_number;
+```
 
 ## Stop conditions
 
-Stop importing and investigate if the preview reports the wrong company/location, unexpected date ranges, missing invoice numbers, ambiguous matches, content conflicts, or a relational write error. A failed import does not alter the backup and does not remove the device copy.
+Stop recovery and investigate if the preview reports the wrong company/location, unexpected counts, missing invoice numbers, unresolved departments, ambiguous identities, content conflicts or a relational write error. A failed invoice transaction does not remove or mark the device copy as saved. Do not continue with mobile until laptop reconciliation is complete.

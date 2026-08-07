@@ -78,7 +78,7 @@ test("legacy invoice rows and splits receive stable deterministic UUIDs before t
   assert.equal(first.items[0].departmentSplits[0].id, second.items[0].departmentSplits[0].id);
 });
 
-test("fresh device loads relational invoice rows with lines and splits", async () => {
+test("TEST J: fresh device loads relational invoice rows with lines and splits", async () => {
   const splitId = "44444444-4444-4444-8444-444444444444";
   const rows = [{
     id: invoiceId,

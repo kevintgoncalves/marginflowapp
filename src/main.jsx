@@ -68,15 +68,19 @@ import {
   buildEmergencyBackup,
   compareInvoiceCollections,
   inspectEmergencyBackup,
+  invoiceRecoveryIdentity,
   mergeInvoiceCollectionsPreservingAll,
   recoveryPreviewForBackup,
 } from "./domain/emergencyRecovery.js";
 import {
-  importMissingRecoveryInvoices,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   upsertInvoiceInCollection,
 } from "./lib/invoiceRepository.js";
+import {
+  previewLaptopLegacyRecovery,
+  recoverLaptopLegacyData,
+} from "./lib/legacyRecoveryRepository.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import {
   departmentAllocationRows,
@@ -216,7 +220,7 @@ const authModes = ["login", "register"];
 const cloudStateTable = "marginflow_cloud_state";
 const cloudStatusText = {
   local: "Local only",
-  synced: "Cloud synced",
+  synced: "Cloud modules synced",
   error: "Sync error",
 };
 
@@ -4974,17 +4978,41 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     };
   };
 
-  const importMissingBackupInvoices = async (missingInvoices = [], sourceCompanyId = "") => {
-    if (!cloudEnabled) throw new Error("Relational cloud access is required before importing missing invoices.");
-    if (sourceCompanyId && sourceCompanyId !== cloudScope.companyId) {
-      throw new Error("This backup belongs to a different company and cannot be imported into the active company.");
-    }
-    return importMissingRecoveryInvoices(
-      supabase,
-      missingInvoices,
-      { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
-      (invoice) => setInvoices((current) => upsertInvoiceInCollection(current, invoice)),
-    );
+  const previewCurrentLaptopRecovery = async () => {
+    if (!cloudEnabled) throw new Error("Relational cloud access is required for laptop recovery preview.");
+    return previewLaptopLegacyRecovery(supabase, cloudSnapshot, {
+      companyId: cloudScope.companyId,
+      locationId: cloudScope.locationId || "",
+    });
+  };
+
+  const recoverCurrentLaptopData = async () => {
+    if (!cloudEnabled) throw new Error("Relational cloud access is required for laptop recovery.");
+    const preview = await previewCurrentLaptopRecovery();
+    const result = await recoverLaptopLegacyData(supabase, preview, {
+      onInvoicePersisted: (invoice) => setInvoices((current) => {
+        const identity = invoiceRecoveryIdentity(invoice).key;
+        const index = current.findIndex((row) => row.id === invoice.id || invoiceRecoveryIdentity(row).key === identity);
+        return index >= 0
+          ? current.map((row, rowIndex) => rowIndex === index ? { ...row, ...invoice } : row)
+          : [invoice, ...current];
+      }),
+    });
+    setSuppliers((current) => current.map((supplier) => {
+      const relationalId = preview.suppliers.mappings[`id:${supplier.id || ""}`]
+        || preview.suppliers.mappings[`name:${supplierIdentityKey(supplier.name)}`];
+      return relationalId ? { ...supplier, relationalId, persistenceSource: "relational+snapshot" } : supplier;
+    }));
+    setProducts((current) => current.map((product) => {
+      const nameKey = String(product.name || product.productName || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const relationalId = preview.products.mappings[`id:${product.id || ""}`]
+        || preview.products.mappings[`name:${nameKey}`];
+      return relationalId ? { ...product, relationalId, persistenceSource: "relational+snapshot" } : product;
+    }));
+    return {
+      ...result,
+      preview: await previewCurrentLaptopRecovery(),
+    };
   };
 
   useEffect(() => {
@@ -5441,9 +5469,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             menuSettings={menuSettings}
             onImportBackupToCloud={importBackupToCloud}
             onCompareDeviceWithCloud={compareDeviceWithCloud}
-            onImportMissingBackupInvoices={importMissingBackupInvoices}
             onInspectRecoveryBackup={inspectRecoveryBackupAgainstCloud}
             onMigrateLocalToCloud={migrateLocalDataToCloud}
+            onPreviewLaptopRecovery={previewCurrentLaptopRecovery}
+            onRecoverLaptopLegacyData={recoverCurrentLaptopData}
             onResetDemo={resetDemoData}
             permissions={permissionsByPage.settings}
             suppliers={suppliers}
@@ -11200,9 +11229,10 @@ function SettingsPanel({
   menuSettings,
   onCompareDeviceWithCloud,
   onImportBackupToCloud,
-  onImportMissingBackupInvoices,
   onInspectRecoveryBackup,
   onMigrateLocalToCloud,
+  onPreviewLaptopRecovery,
+  onRecoverLaptopLegacyData,
   onResetDemo,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "settings"),
   requestDelete,
@@ -11230,6 +11260,7 @@ function SettingsPanel({
   const [emergencyBackupPreview, setEmergencyBackupPreview] = useState(null);
   const [emergencyBackupInputKey, setEmergencyBackupInputKey] = useState(0);
   const [syncDiagnostic, setSyncDiagnostic] = useState(null);
+  const [laptopRecoveryPreview, setLaptopRecoveryPreview] = useState(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
@@ -11402,17 +11433,31 @@ function SettingsPanel({
     }
   };
 
-  const importPreviewMissingInvoices = async () => {
-    const missing = emergencyBackupPreview?.comparison?.onlyLocal || [];
-    if (!missing.length || !onImportMissingBackupInvoices) return;
+  const previewLaptopMigration = async () => {
     setRecoveryBusy(true);
+    setDataStatus("");
     try {
-      const sourceCompanyId = emergencyBackupPreview?.company?.id || emergencyBackupPreview?.company?.company_id || "";
-      const result = await onImportMissingBackupInvoices(missing, sourceCompanyId);
-      setDataStatus(`Recovery import finished: ${result.imported.length} imported, ${result.failed.length} failed. Conflicts were not imported.`);
-      setEmergencyBackupPreview((current) => ({ ...current, importResult: result }));
+      const preview = await onPreviewLaptopRecovery?.();
+      setLaptopRecoveryPreview(preview);
+      setDataStatus("Laptop migration preview completed. No relational or device records were changed.");
     } catch (error) {
-      setDataStatus(error.message || "Recovery import failed. The backup file and device data were not changed.");
+      setLaptopRecoveryPreview(null);
+      setDataStatus(`${error.message || "Laptop recovery preview failed."} No data was changed.`);
+    } finally {
+      setRecoveryBusy(false);
+    }
+  };
+
+  const migrateLaptopLegacyData = async () => {
+    if (!laptopRecoveryPreview?.canMigrate || !onRecoverLaptopLegacyData) return;
+    setRecoveryBusy(true);
+    setDataStatus("");
+    try {
+      const result = await onRecoverLaptopLegacyData();
+      setLaptopRecoveryPreview(result.preview);
+      setDataStatus(`Laptop recovery finished: ${result.imported.length} invoice(s) migrated, ${result.verified.length} already verified, ${result.failed.length} failed. Conflicts remain untouched.`);
+    } catch (error) {
+      setDataStatus(`${error.message || "Laptop recovery failed."} Device records remain unchanged.`);
     } finally {
       setRecoveryBusy(false);
     }
@@ -11869,6 +11914,7 @@ function SettingsPanel({
           <button onClick={exportEmergencyBackup} type="button"><Download size={16} />Download Emergency Backup</button>
           <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
+          <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={previewLaptopMigration} type="button"><PackageSearch size={16} />Preview laptop migration</button>
         </div>
         <p className="helper-text">Emergency export uses the current device state and works even when cloud sync is failing. Inspection is preview-only.</p>
         {syncDiagnostic && (
@@ -11876,6 +11922,34 @@ function SettingsPanel({
             <div><strong>Relational invoices</strong><span>Device {syncDiagnostic.relational.counts.local} · Cloud {syncDiagnostic.relational.counts.cloud}</span><span>Only device {syncDiagnostic.relational.counts.onlyLocal} · Only cloud {syncDiagnostic.relational.counts.onlyCloud} · Conflicts {syncDiagnostic.relational.counts.conflicts}</span></div>
             <div><strong>Legacy snapshot invoices</strong><span>Device {syncDiagnostic.legacySnapshot.counts.local} · Snapshot {syncDiagnostic.legacySnapshot.counts.cloud}</span><span>Only device {syncDiagnostic.legacySnapshot.counts.onlyLocal} · Only snapshot {syncDiagnostic.legacySnapshot.counts.onlyCloud} · Conflicts {syncDiagnostic.legacySnapshot.counts.conflicts}</span></div>
             <div><strong>Largest device snapshot</strong><span>{syncDiagnostic.payloadAudit?.[0]?.moduleKey || "None"} · {syncDiagnostic.payloadAudit?.[0]?.deviceBytes?.toLocaleString() || 0} bytes</span><span>Legacy invoices · {(syncDiagnostic.payloadAudit?.find((row) => row.moduleKey === "invoices")?.cloudBytes || 0).toLocaleString()} cloud bytes</span></div>
+          </div>
+        )}
+        {laptopRecoveryPreview && (
+          <div className="recovery-preview">
+            <div className="panel-head"><div><h3>Laptop migration preview</h3><span>Current device only</span></div></div>
+            <div className="recovery-summary-grid recovery-catalog-grid">
+              <div><strong>Suppliers</strong><span>Legacy {laptopRecoveryPreview.suppliers.counts.legacy} · Already relational {laptopRecoveryPreview.suppliers.counts.alreadyRelational}</span><span>Need migration {laptopRecoveryPreview.suppliers.counts.needMigration} · Conflicts {laptopRecoveryPreview.suppliers.counts.conflicts}</span></div>
+              <div><strong>Products</strong><span>Legacy {laptopRecoveryPreview.products.counts.legacy} · Already relational {laptopRecoveryPreview.products.counts.alreadyRelational}</span><span>Need migration {laptopRecoveryPreview.products.counts.needMigration} · Possible conflicts {laptopRecoveryPreview.products.counts.conflicts}</span></div>
+              <div><strong>Invoices</strong><span>Legacy {laptopRecoveryPreview.invoices.counts.legacy} · Already relational {laptopRecoveryPreview.invoices.counts.alreadyRelational}</span><span>Need migration {laptopRecoveryPreview.invoices.counts.needMigration} · Review conflicts {laptopRecoveryPreview.invoices.counts.conflicts}</span></div>
+              <div><strong>Invoice detail</strong><span>{laptopRecoveryPreview.invoices.counts.lines} lines · {laptopRecoveryPreview.invoices.counts.departmentSplits} department splits</span><span>Eligible {laptopRecoveryPreview.invoices.counts.migratableLines} lines · {laptopRecoveryPreview.invoices.counts.migratableSplits} splits</span></div>
+              <div><strong>Departments</strong><span>{laptopRecoveryPreview.departments.conflicts.length} unresolved reference(s)</span><span>Existing relational departments are reused by exact identity</span></div>
+              <div><strong>Conflicts</strong><span>{laptopRecoveryPreview.conflictCount} total review item(s)</span><span>Conflicting records will not be submitted</span></div>
+            </div>
+            {laptopRecoveryPreview.conflictCount > 0 && (
+              <div className="recovery-conflict-list">
+                {[
+                  ...laptopRecoveryPreview.departments.conflicts,
+                  ...laptopRecoveryPreview.suppliers.conflicts,
+                  ...laptopRecoveryPreview.products.conflicts,
+                  ...laptopRecoveryPreview.invoices.conflicts,
+                ].slice(0, 12).map((conflict, index) => (
+                  <div key={`${conflict.id || conflict.name || conflict.documentNumber}-${index}`}><strong>{conflict.documentNumber || conflict.name || "Recovery conflict"}</strong><span>{conflict.reason}</span></div>
+                ))}
+              </div>
+            )}
+            {permissions.canImport && laptopRecoveryPreview.canMigrate && (
+              <button disabled={recoveryBusy || !cloudEnabled} onClick={migrateLaptopLegacyData} type="button"><Upload size={16} />Migrate legacy data to cloud</button>
+            )}
           </div>
         )}
         {emergencyBackupPreview && (
@@ -11893,9 +11967,7 @@ function SettingsPanel({
             <p className="recovery-invoice-numbers"><strong>Invoice numbers</strong> {emergencyBackupPreview.invoiceNumbers.join(", ") || "None"}</p>
             {emergencyBackupPreview.scopeMismatch && <div className="invoice-status warning">This backup belongs to another company. Import is blocked.</div>}
             {emergencyBackupPreview.cloudError && <div className="invoice-status warning">{emergencyBackupPreview.cloudError} Preview remains read-only.</div>}
-            {permissions.canImport && !emergencyBackupPreview.scopeMismatch && emergencyBackupPreview.comparison.counts.onlyLocal > 0 && (
-              <button disabled={recoveryBusy || !cloudEnabled} onClick={importPreviewMissingInvoices} type="button">Import Missing Invoices Only</button>
-            )}
+            <div className="invoice-status info">Backup files remain preview-only while the current laptop is recovered first.</div>
           </div>
         )}
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
