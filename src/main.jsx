@@ -17,6 +17,7 @@ import {
   PackageSearch,
   Plus,
   ReceiptText,
+  RefreshCw,
   Save,
   Search,
   Settings,
@@ -4668,6 +4669,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       cloudFingerprintsRef.current = result.fingerprints;
       setCloudStatus("synced");
     } catch (error) {
+      if (error.revisions) cloudRevisionsRef.current = error.revisions;
+      if (error.fingerprints) cloudFingerprintsRef.current = error.fingerprints;
       setCloudStatus("error");
       setCloudError(error.message || "Cloud sync failed.");
       throw error;
@@ -5242,6 +5245,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             enabled={cloudEnabled}
             error={cloudError}
             loading={cloudLoading}
+            onRetry={() => saveSnapshotToCloud(cloudSnapshot)}
             status={cloudStatus}
           />
         )}
@@ -5478,7 +5482,7 @@ function targetForRow(departmentSettings, department, fallback) {
   return targetForDepartment(departmentSettings, department, fallback);
 }
 
-function CloudStatusBanner({ enabled, error, loading, status }) {
+function CloudStatusBanner({ enabled, error, loading, onRetry, status }) {
   const label = enabled ? cloudStatusText[status] || cloudStatusText.local : cloudStatusText.local;
   const tone = status === "error" ? "error" : status === "synced" ? "success" : "info";
   return (
@@ -5487,6 +5491,12 @@ function CloudStatusBanner({ enabled, error, loading, status }) {
         <strong>{loading ? "Syncing cloud data..." : label}</strong>
         <span>{error || (enabled ? "Company data is scoped to the current Supabase account and company." : "Using local fallback until cloud access is available.")}</span>
       </div>
+      {enabled && status === "error" && (
+        <button className="ghost" disabled={loading} onClick={() => Promise.resolve(onRetry?.()).catch(() => {})} type="button">
+          <RefreshCw size={16} />
+          Retry cloud sync
+        </button>
+      )}
     </div>
   );
 }

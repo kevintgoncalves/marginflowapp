@@ -28,7 +28,14 @@ test("laptop and mobile invoice collections reconcile without losing distinct wo
   assert.equal(result.comparison.counts.onlyCloud, 1);
 });
 
-test("a stale snapshot is classified as missing cloud data and cannot remove it", () => {
+test("TEST F: a Device / legacy invoice survives cloud hydration", () => {
+  const legacy = invoice("legacy-a", "A", 10, { syncStatus: "legacy_local" });
+  const result = mergeInvoiceCollectionsPreservingAll([legacy], [invoice("cloud-b", "B", 20)]);
+  assert.equal(result.invoices.find((row) => row.documentNumber === "A")?.syncStatus, "legacy_local");
+  assert.deepEqual(new Set(result.invoices.map((row) => row.documentNumber)), new Set(["A", "B"]));
+});
+
+test("TEST G: a stale device snapshot cannot remove a cloud-only invoice", () => {
   const cloud = [invoice("a", "A"), invoice("b", "B"), invoice("c", "C")];
   const comparison = compareInvoiceCollections(cloud.slice(0, 2), cloud);
   assert.equal(comparison.counts.onlyCloud, 1);
@@ -80,7 +87,7 @@ test("same invoice identity with different contents remains an explicit conflict
   assert.equal(comparison.counts.onlyCloud, 0);
 });
 
-test("conflict reconciliation keeps the device version visible and preserves the cloud version for review", () => {
+test("TEST H: conflict reconciliation preserves both versions for Review conflict", () => {
   const result = mergeInvoiceCollectionsPreservingAll([invoice("local", "A", 10)], [invoice("cloud", "A", 11)]);
   assert.equal(result.invoices.length, 1);
   assert.equal(result.invoices[0].total, 10);
