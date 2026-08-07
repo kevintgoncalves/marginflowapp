@@ -64,6 +64,20 @@ import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
 import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
 import {
+  buildEmergencyBackup,
+  compareInvoiceCollections,
+  inspectEmergencyBackup,
+  mergeInvoiceCollectionsPreservingAll,
+  recoveryPreviewForBackup,
+} from "./domain/emergencyRecovery.js";
+import {
+  importMissingRecoveryInvoices,
+  loadRelationalInvoices,
+  persistInvoiceWithLocalFallback,
+  upsertInvoiceInCollection,
+} from "./lib/invoiceRepository.js";
+import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
+import {
   departmentAllocationRows,
   departmentAssignmentForLine,
   departmentAssignmentForResolvedLine,
@@ -229,6 +243,7 @@ const cloudModuleDefinitions = [
   { key: "aiSettings", storageKey: "marginflow.aiSettings" },
   { key: "departmentSelection", storageKey: "marginflow.department" },
 ];
+const cloudWritableModuleDefinitions = cloudModuleDefinitions.filter((definition) => definition.key !== "invoices");
 
 function currentSearchParams() {
   try {
@@ -3398,39 +3413,26 @@ function cloudScopeForMembership(membership) {
   };
 }
 
-function cloudRowsFromSnapshot(scope, snapshot, migratedFromLocalStorage = false) {
-  return cloudModuleDefinitions
-    .filter((definition) => snapshot[definition.key] !== undefined)
-    .map((definition) => ({
-      company_id: scope.companyId,
-      location_id: scope.locationId,
-      scope_key: scope.scopeKey,
-      module_key: definition.key,
-      payload: snapshot[definition.key],
-      migrated_from_local_storage: migratedFromLocalStorage,
-      synced_at: new Date().toISOString(),
-    }));
-}
-
 async function loadCloudState(scope) {
   if (!supabase || !scope.companyId) return [];
-  const { data, error } = await supabase
+  let result = await supabase
     .from(cloudStateTable)
-    .select("module_key,payload,synced_at")
+    .select("module_key,payload,synced_at,revision")
     .eq("company_id", scope.companyId)
     .eq("scope_key", scope.scopeKey);
-  if (error) throw error;
-  return data || [];
+  if (result.error?.code === "42703") {
+    result = await supabase
+      .from(cloudStateTable)
+      .select("module_key,payload,synced_at")
+      .eq("company_id", scope.companyId)
+      .eq("scope_key", scope.scopeKey);
+  }
+  if (result.error) throw result.error;
+  return (result.data || []).map((row) => ({ ...row, revision: Number(row.revision || 1) }));
 }
 
-async function saveCloudState(scope, snapshot, migratedFromLocalStorage = false) {
-  if (!supabase || !scope.companyId) return;
-  const rows = cloudRowsFromSnapshot(scope, snapshot, migratedFromLocalStorage);
-  if (!rows.length) return;
-  const { error } = await supabase
-    .from(cloudStateTable)
-    .upsert(rows, { onConflict: "company_id,scope_key,module_key" });
-  if (error) throw error;
+async function saveCloudState(scope, snapshot, { revisions = {}, fingerprints = {} } = {}) {
+  return saveRevisionedCloudModules(supabase, scope, snapshot, cloudWritableModuleDefinitions, { revisions, fingerprints });
 }
 
 function recordCompletenessScore(record) {
@@ -3555,6 +3557,13 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
       const currentRows = parseBackupValue(currentStorage[key], []);
       const importedRows = parseBackupValue(value, []);
       if (!Array.isArray(currentRows) || !Array.isArray(importedRows)) return;
+      if (key === "marginflow.invoices") {
+        const recoveryMerge = mergeInvoiceCollectionsPreservingAll(currentRows, importedRows);
+        nextStorage[key] = JSON.stringify(recoveryMerge.invoices);
+        summary.invoicesAdded = recoveryMerge.comparison.counts.onlyCloud;
+        summary.invoicesSkipped = recoveryMerge.comparison.counts.presentInBoth;
+        return;
+      }
       if (key === "marginflow.suppliers") {
         const rows = reconcileSuppliersForSync(currentRows, importedRows);
         nextStorage[key] = JSON.stringify(rows);
@@ -4445,6 +4454,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const cloudEnabled = !demoMode && Boolean(supabase && cloudScope.companyId);
   const cloudReadyRef = useRef(false);
   const cloudSaveTimerRef = useRef(null);
+  const cloudRevisionsRef = useRef({});
+  const cloudFingerprintsRef = useRef({});
   const invoiceApprovalRef = useRef(false);
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
@@ -4612,6 +4623,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, supplierProductMappings, invoiceLineCorrections, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
   const applyCloudSnapshot = (snapshot) => {
+    if (!demoMode) {
+      try {
+        Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => localStorage.setItem(key, value));
+      } catch {
+        // The in-memory state remains usable when browser storage is unavailable.
+      }
+    }
     setCompanySettingsState(snapshot.companySettings);
     setFinancialSettingsState(snapshot.financialSettings);
     setDepartmentSettingsState(snapshot.departmentSettings);
@@ -4641,7 +4659,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setCloudLoading(true);
     setCloudError("");
     try {
-      await saveCloudState(cloudScope, snapshot, migratedFromLocalStorage);
+      const result = await saveCloudState(cloudScope, snapshot, {
+        revisions: cloudRevisionsRef.current,
+        fingerprints: cloudFingerprintsRef.current,
+        migratedFromLocalStorage,
+      });
+      cloudRevisionsRef.current = result.revisions;
+      cloudFingerprintsRef.current = result.fingerprints;
       setCloudStatus("synced");
     } catch (error) {
       setCloudStatus("error");
@@ -4671,6 +4695,22 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       invoiceLearningDebug("relational-mappings-load-failed", { message: error.message || "Unknown relational learning error" });
       return snapshot;
     }
+  };
+
+  const withRelationalInvoices = async (snapshot) => {
+    if (!cloudEnabled) return snapshot;
+    const relationalInvoices = await loadRelationalInvoices(supabase, {
+      companyId: cloudScope.companyId,
+      locationId: cloudScope.locationId || "",
+    });
+    const scopedDeviceInvoices = (snapshot.invoices || []).map((invoice) => ({
+      ...invoice,
+      companyId: invoice.companyId || invoice.company_id || cloudScope.companyId,
+      locationId: invoice.locationId || invoice.location_id || cloudScope.locationId || "",
+    }));
+    const reconciled = mergeInvoiceCollectionsPreservingAll(scopedDeviceInvoices, relationalInvoices);
+    saveLocalStorage("marginflow.invoices", reconciled.invoices);
+    return { ...snapshot, invoices: reconciled.invoices };
   };
 
   const persistConfirmedLearning = async (learnedMappings = []) => {
@@ -4716,10 +4756,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const importBackupToCloud = async (pendingBackup, mode, useImportedSettings) => {
     if (!cloudEnabled || !pendingBackup) return null;
+    if (mode === "replace") throw new Error("Replace import is disabled during data recovery. Use Emergency Backup Preview and import only missing invoices.");
     const currentStorage = storageFromCloudSnapshot(cloudSnapshot);
-    const merged = mode === "replace" ? null : mergeMarginFlowStorage(currentStorage, pendingBackup.storage, useImportedSettings);
-    const nextStorage = mode === "replace" ? pendingBackup.storage : merged.nextStorage;
-    const summary = mode === "replace" ? null : merged.summary;
+    const merged = mergeMarginFlowStorage(currentStorage, pendingBackup.storage, useImportedSettings);
+    const nextStorage = merged.nextStorage;
+    const summary = merged.summary;
     const snapshot = cloudSnapshotFromStorage(nextStorage);
     applyCloudSnapshot(snapshot);
     await saveSnapshotToCloud(snapshot, true);
@@ -4742,6 +4783,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       .then(async (rows) => {
         if (cancelled) return;
 
+        cloudRevisionsRef.current = Object.fromEntries(rows.map((row) => [row.module_key, Number(row.revision || 1)]));
+        cloudFingerprintsRef.current = Object.fromEntries(rows.map((row) => [row.module_key, JSON.stringify(row.payload)]));
+
         const localStorageData = readMarginFlowLocalStorage();
         const hasLocalMarginFlowData = Object.keys(localStorageData).some((key) => {
           if (key === "marginflow.preImportBackup") return false;
@@ -4752,17 +4796,17 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         if (rows.length) {
           const cloudStorage = storageFromCloudSnapshot(cloudSnapshotFromRows(rows));
           const merged = hasLocalMarginFlowData
-            ? mergeMarginFlowStorage(cloudStorage, localStorageData, false).nextStorage
+            ? mergeMarginFlowStorage(localStorageData, cloudStorage, false).nextStorage
             : cloudStorage;
-          const nextSnapshot = await withRelationalLearning(cloudSnapshotFromStorage(merged));
+          const learnedSnapshot = await withRelationalLearning(cloudSnapshotFromStorage(merged));
+          const nextSnapshot = await withRelationalInvoices(learnedSnapshot);
           applyCloudSnapshot(nextSnapshot);
-          if (hasLocalMarginFlowData) await saveCloudState(cloudScope, nextSnapshot, true);
           if (cancelled) return;
           setCloudStatus("synced");
         } else {
-          const firstSnapshot = await withRelationalLearning(hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot);
+          const learnedSnapshot = await withRelationalLearning(hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot);
+          const firstSnapshot = await withRelationalInvoices(learnedSnapshot);
           applyCloudSnapshot(firstSnapshot);
-          await saveCloudState(cloudScope, firstSnapshot, hasLocalMarginFlowData);
           if (cancelled) return;
           setCloudStatus("synced");
         }
@@ -4865,6 +4909,79 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setMenus(merged.snapshot.menus);
     setWasteItems(merged.snapshot.wasteItems);
     return merged.analysis;
+  };
+
+  const persistInvoiceDocument = async (invoice) => {
+    const result = await persistInvoiceWithLocalFallback({
+      client: cloudEnabled ? supabase : null,
+      invoice,
+      scope: { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
+      storeLocal: (storedInvoice) => setInvoices((current) => upsertInvoiceInCollection(current, storedInvoice)),
+    });
+    if (result.error) {
+      setCloudStatus("error");
+      setCloudError(`${result.error.message || "Invoice sync failed"} The invoice is stored safely on this device.`);
+    }
+    return result;
+  };
+
+  const compareDeviceWithCloud = async () => {
+    if (!cloudEnabled) {
+      return {
+        relational: compareInvoiceCollections(invoices, []),
+        legacySnapshot: compareInvoiceCollections(invoices, []),
+        note: "Cloud access is unavailable. No data was written.",
+      };
+    }
+    const [relationalInvoices, rows] = await Promise.all([
+      loadRelationalInvoices(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }),
+      loadCloudState(cloudScope),
+    ]);
+    const legacySnapshotInvoices = rows.find((row) => row.module_key === "invoices")?.payload || [];
+    const scopedDeviceInvoices = invoices.map((invoice) => ({ ...invoice, companyId: invoice.companyId || invoice.company_id || cloudScope.companyId }));
+    const scopedLegacyInvoices = (Array.isArray(legacySnapshotInvoices) ? legacySnapshotInvoices : [])
+      .map((invoice) => ({ ...invoice, companyId: invoice.companyId || invoice.company_id || cloudScope.companyId }));
+    const payloadAudit = cloudModuleDefinitions.map((definition) => {
+      const localPayload = cloudSnapshot[definition.key];
+      const cloudRow = rows.find((row) => row.module_key === definition.key);
+      return {
+        moduleKey: definition.key,
+        deviceBytes: new TextEncoder().encode(JSON.stringify(localPayload ?? null)).byteLength,
+        cloudBytes: new TextEncoder().encode(JSON.stringify(cloudRow?.payload ?? null)).byteLength,
+        cloudRevision: Number(cloudRow?.revision || 0),
+      };
+    }).sort((left, right) => right.deviceBytes - left.deviceBytes);
+    return {
+      relational: compareInvoiceCollections(scopedDeviceInvoices, relationalInvoices),
+      legacySnapshot: compareInvoiceCollections(scopedDeviceInvoices, scopedLegacyInvoices),
+      payloadAudit,
+      note: "Read-only comparison completed. No cloud or device records were changed.",
+    };
+  };
+
+  const inspectRecoveryBackupAgainstCloud = async (payload) => {
+    const canonicalInvoices = cloudEnabled
+      ? await loadRelationalInvoices(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" })
+      : invoices;
+    const preview = recoveryPreviewForBackup(payload, canonicalInvoices);
+    const sourceCompanyId = preview.company?.id || preview.company?.company_id || "";
+    return {
+      ...preview,
+      scopeMismatch: Boolean(sourceCompanyId && cloudScope.companyId && sourceCompanyId !== cloudScope.companyId),
+    };
+  };
+
+  const importMissingBackupInvoices = async (missingInvoices = [], sourceCompanyId = "") => {
+    if (!cloudEnabled) throw new Error("Relational cloud access is required before importing missing invoices.");
+    if (sourceCompanyId && sourceCompanyId !== cloudScope.companyId) {
+      throw new Error("This backup belongs to a different company and cannot be imported into the active company.");
+    }
+    return importMissingRecoveryInvoices(
+      supabase,
+      missingInvoices,
+      { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
+      (invoice) => setInvoices((current) => upsertInvoiceInCollection(current, invoice)),
+    );
   };
 
   useEffect(() => {
@@ -5013,23 +5130,20 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         ...products,
         ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
       ];
-      setInvoices((current) => (
-        draft.editingInvoiceId
-          ? current.map((item) => (item.id === draft.editingInvoiceId ? invoice : item))
-          : [invoice, ...current]
-      ));
-      setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
+      const persistence = await persistInvoiceDocument(invoice);
+      const savedInvoice = persistence.invoice;
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
       setSuppliers((current) => ensureSupplierList(current, supplier));
       setProducts((current) => {
         const withCreatedProducts = [
           ...current,
           ...explicitResolution.createdProducts.filter((product) => !current.some((existing) => existing.id === product.id)),
         ];
-        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, invoice.id), invoice.items, invoice.date, invoice);
+        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice);
       });
       const learningResult = learnSupplierProductMappings({
         mappings: supplierProductMappings,
-        invoice,
+        invoice: savedInvoice,
         products: productsForLearning,
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
@@ -5039,7 +5153,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         storageTarget: cloudEnabled ? "relational+snapshot" : "snapshot",
       });
       setSupplierProductMappings(learningResult.mappings);
-      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice }));
+      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistConfirmedLearning(learningResult.learned);
       setDraft(emptyInvoiceDraft());
     } finally {
@@ -5203,6 +5317,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setProducts={setProducts}
             departmentNames={allowedDepartmentNames}
             approveInvoice={approveInvoice}
+            persistInvoiceDocument={persistInvoiceDocument}
             persistInvoiceLearning={persistConfirmedLearning}
             forgetPersistentLearning={forgetPersistentLearning}
             permissions={permissionsByPage.invoices}
@@ -5321,6 +5436,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             labourSettings={labourSettings}
             menuSettings={menuSettings}
             onImportBackupToCloud={importBackupToCloud}
+            onCompareDeviceWithCloud={compareDeviceWithCloud}
+            onImportMissingBackupInvoices={importMissingBackupInvoices}
+            onInspectRecoveryBackup={inspectRecoveryBackupAgainstCloud}
             onMigrateLocalToCloud={migrateLocalDataToCloud}
             onResetDemo={resetDemoData}
             permissions={permissionsByPage.settings}
@@ -5814,6 +5932,7 @@ function Invoices({
   products,
   setProducts,
   approveInvoice,
+  persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
   persistInvoiceLearning = async () => ({ persisted: [], skipped: [] }),
   forgetPersistentLearning = async () => ({ persisted: false, skipped: true }),
   setCreditNotes,
@@ -6554,11 +6673,12 @@ function Invoices({
       items,
     });
 
-    setInvoices((current) => [invoice, ...current]);
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, invoice));
+    const persistence = await persistInvoiceDocument(invoice);
+    const savedInvoice = persistence.invoice;
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, invoice.id), invoice.items, date, invoice));
-    await learnFromCommittedInvoice(invoice);
+    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, date, savedInvoice));
+    await learnFromCommittedInvoice(savedInvoice);
     setManualOpen(false);
   };
 
@@ -6683,11 +6803,12 @@ function Invoices({
       status: editDraft.status || "Approved",
       items,
     });
-    setInvoices((current) => current.map((invoice) => invoice.id === cleaned.id ? cleaned : invoice));
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, cleaned));
+    const persistence = await persistInvoiceDocument(cleaned);
+    const savedInvoice = persistence.invoice;
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, cleaned.id), cleaned.items, cleaned.date, cleaned));
-    await learnFromCommittedInvoice(cleaned);
+    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice));
+    await learnFromCommittedInvoice(savedInvoice);
     setEditDraft(null);
   };
 
@@ -6826,6 +6947,18 @@ function Invoices({
             { key: "items", label: "Lines", render: (items) => items.length },
             { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
+            { key: "syncStatus", label: "Cloud", render: (_, row) => {
+              const syncStatus = row.syncStatus || "legacy_local";
+              if (["pending_sync", "sync_failed"].includes(syncStatus)) {
+                return (
+                  <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
+                    {syncStatus === "pending_sync" ? "Pending sync" : "Retry sync"}
+                  </button>
+                );
+              }
+              if (syncStatus === "conflict") return <Badge tone="red">Review conflict</Badge>;
+              return <Badge tone={syncStatus === "synced" ? "green" : "amber"}>{syncStatus === "synced" ? "Saved to cloud" : "Device / legacy"}</Badge>;
+            } },
           ]}
           onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
           onEdit={permissions.canEdit ? (row) => openEditInvoice(row) : null}
@@ -11055,7 +11188,10 @@ function SettingsPanel({
   invoiceSettings,
   labourSettings = defaultLabourSettings,
   menuSettings,
+  onCompareDeviceWithCloud,
   onImportBackupToCloud,
+  onImportMissingBackupInvoices,
+  onInspectRecoveryBackup,
   onMigrateLocalToCloud,
   onResetDemo,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "settings"),
@@ -11081,6 +11217,10 @@ function SettingsPanel({
   const [backupImportSettingsMode, setBackupImportSettingsMode] = useState("Keep current settings");
   const [backupInputKey, setBackupInputKey] = useState(0);
   const [importSummary, setImportSummary] = useState(null);
+  const [emergencyBackupPreview, setEmergencyBackupPreview] = useState(null);
+  const [emergencyBackupInputKey, setEmergencyBackupInputKey] = useState(0);
+  const [syncDiagnostic, setSyncDiagnostic] = useState(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
   const [userModal, setUserModal] = useState(null);
@@ -11186,6 +11326,88 @@ function SettingsPanel({
     setDataStatus(`Exported ${Object.keys(payload.localStorage).length} MarginFlow localStorage key(s).`);
   };
 
+  const exportEmergencyBackup = () => {
+    const companyName = companySettings.tradingName || companySettings.companyName || authMembership?.companies?.trading_name || authMembership?.companies?.name || "company";
+    const payload = buildEmergencyBackup({
+      currentSnapshot: cloudSnapshot || {},
+      localStorageData: readMarginFlowLocalStorage(),
+      company: {
+        id: authMembership?.company_id || "",
+        name: companyName,
+      },
+      location: {
+        id: authMembership?.location_id || "",
+        name: authMembership?.locations?.name || "",
+      },
+    });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const companySlug = String(companyName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "company";
+    downloadJsonFile(`marginflow-emergency-backup-${companySlug}-${stamp}.json`, payload);
+    setDataStatus(`Emergency backup downloaded from this device: ${payload.summary.invoices} invoice(s), ${payload.summary.pendingInvoices} pending.`);
+  };
+
+  const inspectEmergencyBackupFile = async (file) => {
+    if (!file) return;
+    setRecoveryBusy(true);
+    setDataStatus("");
+    try {
+      const payload = JSON.parse(await file.text());
+      const localInspection = inspectEmergencyBackup(payload);
+      if (!localInspection.valid) throw new Error(localInspection.errors[0] || "Invalid emergency backup.");
+      const sourceCompanyId = localInspection.company?.id || localInspection.company?.company_id || "";
+      const activeCompanyId = authMembership?.company_id || "";
+      if (sourceCompanyId && activeCompanyId && sourceCompanyId !== activeCompanyId) {
+        setEmergencyBackupPreview({
+          ...localInspection,
+          scopeMismatch: true,
+          comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []),
+        });
+        setDataStatus("This backup belongs to a different company. Preview is available, but import is blocked.");
+        return;
+      }
+      try {
+        const preview = await onInspectRecoveryBackup?.(payload);
+        setEmergencyBackupPreview(preview || { ...localInspection, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []) });
+      } catch (error) {
+        setEmergencyBackupPreview({ ...localInspection, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []), cloudError: error.message || "Cloud comparison unavailable." });
+      }
+    } catch (error) {
+      setDataStatus(error.message || "Choose a valid MarginFlow emergency backup JSON file.");
+      setEmergencyBackupPreview(null);
+    } finally {
+      setEmergencyBackupInputKey((current) => current + 1);
+      setRecoveryBusy(false);
+    }
+  };
+
+  const runSyncDiagnostic = async () => {
+    setRecoveryBusy(true);
+    setDataStatus("");
+    try {
+      setSyncDiagnostic(await onCompareDeviceWithCloud?.());
+    } catch (error) {
+      setDataStatus(`${error.message || "Cloud comparison failed."} No data was changed.`);
+    } finally {
+      setRecoveryBusy(false);
+    }
+  };
+
+  const importPreviewMissingInvoices = async () => {
+    const missing = emergencyBackupPreview?.comparison?.onlyLocal || [];
+    if (!missing.length || !onImportMissingBackupInvoices) return;
+    setRecoveryBusy(true);
+    try {
+      const sourceCompanyId = emergencyBackupPreview?.company?.id || emergencyBackupPreview?.company?.company_id || "";
+      const result = await onImportMissingBackupInvoices(missing, sourceCompanyId);
+      setDataStatus(`Recovery import finished: ${result.imported.length} imported, ${result.failed.length} failed. Conflicts were not imported.`);
+      setEmergencyBackupPreview((current) => ({ ...current, importResult: result }));
+    } catch (error) {
+      setDataStatus(error.message || "Recovery import failed. The backup file and device data were not changed.");
+    } finally {
+      setRecoveryBusy(false);
+    }
+  };
+
   const importFullBackup = async (file) => {
     if (demoMode || !permissions.canImport) return;
     if (!file) return;
@@ -11211,28 +11433,6 @@ function SettingsPanel({
     if (demoMode) return;
     const preImportBackup = buildFullBackupPayload();
     localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
-  };
-
-  const replaceFullBackup = async () => {
-    if (demoMode || !permissions.canImport) return;
-    if (!pendingFullBackup) return;
-    if (cloudEnabled && onImportBackupToCloud) {
-      try {
-        await onImportBackupToCloud(pendingFullBackup, "replace", false);
-        setPendingFullBackup(null);
-        setDataStatus(`Replaced ${pendingFullBackup.keyCount} backup key(s) in cloud.`);
-      } catch (error) {
-        setDataStatus(error.message || "Cloud import failed.");
-      }
-      return;
-    }
-    savePreImportBackup();
-    Object.entries(pendingFullBackup.storage).forEach(([key, value]) => {
-      if (key !== "marginflow.preImportBackup") localStorage.setItem(key, stringifyStorageValue(value));
-    });
-    setPendingFullBackup(null);
-    setDataStatus(`Replaced ${pendingFullBackup.keyCount} MarginFlow localStorage key(s). Reloading app...`);
-    window.setTimeout(() => window.location.reload(), 500);
   };
 
   const mergeFullBackup = async () => {
@@ -11654,6 +11854,43 @@ function SettingsPanel({
         )}
       </Panel>
 
+      <Panel title="Emergency data recovery" action="Reads this device without cloud sync">
+        <div className="button-row left wrap">
+          <button onClick={exportEmergencyBackup} type="button"><Download size={16} />Download Emergency Backup</button>
+          <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
+          <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
+        </div>
+        <p className="helper-text">Emergency export uses the current device state and works even when cloud sync is failing. Inspection is preview-only.</p>
+        {syncDiagnostic && (
+          <div className="recovery-summary-grid">
+            <div><strong>Relational invoices</strong><span>Device {syncDiagnostic.relational.counts.local} · Cloud {syncDiagnostic.relational.counts.cloud}</span><span>Only device {syncDiagnostic.relational.counts.onlyLocal} · Only cloud {syncDiagnostic.relational.counts.onlyCloud} · Conflicts {syncDiagnostic.relational.counts.conflicts}</span></div>
+            <div><strong>Legacy snapshot invoices</strong><span>Device {syncDiagnostic.legacySnapshot.counts.local} · Snapshot {syncDiagnostic.legacySnapshot.counts.cloud}</span><span>Only device {syncDiagnostic.legacySnapshot.counts.onlyLocal} · Only snapshot {syncDiagnostic.legacySnapshot.counts.onlyCloud} · Conflicts {syncDiagnostic.legacySnapshot.counts.conflicts}</span></div>
+            <div><strong>Largest device snapshot</strong><span>{syncDiagnostic.payloadAudit?.[0]?.moduleKey || "None"} · {syncDiagnostic.payloadAudit?.[0]?.deviceBytes?.toLocaleString() || 0} bytes</span><span>Legacy invoices · {(syncDiagnostic.payloadAudit?.find((row) => row.moduleKey === "invoices")?.cloudBytes || 0).toLocaleString()} cloud bytes</span></div>
+          </div>
+        )}
+        {emergencyBackupPreview && (
+          <div className="recovery-preview">
+            <div className="panel-head"><div><h3>Backup preview</h3><span>{emergencyBackupPreview.schema}</span></div></div>
+            <div className="merge-impact-grid">
+              <span><strong>{emergencyBackupPreview.counts.invoices}</strong> invoices</span>
+              <span><strong>{emergencyBackupPreview.counts.products}</strong> products</span>
+              <span><strong>{emergencyBackupPreview.counts.suppliers}</strong> suppliers</span>
+              <span><strong>{emergencyBackupPreview.counts.stocktakes}</strong> Stock Takes</span>
+              <span><strong>{emergencyBackupPreview.comparison.counts.onlyLocal}</strong> missing from relational cloud</span>
+              <span><strong>{emergencyBackupPreview.comparison.counts.conflicts}</strong> conflicts requiring review</span>
+            </div>
+            <p>Invoice dates: {emergencyBackupPreview.invoiceDateRange.from || "-"} to {emergencyBackupPreview.invoiceDateRange.to || "-"}</p>
+            <p className="recovery-invoice-numbers"><strong>Invoice numbers</strong> {emergencyBackupPreview.invoiceNumbers.join(", ") || "None"}</p>
+            {emergencyBackupPreview.scopeMismatch && <div className="invoice-status warning">This backup belongs to another company. Import is blocked.</div>}
+            {emergencyBackupPreview.cloudError && <div className="invoice-status warning">{emergencyBackupPreview.cloudError} Preview remains read-only.</div>}
+            {permissions.canImport && !emergencyBackupPreview.scopeMismatch && emergencyBackupPreview.comparison.counts.onlyLocal > 0 && (
+              <button disabled={recoveryBusy || !cloudEnabled} onClick={importPreviewMissingInvoices} type="button">Import Missing Invoices Only</button>
+            )}
+          </div>
+        )}
+        {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
+      </Panel>
+
       {demoMode ? (
         <Panel title="Demo data" action="Temporary">
           <p className="helper-text">Demo edits live only in this browser session. Reset returns every page to the original demo dataset.</p>
@@ -11713,8 +11950,6 @@ function SettingsPanel({
               <button className="icon" onClick={() => setPendingFullBackup(null)} type="button"><X size={16} /></button>
             </div>
             <div className="code-card">
-              <p><strong>Replace existing data</strong></p>
-              <p>Warning: this replaces MarginFlow browser data for the keys included in the backup. A pre-import backup will be saved first.</p>
               <p><strong>Merge with existing data</strong></p>
               <p>Merges imported invoices, products, suppliers and other saved arrays with current browser data. Existing records are not deleted.</p>
             </div>
@@ -11722,7 +11957,6 @@ function SettingsPanel({
               <label>Settings during merge<select value={backupImportSettingsMode} onChange={(event) => setBackupImportSettingsMode(event.target.value)}><option>Keep current settings</option><option>Use imported settings</option></select></label>
             </div>
             <div className="button-row left">
-              {permissions.canImport && <button className="ghost danger" onClick={replaceFullBackup} type="button">Replace</button>}
               {permissions.canImport && <button onClick={mergeFullBackup} type="button">Merge</button>}
               <button className="ghost" onClick={() => { setPendingFullBackup(null); setDataStatus("Full backup import cancelled."); }} type="button">Cancel</button>
             </div>
