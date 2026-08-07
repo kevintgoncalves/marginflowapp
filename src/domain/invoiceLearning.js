@@ -1,5 +1,5 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
-import { normalizeSupplierDescription, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
+import { PRODUCT_MATCH_SOURCES, normalizeSupplierDescription, normalizeSupplierProductCode } from "./invoiceProductMatching.js";
 import { sameSupplierIdentity } from "./supplierIdentity.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 
@@ -128,7 +128,9 @@ export function learnSupplierProductMappings({
       && existing.productId === productId
       && sameAllocation(existing, allocation);
     const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + 1 : 1;
-    const autoApply = code ? true : confirmationCount >= 2 || line.rememberSupplierMapping === true;
+    const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, "user_selected"].includes(line.productMatchSource)
+      || ["manual_match", "manually_matched"].includes(line.productResolution);
+    const autoApply = code ? true : manualProductSelection || confirmationCount >= 2 || line.rememberSupplierMapping === true;
     invoiceLearningDebug("save-start", {
       companyId,
       locationId,
@@ -160,6 +162,8 @@ export function learnSupplierProductMappings({
       normalizedSupplierDescription: description,
       productId,
       productName: product.name || line.productName || existing?.productName || "",
+      mappingSource: manualProductSelection ? PRODUCT_MATCH_SOURCES.MANUAL_SELECTION : (existing?.mappingSource || "confirmed_invoice"),
+      descriptionAutoApply: manualProductSelection || existing?.descriptionAutoApply === true,
       packSize: line.packSize || existing?.packSize || "",
       unitOfMeasure: line.unitOfMeasure || line.unit || existing?.unitOfMeasure || "",
       ...allocation,

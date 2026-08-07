@@ -64,6 +64,8 @@ export function relationalMappingFromRow(row = {}, {
     normalizedSupplierDescription: normalizeSupplierDescription(row.normalized_supplier_description || row.supplier_description),
     productId: row.product_id,
     productName: product?.name || product?.productName || metadata.product_name || "",
+    mappingSource: row.source || metadata.mapping_source || "confirmed_invoice",
+    descriptionAutoApply: row.source === "manual_selection" || metadata.mapping_source === "manual_selection",
     unitOfMeasure: row.unit_of_measure || metadata.unit_of_measure || "",
     normalizedUnitOfMeasure: row.normalized_unit_of_measure || normalizeHeader(row.unit_of_measure || metadata.unit_of_measure || ""),
     packSize: row.pack_size || metadata.pack_size || "",
@@ -189,6 +191,7 @@ function persistencePayload(mapping = {}, scope = {}) {
     p_department_name: mapping.department || "",
     p_mapping_key: mapping.mappingKey || supplierProductMappingIdentity(mapping),
     p_confirmed_at: mapping.lastConfirmedAt || mapping.updatedAt || new Date().toISOString(),
+    p_match_source: mapping.mappingSource || "confirmed_invoice",
   };
 }
 
@@ -201,7 +204,7 @@ export async function persistRelationalSupplierProductMappings(client, mappings 
       skipped.push({ mappingId: mapping.id || "", reason: "Learning references are not canonical relational UUIDs." });
       continue;
     }
-    const { data, error } = await client.rpc("persist_supplier_product_learning", payload);
+    const { data, error } = await client.rpc("persist_supplier_product_learning_v2", payload);
     if (error) throw error;
     persisted.push({ mappingId: mapping.id || "", relationalId: Array.isArray(data) ? data[0]?.mapping_id : data?.mapping_id || data });
   }

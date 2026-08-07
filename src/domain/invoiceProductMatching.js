@@ -181,7 +181,8 @@ export function matchInvoiceLineToExistingProduct({
       if (candidate.autoApply === false) return false;
       const confirmationCount = numberValue(candidate.confirmationCount ?? candidate.confirmation_count, 0);
       const hasCode = normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code);
-      return hasCode || confirmationCount >= 2 || candidate.descriptionAutoApply === true;
+      const mappingSource = candidate.mappingSource || candidate.source || candidate.metadata?.mapping_source || "";
+      return hasCode || confirmationCount >= 2 || candidate.descriptionAutoApply === true || mappingSource === PRODUCT_MATCH_SOURCES.MANUAL_SELECTION;
     });
     const product = mappingProduct(mapping, products);
     if (mapping && product && unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure) && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size)) {

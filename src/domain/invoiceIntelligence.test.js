@@ -891,7 +891,7 @@ test("relational persistence sends the centrally normalized supplier code and co
   }], { companyId: "11111111-1111-4111-8111-111111111111" });
 
   assert.equal(result.persisted.length, 1);
-  assert.equal(calls[0].name, "persist_supplier_product_learning");
+  assert.equal(calls[0].name, "persist_supplier_product_learning_v2");
   assert.equal(calls[0].payload.p_normalized_supplier_product_code, "AB00145");
   assert.deepEqual(calls[0].payload.p_split_lines.map((line) => line.percentage), [75, 25]);
 });
@@ -1083,4 +1083,75 @@ test("description-only mapping uses normalized description, unit and pack size a
   assert.equal(differentPack.filter((mapping) => mapping.active !== false).length, 2);
   assert.equal(match.productMatchSource, "learned_rule");
   assert.equal(match.department, "Bar");
+});
+
+test("committed manual invoice selection persists and auto-applies by normalized supplier description", () => {
+  const juiceProducts = [
+    { id: "juice-a", companyId: "c1", name: "SQUISH Apple Juice", active: true },
+    { id: "juice-b", companyId: "c1", name: "Orange Juice", active: true },
+  ];
+  const saved = learnSupplierProductMappings({
+    mappings: [],
+    invoice: {
+      id: "invoice-manual-1",
+      supplier: "ABC Foods",
+      items: [{
+        id: "line-manual-1",
+        rawDescription: "SQUISH Cold Press Apple Juice",
+        productName: "SQUISH Apple Juice",
+        matchedProductId: "juice-a",
+        productMatchSource: "manual_selection",
+        productResolution: "manual_match",
+        department: "Bar",
+        departmentMode: "Single",
+      }],
+    },
+    products: juiceProducts,
+    companyId: "c1",
+    supplierId: "supplier-abc",
+    supplierName: "ABC Foods",
+  }).mappings;
+
+  assert.equal(saved[0].confirmationCount, 1);
+  assert.equal(saved[0].autoApply, true);
+  assert.equal(saved[0].mappingSource, "manual_selection");
+  const reloaded = JSON.parse(JSON.stringify(saved));
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierId: "supplier-abc",
+    supplierName: "ABC Foods Limited",
+    rawDescription: "  SQUISH COLD-PRESS APPLE JUICE  ",
+    existingProducts: juiceProducts,
+    supplierMappings: reloaded,
+  });
+  assert.equal(match.matchedProductId, "juice-a");
+  assert.equal(match.productMatchSource, "learned_rule");
+  assert.equal(match.needsReview, false);
+});
+
+test("manual description learning stays supplier-scoped and a later confirmed correction wins", () => {
+  const juiceProducts = [
+    { id: "juice-a", companyId: "c1", name: "SQUISH Apple Juice", active: true },
+    { id: "juice-b", companyId: "c1", name: "Pressed Apple Juice", active: true },
+  ];
+  const invoiceFor = (id, productId) => ({
+    id,
+    supplier: "ABC Foods",
+    items: [{
+      id: `${id}-line`,
+      rawDescription: "SQUISH Cold Press Apple Juice",
+      productName: juiceProducts.find((product) => product.id === productId).name,
+      matchedProductId: productId,
+      productMatchSource: "manual_selection",
+      department: "Bar",
+      departmentMode: "Single",
+    }],
+  });
+  const first = learnSupplierProductMappings({ mappings: [], invoice: invoiceFor("invoice-a", "juice-a"), products: juiceProducts, companyId: "c1", supplierId: "supplier-abc", supplierName: "ABC Foods" }).mappings;
+  const corrected = learnSupplierProductMappings({ mappings: JSON.parse(JSON.stringify(first)), invoice: invoiceFor("invoice-b", "juice-b"), products: juiceProducts, companyId: "c1", supplierId: "supplier-abc", supplierName: "ABC Foods" }).mappings;
+  const otherSupplier = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "supplier-other", supplierName: "Other Foods", rawDescription: "SQUISH Cold Press Apple Juice", existingProducts: juiceProducts, supplierMappings: corrected });
+  const correctedMatch = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "supplier-abc", supplierName: "ABC Foods", rawDescription: "SQUISH Cold Press Apple Juice", existingProducts: juiceProducts, supplierMappings: JSON.parse(JSON.stringify(corrected)) });
+  assert.equal(corrected.filter((mapping) => mapping.active !== false).length, 1);
+  assert.equal(correctedMatch.matchedProductId, "juice-b");
+  assert.equal(otherSupplier.matchedProductId, null);
 });

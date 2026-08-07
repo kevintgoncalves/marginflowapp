@@ -3015,3 +3015,154 @@ code {
   height: 28px;
   padding: 0;
 }
+
+.product-merge-workflow section {
+  display: grid;
+  gap: 12px;
+}
+
+.merge-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1728;
+}
+
+.merge-search input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+}
+
+.merge-product-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.merge-product-picker > label {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #101a2e;
+  cursor: pointer;
+}
+
+.merge-product-picker input {
+  width: 16px;
+  height: 16px;
+}
+
+.merge-product-picker span,
+.merge-product-picker strong,
+.merge-product-picker small {
+  min-width: 0;
+}
+
+.merge-product-picker strong,
+.merge-product-picker small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.merge-product-picker small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.merge-product-comparison {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.merge-product-comparison article {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101a2e;
+}
+
+.merge-product-comparison article.canonical {
+  border-color: rgba(11, 191, 131, 0.65);
+}
+
+.merge-product-comparison article > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.merge-product-comparison dl {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+}
+
+.merge-product-comparison dl > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.merge-product-comparison dt {
+  color: var(--muted);
+}
+
+.merge-product-comparison dd {
+  margin: 0;
+  text-align: right;
+}
+
+.merge-impact-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.merge-impact-grid span {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1728;
+  color: var(--muted);
+}
+
+.merge-impact-grid strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.merge-conflicts {
+  display: grid;
+  gap: 8px;
+}
+
+.merge-conflicts .invoice-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .merge-product-picker,
+  .merge-impact-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .merge-product-comparison {
+    grid-template-columns: 1fr;
+  }
+}

@@ -8,6 +8,7 @@ import {
   Boxes,
   ChefHat,
   Check,
+  Combine,
   Download,
   Edit3,
   Eye,
@@ -43,7 +44,10 @@ import {
 import {
   PRODUCT_NAME_MATCH_TYPES,
   matchProductName,
+  normalizeProductName,
+  productAliases,
   rankProductCandidates,
+  unorderedProductKey,
 } from "./domain/productMatching.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
@@ -57,6 +61,8 @@ import {
 } from "./domain/invoiceValidation.js";
 import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
+import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
+import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
 import {
   departmentAllocationRows,
   departmentAssignmentForLine,
@@ -2615,7 +2621,7 @@ function collectSupplierPrices(product, products) {
     }
   };
 
-  products.filter((candidate) => productGroupMatches(product, candidate)).forEach((candidate) => {
+  products.filter((candidate) => candidate.active !== false && productGroupMatches(product, candidate)).forEach((candidate) => {
     addPrice(candidate.supplier, candidate.unitCost, candidate.priceHistory?.at(-1)?.date, candidate.packSize, candidate);
     (candidate.supplierPrices || []).forEach((entry) => addPrice(entry.supplier, entry.price, entry.date, entry.packSize || candidate.packSize, entry));
     (candidate.supplierFormats || []).forEach((entry) => addPrice(entry.supplier, entry.purchaseUnitCost ?? entry.price, entry.date, entry.packSize || candidate.packSize, entry));
@@ -2625,7 +2631,7 @@ function collectSupplierPrices(product, products) {
 }
 
 function buildProductRows(products) {
-  return products.map((product) => {
+  return products.filter((product) => product.active !== false).map((product) => {
     const prices = collectSupplierPrices(product, products);
     const comparison = priceComparisonForProduct(product, prices);
     const cheapest = comparison.comparable ? comparison.cheapest : cheapestOffer(product, products);
@@ -4820,6 +4826,47 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setDeleteConfirmation(null);
   };
 
+  const mergeDuplicateProducts = async ({ keepProductId, mergeProductIds }) => {
+    const merged = applyProductMergeToSnapshot(cloudSnapshot, {
+      companyId: cloudScope.companyId || "",
+      keepProductId,
+      mergeProductIds,
+    });
+    if (cloudEnabled) {
+      if (cloudSaveTimerRef.current) {
+        window.clearTimeout(cloudSaveTimerRef.current);
+        cloudSaveTimerRef.current = null;
+      }
+      setCloudLoading(true);
+      setCloudError("");
+      try {
+        await persistAtomicProductMerge(supabase, {
+          companyId: cloudScope.companyId,
+          locationId: cloudScope.locationId || "",
+          keepProductId,
+          mergeProductIds,
+          nextSnapshot: merged.snapshot,
+        });
+        setCloudStatus("synced");
+      } catch (error) {
+        setCloudStatus("error");
+        setCloudError(error.message || "Product merge failed.");
+        throw error;
+      } finally {
+        setCloudLoading(false);
+      }
+    }
+    setProducts(merged.snapshot.products);
+    setSupplierProductMappings(merged.snapshot.supplierProductMappings);
+    setInvoiceLineCorrections(merged.snapshot.invoiceLineCorrections);
+    setInvoices(merged.snapshot.invoices);
+    setStocktakes(merged.snapshot.stocktakes);
+    setRecipes(merged.snapshot.recipes);
+    setMenus(merged.snapshot.menus);
+    setWasteItems(merged.snapshot.wasteItems);
+    return merged.analysis;
+  };
+
   useEffect(() => {
     const syncPathname = () => setPathname(currentPathname());
     window.addEventListener("popstate", syncPathname);
@@ -5178,7 +5225,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             suppliers={suppliers}
           />
         )}
-        {active === "products" && <Products departmentNames={allowedDepartmentNames} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -5980,7 +6027,7 @@ function Invoices({
           companyId,
           locationId,
           suppliers,
-          products: products.map((product) => ({
+          products: products.filter((product) => product.active !== false).map((product) => ({
             id: product.id,
             name: product.productName || product.name,
             supplier: product.supplier,
@@ -7543,7 +7590,7 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const visibleSuppliers = activeSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
@@ -7554,7 +7601,64 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
   const [importFileKey, setImportFileKey] = useState(0);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeProductIds, setMergeProductIds] = useState([]);
+  const [keepProductId, setKeepProductId] = useState("");
+  const [mergeSearch, setMergeSearch] = useState("");
+  const [mergeStatus, setMergeStatus] = useState("");
+  const [mergeBusy, setMergeBusy] = useState(false);
   const rows = useMemo(() => buildProductRows(products), [products]);
+  const activeProducts = useMemo(() => products.filter((product) => product.active !== false), [products]);
+  const duplicateSuggestions = useMemo(() => mergeOpen ? suggestProductDuplicateGroups(activeProducts, { organisationId: companyId }) : [], [activeProducts, companyId, mergeOpen]);
+  const visibleMergeProducts = useMemo(() => {
+    const query = normalizeProductName(mergeSearch);
+    return activeProducts
+      .filter((product) => !query || productAliases(product).some((name) => normalizeProductName(name).includes(query)))
+      .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+  }, [activeProducts, mergeSearch]);
+  const mergePreview = useMemo(() => (
+    mergeProductIds.length >= 2 && keepProductId
+      ? analyzeProductMerge(mergeSnapshot, { companyId, keepProductId, mergeProductIds: mergeProductIds.filter((id) => id !== keepProductId) })
+      : null
+  ), [companyId, keepProductId, mergeProductIds, mergeSnapshot]);
+
+  const selectMergeProducts = (productIds = []) => {
+    const selected = [...new Set(productIds)].filter((id) => activeProducts.some((product) => product.id === id));
+    const initialAnalysis = selected.length >= 2
+      ? analyzeProductMerge(mergeSnapshot, { companyId, keepProductId: selected[0], mergeProductIds: selected.slice(1) })
+      : null;
+    setMergeProductIds(selected);
+    setKeepProductId(initialAnalysis?.recommendedKeepProductId || selected[0] || "");
+    setMergeStatus("");
+    setMergeOpen(true);
+  };
+
+  const toggleMergeProduct = (productId, checked) => {
+    const selected = checked
+      ? [...new Set([...mergeProductIds, productId])]
+      : mergeProductIds.filter((id) => id !== productId);
+    setMergeProductIds(selected);
+    if (!selected.includes(keepProductId)) setKeepProductId(selected[0] || "");
+    setMergeStatus("");
+  };
+
+  const confirmProductMerge = async () => {
+    if (!mergePreview?.canMerge || mergeBusy || !permissions.canEdit || !permissions.canDelete) return;
+    setMergeBusy(true);
+    setMergeStatus("");
+    try {
+      const completed = await onMergeProducts({ keepProductId, mergeProductIds: mergeProductIds.filter((id) => id !== keepProductId) });
+      setMergeOpen(false);
+      setMergeProductIds([]);
+      setKeepProductId("");
+      setMergeSearch("");
+      setStatus(`${completed.canonicalProduct.name} is now the canonical product. ${completed.mergeProductIds.length} duplicate product(s) archived.`);
+    } catch (error) {
+      setMergeStatus(error.message || "Product merge failed. No changes were applied.");
+    } finally {
+      setMergeBusy(false);
+    }
+  };
 
   const productPayload = (row) => {
     return productRecordFromInput(row, {
@@ -7645,6 +7749,7 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
   return (
     <div className="page-grid">
       <Panel title="Product database" action="Aliases + supplier comparison">
+        {status && <div className="invoice-status info">{status}</div>}
         <DataTable
           columns={[
             { key: "name", label: "Product" },
@@ -7661,7 +7766,12 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
           onEdit={permissions.canEdit ? openProductModal : null}
           rows={rows}
-          toolbarAction={permissions.canAdd ? <button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button> : null}
+          toolbarAction={(
+            <div className="button-row left tight">
+              {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
+              {permissions.canAdd && <button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
+            </div>
+          )}
         />
       </Panel>
       {modalOpen && !editingId && (
@@ -7716,6 +7826,90 @@ function Products({ departmentNames, permissions = permissionsForPage(rolePermis
             <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
           </div>
         </EditModal>
+      )}
+      {mergeOpen && (
+        <AppModal
+          footer={(
+            <>
+              <button className="ghost" disabled={mergeBusy} onClick={() => setMergeOpen(false)} type="button">Cancel</button>
+              <button disabled={!mergePreview?.canMerge || mergeBusy || !permissions.canEdit || !permissions.canDelete} onClick={confirmProductMerge} type="button"><Combine size={16} />{mergeBusy ? "Merging..." : "Merge Products"}</button>
+            </>
+          )}
+          onClose={() => setMergeOpen(false)}
+          open={mergeOpen}
+          title="Merge duplicate products"
+          wide
+        >
+          <div className="modal-stack product-merge-workflow">
+            {mergeStatus && <div className="invoice-status error">{mergeStatus}</div>}
+            {duplicateSuggestions.length > 0 && (
+              <section className="merge-suggestions">
+                <div className="panel-head"><div><h3>Suggested duplicates</h3><span>Suggestions only</span></div></div>
+                <div className="duplicate-list compact">
+                  {duplicateSuggestions.slice(0, 6).map((suggestion) => (
+                    <button key={suggestion.id} onClick={() => selectMergeProducts(suggestion.productIds)} type="button">
+                      <span><strong>{suggestion.products.map((product) => product?.name).join(" + ")}</strong><small>{Math.round(suggestion.confidence * 100)}% name and format similarity</small></span>
+                      <Badge tone="green">Review</Badge>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+            <section>
+              <div className="panel-head"><div><h3>Select products</h3><span>{mergeProductIds.length} selected</span></div></div>
+              <label className="merge-search"><Search size={16} /><input placeholder="Search products" value={mergeSearch} onChange={(event) => setMergeSearch(event.target.value)} /></label>
+              <div className="merge-product-picker">
+                {visibleMergeProducts.map((product) => (
+                  <label key={product.id}>
+                    <input checked={mergeProductIds.includes(product.id)} onChange={(event) => toggleMergeProduct(product.id, event.target.checked)} type="checkbox" />
+                    <span><strong>{product.name}</strong><small>{product.packSize || "No pack"} · {product.department || "No department"} · {money(product.unitCost)}</small></span>
+                  </label>
+                ))}
+              </div>
+            </section>
+            {mergeProductIds.length >= 2 && (
+              <section className="merge-preview">
+                <div className="panel-head"><div><h3>Merge preview</h3><span>Review before confirming</span></div></div>
+                <label>Canonical product<select value={keepProductId} onChange={(event) => setKeepProductId(event.target.value)}>{mergeProductIds.map((id) => {
+                  const product = activeProducts.find((candidate) => candidate.id === id);
+                  return <option key={id} value={id}>{product?.name || id}{id === mergePreview?.recommendedKeepProductId ? " (recommended)" : ""}</option>;
+                })}</select></label>
+                {mergePreview && (
+                  <>
+                    <div className="merge-product-comparison">
+                      {mergePreview.selectedProducts.map((product) => {
+                        const usage = mergePreview.usageByProduct[product.id];
+                        return (
+                          <article className={product.id === keepProductId ? "canonical" : ""} key={product.id}>
+                            <div><strong>{product.name}</strong><Badge tone={product.id === keepProductId ? "green" : "amber"}>{product.id === keepProductId ? "Keep" : "Archive"}</Badge></div>
+                            <dl>
+                              <div><dt>Unit / pack</dt><dd>{product.unit || product.unitOfMeasure || product.baseUnit || "-"} / {product.packSize || "-"}</dd></div>
+                              <div><dt>Department</dt><dd>{product.department || "-"}</dd></div>
+                              <div><dt>Current cost</dt><dd>{money(product.unitCost)}</dd></div>
+                              <div><dt>Invoice / Stock Take</dt><dd>{usage.invoiceLines} / {usage.stocktakeLines}</dd></div>
+                              <div><dt>Recipes / mappings</dt><dd>{usage.recipeIngredients} / {usage.supplierMappings}</dd></div>
+                              <div><dt>Created</dt><dd>{product.createdAt || product.created_at || "-"}</dd></div>
+                            </dl>
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <div className="merge-impact-grid">
+                      <span><strong>{mergePreview.totals.invoiceLines}</strong> invoice lines</span>
+                      <span><strong>{mergePreview.totals.supplierMappings}</strong> supplier mappings</span>
+                      <span><strong>{mergePreview.totals.stocktakeLines}</strong> Stock Take lines</span>
+                      <span><strong>{mergePreview.totals.recipeIngredients}</strong> recipe ingredients</span>
+                      <span><strong>{mergePreview.totals.menuComponents}</strong> menu components</span>
+                      <span><strong>{mergePreview.totals.wasteEntries}</strong> waste records</span>
+                    </div>
+                    <div className="code-card"><p><strong>Names becoming aliases</strong></p><p>{mergePreview.aliasesToAdd.join(", ") || "No new aliases"}</p></div>
+                    {mergePreview.conflicts.length > 0 && <div className="merge-conflicts">{mergePreview.conflicts.map((conflict, index) => <div className={`invoice-status ${conflict.level === "blocking" ? "error" : "warning"}`} key={`${conflict.type}-${index}`}><AlertTriangle size={15} />{conflict.message}</div>)}</div>}
+                  </>
+                )}
+              </section>
+            )}
+          </div>
+        </AppModal>
       )}
     </div>
   );
@@ -8554,7 +8748,7 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
         if (ingredient.id !== id) return ingredient;
         let updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
         if (field === "productName") {
-          const product = products.find((candidate) => candidate.name.toLowerCase() === String(value).trim().toLowerCase());
+          const product = products.find((candidate) => candidate.active !== false && candidate.name.toLowerCase() === String(value).trim().toLowerCase());
           updated = product ? ingredientFromProduct(updated, product) : { ...updated, productId: "", supplier: "", unitCost: 0, lineCost: 0 };
         }
         if (field === "quantity" || field === "unitCost") {
@@ -8694,7 +8888,7 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
               <thead><tr>{["Search ingredient", "Product", "Supplier", "Unit cost", "Quantity", "Unit", "Cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
               <tbody>
                 {form.ingredients.map((ingredient) => {
-                  const productFound = products.some((product) => product.name.toLowerCase() === ingredient.productName.trim().toLowerCase());
+                  const productFound = products.some((product) => product.active !== false && product.name.toLowerCase() === ingredient.productName.trim().toLowerCase());
                   const needsProduct = ingredient.productName.trim() && !productFound;
                   return (
                     <tr key={ingredient.id}>
