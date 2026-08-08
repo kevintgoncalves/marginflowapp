@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildLaptopRecoveryPreview } from "./legacyRecovery.js";
+import { diagnoseLaptopRecoveryConflicts } from "./legacyRecoveryDiagnostics.js";
 import { recoverLaptopLegacyData } from "../lib/legacyRecoveryRepository.js";
 
 const companyId = "11111111-1111-4111-8111-111111111111";
@@ -251,6 +252,133 @@ test("TEST I: successful module snapshot sync alone never qualifies an invoice a
   });
   assert.equal(preview.invoices.counts.needMigration, 1);
   assert.equal(preview.invoices.counts.alreadyRelational, 0);
+});
+
+test("read-only diagnostics identify a derived split amount as a likely technical false conflict", async () => {
+  const splitLocal = invoice({
+    items: [{
+      ...invoice().items[0],
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", department: "Kitchen Made", percentage: 60 },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", department: "Bar", percentage: 40 },
+      ],
+    }],
+  });
+  const splitCloud = {
+    ...splitLocal,
+    supplierId,
+    items: [{
+      ...splitLocal.items[0],
+      productId,
+      matchedProductId: productId,
+      departmentSplits: [
+        { ...splitLocal.items[0].departmentSplits[0], departmentId: relationalDepartmentId, amount: 14.16 },
+        { ...splitLocal.items[0].departmentSplits[1], departmentId: barDepartmentId, amount: 9.44 },
+      ],
+    }],
+  };
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({
+      departmentSettings: [
+        { id: legacyDepartmentId, name: "Kitchen Made" },
+        { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "Bar" },
+      ],
+      invoices: [splitLocal],
+    }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      departments: [
+        { id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true },
+        { id: barDepartmentId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
+      ],
+      invoices: [splitCloud],
+    }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  const before = structuredClone(preview);
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.estimates.likelyFalseConflicts, 1);
+  assert.equal(report.examples[0].conflictReasonCode, "likely_technical_false_conflict");
+  assert.ok(report.examples[0].currentComparatorDifferences.some((row) => row.path.includes("splits") && row.path.endsWith(".amount")));
+  assert.deepEqual(preview, before);
+  assert.equal(preview.invoices.counts.conflicts, 1);
+});
+
+test("read-only diagnostics keep a wrong invoice date classified as a genuine conflict", async () => {
+  const local = invoice({ date: "2026-08-08" });
+  const cloud = invoice({ date: "2020-08-08", supplierId, productId });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      invoices: [cloud],
+    }),
+    scope,
+  });
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.breakdown.find((row) => row.code === "date_mismatch")?.count, 1);
+  assert.equal(report.examples[0].classification, "genuine business conflict");
+  assert.deepEqual(report.examples[0].materialDifferences.find((row) => row.path === "date"), {
+    path: "date",
+    legacy: "2026-08-08",
+    relational: "2020-08-08",
+  });
+});
+
+test("read-only diagnostics classify confirmed split differences as genuine business conflicts", async () => {
+  const local = invoice({
+    items: [{
+      ...invoice().items[0],
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { department: "Kitchen Made", departmentId: legacyDepartmentId, percentage: 75 },
+        { department: "Bar", departmentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", percentage: 25 },
+      ],
+    }],
+  });
+  const cloud = invoice({
+    supplierId,
+    items: [{
+      ...invoice().items[0],
+      productId,
+      matchedProductId: productId,
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { department: "Kitchen Made", departmentId: relationalDepartmentId, percentage: 50 },
+        { department: "Bar", departmentId: barDepartmentId, percentage: 50 },
+      ],
+    }],
+  });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({
+      departmentSettings: [
+        { id: legacyDepartmentId, name: "Kitchen Made" },
+        { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "Bar" },
+      ],
+      invoices: [local],
+    }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      departments: [
+        { id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true },
+        { id: barDepartmentId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
+      ],
+      invoices: [cloud],
+    }),
+    scope,
+  });
+
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.conflicts[0].conflictReasonCode, "department_split_mismatch");
+  assert.equal(report.conflicts[0].classification, "genuine business conflict");
 });
 
 test("recovery migration is install-only, reuses the v2 invoice transaction and verifies child counts", () => {

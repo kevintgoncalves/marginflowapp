@@ -468,6 +468,12 @@ export async function buildLaptopRecoveryPreview({
     generatedAt: new Date().toISOString(),
     source: "current_laptop",
     scope,
+    relationalCounts: {
+      suppliers: (relational.suppliers || []).length,
+      products: (relational.products || []).length,
+      departments: (relational.departments || []).length,
+      invoices: (relational.invoices || []).length,
+    },
     departments,
     suppliers,
     products,

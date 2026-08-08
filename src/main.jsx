@@ -12,6 +12,7 @@ import {
   Download,
   Edit3,
   Eye,
+  FileSearch,
   Gauge,
   Home,
   PackageSearch,
@@ -81,6 +82,7 @@ import {
   previewLaptopLegacyRecovery,
   recoverLaptopLegacyData,
 } from "./lib/legacyRecoveryRepository.js";
+import { diagnoseLaptopRecoveryConflicts } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import {
   departmentAllocationRows,
@@ -4986,6 +4988,14 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     });
   };
 
+  const diagnoseCurrentLaptopRecovery = async () => {
+    const preview = await previewCurrentLaptopRecovery();
+    return {
+      preview,
+      report: diagnoseLaptopRecoveryConflicts(preview, { exampleLimit: 5 }),
+    };
+  };
+
   const recoverCurrentLaptopData = async () => {
     if (!cloudEnabled) throw new Error("Relational cloud access is required for laptop recovery.");
     const preview = await previewCurrentLaptopRecovery();
@@ -5471,6 +5481,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             onCompareDeviceWithCloud={compareDeviceWithCloud}
             onInspectRecoveryBackup={inspectRecoveryBackupAgainstCloud}
             onMigrateLocalToCloud={migrateLocalDataToCloud}
+            onDiagnoseLaptopRecovery={diagnoseCurrentLaptopRecovery}
             onPreviewLaptopRecovery={previewCurrentLaptopRecovery}
             onRecoverLaptopLegacyData={recoverCurrentLaptopData}
             onResetDemo={resetDemoData}
@@ -11231,6 +11242,7 @@ function SettingsPanel({
   onImportBackupToCloud,
   onInspectRecoveryBackup,
   onMigrateLocalToCloud,
+  onDiagnoseLaptopRecovery,
   onPreviewLaptopRecovery,
   onRecoverLaptopLegacyData,
   onResetDemo,
@@ -11261,6 +11273,7 @@ function SettingsPanel({
   const [emergencyBackupInputKey, setEmergencyBackupInputKey] = useState(0);
   const [syncDiagnostic, setSyncDiagnostic] = useState(null);
   const [laptopRecoveryPreview, setLaptopRecoveryPreview] = useState(null);
+  const [recoveryConflictDiagnostic, setRecoveryConflictDiagnostic] = useState(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
@@ -11439,6 +11452,7 @@ function SettingsPanel({
     try {
       const preview = await onPreviewLaptopRecovery?.();
       setLaptopRecoveryPreview(preview);
+      setRecoveryConflictDiagnostic(null);
       setDataStatus("Laptop migration preview completed. No relational or device records were changed.");
     } catch (error) {
       setLaptopRecoveryPreview(null);
@@ -11446,6 +11460,28 @@ function SettingsPanel({
     } finally {
       setRecoveryBusy(false);
     }
+  };
+
+  const diagnoseRecoveryConflicts = async () => {
+    setRecoveryBusy(true);
+    setDataStatus("");
+    try {
+      const result = await onDiagnoseLaptopRecovery?.();
+      setLaptopRecoveryPreview(result?.preview || null);
+      setRecoveryConflictDiagnostic(result?.report || null);
+      setDataStatus("Recovery conflict diagnosis completed in read-only mode. No relational or device records were changed.");
+    } catch (error) {
+      setRecoveryConflictDiagnostic(null);
+      setDataStatus(`${error.message || "Recovery conflict diagnosis failed."} No data was changed.`);
+    } finally {
+      setRecoveryBusy(false);
+    }
+  };
+
+  const exportRecoveryConflictDiagnostic = () => {
+    if (!recoveryConflictDiagnostic) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadJsonFile(`marginflow-recovery-conflict-diagnostic-${stamp}.json`, recoveryConflictDiagnostic);
   };
 
   const migrateLaptopLegacyData = async () => {
@@ -11915,6 +11951,7 @@ function SettingsPanel({
           <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={previewLaptopMigration} type="button"><PackageSearch size={16} />Preview laptop migration</button>
+          <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={diagnoseRecoveryConflicts} type="button"><FileSearch size={16} />Diagnose recovery conflicts</button>
         </div>
         <p className="helper-text">Emergency export uses the current device state and works even when cloud sync is failing. Inspection is preview-only.</p>
         {syncDiagnostic && (
@@ -11950,6 +11987,44 @@ function SettingsPanel({
             {permissions.canImport && laptopRecoveryPreview.canMigrate && (
               <button disabled={recoveryBusy || !cloudEnabled} onClick={migrateLaptopLegacyData} type="button"><Upload size={16} />Migrate legacy data to cloud</button>
             )}
+          </div>
+        )}
+        {recoveryConflictDiagnostic && (
+          <div className="recovery-preview recovery-diagnostic">
+            <div className="panel-head">
+              <div><h3>Recovery conflict diagnosis</h3><span>Read-only · {recoveryConflictDiagnostic.generatedAt}</span></div>
+              <button className="ghost" onClick={exportRecoveryConflictDiagnostic} type="button"><Download size={16} />Download diagnostic JSON</button>
+            </div>
+            <div className="recovery-summary-grid recovery-catalog-grid">
+              <div><strong>Current counts</strong><span>Relational {recoveryConflictDiagnostic.currentCounts.relationalInvoices ?? "Unknown"} · Legacy {recoveryConflictDiagnostic.currentCounts.legacyInvoices}</span><span>Already {recoveryConflictDiagnostic.currentCounts.alreadyRelational} · Need migration {recoveryConflictDiagnostic.currentCounts.needMigration} · Conflicts {recoveryConflictDiagnostic.currentCounts.reviewConflicts}</span></div>
+              <div><strong>Diagnostic estimate</strong><span>Likely false {recoveryConflictDiagnostic.estimates.likelyFalseConflicts} · Likely true {recoveryConflictDiagnostic.estimates.likelyTrueConflicts}</span><span>Unresolved mappings {recoveryConflictDiagnostic.estimates.unresolvedMappings} · Allocations {recoveryConflictDiagnostic.estimates.unresolvedAllocations} · Other {recoveryConflictDiagnostic.estimates.other}</span></div>
+              <div><strong>Candidate reuse</strong><span>{recoveryConflictDiagnostic.candidateReuse.relationalCandidatesUsedMoreThanOnce} relational candidate(s) used more than once</span><span>{recoveryConflictDiagnostic.candidateReuse.legacyRowsUsingReusedCandidates} matching legacy row(s)</span></div>
+            </div>
+            <div className="recovery-diagnostic-breakdown">
+              {recoveryConflictDiagnostic.breakdown.map((row) => (
+                <div key={row.code}><strong>{row.count}</strong><span>{row.label}</span></div>
+              ))}
+            </div>
+            <div className="recovery-diagnostic-examples">
+              {recoveryConflictDiagnostic.examples.map((example, index) => (
+                <section className="recovery-diagnostic-example" key={`${example.legacy.documentNumber}-${example.legacy.date}-${index}`}>
+                  <div className="panel-head">
+                    <div><h4>{example.legacy.supplier || "Unknown supplier"} · {example.legacy.documentNumber || "No document number"}</h4><span>{example.conflictReasonText} · {example.classification}</span></div>
+                  </div>
+                  <div className="recovery-pair-grid">
+                    <div><strong>Legacy</strong><span>{example.legacy.documentType} · {example.legacy.date || "No date"} · £{Number(example.legacy.total || 0).toFixed(2)}</span><span>Supplier ID {example.legacy.supplierSourceId || "None"} → {example.legacy.canonicalSupplierId || "Unresolved"}</span><span>{example.legacy.lineCount} lines · {example.legacy.splitCount} splits</span></div>
+                    <div><strong>Relational</strong><span>{example.relational ? `${example.relational.documentType} · ${example.relational.date || "No date"} · £${Number(example.relational.total || 0).toFixed(2)}` : "No relational candidate"}</span><span>Supplier ID {example.relational?.supplierSourceId || "None"}</span><span>{example.relational ? `${example.relational.lineCount} lines · ${example.relational.splitCount} splits` : example.existingPreviewReason}</span></div>
+                  </div>
+                  <div className="recovery-difference-list">
+                    {(example.materialDifferences.length ? example.materialDifferences : example.currentComparatorDifferences).slice(0, 8).map((difference, differenceIndex) => (
+                      <div key={`${difference.path}-${differenceIndex}`}><code>{difference.path}</code><span>{JSON.stringify(difference.legacy)} → {JSON.stringify(difference.relational)}</span></div>
+                    ))}
+                    {!example.materialDifferences.length && example.currentComparatorDifferences.length > 0 && <p>Canonical business fields match; differences shown above come from the current technical fingerprint.</p>}
+                    {!example.materialDifferences.length && !example.currentComparatorDifferences.length && <p>{example.existingPreviewReason}</p>}
+                  </div>
+                </section>
+              ))}
+            </div>
           </div>
         )}
         {emergencyBackupPreview && (
