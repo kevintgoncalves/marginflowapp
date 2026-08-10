@@ -226,3 +226,24 @@ test("repair RPC checks revision, fingerprint and current header before changing
   assert.match(repair, /subtotal is distinct from p_expected_subtotal/);
   assert.doesNotMatch(repair, /update public\.invoice_lines/i);
 });
+
+test("Final Recovery preflight has minimum authenticated read grants without bypassing RLS", () => {
+  const repository = readFileSync(new URL("../lib/legacyRecoveryRepository.js", import.meta.url), "utf8");
+  const finalRepository = readFileSync(new URL("../lib/finalRecoveryRepository.js", import.meta.url), "utf8");
+  const invoiceRepository = readFileSync(new URL("../lib/invoiceRepository.js", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../../supabase/migrations/20260810183000_final_recovery_read_permissions.sql", import.meta.url), "utf8");
+  const directEvidenceTables = [
+    "supplier_product_mappings",
+    "invoice_line_corrections",
+    "marginflow_recovery_resolutions",
+  ];
+
+  for (const table of directEvidenceTables) {
+    assert.equal(repository.includes(`loadTable(client, "${table}"`), true, `${table} is not a direct preflight query`);
+    assert.match(migration, new RegExp(`grant select on table public\\.${table} to authenticated`, "i"));
+  }
+
+  assert.doesNotMatch(migration, /grant\s+.*\s+to\s+(?:anon|public|service_role)/i);
+  assert.doesNotMatch(migration, /disable\s+row\s+level\s+security|alter\s+policy|drop\s+policy/i);
+  assert.doesNotMatch(`${finalRepository}\n${repository}\n${invoiceRepository}`, /service_role|supabase_service_role/i);
+});
