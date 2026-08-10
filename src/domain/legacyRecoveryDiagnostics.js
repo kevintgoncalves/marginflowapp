@@ -2,6 +2,7 @@ import {
   invoiceContentFingerprint,
   invoiceRecoveryIdentity,
 } from "./emergencyRecovery.js";
+import { invoiceComparisonFinancials } from "./invoiceFinancials.js";
 import { supplierIdentityKey } from "./supplierIdentity.js";
 
 export const RECOVERY_DIAGNOSTIC_SCHEMA = "marginflow-recovery-conflict-diagnostic/v2";
@@ -20,6 +21,8 @@ const reasonLabels = Object.freeze({
   line_content_mismatch: "Line-content mismatch",
   likely_technical_false_conflict: "Likely technical/normalization false conflict",
   duplicate_candidate_reuse: "Multiple legacy rows matched one relational invoice",
+  generic_document_number_ambiguous: "Generic document number cannot prove invoice identity",
+  multiple_invoice_candidates: "Multiple relational invoice candidates",
   document_identity_mismatch: "Document identity mismatch",
   other: "Other",
 });
@@ -179,6 +182,7 @@ function lineSummary(line, preview, source) {
 function invoiceSummary(invoice = {}, preview, source) {
   const supplier = supplierReference(invoice, preview, source);
   const lines = (invoice.items || invoice.lines || []).map((line) => lineSummary(line, preview, source));
+  const financials = invoiceComparisonFinancials(invoice);
   return {
     id: text(invoice.id || invoice.relationalId || invoice.relational_id),
     supplier: supplier.name,
@@ -190,11 +194,19 @@ function invoiceSummary(invoice = {}, preview, source) {
     normalizedDocumentNumber: normalizedDocumentNumber(invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number),
     documentType: normalized(invoice.documentType || invoice.document_type || "invoice").replace(/\s+/g, "_"),
     date: isoDate(invoice.date || invoice.invoiceDate || invoice.invoice_date),
-    subtotal: numberValue(invoice, ["sourceInvoiceSubtotal", "subtotal", "subtotalBeforeDiscount"]),
-    vatTotal: numberValue(invoice, ["vatTotal", "taxAmount", "tax_amount"]),
+    subtotal: financials.subtotal,
+    storedSubtotal: financials.storedSubtotal,
+    legacySubtotal: financials.legacySubtotal,
+    subtotalSource: financials.subtotalSource,
+    vatTotal: financials.vatTotal,
     discountAmount: numberValue(invoice, ["discountAmount", "discount_amount"]),
     additionalCharges: numberValue(invoice, ["additionalCharges", "handlingCharge", "deliveryCharge"]),
-    total: numberValue(invoice, ["sourceInvoiceTotal", "total", "totalAmount", "total_amount", "finalInvoiceTotal"]),
+    total: financials.total,
+    storedTotal: financials.storedTotal,
+    legacyTotal: financials.legacyTotal,
+    totalSource: financials.totalSource,
+    lineSubtotal: financials.lineSubtotal,
+    lineNetTotal: financials.lineNetTotal,
     lineCount: lines.length,
     splitCount: lines.reduce((sum, line) => sum + line.splits.length, 0),
     lines,
@@ -597,6 +609,8 @@ function mappedLegacyInvoice(invoice, preview) {
 }
 
 function codeForDifferences(materialDifferences, legacySummary, relationalSummary, currentDifferences, existingReason = "") {
+  if (/generic document number/i.test(existingReason)) return "generic_document_number_ambiguous";
+  if (/multiple relational invoices share/i.test(existingReason)) return "multiple_invoice_candidates";
   if (/product dependency is unresolved/i.test(existingReason) || legacySummary.lines.some((line) => !line.productResolved)) return "product_mapping_unresolved";
   if (/supplier dependency is unresolved/i.test(existingReason)) return "supplier_mapping_unresolved";
   if (/department/i.test(existingReason) && !relationalSummary) return "department_split_mismatch";
@@ -631,6 +645,8 @@ function conflictDiagnostic(conflict, preview) {
   )));
   const classification = code === "likely_technical_false_conflict"
     ? "likely false conflict"
+    : ["generic_document_number_ambiguous", "multiple_invoice_candidates"].includes(code)
+      ? "ambiguous invoice identity"
     : code === "product_mapping_unresolved"
       ? "unresolved product mapping"
       : code === "supplier_mapping_unresolved"
@@ -807,12 +823,12 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
     count: diagnostics.filter((row) => row.conflictReasonCode === code).length,
   })).filter((row) => row.count > 0);
   const candidateUsage = new Map();
-  const addCandidateUsage = (candidateId, relational, legacy, matchBasis) => {
+  const addCandidateUsage = (candidateId, relational, legacy, matchBasis, classification = "") => {
     if (!candidateId) return;
     const usage = candidateUsage.get(candidateId) || { relational, legacyRows: new Map() };
     if (!usage.relational && relational) usage.relational = relational;
     const legacyKey = legacy.id || [legacy.supplier, legacy.documentNumber, legacy.date, legacy.total, legacy.lineCount].join("|");
-    usage.legacyRows.set(legacyKey, { ...compactInvoiceSummary(legacy), matchBasis });
+    usage.legacyRows.set(legacyKey, { ...compactInvoiceSummary(legacy), matchBasis, ...(classification ? { classification } : {}) });
     candidateUsage.set(candidateId, usage);
   };
   [...(preview.invoices?.already || []), ...previewConflicts].forEach((row) => {
@@ -825,6 +841,7 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
       compactInvoiceSummary(relational),
       legacy,
       rawInvoiceId(row.local) === rawInvoiceId(cloud) ? "same_invoice_uuid" : "canonical_supplier_document_type_number",
+      row.classification || "",
     );
   });
   provenanceRows.forEach((row) => {
@@ -880,11 +897,13 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
       unresolvedSupplierMappings: diagnostics.filter((row) => row.classification === "unresolved supplier mapping").length,
       unresolvedAllocations: diagnostics.filter((row) => row.classification === "unresolved allocation/split conflict").length,
       other: diagnostics.filter((row) => row.classification === "other").length,
+      ambiguousIdentities: diagnostics.filter((row) => row.classification === "ambiguous invoice identity").length,
     },
     conflictCategoryCounts: {
       productDependencyConflict: diagnostics.filter((row) => row.conflictReasonCode === "product_mapping_unresolved").length,
       dateConflict: diagnostics.filter((row) => row.conflictReasonCode === "date_mismatch").length,
       departmentSplitConflict: diagnostics.filter((row) => row.conflictReasonCode === "department_split_mismatch").length,
+      genericIdentityConflict: diagnostics.filter((row) => row.conflictReasonCode === "generic_document_number_ambiguous").length,
     },
     conflictFlagProvenance: {
       totalFlagged: provenanceRows.length,

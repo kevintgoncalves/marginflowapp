@@ -171,19 +171,17 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
 test("TEST B: supplier name and confirmed canonical UUID are materially equivalent", async () => {
   const preview = await diagnosticPreview(legacyInvoice(), relationalInvoice({ supplier: "" }));
   const report = diagnoseLaptopRecoveryConflicts(preview);
-  assert.equal(preview.invoices.counts.conflicts, 1);
-  assert.equal(report.examples[0].materialDifferences.length, 0);
-  assert.ok(report.examples[0].currentComparatorDifferences.some((row) => row.path === "currentFingerprint.supplier"));
-  assert.equal(report.technicalFalsePositivePatterns.find((row) => row.code === "supplier_name_vs_uuid").conflictCount, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(report.examples.length, 0);
 });
 
 test("TEST C: department name and confirmed canonical UUID are materially equivalent", async () => {
   const cloud = relationalInvoice({ items: [relationalLine({ department: "" })] });
   const preview = await diagnosticPreview(legacyInvoice(), cloud);
   const report = diagnoseLaptopRecoveryConflicts(preview);
-  assert.equal(report.examples[0].materialDifferences.length, 0);
-  assert.ok(report.examples[0].currentComparatorDifferences.some((row) => row.path.includes("department")));
-  assert.equal(report.technicalFalsePositivePatterns.find((row) => row.code === "department_name_vs_uuid").conflictCount, 1);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(report.examples.length, 0);
 });
 
 test("TEST D: a confirmed Bar versus Kitchen allocation remains a genuine conflict", async () => {
@@ -212,9 +210,10 @@ test("TEST E: different split row UUIDs with the same confirmed 75/25 allocation
       { id: "12121212-1212-4212-8212-121212121212", department: "Bar", departmentId: barId, percentage: 75, amount: 7.5 },
     ],
   })] });
-  const report = diagnoseLaptopRecoveryConflicts(await diagnosticPreview(local, cloud));
-  assert.equal(report.examples[0].materialDifferences.length, 0);
-  assert.equal(report.examples[0].classification, "likely false conflict");
+  const preview = await diagnosticPreview(local, cloud);
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(report.examples.length, 0);
 });
 
 test("TEST F: a 75/25 split and a 50/50 split remain materially different", async () => {
@@ -254,12 +253,13 @@ test("TEST H: line order changes do not create material differences", async () =
     relationalLine({ id: "14141414-1414-4414-8414-141414141414", quantity: 2, lineTotal: 10 }),
     relationalLine({ id: "15151515-1515-4515-8515-151515151515", quantity: 1, lineTotal: 5 }),
   ];
-  const report = diagnoseLaptopRecoveryConflicts(await diagnosticPreview(
+  const preview = await diagnosticPreview(
     legacyInvoice({ sourceInvoiceTotal: 15, items: localLines }),
     relationalInvoice({ supplier: "", sourceInvoiceTotal: 15, items: cloudLines }),
-  ));
-  assert.equal(report.examples[0].materialDifferences.length, 0);
-  assert.equal(report.examples[0].classification, "likely false conflict");
+  );
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(report.examples.length, 0);
 });
 
 test("TEST I: a pre-flagged conflict is independently compared with its current relational candidate", async () => {
@@ -275,7 +275,8 @@ test("TEST I: a pre-flagged conflict is independently compared with its current 
     relationalInvoices: [cloud],
   });
 
-  assert.equal(preview.invoices.conflicts[0].cloud, null);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
   assert.equal(report.conflictFlagProvenance.totalFlagged, 1);
   assert.equal(report.conflictFlagProvenance.withRelationalCandidate, 1);
   assert.equal(report.conflictFlagProvenance.materiallyEquivalentCandidate, 1);

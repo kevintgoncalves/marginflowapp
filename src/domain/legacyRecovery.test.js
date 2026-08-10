@@ -81,6 +81,28 @@ function relational(overrides = {}) {
   };
 }
 
+function relationalInvoice(overrides = {}) {
+  return invoice({
+    supplierId,
+    items: invoice().items.map((line) => ({
+      ...line,
+      productId,
+      matchedProductId: productId,
+      departmentId: relationalDepartmentId,
+    })),
+    ...overrides,
+  });
+}
+
+function resolvedRelational(invoices = [], overrides = {}) {
+  return relational({
+    suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+    products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+    invoices,
+    ...overrides,
+  });
+}
+
 const scope = { companyId, locationId };
 
 test("TEST A: legacy supplier plans one stable insert and retry maps the same canonical row", async () => {
@@ -254,7 +276,112 @@ test("TEST I: successful module snapshot sync alone never qualifies an invoice a
   assert.equal(preview.invoices.counts.alreadyRelational, 0);
 });
 
-test("read-only diagnostics identify a derived split amount as a likely technical false conflict", async () => {
+test("PHASE 2 TEST 1: stale conflict with the same UUID and equivalent current content is Already relational", async () => {
+  const local = invoice({ syncStatus: "conflict", syncError: "stale cached conflict" });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: resolvedRelational([relationalInvoice()]),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.already[0].matchBasis, "same_invoice_uuid");
+});
+
+test("PHASE 2 TEST 2: stale conflict with the same UUID and material line differences remains Review conflict", async () => {
+  const local = invoice({ syncStatus: "conflict", syncError: "stale cached conflict" });
+  const cloud = relationalInvoice({
+    items: [relationalInvoice().items[0], {
+      ...relationalInvoice().items[0],
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }],
+    sourceInvoiceTotal: 47.2,
+  });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [local] }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /different material content/i);
+});
+
+test("PHASE 2 TEST 3: repeated generic Unit numbers never auto-select one relational candidate", async () => {
+  const firstId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const secondId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const localInvoices = [
+    invoice({ id: firstId, documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-27" }),
+    invoice({ id: secondId, documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-07-13", sourceInvoiceTotal: 35.4, items: [{ ...invoice().items[0], quantity: 3, lineTotal: 35.4 }] }),
+  ];
+  const cloud = relationalInvoice({ documentNumber: "Unit", invoiceNumber: "Unit" });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.conflicts, 2);
+  assert.ok(preview.invoices.conflicts.every((row) => /Generic document number/.test(row.reason)));
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.conflictCategoryCounts.genericIdentityConflict, 2);
+  assert.ok(report.examples.every((row) => row.classification === "ambiguous invoice identity"));
+});
+
+test("PHASE 2 TEST 4: a non-generic candidate with the wrong date is a date conflict, not a migration", async () => {
+  const local = invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", date: "2020-08-08" });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: resolvedRelational([relationalInvoice({ date: "2026-08-08" })]),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /different date/i);
+});
+
+test("PHASE 2 TEST 5: equivalent different-UUID legacy copies are preserved as probable duplicates without insertion", async () => {
+  const localInvoices = [
+    invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+    invoice({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }),
+  ];
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([relationalInvoice()]), scope });
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.alreadyRelational, 2);
+  assert.equal(preview.invoices.counts.probableDuplicateLegacyCopies, 2);
+  assert.ok(preview.invoices.already.every((row) => row.classification === "probable_duplicate_legacy_copy"));
+});
+
+test("PHASE 2 TEST 6: a zero relational header is equivalent only when complete lines prove the legacy total", async () => {
+  const local = invoice({ sourceInvoiceSubtotal: 23.6, sourceInvoiceTotal: 23.6 });
+  const cloud = relationalInvoice({ sourceInvoiceSubtotal: 0, subtotal: 0, sourceInvoiceTotal: 0, total: 0 });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [local] }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+});
+
+test("PHASE 2 TEST 7: an unresolved product remains Review conflict", async () => {
+  const local = invoice({ items: [{ ...invoice().items[0], matchedProductId: "", productName: "Unknown Produce" }] });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ products: [], invoices: [local] }), relational: resolvedRelational([]), scope });
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /Product dependency is unresolved/);
+});
+
+test("PHASE 2 TEST 8: an unresolved department remains Review conflict", async () => {
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ products: [], invoices: [invoice()] }),
+    relational: resolvedRelational([], { departments: [] }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /Department dependency is unresolved/);
+});
+
+test("PHASE 2 TEST 9: distinct invoices sharing a generic number are never treated as the same invoice", async () => {
+  const localInvoices = [
+    invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-27" }),
+    invoice({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-28", sourceInvoiceTotal: 47.2, items: [{ ...invoice().items[0], quantity: 4, lineTotal: 47.2 }] }),
+  ];
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.conflicts, 2);
+});
+
+test("derived split amounts are recomputed as equivalent before diagnostics", async () => {
   const splitLocal = invoice({
     items: [{
       ...invoice().items[0],
@@ -298,14 +425,14 @@ test("read-only diagnostics identify a derived split amount as a likely technica
     }),
     scope,
   });
-  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
   const before = structuredClone(preview);
   const report = diagnoseLaptopRecoveryConflicts(preview);
-  assert.equal(report.estimates.likelyFalseConflicts, 1);
-  assert.equal(report.examples[0].conflictReasonCode, "likely_technical_false_conflict");
-  assert.ok(report.examples[0].currentComparatorDifferences.some((row) => row.path.includes("splits") && row.path.endsWith(".amount")));
+  assert.equal(report.estimates.likelyFalseConflicts, 0);
+  assert.equal(report.examples.length, 0);
   assert.deepEqual(preview, before);
-  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
 });
 
 test("read-only diagnostics keep a wrong invoice date classified as a genuine conflict", async () => {

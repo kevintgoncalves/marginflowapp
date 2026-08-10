@@ -37,6 +37,34 @@ test("confirmed invoice persistence sends the full document to one atomic RPC", 
   assert.equal(result.line_count, 1);
 });
 
+test("legacy financial aliases are normalized into the v2 RPC header fields", async () => {
+  const calls = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      return { data: { invoice_id: invoiceId }, error: null };
+    },
+  };
+  await persistRelationalInvoice(client, {
+    ...sampleInvoice,
+    subtotalBeforeDiscount: 10,
+    finalInvoiceTotal: 8,
+    items: [{ ...sampleInvoice.items[0], originalLineTotal: 10, netLineTotal: 8 }],
+  }, { companyId });
+  assert.equal(calls[0].payload.p_invoice.sourceInvoiceSubtotal, 10);
+  assert.equal(calls[0].payload.p_invoice.sourceInvoiceTotal, 8);
+});
+
+test("a nonzero legacy total alias is not hidden by an earlier zero canonical field", async () => {
+  const canonical = await ensureInvoicePersistenceIds({
+    ...sampleInvoice,
+    sourceInvoiceTotal: 0,
+    finalInvoiceTotal: 12,
+    items: [{ ...sampleInvoice.items[0], netLineTotal: 8 }],
+  }, { companyId });
+  assert.equal(canonical.sourceInvoiceTotal, 12);
+});
+
 test("statement timeout leaves the invoice locally recoverable as failed sync", async () => {
   const states = [];
   const client = { async rpc() { return { data: null, error: new Error("cancelling statement due to statement timeout") }; } };
@@ -88,6 +116,8 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
     document_type: "invoice",
     invoice_date: "2026-08-07",
     status: "Approved",
+    subtotal: 0,
+    total_amount: 0,
     metadata: { marginflow_snapshot: sampleInvoice },
     invoice_lines: [{
       id: lineId,
@@ -114,6 +144,8 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
   const loaded = await loadRelationalInvoices(client, { companyId });
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].syncStatus, "synced");
+  assert.equal(loaded[0].sourceInvoiceTotal, 0);
+  assert.equal(loaded[0].items.reduce((sum, line) => sum + line.lineTotal, 0), 8);
   assert.equal(loaded[0].items[0].departmentSplits[0].id, splitId);
   assert.equal(loaded[0].items.length, 1);
   const originalWithSplit = {

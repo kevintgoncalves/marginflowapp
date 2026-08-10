@@ -1,4 +1,5 @@
 import { compareInvoiceCollections } from "../domain/emergencyRecovery.js";
+import { withCanonicalInvoiceFinancials } from "../domain/invoiceFinancials.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -41,13 +42,13 @@ export async function ensureInvoicePersistenceIds(invoice = {}, scope = {}) {
     }
     items.push({ ...line, id: lineId, departmentSplits });
   }
-  return {
+  return withCanonicalInvoiceFinancials({
     ...invoice,
     id: invoiceId,
     companyId: scope.companyId || invoice.companyId || invoice.company_id || "",
     locationId: scope.locationId || invoice.locationId || invoice.location_id || "",
     items,
-  };
+  }, items);
 }
 
 function invoiceFromRelationalRow(row = {}) {

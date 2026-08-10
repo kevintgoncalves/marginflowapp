@@ -1,4 +1,4 @@
-import { invoiceContentFingerprint } from "./emergencyRecovery.js";
+import { invoiceComparisonFinancials, invoiceLineNetTotal } from "./invoiceFinancials.js";
 import { activeSupplierRows, supplierIdentityKey } from "./supplierIdentity.js";
 import {
   deterministicRecoveryUuid,
@@ -295,6 +295,25 @@ function documentNumber(invoice = {}) {
   return exactName(invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number);
 }
 
+const genericDocumentNumbers = new Set([
+  "",
+  "date",
+  "document",
+  "inv",
+  "invoice",
+  "invoice number",
+  "n/a",
+  "na",
+  "receipt",
+  "total",
+  "unit",
+  "unknown",
+]);
+
+function isGenericDocumentNumber(invoice = {}) {
+  return genericDocumentNumbers.has(documentNumber(invoice));
+}
+
 function invoiceStrongIdentity(invoice, scope) {
   const number = documentNumber(invoice);
   const supplierId = text(invoice.supplierId || invoice.supplier_id);
@@ -302,9 +321,98 @@ function invoiceStrongIdentity(invoice, scope) {
   return [scope.companyId, scope.locationId || "company", supplierId, documentType(invoice), number].join("|");
 }
 
+function number(value, fallback = 0) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function rounded(value, precision = 4) {
+  const factor = 10 ** precision;
+  return Math.round((number(value) + Number.EPSILON) * factor) / factor;
+}
+
+function firstPresent(row = {}, fields = []) {
+  for (const field of fields) {
+    if (row[field] !== undefined && row[field] !== null && row[field] !== "") return row[field];
+  }
+  return undefined;
+}
+
+function recoverySplitShape(split = {}, lineTotal = 0) {
+  const percentageValue = firstPresent(split, ["percentage", "ratio"]);
+  const percentage = rounded(percentageValue);
+  const amountValue = firstPresent(split, ["amount"]);
+  const amount = rounded(amountValue);
+  const amountIsDerived = percentageValue !== undefined
+    && amountValue !== undefined
+    && Math.abs(amount - rounded(lineTotal * percentage / 100)) <= 0.01;
+  return {
+    department: text(split.departmentId || split.department_id) || `unresolved:${exactName(split.department || split.departmentName)}`,
+    percentage,
+    ...(amountValue !== undefined && !amountIsDerived ? { amount } : {}),
+  };
+}
+
+function recoveryLineShape(line = {}) {
+  const lineTotal = rounded(invoiceLineNetTotal(line));
+  const splits = (line.departmentSplits || line.department_splits || [])
+    .map((split) => recoverySplitShape(split, lineTotal))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return {
+    product: text(line.matchedProductId || line.productId || line.product_id) || `unresolved:${exactName(line.productName || line.product_name)}`,
+    quantity: rounded(line.quantity),
+    unit: exactName(firstPresent(line, ["unit", "purchaseUnit", "purchase_unit", "unitOfMeasure", "unit_of_measure"])),
+    packSize: exactName(line.packSize || line.pack_size),
+    unitCost: rounded(firstPresent(line, ["unitCost", "unit_cost"])),
+    lineTotal,
+    vat: rounded(firstPresent(line, ["vat", "vatAmount", "vat_amount"])),
+    allocationMode: splits.length ? "split" : "single",
+    department: splits.length
+      ? "split"
+      : text(line.departmentId || line.department_id) || `unresolved:${exactName(line.department || line.departmentName)}`,
+    splits,
+  };
+}
+
+function recoveryBusinessShape(invoice = {}, includeDate = true) {
+  const financials = invoiceComparisonFinancials(invoice);
+  const lines = (invoice.items || invoice.lines || [])
+    .map(recoveryLineShape)
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return {
+    supplier: text(invoice.supplierId || invoice.supplier_id) || `unresolved:${supplierIdentityKey(invoice.supplier || invoice.supplierName)}`,
+    documentNumber: documentNumber(invoice),
+    documentType: documentType(invoice),
+    ...(includeDate ? { date: text(invoice.date || invoice.invoiceDate || invoice.invoice_date).slice(0, 10) } : {}),
+    currency: exactName(invoice.currency || "GBP"),
+    subtotal: financials.subtotal,
+    vatTotal: financials.vatTotal,
+    discountAmount: rounded(firstPresent(invoice, ["discountAmount", "discount_amount"])),
+    additionalCharges: rounded(firstPresent(invoice, ["additionalCharges", "handlingCharge", "deliveryCharge"])),
+    total: financials.total,
+    originalInvoiceNumber: exactName(invoice.originalInvoiceNumber || invoice.original_invoice_number),
+    creditReason: exactName(invoice.creditReason || invoice.credit_reason),
+    inventoryEffect: exactName(invoice.inventoryEffect || invoice.inventory_effect),
+    lines,
+  };
+}
+
+function compareRecoveryBusinessContent(local, relational) {
+  const equivalent = JSON.stringify(recoveryBusinessShape(local)) === JSON.stringify(recoveryBusinessShape(relational));
+  const localDate = text(local.date || local.invoiceDate || local.invoice_date).slice(0, 10);
+  const relationalDate = text(relational.date || relational.invoiceDate || relational.invoice_date).slice(0, 10);
+  const equivalentWithoutDate = JSON.stringify(recoveryBusinessShape(local, false)) === JSON.stringify(recoveryBusinessShape(relational, false));
+  return {
+    equivalent,
+    dateDiffers: localDate !== relationalDate,
+    equivalentWithoutDate,
+  };
+}
+
 function recoveryConflict(invoice, reason, cloud = null) {
   const lines = invoice.items || invoice.lines || [];
   const cloudLines = cloud?.items || cloud?.lines || [];
+  const financials = invoiceComparisonFinancials(invoice);
+  const cloudFinancials = cloud ? invoiceComparisonFinancials(cloud) : null;
   return {
     id: text(invoice.id),
     documentNumber: text(invoice.documentNumber || invoice.invoiceNumber) || "(no number)",
@@ -312,8 +420,8 @@ function recoveryConflict(invoice, reason, cloud = null) {
     date: text(invoice.date || invoice.invoiceDate),
     lineCount: lines.length,
     cloudLineCount: cloud ? cloudLines.length : null,
-    total: Number(invoice.sourceInvoiceTotal ?? invoice.total ?? invoice.totalAmount ?? 0),
-    cloudTotal: cloud ? Number(cloud.sourceInvoiceTotal ?? cloud.total ?? cloud.totalAmount ?? 0) : null,
+    total: financials.total,
+    cloudTotal: cloudFinancials?.total ?? null,
     reason,
     local: invoice,
     cloud,
@@ -326,6 +434,7 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
   const conflicts = [];
   const relationalById = new Map(relationalInvoices.map((row) => [text(row.id), row]));
   const relationalByIdentity = grouped(relationalInvoices, (row) => invoiceStrongIdentity(row, scope));
+  const equivalentCandidateUsage = new Map();
   let lineCount = 0;
   let splitCount = 0;
 
@@ -341,11 +450,6 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
       conflicts.push(recoveryConflict(originalInvoice, "Only approved purchasing documents are eligible for automatic recovery."));
       continue;
     }
-    if (originalInvoice.syncStatus === "conflict") {
-      conflicts.push(recoveryConflict(originalInvoice, "This device record is already marked Review conflict."));
-      continue;
-    }
-
     const withIds = await ensureInvoicePersistenceIds({ ...originalInvoice, supplierId }, scope);
     const mappedLines = [];
     let dependencyError = "";
@@ -404,14 +508,49 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
     }
     const idMatch = relationalById.get(canonical.id);
     const identityMatches = identity ? relationalByIdentity.get(identity) || [] : [];
+    if (!idMatch && isGenericDocumentNumber(canonical)) {
+      conflicts.push(recoveryConflict(
+        originalInvoice,
+        `Generic document number "${text(originalInvoice.documentNumber || originalInvoice.invoiceNumber) || "blank"}" cannot establish a unique relational identity without the same invoice UUID.`,
+        identityMatches[0] || null,
+      ));
+      continue;
+    }
     const match = idMatch || (identityMatches.length === 1 ? identityMatches[0] : null);
     if (!match && identityMatches.length > 1) {
       conflicts.push(recoveryConflict(originalInvoice, "Multiple relational invoices share this strong identity.", identityMatches[0]));
       continue;
     }
     if (match) {
-      if (invoiceContentFingerprint(canonical) === invoiceContentFingerprint(match)) {
-        already.push({ local: originalInvoice, cloud: match, canonical });
+      const comparison = compareRecoveryBusinessContent(canonical, match);
+      if (comparison.equivalent) {
+        const candidateId = text(match.id);
+        const priorIndexes = equivalentCandidateUsage.get(candidateId) || [];
+        const probableDuplicate = priorIndexes.some((index) => text(already[index]?.local?.id) !== text(originalInvoice.id));
+        if (probableDuplicate) {
+          priorIndexes.forEach((index) => {
+            already[index] = {
+              ...already[index],
+              classification: "probable_duplicate_legacy_copy",
+              probableDuplicateLegacyCopy: true,
+            };
+          });
+        }
+        already.push({
+          local: originalInvoice,
+          cloud: match,
+          canonical,
+          matchBasis: idMatch ? "same_invoice_uuid" : "supplier_document_type_number",
+          ...(probableDuplicate ? {
+            classification: "probable_duplicate_legacy_copy",
+            probableDuplicateLegacyCopy: true,
+          } : {}),
+        });
+        equivalentCandidateUsage.set(candidateId, [...priorIndexes, already.length - 1]);
+      } else if (comparison.dateDiffers) {
+        conflicts.push(recoveryConflict(originalInvoice, comparison.equivalentWithoutDate
+          ? "The same probable invoice has a different date and requires review."
+          : "The same probable invoice has a different date and other material content differences.", match));
       } else {
         conflicts.push(recoveryConflict(originalInvoice, "Relational invoice has the same identity but different material content.", match));
       }
@@ -435,6 +574,7 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
       departmentSplits: deviceInvoices.reduce((sum, invoice) => sum + (invoice.items || invoice.lines || []).reduce((lineSum, line) => lineSum + (line.departmentSplits || line.department_splits || []).length, 0), 0),
       migratableLines: lineCount,
       migratableSplits: splitCount,
+      probableDuplicateLegacyCopies: already.filter((row) => row.probableDuplicateLegacyCopy).length,
     },
   };
 }
