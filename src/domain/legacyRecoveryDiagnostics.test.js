@@ -353,9 +353,8 @@ test("TEST K: v2 export includes reused legacy rows, suspicious document numbers
   });
   const exported = recoveryDiagnosticExport(report);
 
-  assert.equal(exported.candidateReuse.relationalCandidatesUsedMoreThanOnce, 1);
-  assert.equal(exported.candidateReuse.candidates[0].legacyRows.length, 2);
-  assert.equal(exported.candidateReuse.candidates[0].legacyRows[1].matchBasis, "canonical_supplier_document_type_number");
+  assert.equal(exported.candidateReuse.relationalCandidatesUsedMoreThanOnce, 0);
+  assert.equal(preview.invoices.migrate.length, 1);
   assert.deepEqual(exported.documentNumberQuality.suspiciousValues.map((row) => [row.value, row.count]), [["Unit", 2]]);
   assert.equal(exported.relationalGrowthAudit.delta, 1);
   assert.equal(exported.relationalGrowthAudit.latestCreatedCandidates[0].sourceAssessment, "normal_manual_save");

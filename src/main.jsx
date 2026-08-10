@@ -74,6 +74,7 @@ import {
   recoveryPreviewForBackup,
 } from "./domain/emergencyRecovery.js";
 import {
+  loadLegacyInvoiceArchive,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   upsertInvoiceInCollection,
@@ -114,6 +115,7 @@ import {
   CREDIT_REASONS,
   INVENTORY_EFFECTS,
   PURCHASING_DOCUMENT_TYPES,
+  assessPurchasingDocumentDuplicate,
   confirmationLabelForDocument,
   confirmingLabelForDocument,
   defaultInventoryEffectForCreditReason,
@@ -121,7 +123,6 @@ import {
   documentTypeBadgeLabel,
   documentTypeFor,
   documentTypeLabel,
-  findDuplicatePurchasingDocument,
   getDocumentSign,
   inferCreditReasonFromText,
   inferDocumentTypeFromText,
@@ -3131,14 +3132,20 @@ function parseInvoiceWithSupplierParsers(invoiceText = "", fallbackSupplier = ""
   };
 }
 
-function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments") {
+function spendBySupplier(invoices, suppliers, dateRange = { start: "0000-01-01", end: "9999-12-31" }, selectedDepartment = "All departments", legacyArchive = []) {
   return activeSupplierRows(suppliers).map((supplier) => {
-    const supplierDocuments = invoices.filter((invoice) => invoice.supplier === supplier.name && dateInRange(invoice.date, dateRange));
+    const supplierDocuments = invoices.filter((invoice) => sameSupplierIdentity(invoice.supplier, supplier.name) && dateInRange(invoice.date, dateRange));
     const totalFor = (predicate) => supplierDocuments
       .filter(predicate)
       .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
-    const invoiceSpend = totalFor((invoice) => isInvoiceDocument(documentTypeFor(invoice)));
-    const creditTotal = totalFor((invoice) => isCreditNoteDocument(documentTypeFor(invoice)));
+    const archiveDocuments = selectedDepartment === "All departments"
+      ? legacyArchive.filter((invoice) => invoice.financialHeaderReliable && sameSupplierIdentity(invoice.supplier, supplier.name) && dateInRange(invoice.date, dateRange))
+      : [];
+    const archivedTotalFor = (predicate) => archiveDocuments
+      .filter(predicate)
+      .reduce((sum, invoice) => sum + toSignedPurchasingAmount(invoice.sourceInvoiceTotal, documentTypeFor(invoice)), 0);
+    const invoiceSpend = totalFor((invoice) => isInvoiceDocument(documentTypeFor(invoice))) + archivedTotalFor((invoice) => isInvoiceDocument(documentTypeFor(invoice)));
+    const creditTotal = totalFor((invoice) => isCreditNoteDocument(documentTypeFor(invoice))) + archivedTotalFor((invoice) => isCreditNoteDocument(documentTypeFor(invoice)));
     return { ...supplier, invoiceSpend, creditTotal, netSpend: invoiceSpend + creditTotal, spend: invoiceSpend + creditTotal };
   });
 }
@@ -4474,10 +4481,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const cloudRevisionsRef = useRef({});
   const cloudFingerprintsRef = useRef({});
   const invoiceApprovalRef = useRef(false);
+  const invoiceRefreshRef = useRef(false);
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
+  const [duplicatePrompt, setDuplicatePrompt] = useState(null);
+  const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
   const [active, setActive] = useState("dashboard");
   const [pathname, setPathname] = useState(currentPathname);
   const [departmentSettings, setDepartmentSettingsState] = useState(() => demoInitialData?.departmentSettings || safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
@@ -4516,6 +4526,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
+  const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true";
   const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
   const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
@@ -4603,9 +4614,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   }, [allowedDepartmentNames, departmentNames]);
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
-  const metrics = useMemo(() => calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
-  const supplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange), [invoices, suppliers, dateRange]);
-  const departmentSupplierSpend = useMemo(() => spendBySupplier(invoices, suppliers, dateRange, department), [invoices, suppliers, dateRange, department]);
+  const operationalInvoices = useMemo(() => demoMode ? invoices : invoices.filter((invoice) => (
+    invoice.persistenceSource === "relational"
+    || ["pending_sync", "sync_failed", "local_only"].includes(invoice.syncStatus)
+  )), [demoMode, invoices]);
+  const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
+  const supplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, legacyInvoiceArchive]);
+  const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
@@ -4718,10 +4733,12 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const withRelationalInvoices = async (snapshot) => {
     if (!cloudEnabled) return snapshot;
-    const relationalInvoices = await loadRelationalInvoices(supabase, {
-      companyId: cloudScope.companyId,
-      locationId: cloudScope.locationId || "",
-    });
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    const [relationalInvoices, archivedInvoices] = await Promise.all([
+      loadRelationalInvoices(supabase, scope),
+      loadLegacyInvoiceArchive(supabase, scope),
+    ]);
+    setLegacyInvoiceArchive(archivedInvoices);
     const scopedDeviceInvoices = (snapshot.invoices || []).map((invoice) => ({
       ...invoice,
       companyId: invoice.companyId || invoice.company_id || cloudScope.companyId,
@@ -4846,6 +4863,41 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey]);
 
   useEffect(() => {
+    if (!cloudEnabled) return undefined;
+    let cancelled = false;
+    const refreshRelationalInvoices = async () => {
+      if (!cloudReadyRef.current || invoiceRefreshRef.current || cancelled) return;
+      invoiceRefreshRef.current = true;
+      try {
+        const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+        const [freshInvoices, freshArchive] = await Promise.all([
+          loadRelationalInvoices(supabase, scope),
+          loadLegacyInvoiceArchive(supabase, scope),
+        ]);
+        if (cancelled) return;
+        setInvoices((current) => mergeInvoiceCollectionsPreservingAll(current, freshInvoices).invoices);
+        setLegacyInvoiceArchive(freshArchive);
+      } catch (error) {
+        if (!cancelled) setCloudError(error.message || "Could not refresh relational invoices.");
+      } finally {
+        invoiceRefreshRef.current = false;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refreshRelationalInvoices();
+    };
+    const interval = window.setInterval(refreshRelationalInvoices, 30000);
+    window.addEventListener("focus", refreshRelationalInvoices);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshRelationalInvoices);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [cloudEnabled, cloudScope.companyId, cloudScope.locationId]);
+
+  useEffect(() => {
     if (!cloudEnabled || !cloudReadyRef.current) return undefined;
     if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     cloudSaveTimerRef.current = window.setTimeout(() => {
@@ -4934,16 +4986,58 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     return merged.analysis;
   };
 
+  const requestDuplicateDecision = (assessment, invoice) => new Promise((resolve) => {
+    setDuplicatePrompt({ assessment, invoice, resolve });
+  });
+
+  const resolveDuplicateDecision = (decision) => {
+    duplicatePrompt?.resolve?.(decision);
+    setDuplicatePrompt(null);
+  };
+
   const persistInvoiceDocument = async (invoice) => {
+    const assessment = assessPurchasingDocumentDuplicate(operationalInvoices, invoice, { companyId: cloudScope.companyId });
+    let duplicateAction = null;
+    let existingInvoiceId = null;
+    let expectedRevision = null;
+    let invoiceForPersistence = invoice;
+    if (assessment.kind === "same_document") {
+      const decision = await requestDuplicateDecision(assessment, invoice);
+      if (decision === "open_existing") setActive("invoices");
+      return { invoice: assessment.existing, persisted: true, cancelled: true, decision };
+    }
+    if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
+      const decision = await requestDuplicateDecision(assessment, invoice);
+      if (decision !== "save_new" && decision !== "update_existing") {
+        return { invoice, persisted: false, cancelled: true, decision };
+      }
+      duplicateAction = decision;
+      if (decision === "update_existing") {
+        existingInvoiceId = assessment.existing.id;
+        expectedRevision = Number(assessment.existing.syncRevision || 0);
+        invoiceForPersistence = {
+          ...invoice,
+          id: existingInvoiceId,
+          relationalId: existingInvoiceId,
+          syncRevision: expectedRevision,
+        };
+      }
+    }
     const result = await persistInvoiceWithLocalFallback({
       client: cloudEnabled ? supabase : null,
-      invoice,
+      invoice: invoiceForPersistence,
       scope: { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
       storeLocal: (storedInvoice) => setInvoices((current) => upsertInvoiceInCollection(current, storedInvoice)),
+      duplicateAction,
+      existingInvoiceId,
+      expectedRevision,
     });
     if (result.error) {
       setCloudStatus("error");
       setCloudError(`${result.error.message || "Invoice sync failed"} The invoice is stored safely on this device.`);
+    } else if (result.persisted) {
+      setCloudStatus("synced");
+      setCloudError("");
     }
     return result;
   };
@@ -5223,16 +5317,6 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         setDraft((current) => ({ ...current, status: "Select the supplier before confirming." }));
         return;
       }
-      const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
-        supplier,
-        supplierId: supplierRecord?.id || "",
-        documentType,
-        documentNumber,
-      }, { companyId: cloudScope.companyId, excludeId: draft.editingInvoiceId });
-      if (duplicateDocument) {
-        setDraft((current) => ({ ...current, status: `${documentTypeLabel(documentType)} already exists for ${supplier}: ${documentNumber}.` }));
-        return;
-      }
       const normalizedItems = draft.items.map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
       const invoiceId = draft.editingInvoiceId || uid();
       const explicitResolution = resolveExplicitNewProductLines({
@@ -5262,9 +5346,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         id: invoiceId,
         documentType,
         document_type: documentType,
-        documentNumber: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
-        document_number: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
-        invoiceNumber: documentNumber || `MF-${String(invoices.length + 1).padStart(4, "0")}`,
+        documentNumber,
+        document_number: documentNumber,
+        invoiceNumber: documentNumber,
         supplier,
         date: draft.date || today(),
         status: "Approved",
@@ -5298,6 +5382,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
       ];
       const persistence = await persistInvoiceDocument(invoice);
+      if (persistence.cancelled) return;
       const savedInvoice = persistence.invoice;
       setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
       setSuppliers((current) => ensureSupplierList(current, supplier));
@@ -5451,7 +5536,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
-            invoices={invoices}
+            invoices={operationalInvoices}
             metrics={metrics}
             permissions={permissionsByPage.dashboard}
             sales={sales}
@@ -5469,7 +5554,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             draft={draft}
             invoiceApprovalBusy={invoiceApprovalBusy}
             setDraft={setDraft}
-            invoices={invoices}
+            invoices={operationalInvoices}
+            legacyInvoiceArchive={legacyInvoiceArchive}
             invoiceSettings={invoiceSettings}
             financialSettings={financialSettings}
             companyId={cloudScope.companyId}
@@ -5498,7 +5584,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           <InvoiceControlCentre
             departmentNames={allowedDepartmentNames}
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
-            invoices={invoices}
+            invoices={operationalInvoices}
             onAddInvoice={prepareInvoiceUploadFromControl}
             permissions={permissionsByPage.invoiceControl}
             sales={sales}
@@ -5513,7 +5599,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           <Suppliers
             creditNotes={creditNotes}
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
-            invoices={invoices}
+            invoices={operationalInvoices}
             permissions={permissionsByPage.suppliers}
             products={products}
             requestDelete={requestDelete}
@@ -5556,7 +5642,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
-            invoices={invoices}
+            invoices={operationalInvoices}
             metrics={metrics}
             permissions={permissionsByPage.gp}
             requestDelete={requestDelete}
@@ -5636,8 +5722,44 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setMenuSettings={setMenuSettings}
             setUsers={() => {}}
             setActiveUserId={() => {}}
+            showRecoveryTools={recoveryToolsEnabled}
           />
         )}
+        <AppModal
+          title={duplicatePrompt?.assessment?.kind === "same_document" ? "This invoice already exists" : "Possible duplicate invoice"}
+          open={Boolean(duplicatePrompt)}
+          onClose={() => resolveDuplicateDecision("cancel")}
+          footer={duplicatePrompt?.assessment?.kind === "same_document" ? (
+            <>
+              <button className="ghost" onClick={() => resolveDuplicateDecision("cancel")} type="button">Cancel</button>
+              <button onClick={() => resolveDuplicateDecision("open_existing")} type="button"><Eye size={16} />Open existing invoice</button>
+            </>
+          ) : duplicatePrompt?.assessment?.kind === "same_uuid_changed" ? (
+            <>
+              <button className="ghost" onClick={() => resolveDuplicateDecision("cancel")} type="button">Cancel</button>
+              <button className="ghost" onClick={() => resolveDuplicateDecision("keep_existing")} type="button">Keep existing invoice</button>
+              <button onClick={() => resolveDuplicateDecision("update_existing")} type="button"><Save size={16} />Update existing invoice</button>
+            </>
+          ) : (
+            <>
+              <button className="ghost" onClick={() => resolveDuplicateDecision("cancel")} type="button">Cancel</button>
+              <button className="ghost" onClick={() => resolveDuplicateDecision("update_existing")} type="button">Update existing</button>
+              <button onClick={() => resolveDuplicateDecision("save_new")} type="button"><Save size={16} />Save as new invoice</button>
+            </>
+          )}
+        >
+          {duplicatePrompt && (
+            <div className="duplicate-invoice-comparison">
+              <p className="modal-copy">{duplicatePrompt.assessment.kind === "same_document"
+                ? "The supplier, date, totals and line content match an invoice already saved in the cloud."
+                : "The printed document number matches, but the saved content differs. Choose explicitly; lines will never be combined automatically."}</p>
+              <div className="recovery-version-grid">
+                <InvoiceVersionPreview invoice={duplicatePrompt.assessment.existing} title="Saved invoice" />
+                <InvoiceVersionPreview invoice={duplicatePrompt.invoice} title="New version" />
+              </div>
+            </div>
+          )}
+        </AppModal>
         {deleteConfirmation && (
           <ConfirmDeleteModal
             open={Boolean(deleteConfirmation)}
@@ -6112,6 +6234,7 @@ function Invoices({
   supplierProductMappings = [],
   setSupplierProductMappings = () => {},
   invoiceLineCorrections = [],
+  legacyInvoiceArchive = [],
   setInvoiceLineCorrections = () => {},
   products,
   setProducts,
@@ -6787,14 +6910,6 @@ function Invoices({
     const date = manualDraft.date || today();
     const documentType = normalizeDocumentType(manualDraft.documentType || PURCHASING_DOCUMENT_TYPES.INVOICE);
     const documentNumber = (manualDraft.documentNumber || manualDraft.invoiceNumber || "").trim();
-    const documentFallback = `${isCreditNoteDocument(documentType) ? "CN" : "MAN"}-${String(invoices.length + 1).padStart(4, "0")}`;
-    const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
-      supplier,
-      supplierId: supplierRecord?.id || "",
-      documentType,
-      documentNumber: documentNumber || documentFallback,
-    }, { companyId });
-    if (duplicateDocument) return;
     let items = [];
 
     if (manualMode === "Simple Mode") {
@@ -6835,9 +6950,9 @@ function Invoices({
       id: uid(),
       documentType,
       document_type: documentType,
-      documentNumber: documentNumber || documentFallback,
-      document_number: documentNumber || documentFallback,
-      invoiceNumber: documentNumber || documentFallback,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber,
       supplier,
       date,
       status: "Approved",
@@ -6851,13 +6966,14 @@ function Invoices({
         id: uid(),
         event: "credit_note_created",
         documentType,
-        documentNumber: documentNumber || documentFallback,
+        documentNumber,
         createdAt: new Date().toISOString(),
       }] : [],
       items,
     });
 
     const persistence = await persistInvoiceDocument(invoice);
+    if (persistence.cancelled) return;
     const savedInvoice = persistence.invoice;
     setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
@@ -6959,13 +7075,6 @@ function Invoices({
     const supplier = supplierRecord?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
     const documentType = normalizeDocumentType(editDraft.documentType || editDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
     const documentNumber = documentNumberFor(editDraft);
-    const duplicateDocument = findDuplicatePurchasingDocument(invoices, {
-      supplier,
-      supplierId: supplierRecord?.id || "",
-      documentType,
-      documentNumber,
-    }, { companyId, excludeId: editDraft.id });
-    if (duplicateDocument) return;
     const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
     const validation = validateInvoiceLinesForApproval(items, {
       documentType,
@@ -6988,6 +7097,7 @@ function Invoices({
       items,
     });
     const persistence = await persistInvoiceDocument(cleaned);
+    if (persistence.cancelled) return;
     const savedInvoice = persistence.invoice;
     setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
     setSuppliers((current) => ensureSupplierList(current, supplier));
@@ -7133,15 +7243,14 @@ function Invoices({
             { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
             { key: "syncStatus", label: "Cloud", render: (_, row) => {
               const syncStatus = row.syncStatus || "legacy_local";
-              if (["pending_sync", "sync_failed"].includes(syncStatus)) {
+              if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
                 return (
                   <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
-                    {syncStatus === "pending_sync" ? "Pending sync" : "Retry sync"}
+                    {syncStatus === "pending_sync" ? "Saving…" : "Sync failed — Retry"}
                   </button>
                 );
               }
-              if (syncStatus === "conflict") return <Badge tone="red">Review conflict</Badge>;
-              return <Badge tone={syncStatus === "synced" ? "green" : "amber"}>{syncStatus === "synced" ? "Saved to cloud" : "Device / legacy"}</Badge>;
+              return <Badge tone="green">Saved to cloud</Badge>;
             } },
           ]}
           onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
@@ -7156,6 +7265,22 @@ function Invoices({
           )}
         />
       </Panel>
+
+      {legacyInvoiceArchive.length > 0 && (
+        <Panel title="Archived historical documents" action={`${legacyInvoiceArchive.length} read-only`}>
+          <DataTable
+            columns={[
+              { key: "documentNumber", label: "Document number", render: (value) => value || "Not printed" },
+              { key: "supplier", label: "Supplier" },
+              { key: "date", label: "Date" },
+              { key: "sourceInvoiceTotal", label: "Total", render: (value) => money(value) },
+              { key: "archiveReason", label: "Archive reason" },
+              { key: "financialHeaderReliable", label: "Supplier spend", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Included" : "Excluded"}</Badge> },
+            ]}
+            rows={legacyInvoiceArchive}
+          />
+        </Panel>
+      )}
 
       <AppModal
         title={`Confirm ${purchasingDocumentNoun(draftDocumentType)} with warnings?`}
@@ -11400,6 +11525,7 @@ function SettingsPanel({
   setInvoiceSettings,
   setMenuSettings,
   setUsers,
+  showRecoveryTools = false,
   users = [],
 }) {
   const departmentEmpty = { name: "", type: "Food", targetGp: financialSettings.targetGp, active: true };
@@ -12095,7 +12221,7 @@ function SettingsPanel({
         )}
       </Panel>
 
-      <FinalRecoveryPanel
+      {showRecoveryTools && <FinalRecoveryPanel
         canWrite={permissions.canImport}
         cloudEnabled={cloudEnabled}
         onApplyAutomatic={onApplySafeRecovery}
@@ -12108,7 +12234,7 @@ function SettingsPanel({
         onResolveDate={onResolveRecoveryDate}
         onSaveResolution={onSaveRecoveryResolution}
         onVerify={onVerifyRecovery}
-      />
+      />}
 
       {false && <Panel title="Emergency data recovery" action="Reads this device without cloud sync">
         <div className="button-row left wrap">

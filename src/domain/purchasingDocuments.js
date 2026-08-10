@@ -135,9 +135,28 @@ export function duplicateDocumentKey({ companyId = "", supplierId = "", supplier
   ].join("|");
 }
 
+export const GENERIC_PURCHASING_DOCUMENT_NUMBERS = new Set([
+  "",
+  "date",
+  "document",
+  "inv",
+  "invoice",
+  "invoice number",
+  "n/a",
+  "na",
+  "receipt",
+  "total",
+  "unit",
+  "unknown",
+]);
+
+export function isGenericPurchasingDocumentNumber(value = "") {
+  return GENERIC_PURCHASING_DOCUMENT_NUMBERS.has(String(value || "").trim().toLowerCase().replace(/\s+/g, " "));
+}
+
 export function findDuplicatePurchasingDocument(documents = [], document = {}, { companyId = "", excludeId = "" } = {}) {
   const documentNumber = documentNumberFor(document);
-  if (!documentNumber) return null;
+  if (isGenericPurchasingDocumentNumber(documentNumber)) return null;
   const key = duplicateDocumentKey({
     companyId,
     supplierId: document.supplierId || document.supplier_id || "",
@@ -155,6 +174,96 @@ export function findDuplicatePurchasingDocument(documents = [], document = {}, {
       documentNumber: documentNumberFor(candidate),
     }) === key;
   }) || null;
+}
+
+function canonicalSplit(split = {}) {
+  return {
+    department: String(split.departmentId || split.department_id || split.department || split.departmentName || "").trim().toLowerCase(),
+    percentage: roundMoney(numberValue(split.percentage, 0)),
+    amount: roundMoney(numberValue(split.amount, 0)),
+  };
+}
+
+function canonicalLine(line = {}) {
+  const splits = (line.departmentSplits || line.department_splits || []).map(canonicalSplit).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return {
+    product: String(line.matchedProductId || line.productId || line.product_id || line.productName || line.product_name || "").trim().toLowerCase(),
+    packSize: String(line.packSize || line.pack_size || "").trim().toLowerCase(),
+    quantity: numberValue(line.quantity, 0),
+    unitCost: numberValue(line.unitCost ?? line.unit_cost, 0),
+    lineTotal: roundMoney(numberValue(line.netLineTotal ?? line.net_line_total ?? line.lineTotal, numberValue(line.quantity, 0) * numberValue(line.unitCost ?? line.unit_cost, 0))),
+    discountAmount: roundMoney(numberValue(line.discountAmount ?? line.discount_amount, 0)),
+    discountPercent: numberValue(line.discountPercent ?? line.discount_percent, 0),
+    vat: roundMoney(numberValue(line.vat ?? line.vatAmount ?? line.vat_amount, 0)),
+    department: String(line.departmentId || line.department_id || line.department || line.departmentName || "").trim().toLowerCase(),
+    splits,
+  };
+}
+
+export function purchasingDocumentBusinessShape(document = {}) {
+  const lines = (document.items || document.lines || []).map(canonicalLine).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const documentNumber = documentNumberFor(document);
+  return {
+    supplier: String(document.supplierId || document.supplier_id || document.supplier || document.supplierName || "").trim().toLowerCase(),
+    documentType: documentTypeFor(document),
+    documentNumber: isGenericPurchasingDocumentNumber(documentNumber) ? "" : documentNumber.toLowerCase(),
+    date: String(document.date || document.invoiceDate || document.invoice_date || "").slice(0, 10),
+    subtotal: roundMoney(numberValue(document.sourceInvoiceSubtotal ?? document.invoiceSubtotal ?? document.subtotal, 0)),
+    vat: roundMoney(numberValue(document.vatTotal ?? document.taxAmount ?? document.tax_amount, 0)),
+    discount: roundMoney(numberValue(document.discountAmount ?? document.discount_amount, 0)),
+    charges: roundMoney(numberValue(document.additionalCharges ?? document.additional_charges, 0)),
+    total: roundMoney(numberValue(document.sourceInvoiceTotal ?? document.invoiceTotal ?? document.totalAmount ?? document.total, 0)),
+    currency: String(document.currency || "GBP").trim().toUpperCase(),
+    lines,
+  };
+}
+
+export function purchasingDocumentsMateriallyEquivalent(left = {}, right = {}) {
+  return JSON.stringify(purchasingDocumentBusinessShape(left)) === JSON.stringify(purchasingDocumentBusinessShape(right));
+}
+
+export function assessPurchasingDocumentDuplicate(documents = [], document = {}, { companyId = "" } = {}) {
+  const sameId = document.id ? documents.find((candidate) => candidate.id === document.id && candidate.persistenceSource === "relational") : null;
+  if (sameId) {
+    return {
+      kind: purchasingDocumentsMateriallyEquivalent(sameId, document) ? "same_document" : "same_uuid_changed",
+      existing: sameId,
+      candidates: [sameId],
+    };
+  }
+
+  const documentNumber = documentNumberFor(document);
+  let candidates = [];
+  if (isGenericPurchasingDocumentNumber(documentNumber)) {
+    const supplier = String(document.supplierId || document.supplier_id || document.supplier || "").trim().toLowerCase();
+    const date = String(document.date || document.invoiceDate || document.invoice_date || "").slice(0, 10);
+    candidates = documents.filter((candidate) => (
+      candidate.persistenceSource === "relational"
+      && String(candidate.supplierId || candidate.supplier_id || candidate.supplier || "").trim().toLowerCase() === supplier
+      && documentTypeFor(candidate) === documentTypeFor(document)
+      && String(candidate.date || candidate.invoiceDate || candidate.invoice_date || "").slice(0, 10) === date
+      && isGenericPurchasingDocumentNumber(documentNumberFor(candidate))
+    ));
+  } else {
+    const key = duplicateDocumentKey({
+      companyId,
+      supplierId: document.supplierId || document.supplier_id || "",
+      supplier: document.supplier || "",
+      documentType: documentTypeFor(document),
+      documentNumber,
+    });
+    candidates = documents.filter((candidate) => candidate.persistenceSource === "relational" && duplicateDocumentKey({
+      companyId,
+      supplierId: candidate.supplierId || candidate.supplier_id || "",
+      supplier: candidate.supplier || "",
+      documentType: documentTypeFor(candidate),
+      documentNumber: documentNumberFor(candidate),
+    }) === key);
+  }
+  const equivalent = candidates.filter((candidate) => purchasingDocumentsMateriallyEquivalent(candidate, document));
+  if (equivalent.length === 1) return { kind: "same_document", existing: equivalent[0], candidates };
+  if (!isGenericPurchasingDocumentNumber(documentNumber) && candidates.length) return { kind: "possible_duplicate", existing: candidates[0], candidates };
+  return { kind: "none", existing: null, candidates };
 }
 
 export function normalizeCreditReason(value = "", fallback = CREDIT_REASONS.PRICE_ADJUSTMENT) {

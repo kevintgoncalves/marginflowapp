@@ -52,7 +52,7 @@ function relationalInvoice(overrides = {}) {
 function relational(overrides = {}) {
   return {
     suppliers: [{ id: supplierId, name: "Supplier", active: true }],
-    products: [{ id: productId, name: "Milk", active: true }],
+    products: [{ id: productId, supplierId, name: "Milk", active: true }],
     departments: [{ id: departmentId, name: "Kitchen", active: true }],
     invoices: [],
     resolutions: [],
@@ -70,15 +70,16 @@ function snapshot(overrides = {}) {
   };
 }
 
-test("confirmed product mapping resolves every affected invoice dependency", async () => {
+test("one exact supplier product match resolves every affected invoice dependency automatically", async () => {
   const legacyProduct = { id: legacyProductId, name: "Milk", active: true };
   const invoices = [
     localInvoice({ items: [{ ...localInvoice().items[0], matchedProductId: legacyProductId, productId: legacyProductId }] }),
     localInvoice({ id: otherInvoiceId, documentNumber: "INV-2", invoiceNumber: "INV-2", items: [{ ...localInvoice().items[0], id: otherInvoiceId, matchedProductId: legacyProductId, productId: legacyProductId }] }),
   ];
   const unresolved = await buildLaptopRecoveryPreview({ snapshot: snapshot({ products: [legacyProduct], invoices }), relational: relational(), scope });
-  assert.equal(unresolved.products.conflicts.length, 1);
-  assert.equal(unresolved.invoices.conflicts.length, 2);
+  assert.equal(unresolved.products.conflicts.length, 0);
+  assert.equal(unresolved.products.already.length, 1);
+  assert.equal(unresolved.invoices.migrate.length, 2);
   const resolved = await buildLaptopRecoveryPreview({
     snapshot: snapshot({ products: [legacyProduct], invoices }),
     relational: relational({ resolutions: [{ resolution_type: "product_mapping", source_key: legacyProductId, decision: "map_existing", target_id: productId, active: true }] }),

@@ -137,15 +137,16 @@ test("TEST B: legacy product preserves its UUID and retry creates no second prod
   assert.equal(second.products.counts.alreadyRelational, 1);
 });
 
-test("TEST C: invoice remains blocked until supplier, product and department dependencies resolve", async () => {
+test("TEST C: an invoice with unresolved dependencies is preserved in the archive", async () => {
   const preview = await buildLaptopRecoveryPreview({
     snapshot: snapshot({ suppliers: [], products: [], departmentSettings: [] }),
     relational: relational({ departments: [] }),
     scope,
   });
   assert.equal(preview.invoices.counts.needMigration, 0);
-  assert.equal(preview.invoices.counts.conflicts, 1);
-  assert.match(preview.invoices.conflicts[0].reason, /Supplier dependency is unresolved/);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /Supplier dependency is unresolved/);
 });
 
 test("TEST D: basic invoice recovery uses catalog first, one atomic invoice RPC and marks success only after response", async () => {
@@ -172,6 +173,30 @@ test("TEST D: basic invoice recovery uses catalog first, one atomic invoice RPC 
   assert.equal(calls[1].payload.p_invoice.items.length, 3);
   assert.equal(result.imported.length, 1);
   assert.equal(stored[0].syncStatus, "synced");
+});
+
+test("archive-only history is persisted through the member-scoped RPC before invoice migration", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  preview.products.archived = [{ id: "legacy-product", name: "Unit", legacy: { id: "legacy-product", name: "Unit" }, reason: "Generic label." }];
+  preview.invoices.archived = [{ id: "legacy-invoice", legacy: invoice({ id: "legacy-invoice" }), reason: "Unsafe product dependency." }];
+  const calls = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      if (name === "recover_legacy_catalog_v1") return { data: {}, error: null };
+      if (name === "archive_legacy_recovery_v1") return { data: { products_inserted: 1, invoices_inserted: 1 }, error: null };
+      return { data: { invoice_id: invoiceId, sync_revision: 1, line_count: 1, split_count: 0, saved_at: "2026-08-10T12:00:00Z" }, error: null };
+    },
+  };
+
+  const result = await recoverLaptopLegacyData(client, preview);
+
+  assert.deepEqual(calls.map((call) => call.name), ["recover_legacy_catalog_v1", "archive_legacy_recovery_v1", "recover_legacy_invoice_v1"]);
+  assert.equal(calls[1].payload.p_company_id, companyId);
+  assert.equal(calls[1].payload.p_location_id, locationId);
+  assert.equal(calls[1].payload.p_products.length, 1);
+  assert.equal(calls[1].payload.p_invoices.length, 1);
+  assert.equal(result.archive.invoices_inserted, 1);
 });
 
 test("similar legacy products remain separate without fuzzy merging", async () => {
@@ -303,7 +328,7 @@ test("PHASE 2 TEST 2: stale conflict with the same UUID and material line differ
   assert.match(preview.invoices.conflicts[0].reason, /different material content/i);
 });
 
-test("PHASE 2 TEST 3: repeated generic Unit numbers never auto-select one relational candidate", async () => {
+test("PHASE 2 TEST 3: repeated generic Unit numbers keep separate UUIDs when contents differ", async () => {
   const firstId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const secondId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const localInvoices = [
@@ -313,12 +338,9 @@ test("PHASE 2 TEST 3: repeated generic Unit numbers never auto-select one relati
   const cloud = relationalInvoice({ documentNumber: "Unit", invoiceNumber: "Unit" });
   const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([cloud]), scope });
   assert.equal(preview.invoices.counts.alreadyRelational, 0);
-  assert.equal(preview.invoices.counts.needMigration, 0);
-  assert.equal(preview.invoices.counts.conflicts, 2);
-  assert.ok(preview.invoices.conflicts.every((row) => /Generic document number/.test(row.reason)));
-  const report = diagnoseLaptopRecoveryConflicts(preview);
-  assert.equal(report.conflictCategoryCounts.genericIdentityConflict, 2);
-  assert.ok(report.examples.every((row) => row.classification === "ambiguous invoice identity"));
+  assert.equal(preview.invoices.counts.needMigration, 2);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.deepEqual(new Set(preview.invoices.migrate.map((row) => row.id)), new Set([firstId, secondId]));
 });
 
 test("PHASE 2 TEST 4: a non-generic candidate with the wrong date is a date conflict, not a migration", async () => {
@@ -353,21 +375,23 @@ test("PHASE 2 TEST 6: a zero relational header is equivalent only when complete 
   assert.equal(preview.invoices.counts.conflicts, 0);
 });
 
-test("PHASE 2 TEST 7: an unresolved product remains Review conflict", async () => {
+test("PHASE 2 TEST 7: an invoice with no canonical product is archive-only", async () => {
   const local = invoice({ items: [{ ...invoice().items[0], matchedProductId: "", productName: "Unknown Produce" }] });
   const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ products: [], invoices: [local] }), relational: resolvedRelational([]), scope });
-  assert.equal(preview.invoices.counts.conflicts, 1);
-  assert.match(preview.invoices.conflicts[0].reason, /Product dependency is unresolved/);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /not safe for canonical analytics/);
 });
 
-test("PHASE 2 TEST 8: an unresolved department remains Review conflict", async () => {
+test("PHASE 2 TEST 8: an unresolved department preserves the invoice in the archive", async () => {
   const preview = await buildLaptopRecoveryPreview({
     snapshot: snapshot({ products: [], invoices: [invoice()] }),
     relational: resolvedRelational([], { departments: [] }),
     scope,
   });
-  assert.equal(preview.invoices.counts.conflicts, 1);
-  assert.match(preview.invoices.conflicts[0].reason, /Department dependency is unresolved/);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /Department dependency is unresolved/);
 });
 
 test("PHASE 2 TEST 9: distinct invoices sharing a generic number are never treated as the same invoice", async () => {
@@ -377,8 +401,8 @@ test("PHASE 2 TEST 9: distinct invoices sharing a generic number are never treat
   ];
   const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([]), scope });
   assert.equal(preview.invoices.counts.alreadyRelational, 0);
-  assert.equal(preview.invoices.counts.needMigration, 0);
-  assert.equal(preview.invoices.counts.conflicts, 2);
+  assert.equal(preview.invoices.counts.needMigration, 2);
+  assert.equal(preview.invoices.counts.conflicts, 0);
 });
 
 test("derived split amounts are recomputed as equivalent before diagnostics", async () => {

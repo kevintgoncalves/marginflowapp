@@ -128,19 +128,38 @@ export function upsertInvoiceInCollection(invoices = [], invoice = {}) {
     : [invoice, ...invoices];
 }
 
-export async function persistRelationalInvoice(client, invoice = {}, scope = {}) {
+export async function persistRelationalInvoice(client, invoice = {}, scope = {}, {
+  duplicateAction = null,
+  existingInvoiceId = null,
+  expectedRevision = null,
+} = {}) {
   if (!client || !validScope(scope)) {
     throw new Error("Relational invoice persistence needs canonical company and invoice identifiers.");
   }
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
-  const { data, error } = await client.rpc("persist_invoice_document_v2", {
+  const { data, error } = await client.rpc("persist_invoice_document_v3", {
     p_company_id: scope.companyId,
     p_location_id: scope.locationId || null,
     p_invoice: canonicalInvoice,
+    p_duplicate_action: duplicateAction,
+    p_existing_invoice_id: existingInvoiceId,
+    p_expected_revision: expectedRevision,
   });
   if (error) throw error;
   const result = Array.isArray(data) ? data[0] : data;
-  return { ...result, invoice: canonicalInvoice };
+  const expectedLineCount = canonicalInvoice.items.length;
+  const expectedSplitCount = canonicalInvoice.items.reduce((sum, line) => sum + (line.departmentSplits || []).length, 0);
+  if (Number(result?.line_count) !== expectedLineCount || Number(result?.split_count) !== expectedSplitCount) {
+    throw new Error(`Relational invoice verification failed: expected ${expectedLineCount} line(s) and ${expectedSplitCount} split(s), received ${Number(result?.line_count || 0)} and ${Number(result?.split_count || 0)}.`);
+  }
+  return {
+    ...result,
+    invoice: {
+      ...canonicalInvoice,
+      id: result?.invoice_id || canonicalInvoice.id,
+      relationalId: result?.invoice_id || canonicalInvoice.id,
+    },
+  };
 }
 
 export async function persistInvoiceWithLocalFallback({
@@ -149,6 +168,9 @@ export async function persistInvoiceWithLocalFallback({
   scope,
   storeLocal = () => {},
   now = () => new Date().toISOString(),
+  duplicateAction = null,
+  existingInvoiceId = null,
+  expectedRevision = null,
 } = {}) {
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
   const pending = {
@@ -160,9 +182,9 @@ export async function persistInvoiceWithLocalFallback({
   storeLocal(pending);
   if (!client || !validScope(scope)) return { invoice: pending, persisted: false, error: null };
   try {
-    const result = await persistRelationalInvoice(client, pending, scope);
+    const result = await persistRelationalInvoice(client, pending, scope, { duplicateAction, existingInvoiceId, expectedRevision });
     const synced = {
-      ...pending,
+      ...result.invoice,
       syncStatus: "synced",
       syncError: "",
       syncedAt: result?.saved_at || now(),
@@ -181,6 +203,43 @@ export async function persistInvoiceWithLocalFallback({
     storeLocal(failed);
     return { invoice: failed, persisted: false, error };
   }
+}
+
+export async function loadLegacyInvoiceArchive(client, scope = {}) {
+  if (!client || !validScope(scope)) return [];
+  let query = client
+    .from("legacy_invoice_archive")
+    .select("id,company_id,location_id,source_invoice_id,supplier_id,supplier_name,document_type,document_number,invoice_date,subtotal,vat_amount,discount_amount,additional_charges,total_amount,currency,financial_header_reliable,archive_reason,classification,payload,created_at")
+    .eq("company_id", scope.companyId);
+  if (scope.locationId) query = query.eq("location_id", scope.locationId);
+  const { data, error } = await query.order("invoice_date", { ascending: false });
+  if (error) throw error;
+  return (data || []).map((row) => ({
+    id: row.id,
+    sourceInvoiceId: row.source_invoice_id,
+    supplierId: row.supplier_id || "",
+    supplier: row.supplier_name || row.payload?.supplier || "Unknown supplier",
+    documentType: row.document_type || "invoice",
+    documentNumber: row.document_number || "",
+    invoiceNumber: row.document_number || "",
+    date: row.invoice_date || "",
+    subtotal: Number(row.subtotal || 0),
+    vatTotal: Number(row.vat_amount || 0),
+    discountAmount: Number(row.discount_amount || 0),
+    additionalCharges: Number(row.additional_charges || 0),
+    sourceInvoiceTotal: Number(row.total_amount || 0),
+    currency: row.currency || "GBP",
+    financialHeaderReliable: row.financial_header_reliable === true,
+    archiveReason: row.archive_reason,
+    classification: row.classification || "archive_only",
+    payload: row.payload || {},
+    items: [],
+    archiveOnly: true,
+    analyticsScope: "supplier_financials_only",
+    syncStatus: "synced",
+    persistenceSource: "legacy_archive",
+    archivedAt: row.created_at,
+  }));
 }
 
 export async function loadRelationalInvoices(client, scope = {}) {

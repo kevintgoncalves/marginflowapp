@@ -32,8 +32,9 @@ test("confirmed invoice persistence sends the full document to one atomic RPC", 
   };
   const result = await persistRelationalInvoice(client, sampleInvoice, { companyId });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].name, "persist_invoice_document_v2");
+  assert.equal(calls[0].name, "persist_invoice_document_v3");
   assert.equal(calls[0].payload.p_invoice.items[0].id, lineId);
+  assert.equal(calls[0].payload.p_duplicate_action, null);
   assert.equal(result.line_count, 1);
 });
 
@@ -42,7 +43,7 @@ test("legacy financial aliases are normalized into the v2 RPC header fields", as
   const client = {
     async rpc(name, payload) {
       calls.push({ name, payload });
-      return { data: { invoice_id: invoiceId }, error: null };
+      return { data: { invoice_id: invoiceId, line_count: 1, split_count: 0 }, error: null };
     },
   };
   await persistRelationalInvoice(client, {
@@ -84,7 +85,7 @@ test("statement timeout leaves the invoice locally recoverable as failed sync", 
 
 test("retry remains idempotent because it reuses the invoice and line UUIDs", async () => {
   const calls = [];
-  const client = { async rpc(name, payload) { calls.push(payload); return { data: { invoice_id: invoiceId, saved_at: "2026-08-07T12:01:00Z" }, error: null }; } };
+  const client = { async rpc(name, payload) { calls.push(payload); return { data: { invoice_id: invoiceId, line_count: 1, split_count: 0, saved_at: "2026-08-07T12:01:00Z" }, error: null }; } };
   await persistInvoiceWithLocalFallback({ client, invoice: sampleInvoice, scope: { companyId } });
   await persistInvoiceWithLocalFallback({ client, invoice: { ...sampleInvoice, syncStatus: "sync_failed" }, scope: { companyId } });
   assert.equal(calls.length, 2);
@@ -161,15 +162,53 @@ test("recovery imports only the previewed missing invoice and leaves existing cl
   const missing = { ...sampleInvoice, id: "66666666-6666-4666-8666-666666666666", documentNumber: "INV-E", invoiceNumber: "INV-E" };
   const client = {
     async rpc(name, payload) {
-      assert.equal(name, "persist_invoice_document_v2");
+      assert.equal(name, "persist_invoice_document_v3");
       cloud.push(payload.p_invoice);
-      return { data: { invoice_id: payload.p_invoice.id, sync_revision: 1, saved_at: "2026-08-07T12:00:00Z" }, error: null };
+      return { data: { invoice_id: payload.p_invoice.id, sync_revision: 1, line_count: 1, split_count: 0, saved_at: "2026-08-07T12:00:00Z" }, error: null };
     },
   };
   const result = await importMissingRecoveryInvoices(client, [missing], { companyId });
   assert.equal(result.imported.length, 1);
   assert.equal(result.failed.length, 0);
   assert.deepEqual(cloud.map((invoice) => invoice.documentNumber), ["INV-D", "INV-E"]);
+});
+
+test("explicit duplicate update sends the selected target and expected revision without merging lines", async () => {
+  const calls = [];
+  const client = { async rpc(name, payload) {
+    calls.push({ name, payload });
+    return { data: { invoice_id: payload.p_existing_invoice_id, sync_revision: 8, line_count: 1, split_count: 0 }, error: null };
+  } };
+  const result = await persistRelationalInvoice(client, sampleInvoice, { companyId }, {
+    duplicateAction: "update_existing",
+    existingInvoiceId: invoiceId,
+    expectedRevision: 7,
+  });
+  assert.equal(calls[0].payload.p_duplicate_action, "update_existing");
+  assert.equal(calls[0].payload.p_existing_invoice_id, invoiceId);
+  assert.equal(calls[0].payload.p_expected_revision, 7);
+  assert.equal(calls[0].payload.p_invoice.items.length, 1);
+  assert.equal(result.invoice.id, invoiceId);
+});
+
+test("cloud-first migration is additive, keeps RLS, and contains no destructive business-data DML", () => {
+  const migration = readFileSync(new URL("../../supabase/migrations/20260810210000_cloud_first_invoice_completion.sql", import.meta.url), "utf8");
+  assert.match(migration, /create table if not exists public\.legacy_invoice_archive/);
+  assert.match(migration, /enable row level security/);
+  assert.match(migration, /create or replace function public\.persist_invoice_document_v3/);
+  assert.match(migration, /p_expected_revision bigint/);
+  assert.match(migration, /on conflict do nothing/);
+  assert.doesNotMatch(migration, /\b(truncate|drop table|delete from)\b/i);
+  assert.doesNotMatch(migration, /update public\.(invoices|invoice_lines|products|suppliers|marginflow_cloud_state)\b/i);
+});
+
+test("legacy archive table access is locked to authenticated SELECT only", () => {
+  const sql = readFileSync(new URL("../../supabase/migrations/20260810213000_lock_down_legacy_archive_tables.sql", import.meta.url), "utf8");
+  assert.match(sql, /revoke all on table public\.legacy_invoice_archive from public, anon, authenticated/i);
+  assert.match(sql, /revoke all on table public\.legacy_product_archive from public, anon, authenticated/i);
+  assert.match(sql, /grant select on table public\.legacy_invoice_archive to authenticated/i);
+  assert.match(sql, /grant select on table public\.legacy_product_archive to authenticated/i);
+  assert.doesNotMatch(sql, /\b(?:delete|truncate|update|insert)\s+(?:from|into|public\.)/i);
 });
 
 test("recovery migration is non-destructive and defines transactional invoice and revision RPCs", () => {

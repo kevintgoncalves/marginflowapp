@@ -3,6 +3,7 @@ import test from "node:test";
 import { validateInvoiceExtraction } from "./invoiceValidation.js";
 import {
   PURCHASING_DOCUMENT_TYPES,
+  assessPurchasingDocumentDuplicate,
   documentNumberFor,
   findDuplicatePurchasingDocument,
   inferDocumentTypeFromText,
@@ -119,6 +120,85 @@ test("duplicate detection separates invoice and credit note with the same suppli
   const existing = [{ id: "inv-1", supplier: "Woods", documentType: "invoice", documentNumber: "26-733594" }];
   assert.equal(findDuplicatePurchasingDocument(existing, { supplier: "Woods", documentType: "credit_note", documentNumber: "26-733594" }), null);
   assert.equal(findDuplicatePurchasingDocument(existing, { supplier: "Woods", documentType: "invoice", documentNumber: "26-733594" })?.id, "inv-1");
+});
+
+test("equivalent re-upload resolves to the existing relational invoice", () => {
+  const existing = {
+    id: "existing",
+    persistenceSource: "relational",
+    supplier: "Woods",
+    documentType: "invoice",
+    documentNumber: "INV-22",
+    date: "2026-08-10",
+    sourceInvoiceTotal: 20,
+    items: [{ productName: "Milk", quantity: 2, unitCost: 10, lineTotal: 20 }],
+  };
+  const assessment = assessPurchasingDocumentDuplicate([existing], { ...existing, id: "upload", persistenceSource: undefined });
+  assert.equal(assessment.kind, "same_document");
+  assert.equal(assessment.existing.id, "existing");
+});
+
+test("same strong number with different content requires an explicit duplicate choice", () => {
+  const existing = {
+    id: "existing",
+    persistenceSource: "relational",
+    supplier: "Woods",
+    documentType: "invoice",
+    documentNumber: "INV-22",
+    date: "2026-08-10",
+    sourceInvoiceTotal: 20,
+    items: [{ productName: "Milk", quantity: 2, unitCost: 10, lineTotal: 20 }],
+  };
+  const assessment = assessPurchasingDocumentDuplicate([existing], {
+    ...existing,
+    id: "upload",
+    persistenceSource: undefined,
+    sourceInvoiceTotal: 30,
+    items: [{ productName: "Milk", quantity: 3, unitCost: 10, lineTotal: 30 }],
+  });
+  assert.equal(assessment.kind, "possible_duplicate");
+});
+
+test("generic Unit documents with different UUIDs and contents remain independent", () => {
+  const existing = {
+    id: "existing",
+    persistenceSource: "relational",
+    supplier: "Woods",
+    documentType: "invoice",
+    documentNumber: "Unit",
+    date: "2026-08-10",
+    sourceInvoiceTotal: 20,
+    items: [{ productName: "Milk", quantity: 2, unitCost: 10, lineTotal: 20 }],
+  };
+  const assessment = assessPurchasingDocumentDuplicate([existing], {
+    ...existing,
+    id: "upload",
+    persistenceSource: undefined,
+    sourceInvoiceTotal: 30,
+    items: [{ productName: "Milk", quantity: 3, unitCost: 10, lineTotal: 30 }],
+  });
+  assert.equal(assessment.kind, "none");
+});
+
+test("different generic labels do not prevent exact-content duplicate recognition", () => {
+  const existing = {
+    id: "existing",
+    persistenceSource: "relational",
+    supplier: "Woods",
+    documentType: "invoice",
+    documentNumber: "Unit",
+    date: "2026-08-10",
+    sourceInvoiceTotal: 20,
+    items: [{ productName: "Milk", quantity: 2, unitCost: 10, lineTotal: 20 }],
+  };
+  const assessment = assessPurchasingDocumentDuplicate([existing], {
+    ...existing,
+    id: "upload",
+    documentNumber: "Invoice",
+    persistenceSource: undefined,
+  });
+  assert.equal(assessment.kind, "same_document");
+  assert.equal(assessment.existing.id, "existing");
 });
 
 test("signed purchasing totals reduce COGS and increase GP in the credit-note example", () => {

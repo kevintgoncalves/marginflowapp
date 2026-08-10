@@ -31,6 +31,24 @@ function mappedId(map, id, nameKey) {
   return (id && map[`id:${id}`]) || (nameKey && map[`name:${nameKey}`]) || "";
 }
 
+function productIdentityKey(nameKey = "", supplierId = "") {
+  return `${text(supplierId)}|${text(nameKey)}`;
+}
+
+function mappedProductId(map, id, nameKey, supplierId) {
+  return (id && map[`id:${id}`])
+    || map[`identity:${productIdentityKey(nameKey, supplierId)}`]
+    || (nameKey && map[`name:${nameKey}`])
+    || "";
+}
+
+function productReferenceIsMarked(map, marker, id, nameKey, supplierId) {
+  return Boolean(
+    (id && map[`${marker}:id:${id}`])
+    || map[`${marker}:identity:${productIdentityKey(nameKey, supplierId)}`],
+  );
+}
+
 function grouped(rows, keyFor) {
   return rows.reduce((groups, row) => {
     const key = keyFor(row);
@@ -205,6 +223,7 @@ async function productPlan(deviceProducts, relationalProducts, supplierMappings,
   const mappings = {};
   const migrate = [];
   const already = [];
+  const archived = [];
   const conflicts = [];
   const byId = new Map(relationalProducts.map((row) => [row.id, row]));
   const relationalByName = grouped(relationalProducts, (row) => exactName(row.name));
@@ -212,15 +231,45 @@ async function productPlan(deviceProducts, relationalProducts, supplierMappings,
     relationalProducts.filter((row) => storedLegacyId(row)),
     (row) => storedLegacyId(row),
   );
-  const deviceByName = grouped(deviceProducts, (row) => exactName(row.name || row.productName));
+  const plannedCreates = new Map();
+  const ambiguousNameMappings = new Set();
   const compatibleIdentity = (relational, nameKey, supplierId) => (
     exactName(relational.name) === nameKey
-    && (!supplierId || !relational.supplier_id || relational.supplier_id === supplierId)
+    && text(relational.supplier_id || relational.supplierId) === text(supplierId)
   );
+  const addProductMapping = (legacyId, nameKey, supplierId, canonicalId) => {
+    if (legacyId) mappings[`id:${legacyId}`] = canonicalId;
+    mappings[`identity:${productIdentityKey(nameKey, supplierId)}`] = canonicalId;
+    if (!nameKey || ambiguousNameMappings.has(nameKey)) return;
+    const nameMapping = mappings[`name:${nameKey}`];
+    if (nameMapping && nameMapping !== canonicalId) {
+      delete mappings[`name:${nameKey}`];
+      ambiguousNameMappings.add(nameKey);
+      return;
+    }
+    mappings[`name:${nameKey}`] = canonicalId;
+  };
+  const dependentSupplierIds = (legacyId, nameKey) => [...new Set(deviceInvoices.flatMap((invoice) => {
+    const invoiceSupplierId = mappedId(
+      supplierMappings,
+      text(invoice.supplierId || invoice.supplier_id),
+      supplierIdentityKey(invoice.supplier || invoice.supplierName),
+    );
+    if (!invoiceSupplierId) return [];
+    const hasReference = (invoice.items || invoice.lines || []).some((line) => {
+      const lineProductId = text(line.matchedProductId || line.productId || line.product_id);
+      if (legacyId && lineProductId) return lineProductId === legacyId;
+      return !lineProductId && exactName(line.productName || line.product_name) === nameKey;
+    });
+    return hasReference ? [invoiceSupplierId] : [];
+  }))];
+  const archiveOnlyProductNames = new Set(["", "invoice", "item", "product", "stocktake", "total", "unit", "unknown"]);
 
   relationalProducts.forEach((product) => {
     const nameKey = exactName(product.name);
-    if ((relationalByName.get(nameKey) || []).length === 1) addMapping(mappings, product.id, nameKey, product.id);
+    const supplierId = text(product.supplier_id || product.supplierId);
+    const exactMatches = (relationalByName.get(nameKey) || []).filter((candidate) => compatibleIdentity(candidate, nameKey, supplierId));
+    if (exactMatches.length === 1) addProductMapping(product.id, nameKey, supplierId, product.id);
   });
 
   for (const product of deviceProducts) {
@@ -231,7 +280,7 @@ async function productPlan(deviceProducts, relationalProducts, supplierMappings,
     const targetId = text(resolution?.target_id || resolution?.targetId);
     const target = byId.get(targetId);
     if (["map_existing", "merged_into"].includes(decision) && target?.active !== false) {
-      addMapping(mappings, legacyId, exactName(sourceName), target.id);
+      addProductMapping(legacyId, exactName(sourceName), text(target.supplier_id || target.supplierId), target.id);
       already.push({ legacy: product, relational: target, resolution });
       continue;
     }
@@ -240,82 +289,111 @@ async function productPlan(deviceProducts, relationalProducts, supplierMappings,
     const name = text(resolvedProduct.name || resolvedProduct.productName);
     const nameKey = exactName(name);
     if (!nameKey) {
-      conflicts.push({ id: legacyId, name: "Unnamed product", legacy: product, candidates: [], affectedInvoiceCount: 0, reason: "Product has no usable name." });
-      continue;
-    }
-    if ((deviceByName.get(nameKey) || []).length > 1) {
-      delete mappings[`name:${nameKey}`];
-      conflicts.push({ id: legacyId, name, legacy: product, candidates: relationalByName.get(nameKey) || [], affectedInvoiceCount: deviceInvoices.filter((invoice) => (invoice.items || invoice.lines || []).some((line) => text(line.matchedProductId || line.productId || line.product_id) === legacyId || exactName(line.productName || line.product_name) === exactName(sourceName))).length, reason: "Multiple device products have the same exact normalized name, which the relational uniqueness constraint cannot preserve automatically." });
+      archived.push({ id: legacyId, name: "Unnamed product", legacy: product, reason: "Product has no usable name.", classification: "archive_only" });
+      mappings[`archive:id:${legacyId}`] = true;
       continue;
     }
     const supplierName = text(product.supplier || product.supplierName);
-    const supplierId = mappedId(supplierMappings, text(product.supplierId || product.supplier_id), supplierIdentityKey(supplierName));
-    if ((product.supplierId || supplierName) && !supplierId) {
-      conflicts.push({ id: legacyId, name, legacy: product, candidates: relationalByName.get(nameKey) || [], affectedInvoiceCount: 0, reason: `Supplier dependency is unresolved: ${supplierName || product.supplierId}.` });
+    let supplierId = mappedId(supplierMappings, text(product.supplierId || product.supplier_id), supplierIdentityKey(supplierName));
+    const inferredSupplierIds = supplierId ? [supplierId] : dependentSupplierIds(legacyId, nameKey);
+    if (!supplierId && inferredSupplierIds.length === 1) supplierId = inferredSupplierIds[0];
+    if (!supplierId && inferredSupplierIds.length > 1) {
+      const candidates = (relationalByName.get(nameKey) || []).filter((candidate) => inferredSupplierIds.includes(text(candidate.supplier_id || candidate.supplierId)));
+      const conflict = { id: legacyId, name, legacy: product, candidates, affectedInvoiceCount: 0, reason: "The same legacy product is referenced by invoices from multiple suppliers." };
+      conflicts.push(conflict);
+      mappings[`conflict:id:${legacyId}`] = true;
       continue;
     }
     const departmentName = text(product.department || product.departmentName);
     const departmentId = mappedId(departmentMappings, text(product.departmentId || product.department_id), exactName(departmentName));
-    if ((product.departmentId || departmentName) && !departmentId) {
-      conflicts.push({ id: legacyId, name, legacy: product, candidates: relationalByName.get(nameKey) || [], affectedInvoiceCount: 0, reason: `Department dependency is unresolved: ${departmentName || product.departmentId}.` });
-      continue;
-    }
     const idMatch = legacyId ? byId.get(legacyId) : null;
-    const nameMatches = relationalByName.get(nameKey) || [];
+    const nameMatches = (relationalByName.get(nameKey) || []).filter((candidate) => compatibleIdentity(candidate, nameKey, supplierId));
     const legacyMatches = legacyId ? relationalByLegacyId.get(legacyId) || [] : [];
     if (idMatch?.active === false && idMatch.merged_into_product_id && byId.get(idMatch.merged_into_product_id)?.active !== false) {
       const canonicalProduct = byId.get(idMatch.merged_into_product_id);
-      addMapping(mappings, legacyId, nameKey, canonicalProduct.id);
+      addProductMapping(legacyId, nameKey, text(canonicalProduct.supplier_id || canonicalProduct.supplierId), canonicalProduct.id);
       already.push({ legacy: product, relational: canonicalProduct, resolution: { decision: "merged_into", target_id: canonicalProduct.id } });
       continue;
     }
     if (idMatch) {
       if (!compatibleIdentity(idMatch, nameKey, supplierId)) {
-        delete mappings[`name:${nameKey}`];
-        conflicts.push({ id: legacyId, name, legacy: product, candidates: [idMatch], affectedInvoiceCount: 0, reason: "This product UUID already belongs to a different product identity." });
+        const conflict = { id: legacyId, name, legacy: product, candidates: [idMatch], affectedInvoiceCount: 0, reason: "This product UUID already belongs to a different product identity." };
+        conflicts.push(conflict);
+        mappings[`conflict:id:${legacyId}`] = true;
         continue;
       }
-      addMapping(mappings, legacyId, nameKey, idMatch.id);
+      addProductMapping(legacyId, nameKey, supplierId, idMatch.id);
       already.push({ legacy: product, relational: idMatch });
       continue;
     }
     if (legacyMatches.length > 1) {
-      delete mappings[`name:${nameKey}`];
-      conflicts.push({ id: legacyId, name, legacy: product, candidates: legacyMatches, affectedInvoiceCount: 0, reason: "Multiple relational products claim this legacy product identity." });
+      const conflict = { id: legacyId, name, legacy: product, candidates: legacyMatches, affectedInvoiceCount: 0, reason: "Multiple relational products claim this legacy product identity." };
+      conflicts.push(conflict);
+      mappings[`conflict:id:${legacyId}`] = true;
       continue;
     }
     if (legacyMatches.length === 1) {
       const legacyMatch = legacyMatches[0];
       if (!compatibleIdentity(legacyMatch, nameKey, supplierId)) {
-        delete mappings[`name:${nameKey}`];
-        conflicts.push({ id: legacyId, name, legacy: product, candidates: [legacyMatch], affectedInvoiceCount: 0, reason: "The stored legacy product mapping points to incompatible relational content." });
+        const conflict = { id: legacyId, name, legacy: product, candidates: [legacyMatch], affectedInvoiceCount: 0, reason: "The stored legacy product mapping points to incompatible relational content." };
+        conflicts.push(conflict);
+        mappings[`conflict:id:${legacyId}`] = true;
         continue;
       }
-      addMapping(mappings, legacyId, nameKey, legacyMatch.id);
+      addProductMapping(legacyId, nameKey, supplierId, legacyMatch.id);
       already.push({ legacy: product, relational: legacyMatch });
       continue;
     }
-    if (nameMatches.length) {
-      delete mappings[`name:${nameKey}`];
-      conflicts.push({ id: legacyId, name, legacy: product, candidates: nameMatches, affectedInvoiceCount: 0, reason: "A relational product already uses this exact normalized name with a different identity." });
+    if (nameMatches.length === 1) {
+      addProductMapping(legacyId, nameKey, supplierId, nameMatches[0].id);
+      already.push({ legacy: product, relational: nameMatches[0], resolution: { decision: "auto_exact_supplier_name" } });
       continue;
     }
-    const canonicalId = isCanonicalUuid(legacyId)
+    if (nameMatches.length > 1) {
+      const conflict = { id: legacyId, name, legacy: product, candidates: nameMatches, affectedInvoiceCount: 0, reason: "Multiple relational products share the same supplier and exact canonical name." };
+      conflicts.push(conflict);
+      mappings[`conflict:id:${legacyId}`] = true;
+      continue;
+    }
+    if (archiveOnlyProductNames.has(nameKey)) {
+      archived.push({ id: legacyId, name, legacy: product, reason: "Generic legacy catalog label is retained outside the canonical product catalog.", classification: "archive_only" });
+      mappings[`archive:id:${legacyId}`] = true;
+      mappings[`archive:identity:${productIdentityKey(nameKey, supplierId)}`] = true;
+      continue;
+    }
+    const createKey = productIdentityKey(nameKey, supplierId);
+    const planned = plannedCreates.get(createKey);
+    if (planned) {
+      addProductMapping(legacyId, nameKey, supplierId, planned.id);
+      already.push({ legacy: product, relational: planned, resolution: { decision: "auto_exact_supplier_name_planned" } });
+      continue;
+    }
+    const samePlannedGroup = deviceProducts.filter((candidate) => {
+      const candidateNameKey = exactName(candidate.name || candidate.productName);
+      if (candidateNameKey !== nameKey) return false;
+      const directSupplierId = mappedId(supplierMappings, text(candidate.supplierId || candidate.supplier_id), supplierIdentityKey(candidate.supplier || candidate.supplierName));
+      const candidateSupplierIds = directSupplierId ? [directSupplierId] : dependentSupplierIds(rowId(candidate), candidateNameKey);
+      return text(candidateSupplierIds.length === 1 ? candidateSupplierIds[0] : directSupplierId) === text(supplierId);
+    });
+    const canonicalId = samePlannedGroup.length === 1 && isCanonicalUuid(legacyId)
       ? legacyId
-      : await deterministicRecoveryUuid(`product|${scope.companyId}|${scope.locationId || "company"}|${legacyId}|${nameKey}|${supplierId}`);
+      : await deterministicRecoveryUuid(`product|${scope.companyId}|${scope.locationId || "company"}|${createKey}`);
     const generatedIdMatch = byId.get(canonicalId);
     if (generatedIdMatch) {
       if (!compatibleIdentity(generatedIdMatch, nameKey, supplierId)) {
-        delete mappings[`name:${nameKey}`];
-        conflicts.push({ id: legacyId, name, legacy: product, candidates: [generatedIdMatch], affectedInvoiceCount: 0, reason: "The deterministic recovery UUID already belongs to a different product identity." });
+        const conflict = { id: legacyId, name, legacy: product, candidates: [generatedIdMatch], affectedInvoiceCount: 0, reason: "The deterministic recovery UUID already belongs to a different product identity." };
+        conflicts.push(conflict);
+        mappings[`conflict:id:${legacyId}`] = true;
         continue;
       }
-      addMapping(mappings, legacyId, nameKey, generatedIdMatch.id);
+      addProductMapping(legacyId, nameKey, supplierId, generatedIdMatch.id);
       already.push({ legacy: product, relational: generatedIdMatch });
       continue;
     }
-    addMapping(mappings, legacyId, nameKey, canonicalId);
-    migrate.push(productPayload(resolvedProduct, canonicalId, supplierId, departmentId, scope));
+    const payload = productPayload(resolvedProduct, canonicalId, supplierId, departmentId, scope);
+    plannedCreates.set(createKey, payload);
+    addProductMapping(legacyId, nameKey, supplierId, canonicalId);
+    migrate.push(payload);
   }
 
   conflicts.forEach((conflict) => {
@@ -330,8 +408,15 @@ async function productPlan(deviceProducts, relationalProducts, supplierMappings,
     mappings,
     migrate,
     already,
+    archived,
     conflicts,
-    counts: { legacy: deviceProducts.length, alreadyRelational: already.length, needMigration: migrate.length, conflicts: conflicts.length },
+    counts: {
+      legacy: deviceProducts.length,
+      alreadyRelational: already.length,
+      needMigration: migrate.length,
+      archived: archived.length,
+      conflicts: conflicts.length,
+    },
   };
 }
 
@@ -487,12 +572,25 @@ function recoveryConflict(invoice, reason, cloud = null, category = "explicit_ma
 async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings, productMappings, departmentMappings, scope, resolutions = []) {
   const migrate = [];
   const already = [];
+  const archived = [];
   const conflicts = [];
   const relationalById = new Map(relationalInvoices.map((row) => [text(row.id), row]));
   const relationalByIdentity = grouped(relationalInvoices, (row) => invoiceStrongIdentity(row, scope));
   const equivalentCandidateUsage = new Map();
   let lineCount = 0;
   let splitCount = 0;
+
+  const archiveInvoice = (legacy, reason, category, canonical = null) => {
+    const explicitTotal = firstPresent(legacy, ["sourceInvoiceTotal", "invoiceTotal", "invoice_total", "totalAmount", "total_amount", "finalInvoiceTotal", "final_invoice_total", "total"]);
+    archived.push({
+      legacy,
+      canonical,
+      reason,
+      category,
+      classification: "archive_only",
+      financialHeaderReliable: explicitTotal !== undefined && explicitTotal !== null && explicitTotal !== "" && Number.isFinite(Number(explicitTotal)),
+    });
+  };
 
   for (const sourceInvoice of deviceInvoices) {
     const documentResolution = activeResolution(resolutions, "invoice_document_number", text(sourceInvoice.id));
@@ -509,11 +607,11 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
     const supplierName = text(originalInvoice.supplier || originalInvoice.supplierName);
     const supplierId = mappedId(supplierMappings, text(originalInvoice.supplierId || originalInvoice.supplier_id), supplierIdentityKey(supplierName));
     if (!supplierId) {
-      conflicts.push(recoveryConflict(originalInvoice, `Supplier dependency is unresolved: ${supplierName || "missing supplier"}.`, null, "supplier_mapping_unresolved"));
+      archiveInvoice(originalInvoice, `Supplier dependency is unresolved: ${supplierName || "missing supplier"}.`, "supplier_mapping_unresolved");
       continue;
     }
     if (exactName(originalInvoice.status || "Approved") !== "approved") {
-      conflicts.push(recoveryConflict(originalInvoice, "Only approved purchasing documents are eligible for automatic recovery.", null, "document_status_review"));
+      archiveInvoice(originalInvoice, "Only approved purchasing documents are eligible for relational recovery.", "document_status_archive");
       continue;
     }
     const withIds = await ensureInvoicePersistenceIds({ ...originalInvoice, supplierId }, scope);
@@ -521,9 +619,13 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
     let dependencyError = "";
     for (const line of withIds.items || []) {
       const productName = text(line.productName || line.product_name);
-      const productId = mappedId(productMappings, text(line.matchedProductId || line.productId || line.product_id), exactName(productName));
+      const sourceProductId = text(line.matchedProductId || line.productId || line.product_id);
+      const productNameKey = exactName(productName);
+      const productId = mappedProductId(productMappings, sourceProductId, productNameKey, supplierId);
       if (!productId) {
-        dependencyError = `Product dependency is unresolved: ${productName || "unnamed line"}.`;
+        dependencyError = productReferenceIsMarked(productMappings, "conflict", sourceProductId, productNameKey, supplierId)
+          ? `Product mapping is genuinely ambiguous: ${productName || "unnamed line"}.`
+          : `Product dependency is not safe for canonical analytics: ${productName || "unnamed line"}.`;
         break;
       }
       const sourceSplits = line.departmentSplits || line.department_splits || [];
@@ -562,15 +664,17 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
       });
     }
     if (dependencyError) {
-      const category = /Product dependency/i.test(dependencyError) ? "product_mapping_unresolved" : "department_mapping_unresolved";
-      conflicts.push(recoveryConflict(originalInvoice, dependencyError, null, category));
+      const productAmbiguity = /genuinely ambiguous/i.test(dependencyError);
+      const category = /Product/i.test(dependencyError) ? "product_mapping_unresolved" : "department_mapping_unresolved";
+      if (productAmbiguity) conflicts.push(recoveryConflict(originalInvoice, dependencyError, null, category));
+      else archiveInvoice(originalInvoice, dependencyError, category, { ...withIds, supplierId, items: mappedLines });
       continue;
     }
 
     const canonical = { ...withIds, companyId: scope.companyId, locationId: scope.locationId || "", supplierId, items: mappedLines };
     const identity = invoiceStrongIdentity(canonical, scope);
     if (!documentNumber(canonical) && !originalHadUuid) {
-      conflicts.push(recoveryConflict(originalInvoice, "Invoice has neither a reusable UUID nor a document number, so duplicate identity is ambiguous.", null, "generic_identity_review"));
+      archiveInvoice(originalInvoice, "Invoice has neither a reusable UUID nor a usable document number.", "missing_stable_identity", canonical);
       continue;
     }
     const idMatch = relationalById.get(canonical.id);
@@ -594,14 +698,18 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
         });
         continue;
       }
-      conflicts.push(recoveryConflict(
-        sourceInvoice,
-        equivalentCandidates.length > 1
-          ? "Generic document number matches multiple relational invoices with equivalent business content."
-          : `Generic document number "${text(sourceInvoice.documentNumber || sourceInvoice.invoiceNumber) || "blank"}" cannot satisfy the relational uniqueness rule. Enter the real document number before migration.`,
-        equivalentCandidates[0] || genericCandidates[0] || null,
-        equivalentCandidates.length > 1 ? "multiple_equivalent_candidates" : "generic_identity_review",
-      ));
+      if (equivalentCandidates.length > 1) {
+        conflicts.push(recoveryConflict(
+          sourceInvoice,
+          "Generic document number matches multiple relational invoices with equivalent business content.",
+          equivalentCandidates[0],
+          "multiple_equivalent_candidates",
+        ));
+        continue;
+      }
+      migrate.push(canonical);
+      lineCount += canonical.items.length;
+      splitCount += canonical.items.reduce((sum, line) => sum + (line.departmentSplits || []).length, 0);
       continue;
     }
     const match = idMatch || (identityMatches.length === 1 ? identityMatches[0] : null);
@@ -665,11 +773,13 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
   return {
     migrate,
     already,
+    archived,
     conflicts,
     counts: {
       legacy: deviceInvoices.length,
       alreadyRelational: already.length,
       needMigration: migrate.length,
+      archived: archived.length,
       conflicts: conflicts.length,
       lines: deviceInvoices.reduce((sum, invoice) => sum + (invoice.items || invoice.lines || []).length, 0),
       departmentSplits: deviceInvoices.reduce((sum, invoice) => sum + (invoice.items || invoice.lines || []).reduce((lineSum, line) => lineSum + (line.departmentSplits || line.department_splits || []).length, 0), 0),

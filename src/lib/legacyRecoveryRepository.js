@@ -64,6 +64,18 @@ export async function recoverLaptopLegacyData(client, preview, {
     catalog = Array.isArray(data) ? data[0] : data;
   }
 
+  let archive = { products_inserted: 0, products_existing: 0, invoices_inserted: 0, invoices_existing: 0 };
+  if (preview.products.archived.length || preview.invoices.archived.length) {
+    const { data, error } = await client.rpc("archive_legacy_recovery_v1", {
+      p_company_id: scope.companyId,
+      p_location_id: scope.locationId || null,
+      p_products: preview.products.archived,
+      p_invoices: preview.invoices.archived,
+    });
+    if (error) throw error;
+    archive = Array.isArray(data) ? data[0] : data;
+  }
+
   const imported = [];
   const failed = [];
   for (const invoice of preview.invoices.migrate) {
@@ -87,6 +99,7 @@ export async function recoverLaptopLegacyData(client, preview, {
   verified.forEach(onInvoicePersisted);
   return {
     catalog,
+    archive,
     imported,
     verified,
     failed,
