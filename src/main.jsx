@@ -4994,6 +4994,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     return diagnoseLaptopLegacyRecovery(supabase, cloudSnapshot, {
       companyId: cloudScope.companyId,
       locationId: cloudScope.locationId || "",
+      scopeKey: cloudScope.scopeKey,
     }, { exampleLimit: 15 });
   };
 
@@ -12007,6 +12008,8 @@ function SettingsPanel({
             <div className="recovery-summary-grid recovery-catalog-grid">
               <div><strong>Current counts</strong><span>Relational {recoveryConflictDiagnostic.currentCounts.relationalInvoices ?? "Unknown"} · Legacy {recoveryConflictDiagnostic.currentCounts.legacyInvoices}</span><span>Already {recoveryConflictDiagnostic.currentCounts.alreadyRelational} · Need migration {recoveryConflictDiagnostic.currentCounts.needMigration} · Conflicts {recoveryConflictDiagnostic.currentCounts.reviewConflicts}</span></div>
               <div><strong>Diagnostic estimate</strong><span>Likely false {recoveryConflictDiagnostic.estimates.likelyFalseConflicts} · True business {recoveryConflictDiagnostic.estimates.trueBusinessConflicts}</span><span>Product {recoveryConflictDiagnostic.estimates.productRelatedConflicts} · Date {recoveryConflictDiagnostic.estimates.dateRelatedConflicts} · Allocation {recoveryConflictDiagnostic.estimates.allocationRelatedConflicts} · Other {recoveryConflictDiagnostic.estimates.other}</span></div>
+              <div><strong>Pre-flagged conflict provenance</strong><span>Flagged {recoveryConflictDiagnostic.conflictFlagProvenance?.totalFlagged || 0} · Relational candidate {recoveryConflictDiagnostic.conflictFlagProvenance?.withRelationalCandidate || 0} · No candidate {recoveryConflictDiagnostic.conflictFlagProvenance?.withoutRelationalCandidate || 0}</span><span>Equivalent candidate {recoveryConflictDiagnostic.conflictFlagProvenance?.materiallyEquivalentCandidate || 0} · Material mismatch {recoveryConflictDiagnostic.conflictFlagProvenance?.genuineMaterialMismatch || 0} · Stale estimate {recoveryConflictDiagnostic.conflictFlagProvenance?.staleAgainstCurrentRelational || 0}</span></div>
+              <div><strong>Legacy cloud invoice module</strong><span>{recoveryConflictDiagnostic.legacyCloudInvoiceModule?.exists ? `${recoveryConflictDiagnostic.legacyCloudInvoiceModule.invoiceCount} invoice(s) · revision ${recoveryConflictDiagnostic.legacyCloudInvoiceModule.revision}` : "No invoice module row found"}</span><span>{recoveryConflictDiagnostic.legacyCloudInvoiceModule?.available === false ? recoveryConflictDiagnostic.legacyCloudInvoiceModule.error : recoveryConflictDiagnostic.legacyCloudInvoiceModule?.syncedAt || "No cloud snapshot timestamp"}</span></div>
               <div><strong>Candidate reuse</strong><span>{recoveryConflictDiagnostic.candidateReuse.relationalCandidatesUsedMoreThanOnce} relational candidate(s) used more than once</span><span>{recoveryConflictDiagnostic.candidateReuse.legacyRowsUsingReusedCandidates} matching legacy row(s)</span></div>
             </div>
             <div className="recovery-diagnostic-breakdown">
@@ -12031,6 +12034,13 @@ function SettingsPanel({
                     <div><strong>Legacy</strong><span>{example.legacy.supplier || "Unknown supplier"} · {example.legacy.documentNumber || "No document number"}</span><span>{example.legacy.documentType} · {example.legacy.date || "No date"} · £{Number(example.legacy.total || 0).toFixed(2)}</span><span>Supplier ID {example.legacy.supplierSourceId || "None"} → {example.legacy.canonicalSupplierId || "Unresolved"}</span><span>{example.legacy.lineCount} lines · {example.legacy.splitCount} splits</span></div>
                     <div><strong>Relational</strong><span>{example.relational ? `${example.relational.supplier || "Supplier name absent"} · ${example.relational.documentNumber || "No document number"}` : "No relational candidate"}</span><span>{example.relational ? `${example.relational.documentType} · ${example.relational.date || "No date"} · £${Number(example.relational.total || 0).toFixed(2)}` : example.existingPreviewReason}</span><span>Supplier ID {example.relational?.supplierSourceId || "None"}</span><span>{example.relational ? `${example.relational.lineCount} lines · ${example.relational.splitCount} splits` : "No relational lines"}</span></div>
                   </div>
+                  {example.provenance && (
+                    <div className="recovery-mapping-evidence">
+                      <h5>Conflict origin evidence</h5>
+                      <div><code>{example.provenance.likelyOrigin}</code><span>Writer signature: {example.provenance.writerSignature ? "confirmed" : "not proven"}</span><span>Recorded remote versions: {example.provenance.recordedConflictVersionCount}</span><span>Original condition: {example.provenance.recordedConflictConditions.join(", ") || "not retained"}</span></div>
+                      <div><code>{example.provenance.relationalMatchBasis}</code><span>Current relational candidates: {example.provenance.relationalCandidateCount}</span><span>Legacy cloud candidates: {example.provenance.legacyCloudCandidateCount}</span><span>{example.provenance.staleReason}</span></div>
+                    </div>
+                  )}
                   {example.mappingEvidence.length > 0 && (
                     <div className="recovery-mapping-evidence">
                       <h5>Canonical mapping evidence</h5>

@@ -86,6 +86,7 @@ function relationalInvoice(overrides = {}) {
 }
 
 async function diagnosticPreview(localInvoice, cloudInvoice) {
+  const relationalInvoices = Array.isArray(cloudInvoice) ? cloudInvoice : [cloudInvoice].filter(Boolean);
   return buildLaptopRecoveryPreview({
     snapshot: {
       suppliers: [{ id: legacySupplierId, name: "TG Fruits", active: true }],
@@ -120,7 +121,7 @@ async function diagnosticPreview(localInvoice, cloudInvoice) {
         { id: kitchenId, company_id: companyId, location_id: locationId, name: "Kitchen", active: true },
         { id: barId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
       ],
-      invoices: [cloudInvoice],
+      invoices: relationalInvoices,
     },
     scope,
   });
@@ -154,7 +155,7 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
   assert.deepEqual(deviceSnapshot, before);
   assert.equal(operations.some((operation) => operation.startsWith("rpc:")), false);
   assert.deepEqual(operations.filter((operation) => operation.startsWith("from:")), [
-    "from:suppliers", "from:products", "from:departments", "from:invoices",
+    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_cloud_state",
   ]);
 
   const source = readFileSync(new URL("../lib/legacyRecoveryDiagnosticRepository.js", import.meta.url), "utf8");
@@ -255,4 +256,50 @@ test("TEST H: line order changes do not create material differences", async () =
   ));
   assert.equal(report.examples[0].materialDifferences.length, 0);
   assert.equal(report.examples[0].classification, "likely false conflict");
+});
+
+test("TEST I: a pre-flagged conflict is independently compared with its current relational candidate", async () => {
+  const local = legacyInvoice({
+    syncStatus: "conflict",
+    syncError: "Device and cloud contain different versions. Review is required before persistence.",
+    recoveryConflictVersions: [relationalInvoice()],
+  });
+  const cloud = relationalInvoice({ supplier: "" });
+  const preview = await diagnosticPreview(local, cloud);
+  const report = diagnoseLaptopRecoveryConflicts(preview, {
+    deviceInvoices: [local],
+    relationalInvoices: [cloud],
+  });
+
+  assert.equal(preview.invoices.conflicts[0].cloud, null);
+  assert.equal(report.conflictFlagProvenance.totalFlagged, 1);
+  assert.equal(report.conflictFlagProvenance.withRelationalCandidate, 1);
+  assert.equal(report.conflictFlagProvenance.materiallyEquivalentCandidate, 1);
+  assert.equal(report.conflictFlagProvenance.staleAgainstCurrentRelational, 1);
+  assert.equal(report.examples[0].provenance.writerSignature, true);
+  assert.equal(report.examples[0].relational.id, invoiceId);
+});
+
+test("TEST J: a pre-flagged conflict with no relational match retains read-only legacy-cloud origin evidence", async () => {
+  const historicalCloudVersion = legacyInvoice({ sourceInvoiceTotal: 12 });
+  const local = legacyInvoice({
+    syncStatus: "conflict",
+    syncError: "Device and cloud contain different versions. Review is required before persistence.",
+    recoveryConflictVersions: [historicalCloudVersion],
+  });
+  const preview = await diagnosticPreview(local, []);
+  const report = diagnoseLaptopRecoveryConflicts(preview, {
+    deviceInvoices: [local],
+    relationalInvoices: [],
+    legacyCloudInvoices: [historicalCloudVersion],
+    legacyCloudModule: { available: true, exists: true, revision: 7, syncedAt: "2026-08-07T12:00:00Z" },
+  });
+
+  assert.equal(report.conflictFlagProvenance.withoutRelationalCandidate, 1);
+  assert.equal(report.conflictFlagProvenance.withLegacyCloudCandidate, 1);
+  assert.equal(report.conflictFlagProvenance.likelyLegacyCloudOrigin, 1);
+  assert.equal(report.conflictFlagProvenance.staleAgainstCurrentRelational, 1);
+  assert.equal(report.legacyCloudInvoiceModule.invoiceCount, 1);
+  assert.equal(report.examples[0].provenance.likelyOrigin, "legacy_cloud_snapshot_merge");
+  assert.deepEqual(report.examples[0].provenance.recordedConflictConditions, ["same_invoice_uuid_content_fingerprint_mismatch"]);
 });

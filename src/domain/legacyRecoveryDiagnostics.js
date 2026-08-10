@@ -1,4 +1,7 @@
-import { invoiceContentFingerprint } from "./emergencyRecovery.js";
+import {
+  invoiceContentFingerprint,
+  invoiceRecoveryIdentity,
+} from "./emergencyRecovery.js";
 import { supplierIdentityKey } from "./supplierIdentity.js";
 
 export const RECOVERY_DIAGNOSTIC_SCHEMA = "marginflow-recovery-conflict-diagnostic/v1";
@@ -27,6 +30,8 @@ const technicalPatternLabels = Object.freeze({
   split_department_name_vs_uuid: "Split department name vs confirmed department UUID",
   confirmed_product_mapping_raw_difference: "Legacy product value vs confirmed canonical product",
 });
+
+const conflictWriterMessage = "Device and cloud contain different versions. Review is required before persistence.";
 
 function text(value = "") {
   return String(value ?? "").trim();
@@ -161,6 +166,7 @@ function invoiceSummary(invoice = {}, preview, source) {
   const supplier = supplierReference(invoice, preview, source);
   const lines = (invoice.items || invoice.lines || []).map((line) => lineSummary(line, preview, source));
   return {
+    id: text(invoice.id || invoice.relationalId || invoice.relational_id),
     supplier: supplier.name,
     supplierSourceId: supplier.sourceId,
     canonicalSupplierId: supplier.id,
@@ -179,6 +185,71 @@ function invoiceSummary(invoice = {}, preview, source) {
     splitCount: lines.reduce((sum, line) => sum + line.splits.length, 0),
     lines,
   };
+}
+
+function rawInvoiceId(invoice = {}) {
+  return text(invoice.id || invoice.relationalId || invoice.relational_id);
+}
+
+function currentRecoveryIdentity(invoice, preview, source) {
+  const supplier = supplierReference(invoice, preview, source);
+  const number = normalizedDocumentNumber(invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number);
+  const type = normalized(invoice.documentType || invoice.document_type || "invoice").replace(/\s+/g, "_");
+  if (!supplier.id || !number) return "";
+  return [supplier.id, type, number].join("|");
+}
+
+function currentRecoveryCandidates(localInvoice, candidates, preview, source) {
+  const localId = rawInvoiceId(localInvoice);
+  const idMatches = localId
+    ? candidates.filter((candidate) => rawInvoiceId(candidate) === localId)
+    : [];
+  if (idMatches.length) return { candidates: idMatches, basis: "same_invoice_uuid" };
+
+  const identity = currentRecoveryIdentity(localInvoice, preview, "legacy");
+  if (!identity) return { candidates: [], basis: "no_canonical_strong_identity" };
+  const identityMatches = candidates.filter((candidate) => currentRecoveryIdentity(candidate, preview, source) === identity);
+  return {
+    candidates: identityMatches,
+    basis: identityMatches.length ? "canonical_supplier_document_type_number" : "no_match",
+  };
+}
+
+function legacyMergeIdentity(invoice, scope) {
+  return invoiceRecoveryIdentity({
+    ...invoice,
+    companyId: invoice.companyId || invoice.company_id || scope.companyId || "company",
+  }).key;
+}
+
+function legacyCloudCandidates(localInvoice, candidates, scope) {
+  const localId = rawInvoiceId(localInvoice);
+  const idMatches = localId
+    ? candidates.filter((candidate) => rawInvoiceId(candidate) === localId)
+    : [];
+  if (idMatches.length) return { candidates: idMatches, basis: "same_invoice_uuid" };
+  const identity = legacyMergeIdentity(localInvoice, scope);
+  const identityMatches = candidates.filter((candidate) => legacyMergeIdentity(candidate, scope) === identity);
+  return {
+    candidates: identityMatches,
+    basis: identityMatches.length ? "legacy_supplier_type_date_number_identity" : "no_match",
+  };
+}
+
+function recordedConflictCondition(localInvoice, scope) {
+  const versions = Array.isArray(localInvoice.recoveryConflictVersions)
+    ? localInvoice.recoveryConflictVersions
+    : [];
+  const conditions = versions.map((version) => {
+    if (rawInvoiceId(localInvoice) && rawInvoiceId(localInvoice) === rawInvoiceId(version)) {
+      return "same_invoice_uuid_content_fingerprint_mismatch";
+    }
+    if (legacyMergeIdentity(localInvoice, scope) === legacyMergeIdentity(version, scope)) {
+      return "legacy_supplier_type_date_number_identity_content_fingerprint_mismatch";
+    }
+    return "recorded_remote_version_no_longer_matches_current_identity";
+  });
+  return [...new Set(conditions)];
 }
 
 function comparableSplit(split) {
@@ -405,7 +476,7 @@ function codeForDifferences(materialDifferences, legacySummary, relationalSummar
   if (/supplier dependency is unresolved/i.test(existingReason)) return "supplier_mapping_unresolved";
   if (/department/i.test(existingReason) && !relationalSummary) return "department_split_mismatch";
   if (!relationalSummary) return "other";
-  if (!materialDifferences.length && currentDifferences.length) return "likely_technical_false_conflict";
+  if (!materialDifferences.length) return "likely_technical_false_conflict";
   if (materialDifferences.some((row) => row.path === "date")) return "date_mismatch";
   if (materialDifferences.some((row) => ["subtotal", "vatTotal", "discountAmount", "additionalCharges", "total"].includes(row.path))) return "financial_content_mismatch";
   if (materialDifferences.some((row) => row.path === "supplier")) return "supplier_identity_mismatch";
@@ -463,6 +534,73 @@ function conflictDiagnostic(conflict, preview) {
   };
 }
 
+function conflictProvenanceDiagnostic({
+  localInvoice,
+  previewConflict,
+  preview,
+  relationalInvoices,
+  legacyCloudInvoices,
+}) {
+  const relationalMatch = currentRecoveryCandidates(localInvoice, relationalInvoices, preview, "relational");
+  const legacyCloudMatch = legacyCloudCandidates(localInvoice, legacyCloudInvoices, preview.scope || {});
+  const uniqueRelational = relationalMatch.candidates.length === 1 ? relationalMatch.candidates[0] : null;
+  const comparison = conflictDiagnostic({
+    ...(previewConflict || {}),
+    local: localInvoice,
+    cloud: uniqueRelational,
+    reason: previewConflict?.reason || "This device record is already marked Review conflict.",
+  }, preview);
+  const recordedVersions = Array.isArray(localInvoice.recoveryConflictVersions)
+    ? localInvoice.recoveryConflictVersions
+    : [];
+  const recordedFingerprints = new Set(recordedVersions.map(invoiceContentFingerprint));
+  const legacyCloudRecordedVersionMatches = legacyCloudMatch.candidates.filter((candidate) => recordedFingerprints.has(invoiceContentFingerprint(candidate)));
+  const relationalRecordedVersionMatches = relationalMatch.candidates.filter((candidate) => recordedFingerprints.has(invoiceContentFingerprint(candidate)));
+  const writerSignature = localInvoice.syncError === conflictWriterMessage || recordedVersions.length > 0;
+  let likelyOrigin = "unknown";
+  if (legacyCloudRecordedVersionMatches.length && relationalRecordedVersionMatches.length) likelyOrigin = "legacy_cloud_or_relational_merge";
+  else if (legacyCloudRecordedVersionMatches.length) likelyOrigin = "legacy_cloud_snapshot_merge";
+  else if (relationalRecordedVersionMatches.length) likelyOrigin = "relational_invoice_merge";
+  else if (writerSignature && recordedVersions.length) likelyOrigin = "merge_writer_remote_version_no_longer_present";
+  else if (writerSignature) likelyOrigin = "merge_writer_metadata_only";
+
+  const noRelationalCandidate = relationalMatch.candidates.length === 0;
+  const materiallyEquivalentCandidate = Boolean(uniqueRelational && comparison.materialDifferences.length === 0);
+  const genuineMaterialMismatch = Boolean(uniqueRelational && comparison.materialDifferences.length > 0);
+  return {
+    ...comparison,
+    provenance: {
+      preExistingConflict: true,
+      currentSyncStatus: text(localInvoice.syncStatus),
+      currentSyncError: text(localInvoice.syncError),
+      writerSignature,
+      writer: writerSignature ? "src/domain/emergencyRecovery.js:mergeInvoiceCollectionsPreservingAll" : "not_proven_from_record_metadata",
+      recordedConflictVersionCount: recordedVersions.length,
+      recordedConflictConditions: recordedConflictCondition(localInvoice, preview.scope || {}),
+      likelyOrigin,
+      relationalCandidateCount: relationalMatch.candidates.length,
+      relationalCandidateIds: relationalMatch.candidates.map(rawInvoiceId).filter(Boolean),
+      relationalMatchBasis: relationalMatch.basis,
+      legacyCloudCandidateCount: legacyCloudMatch.candidates.length,
+      legacyCloudCandidateIds: legacyCloudMatch.candidates.map(rawInvoiceId).filter(Boolean),
+      legacyCloudMatchBasis: legacyCloudMatch.basis,
+      recordedVersionMatchesLegacyCloud: legacyCloudRecordedVersionMatches.length,
+      recordedVersionMatchesRelational: relationalRecordedVersionMatches.length,
+      noRelationalCandidate,
+      materiallyEquivalentCandidate,
+      genuineMaterialMismatch,
+      staleAgainstCurrentRelational: noRelationalCandidate || materiallyEquivalentCandidate,
+      staleReason: noRelationalCandidate
+        ? "No current relational candidate exists; only the cached conflict flag blocks comparison."
+        : materiallyEquivalentCandidate
+          ? "The current relational candidate is materially equivalent after confirmed mappings."
+          : genuineMaterialMismatch
+            ? "The current relational candidate has material business differences."
+            : "Multiple current relational candidates require review.",
+    },
+  };
+}
+
 function representativeExamples(conflicts, limit) {
   const preferredCodes = [
     "likely_technical_false_conflict",
@@ -477,7 +615,15 @@ function representativeExamples(conflicts, limit) {
     "product_identity_mismatch",
     "other",
   ];
-  const selected = [];
+  const selected = conflicts
+    .filter((row) => row.provenance?.preExistingConflict && row.provenance.noRelationalCandidate)
+    .slice(0, 1);
+  conflicts
+    .filter((row) => row.provenance?.preExistingConflict && !row.provenance.noRelationalCandidate)
+    .slice(0, 1)
+    .forEach((row) => {
+      if (selected.length < limit && !selected.includes(row)) selected.push(row);
+    });
   preferredCodes.forEach((code) => {
     const match = conflicts.find((row) => row.conflictReasonCode === code && !selected.includes(row));
     if (match && selected.length < limit) selected.push(match);
@@ -488,18 +634,56 @@ function representativeExamples(conflicts, limit) {
   return selected;
 }
 
-export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 15 } = {}) {
-  const diagnostics = (preview.invoices?.conflicts || []).map((conflict) => conflictDiagnostic(conflict, preview));
+export function diagnoseLaptopRecoveryConflicts(preview = {}, {
+  exampleLimit = 15,
+  deviceInvoices = [],
+  relationalInvoices = [],
+  legacyCloudInvoices = [],
+  legacyCloudModule = {},
+} = {}) {
+  const previewConflicts = preview.invoices?.conflicts || [];
+  const previewConflictLocals = new Set(previewConflicts.map((conflict) => conflict.local));
+  const previewConflictById = new Map(previewConflicts.map((conflict) => [rawInvoiceId(conflict.local), conflict]));
+  const flaggedInvoices = deviceInvoices.filter((invoice) => invoice.syncStatus === "conflict");
+  const flaggedById = new Map(flaggedInvoices.map((invoice) => [rawInvoiceId(invoice), invoice]));
+  const diagnostics = previewConflicts.map((conflict) => {
+    const localId = rawInvoiceId(conflict.local);
+    const flaggedInvoice = flaggedById.get(localId) || (conflict.local?.syncStatus === "conflict" ? conflict.local : null);
+    return flaggedInvoice
+      ? conflictProvenanceDiagnostic({
+        localInvoice: flaggedInvoice,
+        previewConflict: conflict,
+        preview,
+        relationalInvoices,
+        legacyCloudInvoices,
+      })
+      : conflictDiagnostic(conflict, preview);
+  });
+  flaggedInvoices.forEach((invoice) => {
+    const id = rawInvoiceId(invoice);
+    if (previewConflictLocals.has(invoice) || (id && previewConflictById.has(id))) return;
+    diagnostics.push(conflictProvenanceDiagnostic({
+      localInvoice: invoice,
+      previewConflict: null,
+      preview,
+      relationalInvoices,
+      legacyCloudInvoices,
+    }));
+  });
+  const provenanceRows = diagnostics.filter((row) => row.provenance?.preExistingConflict);
   const breakdown = Object.entries(reasonLabels).map(([code, label]) => ({
     code,
     label,
     count: diagnostics.filter((row) => row.conflictReasonCode === code).length,
   })).filter((row) => row.count > 0);
   const candidateUsage = new Map();
-  [...(preview.invoices?.already || []), ...(preview.invoices?.conflicts || [])].forEach((row) => {
+  [...(preview.invoices?.already || []), ...previewConflicts].forEach((row) => {
     const cloud = row.cloud;
     if (!cloud?.id) return;
     candidateUsage.set(cloud.id, (candidateUsage.get(cloud.id) || 0) + 1);
+  });
+  provenanceRows.forEach((row) => {
+    row.provenance.relationalCandidateIds.forEach((id) => candidateUsage.set(id, (candidateUsage.get(id) || 0) + 1));
   });
   const reusedCandidates = [...candidateUsage.entries()].filter(([, count]) => count > 1);
   const technicalFalsePositivePatterns = Object.entries(technicalPatternLabels).map(([code, label]) => {
@@ -536,6 +720,33 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 1
       unresolvedAllocations: diagnostics.filter((row) => row.classification === "unresolved allocation/split conflict").length,
       other: diagnostics.filter((row) => row.classification === "other").length,
     },
+    conflictFlagProvenance: {
+      totalFlagged: provenanceRows.length,
+      withRelationalCandidate: provenanceRows.filter((row) => row.provenance.relationalCandidateCount > 0).length,
+      withoutRelationalCandidate: provenanceRows.filter((row) => row.provenance.noRelationalCandidate).length,
+      withMultipleRelationalCandidates: provenanceRows.filter((row) => row.provenance.relationalCandidateCount > 1).length,
+      materiallyEquivalentCandidate: provenanceRows.filter((row) => row.provenance.materiallyEquivalentCandidate).length,
+      genuineMaterialMismatch: provenanceRows.filter((row) => row.provenance.genuineMaterialMismatch).length,
+      staleAgainstCurrentRelational: provenanceRows.filter((row) => row.provenance.staleAgainstCurrentRelational).length,
+      writerSignatureConfirmed: provenanceRows.filter((row) => row.provenance.writerSignature).length,
+      withLegacyCloudCandidate: provenanceRows.filter((row) => row.provenance.legacyCloudCandidateCount > 0).length,
+      likelyLegacyCloudOrigin: provenanceRows.filter((row) => row.provenance.likelyOrigin === "legacy_cloud_snapshot_merge").length,
+      likelyRelationalOrigin: provenanceRows.filter((row) => row.provenance.likelyOrigin === "relational_invoice_merge").length,
+      originIndistinguishable: provenanceRows.filter((row) => row.provenance.likelyOrigin === "legacy_cloud_or_relational_merge").length,
+      originUnknownOrNoLongerPresent: provenanceRows.filter((row) => [
+        "unknown",
+        "merge_writer_remote_version_no_longer_present",
+        "merge_writer_metadata_only",
+      ].includes(row.provenance.likelyOrigin)).length,
+    },
+    legacyCloudInvoiceModule: {
+      exists: Boolean(legacyCloudModule.exists),
+      available: legacyCloudModule.available !== false,
+      invoiceCount: legacyCloudInvoices.length,
+      revision: Number(legacyCloudModule.revision || 0),
+      syncedAt: text(legacyCloudModule.syncedAt),
+      error: text(legacyCloudModule.error),
+    },
     technicalFalsePositivePatterns,
     candidateReuse: {
       relationalCandidatesUsedMoreThanOnce: reusedCandidates.length,
@@ -559,6 +770,8 @@ export function recoveryDiagnosticExport(report = {}) {
     estimates: report.estimates || {},
     technicalFalsePositivePatterns: report.technicalFalsePositivePatterns || [],
     candidateReuse: report.candidateReuse || {},
+    conflictFlagProvenance: report.conflictFlagProvenance || {},
+    legacyCloudInvoiceModule: report.legacyCloudInvoiceModule || {},
     examples: (report.examples || []).map((example) => ({
       invoiceIdentity: example.invoiceIdentity,
       classification: example.classification,
@@ -570,6 +783,7 @@ export function recoveryDiagnosticExport(report = {}) {
       mappingEvidence: example.mappingEvidence,
       currentComparatorDifferences: example.currentComparatorDifferences,
       materialDifferences: example.materialDifferences,
+      provenance: example.provenance || null,
     })),
   };
 }
