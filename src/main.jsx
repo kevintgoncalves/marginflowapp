@@ -4526,7 +4526,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
-  const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true";
+  const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true"
+    || (import.meta.env.DEV && new URLSearchParams(window.location.search).get("internalRecovery") === "true");
   const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
   const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
