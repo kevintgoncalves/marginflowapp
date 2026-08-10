@@ -3,9 +3,13 @@ import { supplierIdentityKey } from "./supplierIdentity.js";
 
 export const RECOVERY_DIAGNOSTIC_SCHEMA = "marginflow-recovery-conflict-diagnostic/v1";
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const reasonLabels = Object.freeze({
   date_mismatch: "Date mismatch",
   financial_content_mismatch: "Financial-content mismatch",
+  supplier_mapping_unresolved: "Supplier mapping unresolved",
+  supplier_identity_mismatch: "Supplier identity mismatch",
   product_mapping_unresolved: "Product mapping unresolved",
   product_identity_mismatch: "Product identity mismatch",
   department_split_mismatch: "Department/split mismatch",
@@ -15,6 +19,13 @@ const reasonLabels = Object.freeze({
   duplicate_candidate_reuse: "Multiple legacy rows matched one relational invoice",
   document_identity_mismatch: "Document identity mismatch",
   other: "Other",
+});
+
+const technicalPatternLabels = Object.freeze({
+  supplier_name_vs_uuid: "Supplier name vs confirmed supplier UUID",
+  department_name_vs_uuid: "Department name vs confirmed department UUID",
+  split_department_name_vs_uuid: "Split department name vs confirmed department UUID",
+  confirmed_product_mapping_raw_difference: "Legacy product value vs confirmed canonical product",
 });
 
 function text(value = "") {
@@ -27,6 +38,10 @@ function normalized(value = "") {
 
 function normalizedDocumentNumber(value = "") {
   return normalized(value);
+}
+
+function isUuid(value = "") {
+  return uuidPattern.test(text(value));
 }
 
 function isoDate(value = "") {
@@ -91,29 +106,36 @@ function supplierReference(invoice, preview, source) {
   };
 }
 
-function splitSummary(split, preview, source) {
+function splitSummary(split, preview, source, lineTotal) {
   const department = departmentReference(split, preview, source);
   const percentagePresent = numberPresent(split, ["percentage", "ratio"]);
+  const percentage = numberValue(split, ["percentage", "ratio"]);
+  const amountPresent = numberPresent(split, ["amount"]);
+  const amount = numberValue(split, ["amount"]);
+  const amountIsDerived = percentagePresent
+    && amountPresent
+    && numbersEquivalent(amount, Number(lineTotal || 0) * percentage / 100);
   return {
     department: department.name,
     departmentSourceId: department.sourceId,
     canonicalDepartmentId: department.id,
     departmentResolved: department.resolved,
-    percentage: numberValue(split, ["percentage", "ratio"]),
-    amount: numberValue(split, ["amount"]),
-    amountCompared: !percentagePresent,
+    percentage,
+    amount,
+    amountCompared: !percentagePresent || (amountPresent && !amountIsDerived),
   };
 }
 
 function lineSummary(line, preview, source) {
   const product = productReference(line, preview, source);
-  const splits = (line.departmentSplits || line.department_splits || [])
-    .map((split) => splitSummary(split, preview, source))
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-  const department = splits.length ? { name: "Split", sourceId: "", id: "", resolved: true } : departmentReference(line, preview, source);
   const quantity = numberValue(line, ["quantity"]);
   const unitCost = numberValue(line, ["unitCost", "unit_cost"]);
   const explicitLineTotal = firstValue(line, ["netLineTotal", "net_line_total", "lineTotal"]);
+  const lineTotal = Number(explicitLineTotal ?? (quantity * unitCost));
+  const splits = (line.departmentSplits || line.department_splits || [])
+    .map((split) => splitSummary(split, preview, source, lineTotal))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const department = splits.length ? { name: "Split", sourceId: "", id: "", resolved: true } : departmentReference(line, preview, source);
   return {
     productName: product.name,
     productSourceId: product.sourceId,
@@ -124,7 +146,7 @@ function lineSummary(line, preview, source) {
     unit: normalized(firstValue(line, ["unit", "purchaseUnit", "purchase_unit", "unitOfMeasure", "unit_of_measure"]) || ""),
     packSize: normalized(firstValue(line, ["packSize", "pack_size"]) || ""),
     unitCost,
-    lineTotal: Number(explicitLineTotal ?? (quantity * unitCost)),
+    lineTotal,
     vat: numberValue(line, ["vat", "vatAmount", "vat_amount"]),
     allocationMode: splits.length ? "split" : "single",
     department: department.name,
@@ -199,6 +221,133 @@ function canonicalBusinessShape(summary) {
   };
 }
 
+function numbersEquivalent(left, right) {
+  return Math.abs(Number(left || 0) - Number(right || 0)) <= 0.01;
+}
+
+function referenceEvidence({
+  kind,
+  path,
+  legacyRaw,
+  relationalRaw,
+  legacyCanonicalId,
+  relationalCanonicalId,
+  legacyProof,
+  relationalProof,
+}) {
+  const currentEquivalent = normalized(legacyRaw) === normalized(relationalRaw);
+  const canonicalEquivalent = Boolean(
+    legacyCanonicalId
+    && relationalCanonicalId
+    && legacyCanonicalId === relationalCanonicalId,
+  );
+  return {
+    kind,
+    path,
+    legacyRaw: text(legacyRaw),
+    relationalRaw: text(relationalRaw),
+    legacyCanonicalId: text(legacyCanonicalId),
+    relationalCanonicalId: text(relationalCanonicalId),
+    legacyMappingProof: legacyProof || "unresolved",
+    relationalMappingProof: relationalProof || "unresolved",
+    currentComparator: currentEquivalent ? "same" : "different",
+    materialComparison: canonicalEquivalent ? "same" : "different_or_unresolved",
+    confirmedEquivalent: canonicalEquivalent,
+    nameVsUuid: !currentEquivalent && (isUuid(legacyRaw) !== isUuid(relationalRaw)),
+  };
+}
+
+function linePairScore(legacyLine, relationalLine) {
+  let score = 0;
+  if (legacyLine.canonicalProductId && legacyLine.canonicalProductId === relationalLine.canonicalProductId) score += 8;
+  if (numbersEquivalent(legacyLine.quantity, relationalLine.quantity)) score += 2;
+  if (numbersEquivalent(legacyLine.unitCost, relationalLine.unitCost)) score += 2;
+  if (numbersEquivalent(legacyLine.lineTotal, relationalLine.lineTotal)) score += 2;
+  if (legacyLine.allocationMode === relationalLine.allocationMode) score += 1;
+  return score;
+}
+
+function pairedLines(legacyLines = [], relationalLines = []) {
+  const remaining = relationalLines.map((line, index) => ({ line, index }));
+  return legacyLines.map((legacyLine, legacyIndex) => {
+    const ranked = remaining
+      .map((entry) => ({ ...entry, score: linePairScore(legacyLine, entry.line) }))
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+    const selected = ranked[0];
+    if (!selected) return { legacyLine, relationalLine: null, legacyIndex, relationalIndex: null };
+    remaining.splice(remaining.findIndex((entry) => entry.index === selected.index), 1);
+    return { legacyLine, relationalLine: selected.line, legacyIndex, relationalIndex: selected.index };
+  });
+}
+
+function mappingEvidence(legacy, relational) {
+  if (!relational) return [];
+  const evidence = [referenceEvidence({
+    kind: "supplier",
+    path: "supplier",
+    legacyRaw: legacy.supplier || legacy.supplierSourceId,
+    relationalRaw: relational.supplier || relational.supplierSourceId,
+    legacyCanonicalId: legacy.canonicalSupplierId,
+    relationalCanonicalId: relational.canonicalSupplierId,
+    legacyProof: legacy.supplierMappingProof,
+    relationalProof: relational.supplierMappingProof,
+  })];
+
+  pairedLines(legacy.lines, relational.lines).forEach(({ legacyLine, relationalLine, legacyIndex }) => {
+    if (!relationalLine) return;
+    evidence.push(referenceEvidence({
+      kind: "product",
+      path: `lines[${legacyIndex}].product`,
+      legacyRaw: legacyLine.productName,
+      relationalRaw: relationalLine.productName,
+      legacyCanonicalId: legacyLine.canonicalProductId,
+      relationalCanonicalId: relationalLine.canonicalProductId,
+      legacyProof: legacyLine.productMappingProof,
+      relationalProof: relationalLine.productMappingProof,
+    }));
+    if (legacyLine.allocationMode === "single" && relationalLine.allocationMode === "single") {
+      evidence.push(referenceEvidence({
+        kind: "department",
+        path: `lines[${legacyIndex}].department`,
+        legacyRaw: legacyLine.department || legacyLine.departmentSourceId,
+        relationalRaw: relationalLine.department || relationalLine.departmentSourceId,
+        legacyCanonicalId: legacyLine.canonicalDepartmentId,
+        relationalCanonicalId: relationalLine.canonicalDepartmentId,
+        legacyProof: legacyLine.departmentResolved ? "confirmed_recovery_mapping" : "unresolved",
+        relationalProof: relationalLine.departmentResolved ? "relational_id" : "unresolved",
+      }));
+    }
+    legacyLine.splits.forEach((legacySplit, splitIndex) => {
+      const relationalSplit = relationalLine.splits.find((split) => (
+        legacySplit.canonicalDepartmentId
+        && split.canonicalDepartmentId === legacySplit.canonicalDepartmentId
+      )) || relationalLine.splits[splitIndex];
+      if (!relationalSplit) return;
+      evidence.push(referenceEvidence({
+        kind: "split_department",
+        path: `lines[${legacyIndex}].splits[${splitIndex}].department`,
+        legacyRaw: legacySplit.department || legacySplit.departmentSourceId,
+        relationalRaw: relationalSplit.department || relationalSplit.departmentSourceId,
+        legacyCanonicalId: legacySplit.canonicalDepartmentId,
+        relationalCanonicalId: relationalSplit.canonicalDepartmentId,
+        legacyProof: legacySplit.departmentResolved ? "confirmed_recovery_mapping" : "unresolved",
+        relationalProof: relationalSplit.departmentResolved ? "relational_id" : "unresolved",
+      }));
+    });
+  });
+
+  return evidence.filter((row) => row.currentComparator === "different" || row.materialComparison !== "same");
+}
+
+function technicalPatternsForEvidence(evidence = []) {
+  return {
+    supplier_name_vs_uuid: evidence.filter((row) => row.kind === "supplier" && row.confirmedEquivalent && row.nameVsUuid),
+    department_name_vs_uuid: evidence.filter((row) => row.kind === "department" && row.confirmedEquivalent && row.nameVsUuid),
+    split_department_name_vs_uuid: evidence.filter((row) => row.kind === "split_department" && row.confirmedEquivalent && row.nameVsUuid),
+    confirmed_product_mapping_raw_difference: evidence.filter((row) => row.kind === "product" && row.confirmedEquivalent && row.currentComparator === "different"),
+  };
+}
+
 function differenceRows(left, right, path = "", tolerance = 0.01) {
   if (typeof left === "number" && typeof right === "number") {
     return Math.abs(left - right) <= tolerance ? [] : [{ path, legacy: left, relational: right }];
@@ -253,13 +402,14 @@ function mappedLegacyInvoice(invoice, preview) {
 
 function codeForDifferences(materialDifferences, legacySummary, relationalSummary, currentDifferences, existingReason = "") {
   if (/product dependency is unresolved/i.test(existingReason) || legacySummary.lines.some((line) => !line.productResolved)) return "product_mapping_unresolved";
-  if (/supplier dependency is unresolved/i.test(existingReason)) return "product_mapping_unresolved";
+  if (/supplier dependency is unresolved/i.test(existingReason)) return "supplier_mapping_unresolved";
   if (/department/i.test(existingReason) && !relationalSummary) return "department_split_mismatch";
   if (!relationalSummary) return "other";
   if (!materialDifferences.length && currentDifferences.length) return "likely_technical_false_conflict";
   if (materialDifferences.some((row) => row.path === "date")) return "date_mismatch";
   if (materialDifferences.some((row) => ["subtotal", "vatTotal", "discountAmount", "additionalCharges", "total"].includes(row.path))) return "financial_content_mismatch";
-  if (materialDifferences.some((row) => row.path === "supplier" || row.path === "documentNumber" || row.path === "documentType")) return "document_identity_mismatch";
+  if (materialDifferences.some((row) => row.path === "supplier")) return "supplier_identity_mismatch";
+  if (materialDifferences.some((row) => row.path === "documentNumber" || row.path === "documentType")) return "document_identity_mismatch";
   if (materialDifferences.some((row) => /lines\.length/.test(row.path))) return "missing_extra_line";
   if (materialDifferences.some((row) => /\.product$/.test(row.path))) return "product_identity_mismatch";
   if (materialDifferences.some((row) => /allocationMode|department|splits/.test(row.path))) return "department_split_mismatch";
@@ -277,6 +427,7 @@ function conflictDiagnostic(conflict, preview) {
   const materialDifferences = relational
     ? differenceRows(canonicalBusinessShape(legacy), canonicalBusinessShape(relational))
     : [];
+  const referenceMappings = mappingEvidence(legacy, relational);
   const code = codeForDifferences(materialDifferences, legacy, relational, currentDifferences, conflict.reason);
   const hasUnresolvedAllocation = [legacy, relational].filter(Boolean).some((summary) => summary.lines.some((line) => (
     (line.allocationMode === "single" && !line.departmentResolved)
@@ -286,20 +437,29 @@ function conflictDiagnostic(conflict, preview) {
     ? "likely false conflict"
     : code === "product_mapping_unresolved"
       ? "unresolved product mapping"
-      : code === "department_split_mismatch" && (!relational || hasUnresolvedAllocation)
-        ? "unresolved allocation/split conflict"
-        : relational
-          ? "genuine business conflict"
-          : "other";
+      : code === "supplier_mapping_unresolved"
+        ? "unresolved supplier mapping"
+        : code === "department_split_mismatch" && (!relational || hasUnresolvedAllocation)
+          ? "unresolved allocation/split conflict"
+          : relational
+            ? "genuine business conflict"
+            : "other";
   return {
     conflictReasonCode: code,
     conflictReasonText: reasonLabels[code],
     classification,
     existingPreviewReason: conflict.reason,
+    invoiceIdentity: {
+      canonicalSupplierId: legacy.canonicalSupplierId,
+      documentNumber: legacy.documentNumber,
+      documentType: legacy.documentType,
+      date: legacy.date,
+    },
     legacy,
     relational,
+    mappingEvidence: referenceMappings,
     materialDifferences,
-    currentComparatorDifferences: currentDifferences.slice(0, 80),
+    currentComparatorDifferences: currentDifferences,
   };
 }
 
@@ -309,6 +469,8 @@ function representativeExamples(conflicts, limit) {
     "date_mismatch",
     "financial_content_mismatch",
     "department_split_mismatch",
+    "supplier_mapping_unresolved",
+    "supplier_identity_mismatch",
     "product_mapping_unresolved",
     "missing_extra_line",
     "line_content_mismatch",
@@ -326,7 +488,7 @@ function representativeExamples(conflicts, limit) {
   return selected;
 }
 
-export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 5 } = {}) {
+export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 15 } = {}) {
   const diagnostics = (preview.invoices?.conflicts || []).map((conflict) => conflictDiagnostic(conflict, preview));
   const breakdown = Object.entries(reasonLabels).map(([code, label]) => ({
     code,
@@ -340,6 +502,16 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 5
     candidateUsage.set(cloud.id, (candidateUsage.get(cloud.id) || 0) + 1);
   });
   const reusedCandidates = [...candidateUsage.entries()].filter(([, count]) => count > 1);
+  const technicalFalsePositivePatterns = Object.entries(technicalPatternLabels).map(([code, label]) => {
+    const matchingConflicts = diagnostics.filter((row) => technicalPatternsForEvidence(row.mappingEvidence)[code].length > 0);
+    return {
+      code,
+      label,
+      conflictCount: matchingConflicts.length,
+      likelyFalseConflictCount: matchingConflicts.filter((row) => row.classification === "likely false conflict").length,
+      occurrenceCount: matchingConflicts.reduce((sum, row) => sum + technicalPatternsForEvidence(row.mappingEvidence)[code].length, 0),
+    };
+  });
   return {
     schema: RECOVERY_DIAGNOSTIC_SCHEMA,
     generatedAt: new Date().toISOString(),
@@ -355,11 +527,16 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 5
     breakdown,
     estimates: {
       likelyFalseConflicts: diagnostics.filter((row) => row.classification === "likely false conflict").length,
-      likelyTrueConflicts: diagnostics.filter((row) => row.classification === "genuine business conflict").length,
+      trueBusinessConflicts: diagnostics.filter((row) => row.classification === "genuine business conflict").length,
+      productRelatedConflicts: diagnostics.filter((row) => ["product_mapping_unresolved", "product_identity_mismatch"].includes(row.conflictReasonCode)).length,
+      dateRelatedConflicts: diagnostics.filter((row) => row.conflictReasonCode === "date_mismatch").length,
+      allocationRelatedConflicts: diagnostics.filter((row) => row.conflictReasonCode === "department_split_mismatch").length,
       unresolvedMappings: diagnostics.filter((row) => row.classification === "unresolved product mapping").length,
+      unresolvedSupplierMappings: diagnostics.filter((row) => row.classification === "unresolved supplier mapping").length,
       unresolvedAllocations: diagnostics.filter((row) => row.classification === "unresolved allocation/split conflict").length,
       other: diagnostics.filter((row) => row.classification === "other").length,
     },
+    technicalFalsePositivePatterns,
     candidateReuse: {
       relationalCandidatesUsedMoreThanOnce: reusedCandidates.length,
       legacyRowsUsingReusedCandidates: reusedCandidates.reduce((sum, [, count]) => sum + count, 0),
@@ -368,5 +545,31 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, { exampleLimit = 5
     examples: representativeExamples(diagnostics, exampleLimit),
     conflicts: diagnostics,
     note: "Read-only diagnostic. Existing preview classifications and all device/relational records are unchanged.",
+  };
+}
+
+export function recoveryDiagnosticExport(report = {}) {
+  return {
+    schema: report.schema || RECOVERY_DIAGNOSTIC_SCHEMA,
+    generatedAt: report.generatedAt || new Date().toISOString(),
+    companyId: text(report.scope?.companyId),
+    locationId: text(report.scope?.locationId) || null,
+    currentCounts: report.currentCounts || {},
+    breakdown: report.breakdown || [],
+    estimates: report.estimates || {},
+    technicalFalsePositivePatterns: report.technicalFalsePositivePatterns || [],
+    candidateReuse: report.candidateReuse || {},
+    examples: (report.examples || []).map((example) => ({
+      invoiceIdentity: example.invoiceIdentity,
+      classification: example.classification,
+      conflictReasonCode: example.conflictReasonCode,
+      conflictReasonText: example.conflictReasonText,
+      existingPreviewReason: example.existingPreviewReason,
+      legacy: example.legacy,
+      relational: example.relational,
+      mappingEvidence: example.mappingEvidence,
+      currentComparatorDifferences: example.currentComparatorDifferences,
+      materialDifferences: example.materialDifferences,
+    })),
   };
 }

@@ -82,7 +82,8 @@ import {
   previewLaptopLegacyRecovery,
   recoverLaptopLegacyData,
 } from "./lib/legacyRecoveryRepository.js";
-import { diagnoseLaptopRecoveryConflicts } from "./domain/legacyRecoveryDiagnostics.js";
+import { diagnoseLaptopLegacyRecovery } from "./lib/legacyRecoveryDiagnosticRepository.js";
+import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import {
   departmentAllocationRows,
@@ -4989,11 +4990,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   };
 
   const diagnoseCurrentLaptopRecovery = async () => {
-    const preview = await previewCurrentLaptopRecovery();
-    return {
-      preview,
-      report: diagnoseLaptopRecoveryConflicts(preview, { exampleLimit: 5 }),
-    };
+    if (!cloudEnabled) throw new Error("Relational cloud access is required for recovery diagnosis.");
+    return diagnoseLaptopLegacyRecovery(supabase, cloudSnapshot, {
+      companyId: cloudScope.companyId,
+      locationId: cloudScope.locationId || "",
+    }, { exampleLimit: 15 });
   };
 
   const recoverCurrentLaptopData = async () => {
@@ -11480,8 +11481,16 @@ function SettingsPanel({
 
   const exportRecoveryConflictDiagnostic = () => {
     if (!recoveryConflictDiagnostic) return;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadJsonFile(`marginflow-recovery-conflict-diagnostic-${stamp}.json`, recoveryConflictDiagnostic);
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+      "-",
+      String(now.getHours()).padStart(2, "0"),
+      String(now.getMinutes()).padStart(2, "0"),
+    ].join("");
+    downloadJsonFile(`marginflow-recovery-diagnostics-${stamp}.json`, recoveryDiagnosticExport(recoveryConflictDiagnostic));
   };
 
   const migrateLaptopLegacyData = async () => {
@@ -11951,7 +11960,7 @@ function SettingsPanel({
           <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={previewLaptopMigration} type="button"><PackageSearch size={16} />Preview laptop migration</button>
-          <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={diagnoseRecoveryConflicts} type="button"><FileSearch size={16} />Diagnose recovery conflicts</button>
+          <button className="ghost recovery-diagnostic-button" disabled={recoveryBusy || !cloudEnabled} onClick={diagnoseRecoveryConflicts} type="button"><FileSearch size={16} /><span>Diagnose recovery conflicts<small>Read-only</small></span></button>
         </div>
         <p className="helper-text">Emergency export uses the current device state and works even when cloud sync is failing. Inspection is preview-only.</p>
         {syncDiagnostic && (
@@ -11993,11 +12002,11 @@ function SettingsPanel({
           <div className="recovery-preview recovery-diagnostic">
             <div className="panel-head">
               <div><h3>Recovery conflict diagnosis</h3><span>Read-only · {recoveryConflictDiagnostic.generatedAt}</span></div>
-              <button className="ghost" onClick={exportRecoveryConflictDiagnostic} type="button"><Download size={16} />Download diagnostic JSON</button>
+              <button className="ghost" onClick={exportRecoveryConflictDiagnostic} type="button"><Download size={16} />Download diagnostic report</button>
             </div>
             <div className="recovery-summary-grid recovery-catalog-grid">
               <div><strong>Current counts</strong><span>Relational {recoveryConflictDiagnostic.currentCounts.relationalInvoices ?? "Unknown"} · Legacy {recoveryConflictDiagnostic.currentCounts.legacyInvoices}</span><span>Already {recoveryConflictDiagnostic.currentCounts.alreadyRelational} · Need migration {recoveryConflictDiagnostic.currentCounts.needMigration} · Conflicts {recoveryConflictDiagnostic.currentCounts.reviewConflicts}</span></div>
-              <div><strong>Diagnostic estimate</strong><span>Likely false {recoveryConflictDiagnostic.estimates.likelyFalseConflicts} · Likely true {recoveryConflictDiagnostic.estimates.likelyTrueConflicts}</span><span>Unresolved mappings {recoveryConflictDiagnostic.estimates.unresolvedMappings} · Allocations {recoveryConflictDiagnostic.estimates.unresolvedAllocations} · Other {recoveryConflictDiagnostic.estimates.other}</span></div>
+              <div><strong>Diagnostic estimate</strong><span>Likely false {recoveryConflictDiagnostic.estimates.likelyFalseConflicts} · True business {recoveryConflictDiagnostic.estimates.trueBusinessConflicts}</span><span>Product {recoveryConflictDiagnostic.estimates.productRelatedConflicts} · Date {recoveryConflictDiagnostic.estimates.dateRelatedConflicts} · Allocation {recoveryConflictDiagnostic.estimates.allocationRelatedConflicts} · Other {recoveryConflictDiagnostic.estimates.other}</span></div>
               <div><strong>Candidate reuse</strong><span>{recoveryConflictDiagnostic.candidateReuse.relationalCandidatesUsedMoreThanOnce} relational candidate(s) used more than once</span><span>{recoveryConflictDiagnostic.candidateReuse.legacyRowsUsingReusedCandidates} matching legacy row(s)</span></div>
             </div>
             <div className="recovery-diagnostic-breakdown">
@@ -12005,22 +12014,46 @@ function SettingsPanel({
                 <div key={row.code}><strong>{row.count}</strong><span>{row.label}</span></div>
               ))}
             </div>
+            <div className="recovery-diagnostic-patterns">
+              <h4>Confirmed mapping patterns</h4>
+              {recoveryConflictDiagnostic.technicalFalsePositivePatterns.map((row) => (
+                <div key={row.code}><strong>{row.label}</strong><span>{row.conflictCount} conflict(s) · {row.likelyFalseConflictCount} likely false · {row.occurrenceCount} occurrence(s)</span></div>
+              ))}
+            </div>
             <div className="recovery-diagnostic-examples">
+              <h4>Representative real conflicts ({recoveryConflictDiagnostic.examples.length})</h4>
               {recoveryConflictDiagnostic.examples.map((example, index) => (
                 <section className="recovery-diagnostic-example" key={`${example.legacy.documentNumber}-${example.legacy.date}-${index}`}>
                   <div className="panel-head">
                     <div><h4>{example.legacy.supplier || "Unknown supplier"} · {example.legacy.documentNumber || "No document number"}</h4><span>{example.conflictReasonText} · {example.classification}</span></div>
                   </div>
                   <div className="recovery-pair-grid">
-                    <div><strong>Legacy</strong><span>{example.legacy.documentType} · {example.legacy.date || "No date"} · £{Number(example.legacy.total || 0).toFixed(2)}</span><span>Supplier ID {example.legacy.supplierSourceId || "None"} → {example.legacy.canonicalSupplierId || "Unresolved"}</span><span>{example.legacy.lineCount} lines · {example.legacy.splitCount} splits</span></div>
-                    <div><strong>Relational</strong><span>{example.relational ? `${example.relational.documentType} · ${example.relational.date || "No date"} · £${Number(example.relational.total || 0).toFixed(2)}` : "No relational candidate"}</span><span>Supplier ID {example.relational?.supplierSourceId || "None"}</span><span>{example.relational ? `${example.relational.lineCount} lines · ${example.relational.splitCount} splits` : example.existingPreviewReason}</span></div>
+                    <div><strong>Legacy</strong><span>{example.legacy.supplier || "Unknown supplier"} · {example.legacy.documentNumber || "No document number"}</span><span>{example.legacy.documentType} · {example.legacy.date || "No date"} · £{Number(example.legacy.total || 0).toFixed(2)}</span><span>Supplier ID {example.legacy.supplierSourceId || "None"} → {example.legacy.canonicalSupplierId || "Unresolved"}</span><span>{example.legacy.lineCount} lines · {example.legacy.splitCount} splits</span></div>
+                    <div><strong>Relational</strong><span>{example.relational ? `${example.relational.supplier || "Supplier name absent"} · ${example.relational.documentNumber || "No document number"}` : "No relational candidate"}</span><span>{example.relational ? `${example.relational.documentType} · ${example.relational.date || "No date"} · £${Number(example.relational.total || 0).toFixed(2)}` : example.existingPreviewReason}</span><span>Supplier ID {example.relational?.supplierSourceId || "None"}</span><span>{example.relational ? `${example.relational.lineCount} lines · ${example.relational.splitCount} splits` : "No relational lines"}</span></div>
                   </div>
-                  <div className="recovery-difference-list">
-                    {(example.materialDifferences.length ? example.materialDifferences : example.currentComparatorDifferences).slice(0, 8).map((difference, differenceIndex) => (
-                      <div key={`${difference.path}-${differenceIndex}`}><code>{difference.path}</code><span>{JSON.stringify(difference.legacy)} → {JSON.stringify(difference.relational)}</span></div>
-                    ))}
-                    {!example.materialDifferences.length && example.currentComparatorDifferences.length > 0 && <p>Canonical business fields match; differences shown above come from the current technical fingerprint.</p>}
-                    {!example.materialDifferences.length && !example.currentComparatorDifferences.length && <p>{example.existingPreviewReason}</p>}
+                  {example.mappingEvidence.length > 0 && (
+                    <div className="recovery-mapping-evidence">
+                      <h5>Canonical mapping evidence</h5>
+                      {example.mappingEvidence.map((evidence, evidenceIndex) => (
+                        <div key={`${evidence.path}-${evidenceIndex}`}><code>{evidence.path}</code><span>Legacy raw: {evidence.legacyRaw || "empty"}</span><span>Relational raw: {evidence.relationalRaw || "empty"}</span><span>Canonical: {evidence.legacyCanonicalId || "unresolved"} → {evidence.relationalCanonicalId || "unresolved"}</span><span>Current comparator: {evidence.currentComparator} · Material comparison: {evidence.materialComparison}</span></div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="recovery-difference-groups">
+                    <div className="recovery-difference-list">
+                      <h5>Current comparator differences ({example.currentComparatorDifferences.length})</h5>
+                      {example.currentComparatorDifferences.map((difference, differenceIndex) => (
+                        <div key={`${difference.path}-${differenceIndex}`}><code>{difference.path}</code><span>Legacy: {JSON.stringify(difference.legacy)} · Relational: {JSON.stringify(difference.relational)}</span></div>
+                      ))}
+                      {!example.currentComparatorDifferences.length && <p>None reported by the current fingerprint.</p>}
+                    </div>
+                    <div className="recovery-difference-list">
+                      <h5>Material differences ({example.materialDifferences.length})</h5>
+                      {example.materialDifferences.map((difference, differenceIndex) => (
+                        <div key={`${difference.path}-${differenceIndex}`}><code>{difference.path}</code><span>Legacy: {JSON.stringify(difference.legacy)} · Relational: {JSON.stringify(difference.relational)}</span></div>
+                      ))}
+                      {!example.materialDifferences.length && <p>None. Proven canonical business fields are equivalent.</p>}
+                    </div>
                   </div>
                 </section>
               ))}

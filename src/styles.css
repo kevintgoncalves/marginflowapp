@@ -2049,6 +2049,18 @@ code {
   border-block: 1px solid var(--line);
 }
 
+.recovery-diagnostic-button > span {
+  display: grid;
+  gap: 1px;
+  text-align: left;
+}
+
+.recovery-diagnostic-button small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .recovery-diagnostic-breakdown > div,
 .recovery-pair-grid > div {
   display: grid;
@@ -2065,6 +2077,32 @@ code {
 
 .recovery-diagnostic-examples {
   display: grid;
+}
+
+.recovery-diagnostic-examples > h4,
+.recovery-diagnostic-patterns > h4,
+.recovery-mapping-evidence > h5,
+.recovery-difference-list > h5 {
+  margin: 0;
+}
+
+.recovery-diagnostic-patterns {
+  display: grid;
+  gap: 8px;
+  padding-block: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.recovery-diagnostic-patterns > div {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.recovery-diagnostic-patterns span,
+.recovery-mapping-evidence span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .recovery-diagnostic-example {
@@ -2087,6 +2125,25 @@ code {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.recovery-mapping-evidence {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-block: 1px solid var(--line);
+}
+
+.recovery-mapping-evidence > div {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.4fr) repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.recovery-difference-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .recovery-difference-list {
@@ -2126,6 +2183,9 @@ code {
   }
 
   .recovery-pair-grid,
+  .recovery-difference-groups,
+  .recovery-diagnostic-patterns > div,
+  .recovery-mapping-evidence > div,
   .recovery-difference-list > div {
     grid-template-columns: 1fr;
     gap: 4px;
