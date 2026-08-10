@@ -4,7 +4,7 @@ import {
 } from "./emergencyRecovery.js";
 import { supplierIdentityKey } from "./supplierIdentity.js";
 
-export const RECOVERY_DIAGNOSTIC_SCHEMA = "marginflow-recovery-conflict-diagnostic/v1";
+export const RECOVERY_DIAGNOSTIC_SCHEMA = "marginflow-recovery-conflict-diagnostic/v2";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -32,6 +32,20 @@ const technicalPatternLabels = Object.freeze({
 });
 
 const conflictWriterMessage = "Device and cloud contain different versions. Review is required before persistence.";
+const genericDocumentNumbers = new Set([
+  "",
+  "date",
+  "document",
+  "inv",
+  "invoice",
+  "invoice number",
+  "n/a",
+  "na",
+  "receipt",
+  "total",
+  "unit",
+  "unknown",
+]);
 
 function text(value = "") {
   return String(value ?? "").trim();
@@ -250,6 +264,117 @@ function recordedConflictCondition(localInvoice, scope) {
     return "recorded_remote_version_no_longer_matches_current_identity";
   });
   return [...new Set(conditions)];
+}
+
+function compactInvoiceSummary(summary = {}) {
+  return {
+    supplier: summary.supplier || "Unknown supplier",
+    id: summary.id || "",
+    documentNumber: summary.documentNumber || "",
+    date: summary.date || "",
+    total: Number(summary.total || 0),
+    lineCount: Number(summary.lineCount || 0),
+  };
+}
+
+function dateRange(rows = []) {
+  const dates = rows.map((row) => row.date).filter(Boolean).sort();
+  return { from: dates[0] || "", to: dates.at(-1) || "" };
+}
+
+function documentNumberQuality(deviceInvoices = []) {
+  const groups = new Map();
+  deviceInvoices.forEach((invoice) => {
+    const value = text(invoice.documentNumber || invoice.document_number || invoice.invoiceNumber || invoice.invoice_number);
+    const normalizedValue = normalizedDocumentNumber(value);
+    const row = {
+      supplier: text(invoice.supplier || invoice.supplierName || invoice.supplier_name) || "Unknown supplier",
+      date: isoDate(invoice.date || invoice.invoiceDate || invoice.invoice_date),
+    };
+    const group = groups.get(normalizedValue) || { value, normalizedValue, rows: [] };
+    group.rows.push(row);
+    groups.set(normalizedValue, group);
+  });
+  const summaries = [...groups.values()].map((group) => {
+    const reasons = [];
+    if (genericDocumentNumbers.has(group.normalizedValue)) reasons.push(group.normalizedValue ? "generic_placeholder" : "blank");
+    if (/[,;]\s*[a-z0-9]/i.test(group.value)) reasons.push("multiple_values");
+    if (group.rows.length > 1) reasons.push("repeated_value");
+    const range = dateRange(group.rows);
+    return {
+      value: group.value || "(blank)",
+      normalizedValue: group.normalizedValue,
+      count: group.rows.length,
+      suppliers: [...new Set(group.rows.map((row) => row.supplier))].sort(),
+      dateFrom: range.from,
+      dateTo: range.to,
+      reasons,
+    };
+  });
+  return {
+    totalInvoices: deviceInvoices.length,
+    suspiciousValues: summaries
+      .filter((row) => row.reasons.some((reason) => reason !== "repeated_value"))
+      .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value)),
+    repeatedValues: summaries
+      .filter((row) => row.count > 1)
+      .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value)),
+  };
+}
+
+function recoveryEvidence(metadata = {}) {
+  const snapshot = metadata?.marginflow_snapshot && typeof metadata.marginflow_snapshot === "object"
+    ? metadata.marginflow_snapshot
+    : {};
+  return metadata?.legacyRecovery
+    || snapshot?.metadata?.legacyRecovery
+    || snapshot?.legacyRecovery
+    || null;
+}
+
+function relationalCreationAudit(rows = [], suppliers = [], baselineCount = null, currentCount = null, available = true, error = "") {
+  const supplierNames = new Map(suppliers.map((supplier) => [text(supplier.id), text(supplier.name)]));
+  const hasBaseline = baselineCount !== null && baselineCount !== undefined && baselineCount !== "";
+  const baseline = hasBaseline && Number.isFinite(Number(baselineCount)) ? Number(baselineCount) : null;
+  const current = Number.isFinite(Number(currentCount)) ? Number(currentCount) : rows.length;
+  const delta = baseline === null ? null : current - baseline;
+  const candidateLimit = delta && delta > 0 ? delta : 5;
+  const latestCreatedCandidates = [...rows]
+    .sort((left, right) => text(right.created_at).localeCompare(text(left.created_at)))
+    .slice(0, candidateLimit)
+    .map((row) => {
+      const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+      const snapshot = metadata.marginflow_snapshot && typeof metadata.marginflow_snapshot === "object" ? metadata.marginflow_snapshot : {};
+      const recovery = recoveryEvidence(metadata);
+      const source = text(row.source || snapshot.source);
+      let sourceAssessment = "origin_not_recorded";
+      if (recovery) sourceAssessment = "recovery_metadata_present";
+      else if (/recover|legacy/i.test(source)) sourceAssessment = "recovery_source_label";
+      else if (/manual/i.test(source)) sourceAssessment = "normal_manual_save";
+      else if (source) sourceAssessment = "normal_application_save_or_import";
+      return {
+        id: text(row.id),
+        supplierId: text(row.supplier_id),
+        supplier: supplierNames.get(text(row.supplier_id)) || text(snapshot.supplier || metadata.supplier_name) || "Unknown supplier",
+        documentNumber: text(row.document_number || row.invoice_number || snapshot.documentNumber || snapshot.invoiceNumber),
+        date: isoDate(row.invoice_date || snapshot.date),
+        total: Number(row.total_amount ?? snapshot.sourceInvoiceTotal ?? snapshot.total ?? snapshot.finalInvoiceTotal ?? 0),
+        createdAt: text(row.created_at),
+        updatedAt: text(row.updated_at),
+        source,
+        sourceAssessment,
+        recoveryMetadata: recovery,
+      };
+    });
+  return {
+    available,
+    error: text(error),
+    baselineCount: baseline,
+    currentCount: current,
+    delta,
+    latestCreatedCandidates,
+    note: "The database does not store a device identifier, so mobile versus laptop origin cannot be proven unless source or recovery metadata records it.",
+  };
 }
 
 function comparableSplit(split) {
@@ -638,6 +763,11 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
   exampleLimit = 15,
   deviceInvoices = [],
   relationalInvoices = [],
+  relationalSuppliers = [],
+  relationalAuditRows = [],
+  relationalAuditAvailable = true,
+  relationalAuditError = "",
+  baselineRelationalCount = null,
   legacyCloudInvoices = [],
   legacyCloudModule = {},
 } = {}) {
@@ -677,15 +807,46 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
     count: diagnostics.filter((row) => row.conflictReasonCode === code).length,
   })).filter((row) => row.count > 0);
   const candidateUsage = new Map();
+  const addCandidateUsage = (candidateId, relational, legacy, matchBasis) => {
+    if (!candidateId) return;
+    const usage = candidateUsage.get(candidateId) || { relational, legacyRows: new Map() };
+    if (!usage.relational && relational) usage.relational = relational;
+    const legacyKey = legacy.id || [legacy.supplier, legacy.documentNumber, legacy.date, legacy.total, legacy.lineCount].join("|");
+    usage.legacyRows.set(legacyKey, { ...compactInvoiceSummary(legacy), matchBasis });
+    candidateUsage.set(candidateId, usage);
+  };
   [...(preview.invoices?.already || []), ...previewConflicts].forEach((row) => {
     const cloud = row.cloud;
     if (!cloud?.id) return;
-    candidateUsage.set(cloud.id, (candidateUsage.get(cloud.id) || 0) + 1);
+    const legacy = invoiceSummary(row.local || {}, preview, "legacy");
+    const relational = invoiceSummary(cloud, preview, "relational");
+    addCandidateUsage(
+      cloud.id,
+      compactInvoiceSummary(relational),
+      legacy,
+      rawInvoiceId(row.local) === rawInvoiceId(cloud) ? "same_invoice_uuid" : "canonical_supplier_document_type_number",
+    );
   });
   provenanceRows.forEach((row) => {
-    row.provenance.relationalCandidateIds.forEach((id) => candidateUsage.set(id, (candidateUsage.get(id) || 0) + 1));
+    row.provenance.relationalCandidateIds.forEach((id) => {
+      const relational = relationalInvoices.find((invoice) => rawInvoiceId(invoice) === id);
+      addCandidateUsage(
+        id,
+        relational ? compactInvoiceSummary(invoiceSummary(relational, preview, "relational")) : null,
+        row.legacy,
+        row.provenance.relationalMatchBasis,
+      );
+    });
   });
-  const reusedCandidates = [...candidateUsage.entries()].filter(([, count]) => count > 1);
+  const reusedCandidates = [...candidateUsage.entries()]
+    .map(([relationalInvoiceId, usage]) => ({
+      relationalInvoiceId,
+      relational: usage.relational || null,
+      legacyRowCount: usage.legacyRows.size,
+      legacyRows: [...usage.legacyRows.values()].sort((left, right) => left.date.localeCompare(right.date) || left.id.localeCompare(right.id)),
+    }))
+    .filter((row) => row.legacyRowCount > 1)
+    .sort((left, right) => right.legacyRowCount - left.legacyRowCount || left.relationalInvoiceId.localeCompare(right.relationalInvoiceId));
   const technicalFalsePositivePatterns = Object.entries(technicalPatternLabels).map(([code, label]) => {
     const matchingConflicts = diagnostics.filter((row) => technicalPatternsForEvidence(row.mappingEvidence)[code].length > 0);
     return {
@@ -720,6 +881,11 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
       unresolvedAllocations: diagnostics.filter((row) => row.classification === "unresolved allocation/split conflict").length,
       other: diagnostics.filter((row) => row.classification === "other").length,
     },
+    conflictCategoryCounts: {
+      productDependencyConflict: diagnostics.filter((row) => row.conflictReasonCode === "product_mapping_unresolved").length,
+      dateConflict: diagnostics.filter((row) => row.conflictReasonCode === "date_mismatch").length,
+      departmentSplitConflict: diagnostics.filter((row) => row.conflictReasonCode === "department_split_mismatch").length,
+    },
     conflictFlagProvenance: {
       totalFlagged: provenanceRows.length,
       withRelationalCandidate: provenanceRows.filter((row) => row.provenance.relationalCandidateCount > 0).length,
@@ -739,6 +905,14 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
         "merge_writer_metadata_only",
       ].includes(row.provenance.likelyOrigin)).length,
     },
+    preFlaggedConflictAnalysis: {
+      totalPreFlagged: provenanceRows.length,
+      noRelationalCandidate: provenanceRows.filter((row) => row.provenance.relationalCandidateCount === 0).length,
+      exactlyOneMateriallyEquivalentCandidate: provenanceRows.filter((row) => row.provenance.relationalCandidateCount === 1 && row.provenance.materiallyEquivalentCandidate).length,
+      exactlyOneMateriallyDifferentCandidate: provenanceRows.filter((row) => row.provenance.relationalCandidateCount === 1 && row.provenance.genuineMaterialMismatch).length,
+      multipleCandidates: provenanceRows.filter((row) => row.provenance.relationalCandidateCount > 1).length,
+      staleAgainstCurrentRelational: provenanceRows.filter((row) => row.provenance.staleAgainstCurrentRelational).length,
+    },
     legacyCloudInvoiceModule: {
       exists: Boolean(legacyCloudModule.exists),
       available: legacyCloudModule.available !== false,
@@ -750,9 +924,18 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
     technicalFalsePositivePatterns,
     candidateReuse: {
       relationalCandidatesUsedMoreThanOnce: reusedCandidates.length,
-      legacyRowsUsingReusedCandidates: reusedCandidates.reduce((sum, [, count]) => sum + count, 0),
-      candidates: reusedCandidates.map(([relationalInvoiceId, legacyRowCount]) => ({ relationalInvoiceId, legacyRowCount })),
+      legacyRowsUsingReusedCandidates: reusedCandidates.reduce((sum, row) => sum + row.legacyRowCount, 0),
+      candidates: reusedCandidates,
     },
+    documentNumberQuality: documentNumberQuality(deviceInvoices),
+    relationalGrowthAudit: relationalCreationAudit(
+      relationalAuditRows,
+      relationalSuppliers,
+      baselineRelationalCount,
+      preview.relationalCounts?.invoices,
+      relationalAuditAvailable,
+      relationalAuditError,
+    ),
     examples: representativeExamples(diagnostics, exampleLimit),
     conflicts: diagnostics,
     note: "Read-only diagnostic. Existing preview classifications and all device/relational records are unchanged.",
@@ -768,10 +951,14 @@ export function recoveryDiagnosticExport(report = {}) {
     currentCounts: report.currentCounts || {},
     breakdown: report.breakdown || [],
     estimates: report.estimates || {},
+    conflictCategoryCounts: report.conflictCategoryCounts || {},
     technicalFalsePositivePatterns: report.technicalFalsePositivePatterns || [],
     candidateReuse: report.candidateReuse || {},
     conflictFlagProvenance: report.conflictFlagProvenance || {},
+    preFlaggedConflictAnalysis: report.preFlaggedConflictAnalysis || {},
     legacyCloudInvoiceModule: report.legacyCloudInvoiceModule || {},
+    documentNumberQuality: report.documentNumberQuality || {},
+    relationalGrowthAudit: report.relationalGrowthAudit || {},
     examples: (report.examples || []).map((example) => ({
       invoiceIdentity: example.invoiceIdentity,
       classification: example.classification,

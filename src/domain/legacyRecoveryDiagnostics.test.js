@@ -155,12 +155,16 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
   assert.deepEqual(deviceSnapshot, before);
   assert.equal(operations.some((operation) => operation.startsWith("rpc:")), false);
   assert.deepEqual(operations.filter((operation) => operation.startsWith("from:")), [
-    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_cloud_state",
+    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_cloud_state", "from:invoices",
   ]);
 
   const source = readFileSync(new URL("../lib/legacyRecoveryDiagnosticRepository.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.(?:insert|upsert|update|delete|rpc)\s*\(|storeLocal|saveCloud|persist_invoice_document|recover_legacy_|save_cloud_state_module/i);
   const exported = recoveryDiagnosticExport({ ...result.report, authToken: "must-not-export" });
+  assert.equal(exported.schema, "marginflow-recovery-conflict-diagnostic/v2");
+  assert.ok(Object.hasOwn(exported, "preFlaggedConflictAnalysis"));
+  assert.ok(Object.hasOwn(exported, "documentNumberQuality"));
+  assert.ok(Object.hasOwn(exported, "relationalGrowthAudit"));
   assert.equal(JSON.stringify(exported).includes("must-not-export"), false);
 });
 
@@ -302,4 +306,55 @@ test("TEST J: a pre-flagged conflict with no relational match retains read-only 
   assert.equal(report.legacyCloudInvoiceModule.invoiceCount, 1);
   assert.equal(report.examples[0].provenance.likelyOrigin, "legacy_cloud_snapshot_merge");
   assert.deepEqual(report.examples[0].provenance.recordedConflictConditions, ["same_invoice_uuid_content_fingerprint_mismatch"]);
+});
+
+test("TEST K: v2 export includes reused legacy rows, suspicious document numbers and latest relational creations", async () => {
+  const cloud = relationalInvoice({ documentNumber: "Unit" });
+  const first = legacyInvoice({ documentNumber: "Unit" });
+  const second = legacyInvoice({
+    id: "16161616-1616-4616-8616-161616161616",
+    documentNumber: "Unit",
+    date: "2026-06-23",
+    sourceInvoiceTotal: 25,
+  });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: {
+      suppliers: [{ id: legacySupplierId, name: "TG Fruits", active: true }],
+      products: [{ id: legacyProductId, name: "Tomatoes", supplier: "TG Fruits", supplierId: legacySupplierId, department: "Kitchen", departmentId: legacyKitchenId, active: true }],
+      departmentSettings: [{ id: legacyKitchenId, name: "Kitchen", active: true }],
+      invoices: [first, second],
+    },
+    relational: {
+      suppliers: [{ id: supplierId, company_id: companyId, location_id: locationId, name: "TG Fruits", active: true }],
+      products: [{ id: productId, company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: kitchenId, name: "Tomatoes", active: true, metadata: { legacyRecovery: { legacyId: legacyProductId } } }],
+      departments: [{ id: kitchenId, company_id: companyId, location_id: locationId, name: "Kitchen", active: true }],
+      invoices: [cloud],
+    },
+    scope,
+  });
+  const report = diagnoseLaptopRecoveryConflicts(preview, {
+    deviceInvoices: [first, second],
+    relationalInvoices: [cloud],
+    relationalSuppliers: [{ id: supplierId, name: "TG Fruits" }],
+    relationalAuditRows: [{
+      id: invoiceId,
+      supplier_id: supplierId,
+      document_number: "Unit",
+      invoice_date: "2026-06-22",
+      total_amount: 10,
+      source: "Manual invoice",
+      created_at: "2026-08-10T12:00:00Z",
+      updated_at: "2026-08-10T12:00:00Z",
+      metadata: {},
+    }],
+    baselineRelationalCount: 0,
+  });
+  const exported = recoveryDiagnosticExport(report);
+
+  assert.equal(exported.candidateReuse.relationalCandidatesUsedMoreThanOnce, 1);
+  assert.equal(exported.candidateReuse.candidates[0].legacyRows.length, 2);
+  assert.equal(exported.candidateReuse.candidates[0].legacyRows[1].matchBasis, "canonical_supplier_document_type_number");
+  assert.deepEqual(exported.documentNumberQuality.suspiciousValues.map((row) => [row.value, row.count]), [["Unit", 2]]);
+  assert.equal(exported.relationalGrowthAudit.delta, 1);
+  assert.equal(exported.relationalGrowthAudit.latestCreatedCandidates[0].sourceAssessment, "normal_manual_save");
 });

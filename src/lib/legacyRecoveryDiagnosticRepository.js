@@ -32,15 +32,31 @@ async function loadLegacyCloudInvoiceModule(client, scope) {
   };
 }
 
+async function loadRelationalInvoiceAuditRows(client, scope) {
+  let query = client
+    .from("invoices")
+    .select("id,supplier_id,invoice_number,document_number,invoice_date,total_amount,source,created_at,updated_at,metadata")
+    .eq("company_id", scope.companyId);
+  if (scope.locationId) query = query.eq("location_id", scope.locationId);
+  const result = await query.order("created_at", { ascending: false });
+  if (result.error) {
+    return { available: false, rows: [], error: result.error.message || "Relational invoice creation audit could not be read." };
+  }
+  return { available: true, rows: result.data || [], error: "" };
+}
+
 export async function diagnoseLaptopLegacyRecovery(client, snapshot, scope, {
   exampleLimit = 15,
+  baselineRelationalCount = null,
   loadRelationalState = loadLegacyRecoveryRelationalState,
   loadCloudInvoiceModule = loadLegacyCloudInvoiceModule,
+  loadRelationalAuditRows = loadRelationalInvoiceAuditRows,
   buildPreview = buildLaptopRecoveryPreview,
 } = {}) {
-  const [relational, legacyCloudModule] = await Promise.all([
+  const [relational, legacyCloudModule, relationalAudit] = await Promise.all([
     loadRelationalState(client, scope),
     loadCloudInvoiceModule(client, scope),
+    loadRelationalAuditRows(client, scope),
   ]);
   const preview = await buildPreview({ snapshot, relational, scope });
   return {
@@ -49,6 +65,11 @@ export async function diagnoseLaptopLegacyRecovery(client, snapshot, scope, {
       exampleLimit,
       deviceInvoices: snapshot.invoices || [],
       relationalInvoices: relational.invoices || [],
+      relationalSuppliers: relational.suppliers || [],
+      relationalAuditRows: relationalAudit.rows,
+      relationalAuditAvailable: relationalAudit.available,
+      relationalAuditError: relationalAudit.error,
+      baselineRelationalCount,
       legacyCloudInvoices: legacyCloudModule.invoices,
       legacyCloudModule,
     }),
