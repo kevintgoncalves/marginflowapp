@@ -24,7 +24,9 @@ const reasonLabels = Object.freeze({
   generic_document_number_ambiguous: "Generic document number cannot prove invoice identity",
   multiple_invoice_candidates: "Multiple relational invoice candidates",
   document_identity_mismatch: "Document identity mismatch",
-  other: "Other",
+  multiple_equivalent_candidates: "Multiple equivalent invoice candidates",
+  document_status_review: "Document status requires review",
+  explicit_manual_review: "Explicit manual review",
 });
 
 const technicalPatternLabels = Object.freeze({
@@ -614,7 +616,7 @@ function codeForDifferences(materialDifferences, legacySummary, relationalSummar
   if (/product dependency is unresolved/i.test(existingReason) || legacySummary.lines.some((line) => !line.productResolved)) return "product_mapping_unresolved";
   if (/supplier dependency is unresolved/i.test(existingReason)) return "supplier_mapping_unresolved";
   if (/department/i.test(existingReason) && !relationalSummary) return "department_split_mismatch";
-  if (!relationalSummary) return "other";
+  if (!relationalSummary) return "explicit_manual_review";
   if (!materialDifferences.length) return "likely_technical_false_conflict";
   if (materialDifferences.some((row) => row.path === "date")) return "date_mismatch";
   if (materialDifferences.some((row) => ["subtotal", "vatTotal", "discountAmount", "additionalCharges", "total"].includes(row.path))) return "financial_content_mismatch";
@@ -624,7 +626,7 @@ function codeForDifferences(materialDifferences, legacySummary, relationalSummar
   if (materialDifferences.some((row) => /\.product$/.test(row.path))) return "product_identity_mismatch";
   if (materialDifferences.some((row) => /allocationMode|department|splits/.test(row.path))) return "department_split_mismatch";
   if (materialDifferences.some((row) => /quantity|unitCost|lineTotal|vat|unit|packSize/.test(row.path))) return "line_content_mismatch";
-  return "other";
+  return "explicit_manual_review";
 }
 
 function conflictDiagnostic(conflict, preview) {
@@ -638,7 +640,9 @@ function conflictDiagnostic(conflict, preview) {
     ? differenceRows(canonicalBusinessShape(legacy), canonicalBusinessShape(relational))
     : [];
   const referenceMappings = mappingEvidence(legacy, relational);
-  const code = codeForDifferences(materialDifferences, legacy, relational, currentDifferences, conflict.reason);
+  let code = codeForDifferences(materialDifferences, legacy, relational, currentDifferences, conflict.reason);
+  if (conflict.category === "generic_identity_review") code = "generic_document_number_ambiguous";
+  else if (conflict.category && reasonLabels[conflict.category]) code = conflict.category;
   const hasUnresolvedAllocation = [legacy, relational].filter(Boolean).some((summary) => summary.lines.some((line) => (
     (line.allocationMode === "single" && !line.departmentResolved)
     || line.splits.some((split) => !split.departmentResolved)
@@ -655,7 +659,7 @@ function conflictDiagnostic(conflict, preview) {
           ? "unresolved allocation/split conflict"
           : relational
             ? "genuine business conflict"
-            : "other";
+            : "explicit manual review";
   return {
     conflictReasonCode: code,
     conflictReasonText: reasonLabels[code],
@@ -754,7 +758,7 @@ function representativeExamples(conflicts, limit) {
     "missing_extra_line",
     "line_content_mismatch",
     "product_identity_mismatch",
-    "other",
+    "explicit_manual_review",
   ];
   const selected = conflicts
     .filter((row) => row.provenance?.preExistingConflict && row.provenance.noRelationalCandidate)
@@ -788,8 +792,6 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
   legacyCloudModule = {},
 } = {}) {
   const previewConflicts = preview.invoices?.conflicts || [];
-  const previewConflictLocals = new Set(previewConflicts.map((conflict) => conflict.local));
-  const previewConflictById = new Map(previewConflicts.map((conflict) => [rawInvoiceId(conflict.local), conflict]));
   const flaggedInvoices = deviceInvoices.filter((invoice) => invoice.syncStatus === "conflict");
   const flaggedById = new Map(flaggedInvoices.map((invoice) => [rawInvoiceId(invoice), invoice]));
   const diagnostics = previewConflicts.map((conflict) => {
@@ -805,18 +807,17 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
       })
       : conflictDiagnostic(conflict, preview);
   });
-  flaggedInvoices.forEach((invoice) => {
+  const provenanceRows = flaggedInvoices.map((invoice) => {
     const id = rawInvoiceId(invoice);
-    if (previewConflictLocals.has(invoice) || (id && previewConflictById.has(id))) return;
-    diagnostics.push(conflictProvenanceDiagnostic({
+    const previewConflict = previewConflicts.find((conflict) => conflict.local === invoice || (id && rawInvoiceId(conflict.local) === id));
+    return conflictProvenanceDiagnostic({
       localInvoice: invoice,
-      previewConflict: null,
+      previewConflict: previewConflict || null,
       preview,
       relationalInvoices,
       legacyCloudInvoices,
-    }));
+    });
   });
-  const provenanceRows = diagnostics.filter((row) => row.provenance?.preExistingConflict);
   const breakdown = Object.entries(reasonLabels).map(([code, label]) => ({
     code,
     label,
@@ -896,7 +897,7 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
       unresolvedMappings: diagnostics.filter((row) => row.classification === "unresolved product mapping").length,
       unresolvedSupplierMappings: diagnostics.filter((row) => row.classification === "unresolved supplier mapping").length,
       unresolvedAllocations: diagnostics.filter((row) => row.classification === "unresolved allocation/split conflict").length,
-      other: diagnostics.filter((row) => row.classification === "other").length,
+      explicitManualReview: diagnostics.filter((row) => row.conflictReasonCode === "explicit_manual_review").length,
       ambiguousIdentities: diagnostics.filter((row) => row.classification === "ambiguous invoice identity").length,
     },
     conflictCategoryCounts: {
@@ -957,7 +958,13 @@ export function diagnoseLaptopRecoveryConflicts(preview = {}, {
     ),
     examples: representativeExamples(diagnostics, exampleLimit),
     conflicts: diagnostics,
-    note: "Read-only diagnostic. Existing preview classifications and all device/relational records are unchanged.",
+    historicalProvenance: provenanceRows,
+    classificationInvariant: {
+      currentReviewConflicts: preview.invoices?.counts?.conflicts || 0,
+      classifiedCurrentConflicts: breakdown.reduce((sum, row) => sum + row.count, 0),
+      exact: breakdown.reduce((sum, row) => sum + row.count, 0) === (preview.invoices?.counts?.conflicts || 0),
+    },
+    note: "Read-only diagnostic. Current classifications are disjoint; historical conflict provenance is reported separately.",
   };
 }
 
@@ -978,6 +985,8 @@ export function recoveryDiagnosticExport(report = {}) {
     legacyCloudInvoiceModule: report.legacyCloudInvoiceModule || {},
     documentNumberQuality: report.documentNumberQuality || {},
     relationalGrowthAudit: report.relationalGrowthAudit || {},
+    classificationInvariant: report.classificationInvariant || {},
+    historicalProvenance: report.historicalProvenance || [],
     examples: (report.examples || []).map((example) => ({
       invoiceIdentity: example.invoiceIdentity,
       classification: example.classification,

@@ -65,6 +65,14 @@ function invoiceFromRelationalRow(row = {}) {
       ? line.metadata.marginflow_snapshot
       : {};
     const splits = (line.invoice_line_department_splits || line.department_splits || []).filter((split) => split.active !== false);
+    const snapshotUnit = String(lineSnapshot.unit || lineSnapshot.purchaseUnit || lineSnapshot.purchase_unit || lineSnapshot.unitOfMeasure || lineSnapshot.unit_of_measure || "").trim().toLowerCase();
+    const snapshotPackSize = String(line.pack_size || lineSnapshot.packSize || lineSnapshot.pack_size || "").trim().toLowerCase();
+    const quantity = Number(line.quantity ?? lineSnapshot.quantity ?? 0);
+    const unitPersistenceCompatibility = snapshotUnit === "qty"
+      && snapshotPackSize === "kg"
+      && !Number.isInteger(quantity)
+      ? "historical_qty_pack_measure_fallback"
+      : "";
     return {
       ...lineSnapshot,
       id: line.id,
@@ -72,10 +80,11 @@ function invoiceFromRelationalRow(row = {}) {
       matchedProductId: line.product_id || lineSnapshot.matchedProductId || "",
       productName: line.product_name || lineSnapshot.productName || "",
       packSize: line.pack_size || lineSnapshot.packSize || "",
-      quantity: Number(line.quantity ?? lineSnapshot.quantity ?? 0),
+      quantity,
       unitCost: Number(line.unit_cost ?? lineSnapshot.unitCost ?? 0),
       lineTotal: Number(line.net_line_total ?? lineSnapshot.lineTotal ?? 0),
       departmentId: line.department_id || lineSnapshot.departmentId || "",
+      unitPersistenceCompatibility,
       departmentSplits: splits.map((split) => ({
         ...(split.metadata?.marginflow_snapshot || {}),
         id: split.id,
@@ -106,6 +115,7 @@ function invoiceFromRelationalRow(row = {}) {
     syncError: "",
     relationalId: row.id,
     syncRevision: Number(row.sync_revision || 1),
+    contentFingerprint: row.content_fingerprint || "",
     syncedAt: row.updated_at || row.created_at || "",
     persistenceSource: "relational",
   };

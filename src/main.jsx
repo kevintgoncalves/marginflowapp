@@ -138,6 +138,15 @@ import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import LiveStocktakeEntry from "./components/stocktake/LiveStocktakeEntry.jsx";
 import StocktakeDownloadMenu from "./components/stocktake/StocktakeDownloadMenu.jsx";
 import StocktakeImportReview from "./components/stocktake/StocktakeImportReview.jsx";
+import FinalRecoveryPanel from "./components/FinalRecoveryPanel.jsx";
+import {
+  applySafeFinancialHeaderRepairs,
+  loadFinalRecoveryWorkspace,
+  resolveRecoveryInvoiceDate,
+  saveRecoveryResolution,
+  useDeviceRecoveryInvoiceVersion,
+  verifyRecoveryIntegrity,
+} from "./lib/finalRecoveryRepository.js";
 import {
   activeSupplierRows,
   canonicalSupplierForName,
@@ -4894,13 +4903,17 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       setCloudLoading(true);
       setCloudError("");
       try {
-        await persistAtomicProductMerge(supabase, {
+        const result = await persistAtomicProductMerge(supabase, {
           companyId: cloudScope.companyId,
           locationId: cloudScope.locationId || "",
           keepProductId,
           mergeProductIds,
           nextSnapshot: merged.snapshot,
+          expectedModuleRevisions: cloudRevisionsRef.current,
         });
+        if (result?.module_revisions) {
+          cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...result.module_revisions };
+        }
         setCloudStatus("synced");
       } catch (error) {
         setCloudStatus("error");
@@ -5026,6 +5039,117 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       preview: await previewCurrentLaptopRecovery(),
     };
   };
+
+  const currentRecoveryScope = () => ({ companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" });
+
+  const loadCurrentFinalRecovery = async () => {
+    if (!cloudEnabled) throw new Error("Relational cloud access is required for recovery preflight.");
+    return loadFinalRecoveryWorkspace(supabase, cloudSnapshot, currentRecoveryScope());
+  };
+
+  const reconcileLocalRecoveryEntries = (entries = [], { useRelationalContent = false } = {}) => {
+    const byLocalId = new Map(entries.map((entry) => [entry.local?.id, entry]).filter(([id]) => id));
+    setInvoices((current) => current.map((invoice) => {
+      const entry = byLocalId.get(invoice.id);
+      if (!entry) return invoice;
+      const cloudInvoice = entry.cloud || {};
+      const preserved = {
+        recoveryConflictVersions: invoice.recoveryConflictVersions,
+        recoveryResolutionHistory: invoice.recoveryResolutionHistory,
+      };
+      return {
+        ...(useRelationalContent ? cloudInvoice : invoice),
+        id: invoice.id,
+        ...preserved,
+        syncStatus: "synced",
+        syncError: "",
+        relationalId: cloudInvoice.id || invoice.relationalId || invoice.id,
+        syncRevision: Number(cloudInvoice.syncRevision || invoice.syncRevision || 1),
+        syncedAt: cloudInvoice.syncedAt || new Date().toISOString(),
+        persistenceSource: "relational+device",
+        ...(entry.probableDuplicateLegacyCopy ? { recoveryDuplicateStatus: "archived_legacy_copy" } : {}),
+      };
+    }));
+    return byLocalId.size;
+  };
+
+  const applyCurrentSafeRecovery = async (workspace) => {
+    const repairs = await applySafeFinancialHeaderRepairs(supabase, currentRecoveryScope(), workspace.safeRepairs || []);
+    const statuses = reconcileLocalRecoveryEntries(workspace.preview?.invoices?.already || []);
+    return { statuses, repaired: repairs.repaired.length, failed: repairs.failed.length, failures: repairs.failed };
+  };
+
+  const saveCurrentRecoveryResolution = (input) => saveRecoveryResolution(supabase, currentRecoveryScope(), input);
+
+  const resolveCurrentRecoveryDate = async (conflict, decision) => {
+    if (decision === "use_device") {
+      const result = await resolveRecoveryInvoiceDate(supabase, currentRecoveryScope(), {
+        legacyInvoiceId: conflict.legacy.id,
+        invoiceId: conflict.cloud?.id || conflict.relational?.id,
+        expectedRevision: conflict.cloud?.syncRevision,
+        expectedContentFingerprint: conflict.cloud?.contentFingerprint,
+        date: conflict.local?.date || conflict.legacy.date,
+      });
+      setInvoices((current) => current.map((invoice) => invoice.id === conflict.legacy.id ? {
+        ...invoice,
+        date: conflict.local?.date || conflict.legacy.date,
+        syncStatus: "synced",
+        syncError: "",
+        relationalId: conflict.cloud?.id || conflict.relational?.id,
+        syncRevision: Number(result.sync_revision || invoice.syncRevision || 1),
+        syncedAt: new Date().toISOString(),
+      } : invoice));
+      return result;
+    }
+    const result = await saveCurrentRecoveryResolution({
+      type: "invoice_date",
+      sourceKey: conflict.legacy.id,
+      decision: "keep_relational",
+      targetId: conflict.cloud?.id || conflict.relational?.id,
+      value: { date: conflict.cloud?.date || conflict.relational?.date },
+    });
+    reconcileLocalRecoveryEntries([{ local: conflict.local, cloud: conflict.cloud }], { useRelationalContent: true });
+    return result;
+  };
+
+  const resolveCurrentRecoveryContent = async (conflict, decision) => {
+    if (decision === "use_device") {
+      const result = await useDeviceRecoveryInvoiceVersion(supabase, currentRecoveryScope(), conflict.local, conflict.cloud);
+      await saveCurrentRecoveryResolution({
+        type: "invoice_content",
+        sourceKey: conflict.legacy.id,
+        decision: "use_device",
+        targetId: conflict.cloud?.id || conflict.relational?.id,
+        value: { resultingRevision: result.sync_revision || null },
+      });
+      setInvoices((current) => current.map((invoice) => invoice.id === conflict.legacy.id ? {
+        ...invoice,
+        syncStatus: "synced",
+        syncError: "",
+        relationalId: result.invoice_id || conflict.cloud?.id,
+        syncRevision: Number(result.sync_revision || invoice.syncRevision || 1),
+        syncedAt: result.saved_at || new Date().toISOString(),
+      } : invoice));
+      return result;
+    }
+    const result = await saveCurrentRecoveryResolution({
+      type: "invoice_content",
+      sourceKey: conflict.legacy.id,
+      decision: "keep_relational",
+      targetId: conflict.cloud?.id || conflict.relational?.id,
+    });
+    reconcileLocalRecoveryEntries([{ local: conflict.local, cloud: conflict.cloud }], { useRelationalContent: true });
+    return result;
+  };
+
+  const verifyCurrentRecovery = () => verifyRecoveryIntegrity(supabase, currentRecoveryScope());
+
+  const markCurrentRecoveryComplete = () => saveCurrentRecoveryResolution({
+    type: "recovery_status",
+    sourceKey: "current_laptop",
+    decision: "complete",
+    value: { completedAt: new Date().toISOString() },
+  });
 
   useEffect(() => {
     const syncPathname = () => setPathname(currentPathname());
@@ -5486,6 +5610,14 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             onDiagnoseLaptopRecovery={diagnoseCurrentLaptopRecovery}
             onPreviewLaptopRecovery={previewCurrentLaptopRecovery}
             onRecoverLaptopLegacyData={recoverCurrentLaptopData}
+            onLoadFinalRecovery={loadCurrentFinalRecovery}
+            onApplySafeRecovery={applyCurrentSafeRecovery}
+            onSaveRecoveryResolution={saveCurrentRecoveryResolution}
+            onResolveRecoveryDate={resolveCurrentRecoveryDate}
+            onResolveRecoveryContent={resolveCurrentRecoveryContent}
+            onVerifyRecovery={verifyCurrentRecovery}
+            onMarkRecoveryComplete={markCurrentRecoveryComplete}
+            onMergeRecoveryProducts={mergeDuplicateProducts}
             onResetDemo={resetDemoData}
             permissions={permissionsByPage.settings}
             suppliers={suppliers}
@@ -11247,6 +11379,14 @@ function SettingsPanel({
   onDiagnoseLaptopRecovery,
   onPreviewLaptopRecovery,
   onRecoverLaptopLegacyData,
+  onLoadFinalRecovery,
+  onApplySafeRecovery,
+  onSaveRecoveryResolution,
+  onResolveRecoveryDate,
+  onResolveRecoveryContent,
+  onVerifyRecovery,
+  onMarkRecoveryComplete,
+  onMergeRecoveryProducts,
   onResetDemo,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "settings"),
   requestDelete,
@@ -11955,7 +12095,22 @@ function SettingsPanel({
         )}
       </Panel>
 
-      <Panel title="Emergency data recovery" action="Reads this device without cloud sync">
+      <FinalRecoveryPanel
+        canWrite={permissions.canImport}
+        cloudEnabled={cloudEnabled}
+        onApplyAutomatic={onApplySafeRecovery}
+        onDownloadBackup={exportEmergencyBackup}
+        onLoad={onLoadFinalRecovery}
+        onMarkComplete={onMarkRecoveryComplete}
+        onMergeProducts={onMergeRecoveryProducts}
+        onMigrate={onRecoverLaptopLegacyData}
+        onResolveContent={onResolveRecoveryContent}
+        onResolveDate={onResolveRecoveryDate}
+        onSaveResolution={onSaveRecoveryResolution}
+        onVerify={onVerifyRecovery}
+      />
+
+      {false && <Panel title="Emergency data recovery" action="Reads this device without cloud sync">
         <div className="button-row left wrap">
           <button onClick={exportEmergencyBackup} type="button"><Download size={16} />Download Emergency Backup</button>
           <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
@@ -12091,7 +12246,7 @@ function SettingsPanel({
           </div>
         )}
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
-      </Panel>
+      </Panel>}
 
       {demoMode ? (
         <Panel title="Demo data" action="Temporary">

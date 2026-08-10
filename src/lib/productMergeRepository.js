@@ -21,17 +21,22 @@ export async function persistAtomicProductMerge(client, {
   keepProductId = "",
   mergeProductIds = [],
   nextSnapshot = {},
+  expectedModuleRevisions = {},
 } = {}) {
   const sourceIds = [...new Set(mergeProductIds.filter((id) => id && id !== keepProductId))];
   if (!client || !uuidPattern.test(companyId) || !uuidPattern.test(keepProductId) || !sourceIds.length || sourceIds.some((id) => !uuidPattern.test(id)) || (locationId && !uuidPattern.test(locationId))) {
     throw new Error("Product merge needs canonical company and product identifiers.");
   }
-  const { data, error } = await client.rpc("merge_duplicate_products", {
+  const revisions = Object.fromEntries(PRODUCT_MERGE_SNAPSHOT_MODULES
+    .filter((key) => key !== "invoices")
+    .map((key) => [key, Number(expectedModuleRevisions[key] || 0)]));
+  const { data, error } = await client.rpc("merge_product_v2", {
     p_company_id: companyId,
     p_location_id: locationId || null,
     p_keep_product_id: keepProductId,
     p_merge_product_ids: sourceIds,
     p_snapshot_modules: productMergeSnapshotModules(nextSnapshot),
+    p_expected_module_revisions: revisions,
   });
   if (error) throw error;
   return Array.isArray(data) ? data[0] : data;

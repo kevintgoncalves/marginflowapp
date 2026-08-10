@@ -155,7 +155,7 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
   assert.deepEqual(deviceSnapshot, before);
   assert.equal(operations.some((operation) => operation.startsWith("rpc:")), false);
   assert.deepEqual(operations.filter((operation) => operation.startsWith("from:")), [
-    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_cloud_state", "from:invoices",
+    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_recovery_resolutions", "from:supplier_product_mappings", "from:invoice_line_corrections", "from:marginflow_cloud_state", "from:invoices",
   ]);
 
   const source = readFileSync(new URL("../lib/legacyRecoveryDiagnosticRepository.js", import.meta.url), "utf8");
@@ -281,8 +281,9 @@ test("TEST I: a pre-flagged conflict is independently compared with its current 
   assert.equal(report.conflictFlagProvenance.withRelationalCandidate, 1);
   assert.equal(report.conflictFlagProvenance.materiallyEquivalentCandidate, 1);
   assert.equal(report.conflictFlagProvenance.staleAgainstCurrentRelational, 1);
-  assert.equal(report.examples[0].provenance.writerSignature, true);
-  assert.equal(report.examples[0].relational.id, invoiceId);
+  assert.equal(report.examples.length, 0);
+  assert.equal(report.historicalProvenance[0].provenance.writerSignature, true);
+  assert.equal(report.historicalProvenance[0].relational.id, invoiceId);
 });
 
 test("TEST J: a pre-flagged conflict with no relational match retains read-only legacy-cloud origin evidence", async () => {
@@ -305,8 +306,8 @@ test("TEST J: a pre-flagged conflict with no relational match retains read-only 
   assert.equal(report.conflictFlagProvenance.likelyLegacyCloudOrigin, 1);
   assert.equal(report.conflictFlagProvenance.staleAgainstCurrentRelational, 1);
   assert.equal(report.legacyCloudInvoiceModule.invoiceCount, 1);
-  assert.equal(report.examples[0].provenance.likelyOrigin, "legacy_cloud_snapshot_merge");
-  assert.deepEqual(report.examples[0].provenance.recordedConflictConditions, ["same_invoice_uuid_content_fingerprint_mismatch"]);
+  assert.equal(report.historicalProvenance[0].provenance.likelyOrigin, "legacy_cloud_snapshot_merge");
+  assert.deepEqual(report.historicalProvenance[0].provenance.recordedConflictConditions, ["same_invoice_uuid_content_fingerprint_mismatch"]);
 });
 
 test("TEST K: v2 export includes reused legacy rows, suspicious document numbers and latest relational creations", async () => {

@@ -16,13 +16,16 @@ async function loadTable(client, table, columns, scope) {
 
 export async function loadLegacyRecoveryRelationalState(client, scope) {
   if (!client) throw new Error("Relational cloud access is required for laptop recovery.");
-  const [suppliers, products, departments, invoices] = await Promise.all([
+  const [suppliers, products, departments, invoices, resolutions, supplierProductMappings, invoiceLineCorrections] = await Promise.all([
     loadTable(client, "suppliers", "id,company_id,location_id,name,category,contact_name,email,phone,active,parser_key,metadata", scope),
-    loadTable(client, "products", "id,company_id,location_id,supplier_id,department_id,name,pack_size,quantity,unit_cost,aliases,active,metadata", scope),
+    loadTable(client, "products", "id,company_id,location_id,supplier_id,department_id,name,pack_size,quantity,unit_cost,aliases,active,archived_at,merged_into_product_id,merge_metadata,metadata", scope),
     loadTable(client, "departments", "id,company_id,location_id,name,department_type,active,metadata", scope),
     loadRelationalInvoices(client, scope),
+    loadTable(client, "marginflow_recovery_resolutions", "id,company_id,location_id,resolution_type,source_key,decision,target_id,value,metadata,revision,active,created_at,updated_at", scope),
+    loadTable(client, "supplier_product_mappings", "id,supplier_id,supplier_product_code,supplier_description,product_id,allocation_mode,department_id,auto_apply,confirmation_count,active,source,metadata", scope),
+    loadTable(client, "invoice_line_corrections", "id,supplier_id,invoice_id,invoice_line_id,product_id,supplier_product_code,product_name,field_name,original_value,corrected_value,metadata,created_at", scope),
   ]);
-  return { suppliers, products, departments, invoices };
+  return { suppliers, products, departments, invoices, resolutions, supplierProductMappings, invoiceLineCorrections };
 }
 
 export async function previewLaptopLegacyRecovery(client, snapshot, scope) {
