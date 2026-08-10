@@ -285,9 +285,10 @@ export default function FinalRecoveryPanel({
         {!exceptionalConflicts.length && <p>No exceptional financial or line conflicts.</p>}
       </RecoveryStep>
 
-      <RecoveryStep number="7" title="Migrate all now-safe invoices" state={`${workspace?.preview?.invoices?.counts?.needMigration || 0} eligible`}>
+      <RecoveryStep number="7" title="Migrate all now-safe invoices" state={`${(workspace?.preview?.invoices?.counts?.needMigration || 0) + (workspace?.preview?.invoices?.counts?.archived || 0)} eligible`}>
         {(workspace?.preview?.invoices?.migrate || []).map((invoice) => <span className="recovery-migration-row" key={invoice.id}>{invoice.supplier || "Supplier"} · {invoice.documentNumber || invoice.invoiceNumber} · {invoice.date} · {(invoice.items || []).length} lines</span>)}
-        <button disabled={writeDisabled || !workspace?.preview?.canMigrate} onClick={() => write(() => onMigrate(), (result) => `Migration finished: ${result.imported.length} imported, ${result.verified.length} verified, ${result.failed.length} failed independently.`)} type="button"><Upload size={16} />Migrate all safe invoices</button>
+        {(workspace?.preview?.invoices?.archived || []).map((entry) => <span className="recovery-migration-row" key={entry.legacy?.id}>{entry.legacy?.supplier || "Supplier"} · {entry.legacy?.documentNumber || entry.legacy?.invoiceNumber} · {entry.legacy?.date} · {(entry.legacy?.items || entry.legacy?.lines || []).length} lines · historical unmapped</span>)}
+        <button disabled={writeDisabled || !(workspace?.preview?.canMigrate || workspace?.preview?.invoices?.archived?.length)} onClick={() => write(() => onMigrate(), (result) => `Migration finished: ${result.imported.length} canonical imported, ${result.alreadyExisting.length} canonical already present, ${result.historical.imported.length} historical imported, ${result.historical.alreadyExisting.length} historical already present, ${result.failed.length + result.historical.failed.length} failed independently.`)} type="button"><Upload size={16} />Migrate all safe invoices</button>
       </RecoveryStep>
 
       <RecoveryStep number="8" title="Verify relational integrity" state={integrity ? (integrity.pass ? "PASS" : "Review failures") : "Not run"}>

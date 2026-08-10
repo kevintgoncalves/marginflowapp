@@ -5091,7 +5091,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const previewCurrentLaptopRecovery = async () => {
     if (!cloudEnabled) throw new Error("Relational cloud access is required for laptop recovery preview.");
-    return previewLaptopLegacyRecovery(supabase, cloudSnapshot, {
+    const recoverySnapshot = cloudSnapshotFromRows(await loadCloudState(cloudScope));
+    return previewLaptopLegacyRecovery(supabase, recoverySnapshot, {
       companyId: cloudScope.companyId,
       locationId: cloudScope.locationId || "",
     });
@@ -5099,7 +5100,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const diagnoseCurrentLaptopRecovery = async () => {
     if (!cloudEnabled) throw new Error("Relational cloud access is required for recovery diagnosis.");
-    return diagnoseLaptopLegacyRecovery(supabase, cloudSnapshot, {
+    const recoverySnapshot = cloudSnapshotFromRows(await loadCloudState(cloudScope));
+    return diagnoseLaptopLegacyRecovery(supabase, recoverySnapshot, {
       companyId: cloudScope.companyId,
       locationId: cloudScope.locationId || "",
       scopeKey: cloudScope.scopeKey,
@@ -5139,7 +5141,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const loadCurrentFinalRecovery = async () => {
     if (!cloudEnabled) throw new Error("Relational cloud access is required for recovery preflight.");
-    return loadFinalRecoveryWorkspace(supabase, cloudSnapshot, currentRecoveryScope());
+    const recoverySnapshot = cloudSnapshotFromRows(await loadCloudState(cloudScope));
+    return loadFinalRecoveryWorkspace(supabase, recoverySnapshot, currentRecoveryScope());
   };
 
   const reconcileLocalRecoveryEntries = (entries = [], { useRelationalContent = false } = {}) => {

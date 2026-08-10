@@ -1,5 +1,6 @@
 import { buildLaptopRecoveryPreview } from "../domain/legacyRecovery.js";
-import { loadRelationalInvoices } from "./invoiceRepository.js";
+import { buildOperationalHistoricalInvoice } from "../domain/historicalInvoiceRecovery.js";
+import { loadRelationalInvoices, persistRelationalInvoice } from "./invoiceRepository.js";
 
 function scopedCatalogQuery(query, scope) {
   let scoped = query.eq("company_id", scope.companyId);
@@ -65,18 +66,19 @@ export async function recoverLaptopLegacyData(client, preview, {
   }
 
   let archive = { products_inserted: 0, products_existing: 0, invoices_inserted: 0, invoices_existing: 0 };
-  if (preview.products.archived.length || preview.invoices.archived.length) {
+  if (preview.products.archived.length) {
     const { data, error } = await client.rpc("archive_legacy_recovery_v1", {
       p_company_id: scope.companyId,
       p_location_id: scope.locationId || null,
       p_products: preview.products.archived,
-      p_invoices: preview.invoices.archived,
+      p_invoices: [],
     });
     if (error) throw error;
     archive = Array.isArray(data) ? data[0] : data;
   }
 
   const imported = [];
+  const alreadyExisting = [];
   const failed = [];
   for (const invoice of preview.invoices.migrate) {
     try {
@@ -88,10 +90,33 @@ export async function recoverLaptopLegacyData(client, preview, {
       if (error) throw error;
       const result = Array.isArray(data) ? data[0] : data;
       const synced = syncedInvoice(invoice, result || {});
-      imported.push(synced);
+      if (result?.status === "already_exists") alreadyExisting.push(synced);
+      else imported.push(synced);
       onInvoicePersisted(synced);
     } catch (error) {
       failed.push({ invoice, error: error.message || "Recovery import failed." });
+    }
+  }
+
+  const historical = { attempted: preview.invoices.archived.length, audit: [], imported: [], alreadyExisting: [], failed: [] };
+  for (const entry of preview.invoices.archived) {
+    try {
+      const invoice = await buildOperationalHistoricalInvoice(entry, preview);
+      historical.audit.push({
+        invoiceId: invoice.id,
+        sourceInvoiceId: invoice.historicalRecovery.sourceInvoiceId,
+        documentNumber: invoice.documentNumber || invoice.invoiceNumber || "",
+        unmappedProducts: invoice.items.filter((line) => !line.productId).length,
+        unmappedDepartments: invoice.items.filter((line) => !line.departmentId && !(line.departmentSplits || []).length).length,
+        collapsedAllocations: invoice.items.filter((line) => line.historicalRecovery?.allocationStatus?.includes("collapsed")).length,
+      });
+      const result = await persistRelationalInvoice(client, invoice, scope);
+      const synced = syncedInvoice(result.invoice, result || {});
+      if (result?.status === "already_exists") historical.alreadyExisting.push(synced);
+      else historical.imported.push(synced);
+      onInvoicePersisted(synced);
+    } catch (error) {
+      historical.failed.push({ entry, error: error.message || "Historical invoice recovery failed." });
     }
   }
 
@@ -101,8 +126,10 @@ export async function recoverLaptopLegacyData(client, preview, {
     catalog,
     archive,
     imported,
+    alreadyExisting,
     verified,
     failed,
+    historical,
     conflicts: preview.invoices.conflicts,
   };
 }

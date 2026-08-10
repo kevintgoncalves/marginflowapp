@@ -548,6 +548,36 @@ function compareRecoveryBusinessContent(local, relational) {
   };
 }
 
+function historicalEvidenceShape(invoice = {}) {
+  const financials = invoiceComparisonFinancials(invoice);
+  const lines = (invoice.items || invoice.lines || []).map((line) => ({
+    productName: exactName(line.productName || line.product_name),
+    quantity: rounded(line.quantity),
+    unitCost: rounded(firstPresent(line, ["unitCost", "unit_cost"])),
+    lineTotal: rounded(invoiceLineNetTotal(line), 2),
+    discountAmount: rounded(firstPresent(line, ["discountAmount", "discount_amount"]), 2),
+    discountPercent: rounded(firstPresent(line, ["discountPercent", "discount_percent"]), 2),
+    vat: rounded(firstPresent(line, ["vat", "vatAmount", "vat_amount"]), 2),
+  })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return {
+    supplier: supplierIdentityKey(invoice.supplier || invoice.supplierName),
+    documentNumber: documentNumber(invoice),
+    documentType: documentType(invoice),
+    date: text(invoice.date || invoice.invoiceDate || invoice.invoice_date).slice(0, 10),
+    subtotal: financials.subtotal,
+    vatTotal: financials.vatTotal,
+    discountAmount: financials.discountAmount,
+    additionalCharges: financials.additionalCharges,
+    total: financials.total,
+    lines,
+  };
+}
+
+function historicalRecoverySourceId(invoice = {}) {
+  const marker = invoice.historicalRecovery;
+  return marker?.mode === "operational_historical_unmapped" ? text(marker.sourceInvoiceId) : "";
+}
+
 function recoveryConflict(invoice, reason, cloud = null, category = "explicit_manual_review") {
   const lines = invoice.items || invoice.lines || [];
   const cloudLines = cloud?.items || cloud?.lines || [];
@@ -576,6 +606,7 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
   const conflicts = [];
   const relationalById = new Map(relationalInvoices.map((row) => [text(row.id), row]));
   const relationalByIdentity = grouped(relationalInvoices, (row) => invoiceStrongIdentity(row, scope));
+  const relationalByHistoricalSource = grouped(relationalInvoices, historicalRecoverySourceId);
   const equivalentCandidateUsage = new Map();
   let lineCount = 0;
   let splitCount = 0;
@@ -593,6 +624,26 @@ async function invoicePlan(deviceInvoices, relationalInvoices, supplierMappings,
   };
 
   for (const sourceInvoice of deviceInvoices) {
+    const historicalMatches = relationalByHistoricalSource.get(text(sourceInvoice.id)) || [];
+    if (historicalMatches.length === 1) {
+      const match = historicalMatches[0];
+      if (JSON.stringify(historicalEvidenceShape(sourceInvoice)) === JSON.stringify(historicalEvidenceShape(match))) {
+        already.push({
+          local: sourceInvoice,
+          cloud: match,
+          canonical: match,
+          matchBasis: "operational_historical_source_id",
+          classification: "historical_unmapped_operational",
+        });
+      } else {
+        conflicts.push(recoveryConflict(sourceInvoice, "Operational historical invoice no longer matches its immutable source evidence.", match, "historical_unmapped_content_mismatch"));
+      }
+      continue;
+    }
+    if (historicalMatches.length > 1) {
+      conflicts.push(recoveryConflict(sourceInvoice, "Multiple operational historical invoices claim the same source invoice.", historicalMatches[0], "multiple_historical_source_candidates"));
+      continue;
+    }
     const documentResolution = activeResolution(resolutions, "invoice_document_number", text(sourceInvoice.id));
     const correctedDocumentNumber = resolutionDecision(documentResolution) === "use_corrected_number"
       ? text(resolutionValue(documentResolution).documentNumber)

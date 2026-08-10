@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildLaptopRecoveryPreview } from "./legacyRecovery.js";
+import { buildOperationalHistoricalInvoice } from "./historicalInvoiceRecovery.js";
 import { diagnoseLaptopRecoveryConflicts } from "./legacyRecoveryDiagnostics.js";
 import { recoverLaptopLegacyData } from "../lib/legacyRecoveryRepository.js";
 
@@ -175,8 +176,8 @@ test("TEST D: basic invoice recovery uses catalog first, one atomic invoice RPC 
   assert.equal(stored[0].syncStatus, "synced");
 });
 
-test("archive-only history is persisted through the member-scoped RPC before invoice migration", async () => {
-  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+test("dependency-imperfect history becomes an operational invoice while product archive remains immutable", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: relational(), scope });
   preview.products.archived = [{ id: "legacy-product", name: "Unit", legacy: { id: "legacy-product", name: "Unit" }, reason: "Generic label." }];
   preview.invoices.archived = [{ id: "legacy-invoice", legacy: invoice({ id: "legacy-invoice" }), reason: "Unsafe product dependency." }];
   const calls = [];
@@ -185,18 +186,60 @@ test("archive-only history is persisted through the member-scoped RPC before inv
       calls.push({ name, payload });
       if (name === "recover_legacy_catalog_v1") return { data: {}, error: null };
       if (name === "archive_legacy_recovery_v1") return { data: { products_inserted: 1, invoices_inserted: 1 }, error: null };
-      return { data: { invoice_id: invoiceId, sync_revision: 1, line_count: 1, split_count: 0, saved_at: "2026-08-10T12:00:00Z" }, error: null };
+      return { data: { invoice_id: invoiceId, status: "created", sync_revision: 1, line_count: 1, split_count: 0, saved_at: "2026-08-10T12:00:00Z" }, error: null };
     },
   };
 
   const result = await recoverLaptopLegacyData(client, preview);
 
-  assert.deepEqual(calls.map((call) => call.name), ["recover_legacy_catalog_v1", "archive_legacy_recovery_v1", "recover_legacy_invoice_v1"]);
+  assert.deepEqual(calls.map((call) => call.name), ["recover_legacy_catalog_v1", "archive_legacy_recovery_v1", "persist_invoice_document_v3"]);
   assert.equal(calls[1].payload.p_company_id, companyId);
   assert.equal(calls[1].payload.p_location_id, locationId);
   assert.equal(calls[1].payload.p_products.length, 1);
-  assert.equal(calls[1].payload.p_invoices.length, 1);
-  assert.equal(result.archive.invoices_inserted, 1);
+  assert.equal(calls[1].payload.p_invoices.length, 0);
+  assert.equal(calls[2].payload.p_invoice.historicalRecovery.mode, "operational_historical_unmapped");
+  assert.equal(result.historical.imported.length, 1);
+});
+
+test("historical invoice recovery nulls ambiguous products and collapses duplicate same-department splits", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: resolvedRelational(), scope });
+  const legacy = invoice({
+    items: [{
+      ...invoice().items[0],
+      matchedProductId: "ambiguous-product",
+      productName: "Lemons",
+      departmentSplits: [
+        { department: "Kitchen Made", percentage: 100 },
+        { department: "Kitchen Made", percentage: 100 },
+      ],
+    }],
+  });
+  const recovered = await buildOperationalHistoricalInvoice({ legacy, reason: "Unsafe dependencies." }, preview);
+  assert.equal(recovered.items[0].productId, "");
+  assert.equal(recovered.items[0].departmentId, relationalDepartmentId);
+  assert.deepEqual(recovered.items[0].departmentSplits, []);
+  assert.equal(recovered.items[0].historicalRecovery.allocationStatus, "duplicate_same_department_collapsed");
+  assert.equal(recovered.items[0].historicalRecovery.sourceDepartmentSplits.length, 2);
+});
+
+test("operational historical recovery is classified as already relational on every later preflight", async () => {
+  const base = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: resolvedRelational(), scope });
+  const legacy = invoice({
+    items: [{ ...invoice().items[0], matchedProductId: "missing-product", department: "Fresh Produce", departmentId: "" }],
+  });
+  const recovered = await buildOperationalHistoricalInvoice({ legacy, reason: "Unknown department." }, base);
+  assert.equal(recovered.items[0].departmentId, "");
+  assert.equal(recovered.items[0].historicalRecovery.sourceDepartmentName, "Fresh Produce");
+
+  const retry = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [legacy] }),
+    relational: resolvedRelational([recovered]),
+    scope,
+  });
+  assert.equal(retry.invoices.counts.needMigration, 0);
+  assert.equal(retry.invoices.counts.archived, 0);
+  assert.equal(retry.invoices.counts.conflicts, 0);
+  assert.equal(retry.invoices.already[0].classification, "historical_unmapped_operational");
 });
 
 test("similar legacy products remain separate without fuzzy merging", async () => {
