@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import marginflowLogo from "./assets/marginflow-logo.svg";
 import {
@@ -4519,6 +4520,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => emptyInvoiceDraft());
+  const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
+  const [salesInputRequest, setSalesInputRequest] = useState(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true"
     || (import.meta.env.DEV && new URLSearchParams(window.location.search).get("internalRecovery") === "true");
@@ -5499,7 +5502,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         ? `Ready to upload or add invoice for ${supplierName} on ${formatRangeDate(date)}.`
         : "Ready to upload or add an invoice.",
     }));
-    setActive("invoices");
+    setInvoiceUploadRequest({ id: uid(), supplierName, date });
   };
 
   const leaveWorkforce = () => {
@@ -5520,9 +5523,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   }
 
   const topbarAction = active === "dashboard"
-    ? <button className="page-primary-action" onClick={() => setActive("gp")} type="button">Input sales +</button>
-    : active === "invoiceControl" && permissionsByPage.invoiceControl?.canAdd
-      ? <button className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())} type="button">Upload invoice</button>
+    ? <PrimaryAction className="page-primary-action" onClick={() => setSalesInputRequest({ id: uid() })}>Input Sales</PrimaryAction>
+    : active === "invoices" && permissionsByPage.invoices?.canImport
+      ? <PrimaryAction className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())}>Upload Invoice</PrimaryAction>
       : active === "ai"
         ? <button className="page-primary-action" onClick={() => setAnalysisRunId((current) => current + 1)} type="button">Run analysis</button>
       : null;
@@ -5626,39 +5629,39 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             wasteItems={wasteItems}
           />
         )}
-        {active === "invoices" && (
-          <Invoices
-            aiSettings={aiSettings}
-            creditNotes={creditNotes}
-            draft={draft}
-            invoiceApprovalBusy={invoiceApprovalBusy}
-            setDraft={setDraft}
-            invoices={operationalInvoices}
-            legacyInvoiceArchive={legacyInvoiceArchive}
-            invoiceSettings={invoiceSettings}
-            financialSettings={financialSettings}
-            companyId={cloudScope.companyId}
-            locationId={cloudScope.locationId || ""}
-            departmentSettings={departmentSettings}
-            suppliers={suppliers}
-            setSuppliers={setSuppliers}
-            supplierProductMappings={supplierProductMappings}
-            setSupplierProductMappings={setSupplierProductMappings}
-            invoiceLineCorrections={invoiceLineCorrections}
-            setInvoiceLineCorrections={setInvoiceLineCorrections}
-            products={products}
-            setProducts={setProducts}
-            departmentNames={allowedDepartmentNames}
-            approveInvoice={approveInvoice}
-            persistInvoiceDocument={persistInvoiceDocument}
-            persistInvoiceLearning={persistConfirmedLearning}
-            forgetPersistentLearning={forgetPersistentLearning}
-            permissions={permissionsByPage.invoices}
-            requestDelete={requestDelete}
-            setCreditNotes={setCreditNotes}
-            setInvoices={setInvoices}
-          />
-        )}
+        <Invoices
+          isActive={active === "invoices"}
+          uploadRequest={invoiceUploadRequest}
+          aiSettings={aiSettings}
+          creditNotes={creditNotes}
+          draft={draft}
+          invoiceApprovalBusy={invoiceApprovalBusy}
+          setDraft={setDraft}
+          invoices={operationalInvoices}
+          legacyInvoiceArchive={legacyInvoiceArchive}
+          invoiceSettings={invoiceSettings}
+          financialSettings={financialSettings}
+          companyId={cloudScope.companyId}
+          locationId={cloudScope.locationId || ""}
+          departmentSettings={departmentSettings}
+          suppliers={suppliers}
+          setSuppliers={setSuppliers}
+          supplierProductMappings={supplierProductMappings}
+          setSupplierProductMappings={setSupplierProductMappings}
+          invoiceLineCorrections={invoiceLineCorrections}
+          setInvoiceLineCorrections={setInvoiceLineCorrections}
+          products={products}
+          setProducts={setProducts}
+          departmentNames={allowedDepartmentNames}
+          approveInvoice={approveInvoice}
+          persistInvoiceDocument={persistInvoiceDocument}
+          persistInvoiceLearning={persistConfirmedLearning}
+          forgetPersistentLearning={forgetPersistentLearning}
+          permissions={permissionsByPage.invoices}
+          requestDelete={requestDelete}
+          setCreditNotes={setCreditNotes}
+          setInvoices={setInvoices}
+        />
         {active === "invoiceControl" && (
           <InvoiceControlCentre
             departmentNames={allowedDepartmentNames}
@@ -5713,8 +5716,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
         {active === "waste" && <Waste department={department} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
-        {active === "gp" && (
-          <SalesAnalysis
+        <SalesAnalysis
+          isActive={active === "gp"}
+          inputRequest={salesInputRequest}
             dateRange={dateRange}
             dateRangeState={dateRangeState}
             department={department}
@@ -5734,8 +5738,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             suppliers={suppliers}
             supplierSpend={departmentSupplierSpend}
             wasteItems={wasteItems}
-          />
-        )}
+        />
         {active === "labour" && (
           <LabourPage
             dateRange={labourDateRange}
@@ -6181,9 +6184,15 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
 
 function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
   const [breakdownView, setBreakdownView] = useState("Department");
+  const [supplierSpendView, setSupplierSpendView] = useState("day");
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
+  const departmentSpendRows = departmentRows
+    .map((row) => ({ id: row.department, name: displayDepartmentName(row.department), spend: numberValue(row.purchases) }))
+    .filter((row) => row.spend);
+  const displayedSupplierSpend = supplierSpendView === "department" ? departmentSpendRows : sortedSuppliers;
+  const displayedSupplierSpendTotal = displayedSupplierSpend.reduce((sum, row) => sum + numberValue(row.spend), 0);
   const chartData = aggregateDashboardRows(dailyRows, dateRange);
   const chartPrefix = chartTitlePrefix(chartData.granularity);
 
@@ -6193,11 +6202,11 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
         <div className="dashboard-operational-view">
           <Panel className="dashboard-supplier-spend" title="Supplier spend" action={(
             <div className="segmented-control compact" role="group" aria-label="Supplier spend view">
-              <button className="active" type="button">By day</button>
-              <button type="button">By dept</button>
+              <button className={supplierSpendView === "day" ? "active" : ""} onClick={() => setSupplierSpendView("day")} type="button">By day</button>
+              <button className={supplierSpendView === "department" ? "active" : ""} onClick={() => setSupplierSpendView("department")} type="button">By department</button>
             </div>
           )}>
-            {hasData ? <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} /> : <EmptyState />}
+            {hasData ? <SupplierSpendChart rows={displayedSupplierSpend} total={displayedSupplierSpendTotal} /> : <EmptyState />}
           </Panel>
           <Panel
             className="dashboard-performance-breakdown"
@@ -6354,6 +6363,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
 
 function Invoices({
   aiSettings,
+  isActive = true,
   departmentNames,
   draft,
   invoiceApprovalBusy = false,
@@ -6380,6 +6390,7 @@ function Invoices({
   forgetPersistentLearning = async () => ({ persisted: false, skipped: true }),
   setCreditNotes,
   setInvoices,
+  uploadRequest = null,
 }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -6390,6 +6401,7 @@ function Invoices({
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
@@ -7253,23 +7265,25 @@ function Invoices({
     setDeleteTarget(null);
   };
 
-  const openInvoiceWorkflow = () => {
-    const workflow = document.querySelector(".invoice-workflow-panel");
-    if (!workflow) return;
-    workflow.open = true;
-    workflow.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
+  useEffect(() => {
+    if (uploadRequest?.id) setUploadModalOpen(true);
+  }, [uploadRequest?.id]);
 
   return (
-    <div className="page-grid invoices-page">
+    <div className={`page-grid invoices-page${isActive ? "" : " page-component-hidden"}`}>
       <div className="invoice-list-metrics metric-grid">
         <Metric label="Total spend" value={money(approvedInvoiceTotal)} delta="All documents" />
         <Metric label="Invoices" value={approvedDocuments.length} delta="This month" />
         <Metric label="Avg. per invoice" value={money(approvedDocuments.length ? approvedInvoiceTotal / approvedDocuments.length : 0)} delta="Current selection" />
         <Metric label="Awaiting review" value={reviewDocumentCount} delta="Review conflicts" tone={reviewDocumentCount ? "warn" : "good"} />
       </div>
-      <details className="invoice-workflow-panel">
-        <summary>Upload invoice +</summary>
+      <AppModal
+        title="Upload invoice"
+        open={uploadModalOpen}
+        onClose={() => setUploadModalOpen(false)}
+        wide
+      >
+        <div className="modal-stack invoice-upload-workflow">
         <Panel title="Invoice workflow" action={draft.status}>
         <div
           className={`drop-zone ${dragging ? "dragging" : ""}`}
@@ -7383,10 +7397,10 @@ function Invoices({
           </div>
         )}
         </Panel>
-      </details>
+        </div>
+      </AppModal>
 
-      <div className="invoice-overview-layout">
-        <Panel className="invoice-overview-table" title="Approved purchasing documents">
+      <Panel className="invoice-overview-table" title="Approved purchasing documents">
           <DataTable
             columns={[
               { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
@@ -7419,19 +7433,7 @@ function Invoices({
               </select></label>
             )}
           />
-        </Panel>
-        <aside className="invoice-overview-rail" aria-label="Invoice actions">
-          <section>
-            <h2>Actions</h2>
-            {permissions.canImport && <button onClick={openInvoiceWorkflow} type="button">Upload invoice</button>}
-            {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button">Add manual</button>}
-          </section>
-          <section className="invoice-help-card">
-            <h2>Need help?</h2>
-            <p>Review purchasing workflows and document status.</p>
-          </section>
-        </aside>
-      </div>
+      </Panel>
 
       {legacyInvoiceArchive.length > 0 && (
         <Panel title="Archived historical documents" action={`${legacyInvoiceArchive.length} read-only`}>
@@ -7999,7 +8001,7 @@ function InvoiceControlCentre({
         <summary>View controls</summary>
         <Panel
           title="Invoice Control Centre"
-          action={permissions.canAdd ? <button onClick={() => onAddInvoice("", weekStart)} type="button">Upload invoice</button> : `${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
+          action={`${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
         >
         <div className="form-grid six range-grid">
           <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(mondayWeekStart(value || today()))} />
@@ -8195,12 +8197,13 @@ function InvoiceControlCentre({
 
       {selectedCell && (
         <AppModal
+          className="invoice-control-status-modal"
           footer={(
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
               {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
               {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "not_ordered")} type="button">Mark as Not Ordered</button>}
-              {permissions.canAdd && <button onClick={() => onAddInvoice(selectedCell.supplier.name, selectedCell.date)} type="button">Upload Invoice</button>}
+              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoice</PrimaryAction>}
             </>
           )}
           onClose={() => setSelectedCell(null)}
@@ -8449,9 +8452,9 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
           onQueryChange={setProductQuery}
           toolbarAction={(
             <div className="button-row left tight">
-              <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button"><Download size={16} />Download Products Excel</button>
+              <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
-              {permissions.canAdd && <button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
+              {permissions.canAdd && <PrimaryAction onClick={() => openProductModal()}>Add Product</PrimaryAction>}
             </div>
           )}
         />
@@ -8841,7 +8844,7 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
           onEdit={permissions.canEdit ? openSupplierModal : null}
           rows={supplierRows}
-          toolbarAction={permissions.canAdd ? <button onClick={() => openSupplierModal()} type="button"><Plus size={16} />Add Supplier</button> : null}
+          toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openSupplierModal()}>Add Supplier</PrimaryAction> : null}
         />
       </Panel>
       {modalOpen && !editingId && (
@@ -9287,7 +9290,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       <Panel className="stocktake-actions" title="Stocktake">
         <div className="button-row left">
           {permissions.canAdd && <button className="ghost" onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
-          {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
+          {permissions.canAdd && <PrimaryAction onClick={() => openModal("Stocktake")}>New Stocktake</PrimaryAction>}
           <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsExcel} type="button"><Download size={16} />Download Products Excel</button>
           <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />CSV</button>
         </div>
@@ -9616,7 +9619,7 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) }) : null}
           onEdit={permissions.canEdit ? openRecipeModal : null}
           rows={rows}
-          toolbarAction={permissions.canAdd ? <button onClick={() => openRecipeModal()} type="button"><Plus size={16} />Add Recipe</button> : null}
+          toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openRecipeModal()}>Add Recipe</PrimaryAction> : null}
         />
       </Panel>
       {modalOpen && (editingId ? permissions.canEdit : permissions.canAdd) && (
@@ -9691,6 +9694,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   const [dishForm, setDishForm] = useState({ menuId: menus[0]?.id || "", subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" });
   const [menuModalOpen, setMenuModalOpen] = useState(false);
   const [dishModalOpen, setDishModalOpen] = useState(false);
+  const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
   const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
   const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
   const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
@@ -9841,8 +9845,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
       {activeMenu && (
         <>
           <div className="menu-primary-actions">
-            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button">Add dish</button>}
-            {permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button">Create menu +</button>}
+            {(permissions.canAdd || permissions.canEdit) && <PrimaryAction className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+            {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
           </div>
           <div className="metric-grid compact menu-metrics menu-overview-metrics">
             <Metric label="Food GP %" value={percent(menuGp)} delta="Average without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
@@ -9864,16 +9868,16 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
               rows={dishRows}
             />
           </Panel>
-          <button className="menu-report-link" onClick={() => document.querySelector(".menu-management")?.setAttribute("open", "")} type="button">View full menu report</button>
-          <details className="menu-management">
-            <summary aria-label="Manage menu" title="Manage menu"><Settings size={16} /></summary>
+          <button className="menu-report-link" onClick={() => setMenuHierarchyOpen(true)} type="button">View full menu report</button>
+          <details className="menu-management" onToggle={(event) => setMenuHierarchyOpen(event.currentTarget.open)} open={menuHierarchyOpen}>
+            <summary>{menuHierarchyOpen ? "Hide hierarchy" : "Menu hierarchy"}</summary>
             <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
             </div>
             <div className="button-row left menu-hierarchy-actions">
-              {permissions.canAdd && <button className="ghost" onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}
-              {(permissions.canAdd || permissions.canEdit) && <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>}
+              {permissions.canAdd && <PrimaryAction className="ghost" onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
+              {(permissions.canAdd || permissions.canEdit) && <PrimaryAction onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
               {permissions.canDelete && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
             </Panel>
@@ -9890,7 +9894,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
           </details>
         </>
       )}
-      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}</div></Panel>}
+      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}</div></Panel>}
       {menuModalOpen && permissions.canAdd && (
         <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
           <div className="form-grid six">
@@ -10031,7 +10035,7 @@ function Waste({ department, departmentNames, metrics, permissions = permissions
           onEdit={permissions.canEdit ? openWasteModal : null}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete waste record", message: "Are you sure you want to delete this waste record?", onConfirm: () => setWasteItems((current) => current.filter((item) => item.id !== id)) }) : null}
           rows={visibleWaste}
-          toolbarAction={permissions.canAdd ? <button onClick={() => openWasteModal()} type="button"><Plus size={16} />Add Waste</button> : null}
+          toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openWasteModal()}>Add Waste</PrimaryAction> : null}
         />
       </Panel>
       {wasteModalOpen && (editingWasteId ? permissions.canEdit : permissions.canAdd) && (
@@ -10621,6 +10625,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
   const [rateModal, setRateModal] = useState(null);
   const [weeklyModal, setWeeklyModal] = useState(null);
   const [activeLabourModal, setActiveLabourModal] = useState(null);
+  const [labourControlOpen, setLabourControlOpen] = useState(false);
   const [salesImportKey, setSalesImportKey] = useState(0);
   const [labourImportKey, setLabourImportKey] = useState(0);
   const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
@@ -11220,22 +11225,24 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
 
   return (
     <div className="labour-page">
-      <details className="labour-controls">
-        <summary>Import labour</summary>
+      <PrimaryAction className="labour-controls" onClick={() => setLabourControlOpen(true)}>Import Labour</PrimaryAction>
+      <AppModal title="Import labour" open={labourControlOpen} onClose={() => setLabourControlOpen(false)} wide>
+        <div className="modal-stack">
         <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
         <div className="button-row left labour-hub-actions">
-          {permissions.canAdd && <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour</button>}
-          <button className="ghost" onClick={() => setActiveLabourModal("imports")} type="button">Staff Earnings</button>
-          <button className="ghost" onClick={() => setActiveLabourModal("employees")} type="button">Employees</button>
-          <button className="ghost" onClick={() => setActiveLabourModal("departments")} type="button">Departments & breakdown</button>
-          <button className="ghost" onClick={() => setActiveLabourModal("holidays")} type="button">Holidays</button>
-          <button className="ghost" onClick={() => setActiveLabourModal("bookings")} type="button">Holiday bookings</button>
+          {permissions.canAdd && <PrimaryAction onClick={() => { setLabourControlOpen(false); openWeeklyInput(); }}>Input Labour</PrimaryAction>}
+          <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("imports"); }} type="button">Staff Earnings</button>
+          <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("employees"); }} type="button">Employees</button>
+          <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("departments"); }} type="button">Departments & breakdown</button>
+          <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("holidays"); }} type="button">Holidays</button>
+          <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("bookings"); }} type="button">Holiday bookings</button>
         </div>
         <div className="helper-text">{salesSourceLabel}. This page is designed to be managed weekly. Sales are pulled from the Sales page when available; use Input labour week for staff hours and Base Pay.</div>
         {status && <div className="invoice-status">{status}</div>}
         </Panel>
-      </details>
+        </div>
+      </AppModal>
 
       <div className="metric-grid labour-primary-metrics">
         <Metric label="Labour cost" value={money(labourSummary.wages)} delta={`${numberValue(labourSummary.hours).toFixed(1)} hours`} />
@@ -11617,7 +11624,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
   );
 }
 
-function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
+function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
   const makeSalesDraft = (date = today()) => {
     const existing = sales.find((row) => row.date === date);
     const departments = salesDepartments(existing);
@@ -11715,22 +11722,13 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
     setInputOpen(false);
   };
 
+  useEffect(() => {
+    if (inputRequest?.id) openInputSales();
+  }, [inputRequest?.id]);
+
   return (
-    <div className="sales-page">
-      <details className="sales-controls">
-        <summary>Input sales +</summary>
-        <Panel title="Sales controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
-        <div className="form-grid six">
-          <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
-          <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: value, endDate: dateRange.end })} />
-          <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: dateRange.start, endDate: value })} />
-          <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
-        </div>
-        <div className="button-row left">
-          {permissions.canAdd && <button onClick={openInputSales} type="button"><Plus size={16} />Input sales</button>}
-        </div>
-        </Panel>
-      </details>
+    <div className={`sales-page${isActive ? "" : " page-component-hidden"}`}>
+      {permissions.canAdd && <PrimaryAction className="sales-controls" onClick={openInputSales}>Input Sales</PrimaryAction>}
 
       <div className="metric-grid primary-metrics">
         <Metric empty={!hasSalesInput} label="Net sales" value={moneyOrEmpty(selectedTotals.netSales, hasSalesInput)} delta={hasSalesInput ? `${selectedTotals.rows.length} sales day(s)` : "No sales logged yet"} tone="good" />
@@ -11803,6 +11801,14 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         wide
       >
         <div className="modal-stack">
+          <Panel title="Period and comparison" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+            <div className="form-grid six">
+              <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
+              <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: value, endDate: dateRange.end })} />
+              <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: dateRange.start, endDate: value })} />
+              <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
+            </div>
+          </Panel>
           <div className="form-grid six">
             <Field label="Sales date" type="date" value={salesDraft.date} onChange={updateDraftDate} />
             <Field label="Gross sales" type="number" value={salesDraft.grossSales} onChange={(value) => updateDraftTop("grossSales", value)} />
@@ -12270,7 +12276,7 @@ function SettingsPanel({
   };
 
   return (
-    <div className="settings-grid settings-page">
+    <div className={`settings-grid settings-page${settingsSection ? ` settings-detail-view settings-section-${settingsSection}` : ""}`}>
       {!settingsSection ? (
         <SettingsLanding
           cloudEnabled={cloudEnabled}
@@ -12282,7 +12288,7 @@ function SettingsPanel({
         <>
           <button className="settings-back-link" onClick={() => setSettingsSection("")} type="button">Back to Settings</button>
       {!demoMode && (
-        <Panel title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
+        <Panel className="settings-cloud-section" title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
           <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
             <div>
               <strong>{cloudLoading ? "Syncing..." : cloudStatusText[cloudStatus] || cloudStatusText.local}</strong>
@@ -12305,7 +12311,8 @@ function SettingsPanel({
           {dataStatus && <div className={`invoice-status ${cloudStatus === "error" ? "error" : "info"}`}>{dataStatus}</div>}
         </Panel>
       )}
-      <Panel title="Users & Permissions" action={demoMode ? "Demo Mode" : authMode ? "Supabase Auth" : "Local placeholders"}>
+      {demoMode && <Panel className="settings-cloud-section" title="Cloud sync" action="Demo mode"><p className="helper-text">Cloud synchronisation is unavailable while using temporary demo data.</p></Panel>}
+      <Panel className="settings-users-section" title="Users & Permissions" action={demoMode ? "Demo Mode" : authMode ? "Supabase Auth" : "Local placeholders"}>
         {demoMode ? (
           <div className="auth-account-summary">
             <div>
@@ -12435,7 +12442,7 @@ function SettingsPanel({
         </EditModal>
       )}
 
-      <Panel title="Company settings">
+      <Panel className="settings-business-section" title="Company settings">
         <div className="form-grid six">
           <label>App mode<select value={companySettings.appMode || defaultCompanySettings.appMode} onChange={(event) => updateCompany("appMode", event.target.value)}>{appModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
           <Field label="Company name" value={companySettings.companyName} onChange={(value) => updateCompany("companyName", value)} />
@@ -12450,7 +12457,17 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Financial settings">
+      <Panel className="settings-locations-section" title="Locations">
+        <div className="auth-account-summary">
+          <div><span>Current location</span><strong>{authMembership?.locations?.name || "No location selected"}</strong><small>{authMembership?.location_id || "Location access is managed by your account"}</small></div>
+        </div>
+      </Panel>
+
+      <Panel className="settings-notifications-section" title="Notifications">
+        <p className="helper-text">Notification preferences are managed through your account and connected services.</p>
+      </Panel>
+
+      <Panel className="settings-datetime-section" title="Financial settings">
         <div className="form-grid six">
           <label>Currency<select value={financialSettings.currency} onChange={(event) => updateFinancial("currency", event.target.value)}><option>GBP</option><option>EUR</option><option>USD</option></select></label>
           <label>Week starts on<select value={financialSettings.weekStartsOn} onChange={(event) => updateFinancial("weekStartsOn", event.target.value)}><option>Monday</option><option>Sunday</option></select></label>
@@ -12507,7 +12524,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Department settings">
+      <Panel className="settings-categories-section" title="Categories">
         <DataTable
           columns={[
             { key: "name", label: "Department" },
@@ -12520,6 +12537,10 @@ function SettingsPanel({
           rows={departmentSettings}
           toolbarAction={permissions.canAdd ? <button onClick={() => openDepartmentModal()} type="button"><Plus size={16} />Add Department</button> : null}
         />
+      </Panel>
+
+      <Panel className="settings-units-section" title="Units">
+        <p className="helper-text">Units are defined on each product's pack size and base unit.</p>
       </Panel>
 
       {departmentModalOpen && (editingDepartmentId ? permissions.canEdit : permissions.canAdd) && (
@@ -12739,7 +12760,7 @@ function SettingsPanel({
       </Panel>}
 
       {demoMode ? (
-        <Panel title="Demo data" action="Temporary">
+        <Panel className="settings-danger-section" title="Demo data" action="Temporary">
           <p className="helper-text">Demo edits live only in this browser session. Reset returns every page to the original demo dataset.</p>
           <div className="button-row left">
             {permissions.canReset && <button onClick={() => { onResetDemo?.(); setDataStatus("Demo data reset."); }} type="button">Reset Demo</button>}
@@ -12749,7 +12770,7 @@ function SettingsPanel({
         </Panel>
       ) : (
         <>
-      <Panel title="Reset data by page">
+      <Panel className="settings-danger-section" title="Reset data by page">
         <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
         <div className="button-row left wrap">
           {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Invoices", ["marginflow.invoices", "marginflow.creditNotes", "marginflow.invoiceLineCorrections"])} type="button">Reset invoices</button>}
@@ -12765,7 +12786,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Data settings">
+      <Panel className="settings-danger-section" title="Data settings">
         <div className="button-row left">
           <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
           {permissions.canImport && <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>}
@@ -12824,25 +12845,25 @@ function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
       <section className="settings-summary-card">
         <h2>Business</h2>
         <div className="settings-summary-row"><span>Business details</span><button onClick={() => onOpen("business")} type="button">Update profile</button></div>
-        <div className="settings-summary-row"><span>Locations</span><button onClick={() => onOpen("business")} type="button">Manage</button></div>
-        <div className="settings-summary-row"><span>Users</span><button onClick={() => onOpen("business")} type="button">Team access</button></div>
+        <div className="settings-summary-row"><span>Locations</span><button onClick={() => onOpen("locations")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Users</span><button onClick={() => onOpen("users")} type="button">Team access</button></div>
       </section>
       <section className="settings-summary-card">
         <h2>Integrations</h2>
-        <div className="settings-summary-row"><span>Cloud sync</span><button className={integrationStatus === "Connected" ? "success" : ""} onClick={() => onOpen("integrations")} type="button">{integrationStatus}</button></div>
-        <div className="settings-summary-row"><span>Data &amp; Time</span><button onClick={() => onOpen("business")} type="button">Preferences</button></div>
-        <div className="settings-summary-row"><span>Notifications</span><button onClick={() => onOpen("integrations")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Cloud sync</span><button className={integrationStatus === "Connected" ? "success" : ""} onClick={() => onOpen("cloud")} type="button">{integrationStatus}</button></div>
+        <div className="settings-summary-row"><span>Data &amp; Time</span><button onClick={() => onOpen("datetime")} type="button">Preferences</button></div>
+        <div className="settings-summary-row"><span>Notifications</span><button onClick={() => onOpen("notifications")} type="button">Manage</button></div>
       </section>
       <section className="settings-summary-card">
         <h2>Data</h2>
-        <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("data")} type="button">Manage</button></div>
-        <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("data")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("categories")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("units")} type="button">Manage</button></div>
       </section>
       <section className="settings-summary-card danger-zone-card">
         <h2>Danger Zone</h2>
         <strong>Delete Data</strong>
         <p>{demoMode ? "Reset this temporary demo data" : "Permanently delete saved application data"}</p>
-        <button className="danger" onClick={() => onOpen("data")} type="button">{demoMode ? "Reset demo" : "Delete data"}</button>
+        <button className="danger" onClick={() => onOpen("danger")} type="button">{demoMode ? "Reset demo" : "Delete data"}</button>
       </section>
     </div>
   );
@@ -12949,11 +12970,11 @@ function EditModal({ title, children, onCancel, onSave, saveLabel = "Save Change
   );
 }
 
-function AppModal({ title, open, onClose, footer, children, wide = false }) {
+function AppModal({ title, open, onClose, footer, children, wide = false, className = "" }) {
   if (!open) return null;
-  return (
+  return createPortal(
     <div className="modal-backdrop" role="presentation">
-      <div className={`app-modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+      <div className={`app-modal ${wide ? "wide" : ""} ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="icon" onClick={onClose} type="button"><X size={17} /></button>
@@ -12961,8 +12982,13 @@ function AppModal({ title, open, onClose, footer, children, wide = false }) {
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-footer">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body
   );
+}
+
+function PrimaryAction({ children, className = "", ...props }) {
+  return <button {...props} className={`page-primary-action ${className}`.trim()} type="button"><Plus size={16} />{children}</button>;
 }
 
 function Field({ label, value, onChange, type = "text", readOnly = false }) {

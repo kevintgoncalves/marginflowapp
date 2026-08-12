@@ -6081,6 +6081,92 @@ button.icon {
 
 .settings-back-link { width: fit-content; color: var(--data-accent); }
 
+/* Prompt 5.4: interaction shells and view stability. */
+.page-component-hidden { display: none; }
+
+.table-toolbar .page-primary-action,
+.menu-primary-actions .page-primary-action,
+.stocktake-actions .page-primary-action,
+.sales-controls.page-primary-action,
+.labour-controls.page-primary-action { margin-top: 0; }
+
+.sales-controls.page-primary-action,
+.labour-controls.page-primary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.dashboard-supplier-spend .segmented-control button { min-width: 76px; }
+.dashboard-performance-breakdown { min-height: 322px; }
+.dashboard-performance-breakdown > .breakdown-layout,
+.dashboard-performance-breakdown > .table-wrap,
+.dashboard-performance-breakdown > .table-toolbar { width: 100%; }
+.dashboard-performance-breakdown .breakdown-layout { min-height: 246px; }
+.dashboard-performance-breakdown .breakdown-layout .donut-list { display: none; }
+.dashboard-performance-breakdown .breakdown-layout .table-wrap { width: 100%; margin: 0; }
+.dashboard-performance-breakdown .table-wrap { overflow-x: auto; }
+
+.invoice-control-cell.missing {
+  border-color: #dea44c;
+  background: #ffe3b4;
+  color: #77410b;
+}
+
+.invoice-control-status-modal {
+  border-color: var(--border-subtle);
+  background: #fff;
+}
+
+.invoice-control-status-modal .badge.green {
+  border-color: #bfe4cf;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.invoice-schedule-list { background: #fff; }
+.invoice-schedule-row {
+  border-color: var(--border-subtle);
+  background: #fff;
+  color: var(--text);
+}
+.weekday-toggle-row label {
+  border: 1px solid var(--border-subtle);
+  background: #fff;
+  color: var(--text-secondary);
+}
+.weekday-toggle-row label:has(input:checked) {
+  border-color: #bfe4cf;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.menu-management { right: 268px; }
+.menu-management > summary {
+  display: inline-flex;
+  width: auto;
+  min-height: 38px;
+  height: auto;
+  align-items: center;
+  padding: 0 13px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-detail-view > .panel,
+.settings-detail-view > details { display: none; }
+.settings-section-business > .settings-business-section,
+.settings-section-locations > .settings-locations-section,
+.settings-section-users > .settings-users-section,
+.settings-section-cloud > .settings-cloud-section,
+.settings-section-datetime > .settings-datetime-section,
+.settings-section-notifications > .settings-notifications-section,
+.settings-section-categories > .settings-categories-section,
+.settings-section-units > .settings-units-section,
+.settings-section-danger > .settings-danger-section { display: block; }
+.settings-detail-view .settings-back-link { grid-column: 1 / -1; }
+.settings-detail-view > .panel { max-width: 900px; }
+
 @media (min-width: 1121px) {
   .settings-landing-grid { gap: 48px; }
   .settings-summary-card { min-height: 312px; }
