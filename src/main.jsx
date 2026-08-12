@@ -778,6 +778,8 @@ async function loadAuthMembership(user) {
     .select("id, company_id, location_id, role_label, status, companies(name, trading_name), locations(name)")
     .eq("user_id", user.id)
     .eq("status", "active")
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
@@ -11435,8 +11437,8 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       <Panel title="Sales controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <div className="form-grid six">
           <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
-          <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom range", startDate: value })} />
-          <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom range", endDate: value })} />
+          <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: value, endDate: dateRange.end })} />
+          <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: dateRange.start, endDate: value })} />
           <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
         </div>
         <div className="button-row left">
