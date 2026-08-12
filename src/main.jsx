@@ -3,7 +3,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import marginflowLogo from "./assets/marginflow-logo.svg";
+import marginflowLogo from "./assets/marginflow-logo.png";
 import {
   AlertTriangle,
   ArrowDownUp,
