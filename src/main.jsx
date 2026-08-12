@@ -65,6 +65,7 @@ import {
 import { supplierFormatFromLine } from "./domain/productPackaging.js";
 import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.js";
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
+import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
 import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
@@ -1064,6 +1065,10 @@ function UpdatePasswordScreen({ onSignOut, onUpdated }) {
 
 function money(value) {
   return moneyForCurrency(value, "GBP");
+}
+
+function moneyOrEmpty(value, hasData) {
+  return displayValueForDataAvailability(value, hasData, money);
 }
 
 function moneyForCurrency(value, currency = "GBP") {
@@ -3184,6 +3189,7 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
     wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
     stockVariance: closingStock - openingStock,
     salesRows,
+    wasteRecords: filteredWaste,
     invoiceItems: filteredInvoices.flatMap((invoice) => invoice.items || []),
     invoices: filteredInvoices,
   };
@@ -3795,6 +3801,9 @@ function salesByDepartment(sales, range, departmentNames = defaultDepartments) {
       const hasDepartmentBreakdown = Object.keys(departments).length > 0;
       const includeLegacyRow = !hasDepartmentBreakdown && (!row.department || row.department === departmentName) && departmentName === departmentNames[0];
       const includeSingleDepartmentRow = !hasDepartmentBreakdown && row.department === departmentName;
+      const hasDepartmentEntry = hasDepartmentBreakdown
+        ? Object.hasOwn(departments, departmentName)
+        : (includeLegacyRow || includeSingleDepartmentRow);
       const netSales = hasDepartmentBreakdown
         ? salesNetForRow(row, departmentName)
         : (includeLegacyRow || includeSingleDepartmentRow ? salesNetForRow(row, "All departments") : 0);
@@ -3804,14 +3813,16 @@ function salesByDepartment(sales, range, departmentNames = defaultDepartments) {
       return {
         netSales: sum.netSales + netSales,
         grossSales: sum.grossSales + grossSales,
+        hasData: sum.hasData || hasDepartmentEntry,
       };
-    }, { netSales: 0, grossSales: 0 });
+    }, { netSales: 0, grossSales: 0, hasData: false });
     return {
       id: departmentName,
       department: departmentName,
       netSales: totals.netSales,
       grossSales: totals.grossSales,
       vat: Math.max(0, totals.grossSales - totals.netSales),
+      hasData: totals.hasData,
     };
   });
 }
@@ -3822,6 +3833,37 @@ function formatRangeDate(date) {
 
 function rangeLabel(rangeState, range) {
   return `${rangeState.preset}: ${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
+}
+
+function contextualPageSubtitle(active, {
+  dateRange,
+  dateRangeState,
+  invoices = [],
+  products = [],
+  suppliers = [],
+  stocktakes = [],
+  wasteItems = [],
+  recipes = [],
+  invoiceControlWeekRange,
+}) {
+  const period = `${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`;
+  const activeSupplierCount = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false).length;
+  if (active === "dashboard") return `${rangeLabel(dateRangeState, dateRange)}`;
+  if (active === "invoices") return `${invoices.length} purchasing document${invoices.length === 1 ? "" : "s"} · ${period}`;
+  if (active === "invoiceControl") {
+    const week = invoiceControlWeekRange ? `${formatRangeDate(invoiceControlWeekRange.start)} - ${formatRangeDate(invoiceControlWeekRange.end)}` : "";
+    return `${activeSupplierCount} active supplier${activeSupplierCount === 1 ? "" : "s"}${week ? ` · ${week}` : ""}`;
+  }
+  if (active === "products") return `${products.length} product${products.length === 1 ? "" : "s"}`;
+  if (active === "suppliers") return `${activeSupplierCount} active supplier${activeSupplierCount === 1 ? "" : "s"}`;
+  if (active === "stocktake") return stocktakes.length ? `Latest stocktake · ${formatRangeDate(stocktakes.at(-1)?.date || stocktakes.at(-1)?.createdAt || today())}` : "No stocktake recorded";
+  if (active === "recipes") {
+    const activeRecipeCount = recipes.filter((recipe) => recipe.status !== "Archived").length;
+    return `${activeRecipeCount} active recipe${activeRecipeCount === 1 ? "" : "s"}`;
+  }
+  if (active === "waste") return `${period} · ${wasteItems.filter((item) => dateInRange(item.date, dateRange)).length} record(s)`;
+  if (["gp", "labour"].includes(active)) return period;
+  return "";
 }
 
 function activeDepartmentNames(departmentSettings) {
@@ -4432,6 +4474,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
   const [active, setActive] = useState("dashboard");
   const [pathname, setPathname] = useState(currentPathname);
+  const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
+    const dates = mondaySundayWeekDates(mondayWeekStart(today()));
+    return { start: dates[0], end: dates[6] };
+  });
   const [departmentSettings, setDepartmentSettingsState] = useState(() => demoInitialData?.departmentSettings || safeReadLocalStorageArray("marginflow.departmentSettings", defaultDepartmentSettings));
   const departmentNames = useMemo(() => activeDepartmentNames(departmentSettings), [departmentSettings]);
   const [department, setDepartmentState] = useState(() => {
@@ -4610,6 +4656,17 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive]);
   const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
   const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
+  const pageSubtitle = useMemo(() => contextualPageSubtitle(active, {
+    dateRange,
+    dateRangeState,
+    invoices: operationalInvoices,
+    products,
+    suppliers,
+    stocktakes,
+    wasteItems,
+    recipes,
+    invoiceControlWeekRange,
+  }), [active, dateRange, dateRangeState, invoiceControlWeekRange, operationalInvoices, products, recipes, suppliers, stocktakes, wasteItems]);
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
   const permissionsByPage = useMemo(
@@ -5433,7 +5490,9 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       ...current,
       supplier: supplierName,
       date,
-      status: `Ready to upload or add invoice for ${supplierName} on ${formatRangeDate(date)}.`,
+      status: supplierName
+        ? `Ready to upload or add invoice for ${supplierName} on ${formatRangeDate(date)}.`
+        : "Ready to upload or add an invoice.",
     }));
     setActive("invoices");
   };
@@ -5514,9 +5573,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         )}
         <header className="topbar">
           <div>
-            <p className="eyebrow">MarginFlow v3</p>
             <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
-            <p>Turn invoices, stock, recipes, waste and menus into live hospitality margin control.</p>
+            {pageSubtitle && <p className="page-subtitle">{pageSubtitle}</p>}
           </div>
         </header>
 
@@ -5600,6 +5658,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
             invoices={operationalInvoices}
             onAddInvoice={prepareInvoiceUploadFromControl}
+            onWeekRangeChange={setInvoiceControlWeekRange}
             permissions={permissionsByPage.invoiceControl}
             sales={sales}
             setInvoiceDayStatusOverrides={setInvoiceDayStatusOverrides}
@@ -6012,16 +6071,27 @@ function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn
 }
 
 function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
+  const hasSales = (metrics.salesRows || []).length > 0;
+  const hasPurchases = (metrics.invoices || []).length > 0;
+  const hasWaste = (metrics.wasteRecords || []).length > 0;
+  const hasGp = hasSales && numberValue(metrics.netSales) > 0;
   return (
-    <div className="metric-grid performance-grid">
-      <Metric label="Gross Sales" value={money(metrics.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-      <Metric label="Net Sales" value={money(metrics.netSales)} delta="Used for GP" />
-      <Metric label="Purchases" value={money(metrics.purchases)} delta={department} />
-      <Metric label="Invoice GP %" value={percent(metrics.invoiceGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-      <Metric label="Stocktake GP %" value={percent(metrics.stocktakeGp)} delta="Opening + purchases - closing" tone={metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-      <Metric label="Waste Cost" value={money(metrics.waste)} delta={`${percent(metrics.wastePercent)} of GP base`} tone="warn" />
-      <Metric label="Real GP incl. waste" value={percent(metrics.realGp)} delta={`Target ${percent(gpTarget)}`} tone={metrics.realGp >= gpTarget ? "good" : "warn"} />
-    </div>
+    <>
+      <div className="metric-grid primary-metrics">
+        <Metric empty={!hasSales} label="Net Sales" value={moneyOrEmpty(metrics.netSales, hasSales)} delta={hasSales ? "Used for GP" : "No sales logged yet"} />
+        <Metric empty={!hasPurchases} label="Purchases" value={moneyOrEmpty(metrics.purchases, hasPurchases)} delta={hasPurchases ? department : "No invoices logged yet"} />
+        <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp && metrics.realGp >= gpTarget ? "good" : "warn"} />
+      </div>
+      <details className="more-metrics">
+        <summary>More metrics</summary>
+        <div className="metric-grid secondary-metrics">
+          <Metric empty={!hasSales} label="Gross Sales" value={moneyOrEmpty(metrics.grossSales, hasSales)} delta={rangeLabel(dateRangeState, dateRange)} />
+          <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp && metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
+          <Metric empty={!hasGp} label="Stocktake GP %" value={hasGp ? percent(metrics.stocktakeGp) : "–"} delta="Opening + purchases - closing" tone={hasGp && metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
+          <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? `${percent(metrics.wastePercent)} of GP base` : "No waste logged yet"} tone="warn" />
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -6107,6 +6177,7 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
 }
 
 function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
+  const [breakdownView, setBreakdownView] = useState("Department");
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
@@ -6126,16 +6197,20 @@ function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, met
         </Panel>
       </div>
       <div className="dashboard-layout secondary">
-        <Panel title="Department Breakdown" action="Gross, net, cost and GP">
-          <DepartmentBreakdown rows={departmentRows} />
+        <Panel
+          title="Performance breakdown"
+          action={(
+            <div className="segmented-control compact" role="group" aria-label="Performance breakdown view">
+              {["Department", "Daily"].map((option) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{option}</button>)}
+            </div>
+          )}
+        >
+          {breakdownView === "Department" ? <DepartmentBreakdown rows={departmentRows} /> : <DailyGpTable rows={dailyRows} />}
         </Panel>
         <Panel title="Supplier Spend" action="High to low">
           <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} />
         </Panel>
       </div>
-      <Panel title="Daily GP Table">
-        <DailyGpTable rows={dailyRows} />
-      </Panel>
     </>
   );
 }
@@ -7736,6 +7811,7 @@ function InvoiceControlCentre({
   invoiceDayStatusOverrides,
   invoices,
   onAddInvoice,
+  onWeekRangeChange,
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoiceControl"),
   sales,
   setInvoiceDayStatusOverrides,
@@ -7752,6 +7828,9 @@ function InvoiceControlCentre({
   const [viewInvoice, setViewInvoice] = useState(null);
   const weekDates = mondaySundayWeekDates(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
+  useEffect(() => {
+    onWeekRangeChange?.(weekRange);
+  }, [onWeekRangeChange, weekRange.end, weekRange.start]);
   const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
 
@@ -7767,6 +7846,7 @@ function InvoiceControlCentre({
       schedule,
       cells,
       weeklyTotal: cells.reduce((sum, cell) => sum + numberValue(cell.total, 0), 0),
+      hasWeeklyInvoiceValue: cells.some((cell) => Boolean(cell.invoice)),
       missingCount: cells.filter((cell) => cell.state === "missing").length,
     };
   }).filter((row) => {
@@ -7832,7 +7912,10 @@ function InvoiceControlCentre({
 
   return (
     <div className="page-grid invoice-control-page">
-      <Panel title="Invoice Control Centre" action={`${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}>
+      <Panel
+        title="Invoice Control Centre"
+        action={permissions.canAdd ? <button onClick={() => onAddInvoice("", weekStart)} type="button">Upload invoice</button> : `${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
+      >
         <div className="form-grid six range-grid">
           <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(mondayWeekStart(value || today()))} />
           <label>Status filter<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
@@ -7844,18 +7927,30 @@ function InvoiceControlCentre({
         </div>
       </Panel>
 
-      <div className="metric-grid compact">
+      {missingCells.length > 0 && (
+        <div className="invoice-status warn attention-summary">
+          <strong>{missingCells.length} invoice day{missingCells.length === 1 ? "" : "s"} need attention.</strong>
+          <span>Review missing supplier deliveries for this week.</span>
+        </div>
+      )}
+
+      <div className="metric-grid invoice-control-summary">
         <Metric label="Uploaded" value={receivedCells.length} delta="invoice day(s)" tone="good" />
         <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
         <Metric label="Missing" value={missingCells.length} delta="past due" tone={missingCells.length ? "warn" : "good"} />
         <Metric label="Not ordered" value={notOrderedCells.length} delta="manual override" />
-        <Metric label="Invoices" value={money(weeklyInvoiceSpend)} delta="weekly invoice total" />
-        <Metric label="Credit notes" value={money(weeklyCreditTotal)} delta="weekly credit total" />
-        <Metric label="Net purchases" value={money(weeklySupplierSpend)} delta="weekly total" />
-        <Metric label="Food purchases" value={money(weeklyFoodPurchases)} delta="make-in + bought-in" />
-        <Metric label="Make-in" value={money(weeklyMakeInPurchases)} delta="Kitchen Made" />
-        <Metric label="Bought-in" value={money(weeklyBoughtInPurchases)} delta="Bought In" />
       </div>
+      <details className="more-metrics invoice-control-more-metrics">
+        <summary>More weekly metrics</summary>
+        <div className="metric-grid secondary-metrics">
+          <Metric empty={!weeklyDocuments.length} label="Invoices" value={moneyOrEmpty(weeklyInvoiceSpend, weeklyDocuments.length > 0)} delta="weekly invoice total" />
+          <Metric empty={!weeklyDocuments.length} label="Credit notes" value={moneyOrEmpty(weeklyCreditTotal, weeklyDocuments.length > 0)} delta="weekly credit total" />
+          <Metric empty={!weeklyDocuments.length} label="Net purchases" value={moneyOrEmpty(weeklySupplierSpend, weeklyDocuments.length > 0)} delta="weekly total" />
+          <Metric empty={!weeklyDocuments.length} label="Food purchases" value={moneyOrEmpty(weeklyFoodPurchases, weeklyDocuments.length > 0)} delta="make-in + bought-in" />
+          <Metric empty={!weeklyDocuments.length} label="Make-in" value={moneyOrEmpty(weeklyMakeInPurchases, weeklyDocuments.length > 0)} delta="Kitchen Made" />
+          <Metric empty={!weeklyDocuments.length} label="Bought-in" value={moneyOrEmpty(weeklyBoughtInPurchases, weeklyDocuments.length > 0)} delta="Bought In" />
+        </div>
+      </details>
 
       <Panel
         action={`${rows.length} supplier(s)`}
@@ -7891,7 +7986,7 @@ function InvoiceControlCentre({
                       )}
                     </td>
                     {row.cells.map((cell) => <InvoiceControlCell cell={cell} key={`${row.supplier.id}-${cell.date}`} onClick={() => openCell(cell)} />)}
-                    <td className="weekly-total">{money(row.weeklyTotal)}</td>
+                    <td className={`weekly-total${row.hasWeeklyInvoiceValue ? "" : " empty"}`}>{moneyOrEmpty(row.weeklyTotal, row.hasWeeklyInvoiceValue)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -8005,7 +8100,7 @@ function InvoiceControlCentre({
           title={`${selectedCell.supplier.name} · ${formatRangeDate(selectedCell.date)}`}
         >
           <div className="modal-stack">
-            <Badge tone={selectedCell.state === "missing" ? "red" : selectedCell.state === "expected" ? "amber" : selectedCell.state === "not_ordered" ? "gray" : "green"}>{selectedCell.label}</Badge>
+            <Badge tone={selectedCell.state === "missing" ? "amber" : selectedCell.state === "expected" ? "amber" : selectedCell.state === "not_ordered" ? "gray" : "green"}>{selectedCell.label}</Badge>
             <p className="helper-text">Quick actions update this supplier/day only. Upload Invoice opens the invoice workflow with supplier and date prepared.</p>
           </div>
         </AppModal>
@@ -8045,13 +8140,13 @@ function InvoiceControlCentre({
 
 function InvoiceControlCell({ cell, onClick }) {
   if (cell.state === "no_delivery") {
-    return <td className="invoice-control-cell no-delivery"><span>-</span></td>;
+    return <td className="invoice-control-cell no-delivery"><span>–</span></td>;
   }
   return (
     <td>
       <button className={`invoice-control-cell ${cell.state}`} onClick={onClick} type="button">
         <strong>{cell.invoice ? documentTypeBadgeLabel(documentTypeFor(cell.invoice)) : cell.label}</strong>
-        {cell.total ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
+        {cell.invoice ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
       </button>
     </td>
   );
@@ -9068,7 +9163,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     <div className="page-grid">
       <Panel title="Stocktake">
         <div className="button-row left">
-          {permissions.canAdd && <button onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
+          {permissions.canAdd && <button className="ghost" onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
           {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
           <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsExcel} type="button"><Download size={16} />Download Products Excel</button>
           <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />CSV</button>
@@ -9641,7 +9736,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
                 { key: "sellingPrice", label: "Selling price", render: (value) => money(value) },
                 { key: "gp", label: "GP %", render: (value) => percent(value) },
                 { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
-                { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : value > -5 ? "amber" : "red"}>{percent(value)}</Badge> },
+                { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : "amber"}>{percent(value)}</Badge> },
                 { key: "status", label: "Status" },
               ]}
               onDelete={permissions.canDelete ? deleteDish : null}
@@ -11365,6 +11460,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
   const [salesDraft, setSalesDraft] = useState(() => makeSalesDraft(today()));
   const [compareWeekStart, setCompareWeekStart] = useState(defaultCompareStart);
   const selectedTotals = salesTotalsForRange(sales, dateRange, department);
+  const hasSalesInput = selectedTotals.rows.length > 0;
   const periodLength = daysBetween(dateRange.start, dateRange.end);
   const customWeekRange = rangeFromStartAndLength(compareWeekStart, 7);
   const comparisonRows = comparisonRangesForChosenWeek(customWeekRange).map((row) => {
@@ -11377,6 +11473,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       grossSales: totals.grossSales,
       variance,
       change: totals.netSales ? (variance / totals.netSales) * 100 : 0,
+      hasData: totals.rows.length > 0,
     };
   });
   const dailyRows = selectedTotals.rows.map((row) => ({
@@ -11450,14 +11547,19 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         </div>
       </Panel>
 
-      <div className="metric-grid">
-        <Metric label="Net sales" value={money(selectedTotals.netSales)} delta={`${selectedTotals.rows.length} sales day(s)`} tone="good" />
-        <Metric label="Gross sales" value={money(selectedTotals.grossSales)} delta={department} />
-        <Metric label="Service charge" value={money(selectedTotals.serviceCharge)} delta="Feeds Labour" />
-        <Metric label="VAT / tax" value={money(selectedTotals.vat)} delta="Gross - net" />
-        <Metric label="Daily average" value={money(selectedTotals.averageDailyNet)} delta={`${periodLength} day period`} />
-        <Metric label="Entries" value={selectedTotals.rows.length} delta="Days with sales input" />
+      <div className="metric-grid primary-metrics">
+        <Metric empty={!hasSalesInput} label="Net sales" value={moneyOrEmpty(selectedTotals.netSales, hasSalesInput)} delta={hasSalesInput ? `${selectedTotals.rows.length} sales day(s)` : "No sales logged yet"} tone="good" />
+        <Metric empty={!hasSalesInput} label="Gross sales" value={moneyOrEmpty(selectedTotals.grossSales, hasSalesInput)} delta={department} />
+        <Metric empty={!hasSalesInput} label="Daily average" value={moneyOrEmpty(selectedTotals.averageDailyNet, hasSalesInput)} delta={`${periodLength} day period`} />
       </div>
+      <details className="more-metrics">
+        <summary>More sales metrics</summary>
+        <div className="metric-grid secondary-metrics">
+          <Metric empty={!hasSalesInput} label="Service charge" value={moneyOrEmpty(selectedTotals.serviceCharge, hasSalesInput)} delta="Feeds Labour" />
+          <Metric empty={!hasSalesInput} label="VAT / tax" value={moneyOrEmpty(selectedTotals.vat, hasSalesInput)} delta="Gross - net" />
+          <Metric label="Entries" value={selectedTotals.rows.length} delta="Days with sales input" />
+        </div>
+      </details>
 
       <div className="dashboard-layout secondary">
         <Panel title={`${salesChartPrefix} net sales`} action={`${salesChartData.granularity} view`}><LineSeries rows={salesChartData.rows} valueKey="netSales" /></Panel>
@@ -11466,10 +11568,10 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
             columns={[
               { key: "period", label: "Compare" },
               { key: "rangeText", label: "Period" },
-              { key: "netSales", label: "Net sales", render: money },
-              { key: "grossSales", label: "Gross sales", render: money },
-              { key: "variance", label: "Variance", render: (value) => money(value) },
-              { key: "change", label: "Change", render: percent },
+              { key: "netSales", label: "Net sales", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "grossSales", label: "Gross sales", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "variance", label: "Variance", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "change", label: "Change", render: (value, row) => row.hasData ? percent(value) : "–" },
             ]}
             rows={comparisonRows}
           />
@@ -11481,10 +11583,10 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
           <DataTable
             columns={[
               { key: "department", label: "Department" },
-              { key: "netSales", label: "Net sales", render: money },
-              { key: "grossSales", label: "Gross sales", render: money },
-              { key: "serviceCharge", label: "Service charge", render: money },
-              { key: "vat", label: "VAT / tax", render: money },
+              { key: "netSales", label: "Net sales", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "grossSales", label: "Gross sales", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "serviceCharge", label: "Service charge", render: (value, row) => moneyOrEmpty(value, row.hasData) },
+              { key: "vat", label: "VAT / tax", render: (value, row) => moneyOrEmpty(value, row.hasData) },
             ]}
             rows={departmentRows}
           />
@@ -12645,9 +12747,9 @@ function CheckboxField({ checked, label, onChange }) {
   );
 }
 
-function Metric({ label, value, delta, tone = "default" }) {
+function Metric({ label, value, delta, tone = "default", empty = false }) {
   return (
-    <div className={`metric-card ${tone}`}>
+    <div className={`metric-card ${tone}${empty ? " empty" : ""}`}>
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{delta}</small>
@@ -12764,7 +12866,7 @@ function DepartmentBreakdown({ rows }) {
                 <td>{money(row.waste)}</td>
                 <td>{percent(row.gp)}</td>
                 <td>{percent(row.targetGp)}</td>
-                <td><Badge tone={row.variance >= 0 ? "green" : row.variance > -5 ? "amber" : "red"}>{percent(row.variance)}</Badge></td>
+                <td><Badge tone={row.variance >= 0 ? "green" : "amber"}>{percent(row.variance)}</Badge></td>
               </tr>
             ))}
           </tbody>
