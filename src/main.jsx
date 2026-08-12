@@ -8,6 +8,8 @@ import {
   Boxes,
   ChefHat,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Combine,
   Download,
   Edit3,
@@ -49,7 +51,6 @@ import {
   normalizeProductName,
   productAliases,
   rankProductCandidates,
-  unorderedProductKey,
 } from "./domain/productMatching.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
@@ -61,7 +62,9 @@ import {
   reviewReasonSeverity,
   validateInvoiceExtraction,
 } from "./domain/invoiceValidation.js";
-import { normalisedCostForPrice, priceComparisonForProduct, supplierFormatFromLine } from "./domain/productPackaging.js";
+import { supplierFormatFromLine } from "./domain/productPackaging.js";
+import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.js";
+import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
 import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
@@ -172,6 +175,8 @@ import {
 } from "./domain/stocktakeImport.js";
 import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
 import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
+import { downloadProductsExcel } from "./utils/exportProductsExcel.js";
+import { mondaySundayWeekDates, mondayWeekStart, shiftMondayWeek } from "./domain/weekNavigation.js";
 import "./styles.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -231,6 +236,7 @@ const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
 const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
 const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const weekdayShortLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const supplierCategoryTaxonomy = ["Dry / Chilled", "Produce", "Bakery", "Meat", "Fish / Seafood", "Drinks", "Cleaning / Non-food", "Other"];
 const authModes = ["login", "register"];
 const cloudStateTable = "marginflow_cloud_state";
 const cloudStatusText = {
@@ -2618,76 +2624,6 @@ function normalizeStocktakes(rows) {
   }));
 }
 
-function cheapestOffer(product, products) {
-  const prices = collectSupplierPrices(product, products);
-  const comparison = priceComparisonForProduct(product, prices);
-  return comparison.comparable
-    ? { ...comparison.cheapest, price: comparison.cheapest?.price ?? comparison.cheapest?.originalCost ?? 0, comparison }
-    : prices.sort((a, b) => a.price - b.price)[0] || { supplier: product.supplier, price: numberValue(product.unitCost), comparison };
-}
-
-function productGroupMatches(a, b) {
-  const aKeys = new Set(productAliases(a).map(unorderedProductKey));
-  return productAliases(b).some((alias) => aKeys.has(unorderedProductKey(alias)));
-}
-
-function collectSupplierPrices(product, products) {
-  const prices = [];
-  const addPrice = (supplier, price, date = today(), packSize = "", extra = {}) => {
-    const numeric = numberValue(price);
-    if (!supplier || !numeric) return;
-    const normalized = normalisedCostForPrice(numeric, packSize || product.packSize, extra);
-    const priceKey = `${supplier}|${packSize || product.packSize || ""}|${normalized.baseQuantity}|${normalized.baseUnit}`;
-    const existing = prices.find((entry) => entry.priceKey === priceKey);
-    const nextEntry = {
-      priceKey,
-      supplier,
-      price: numeric,
-      date,
-      packSize: packSize || product.packSize || "",
-      normalizedCost: normalized.normalizedCost,
-      normalizedUnit: normalized.baseUnit,
-      conversionConfidence: normalized.confidence,
-      conversionReviewRequired: normalized.reviewRequired,
-      conversionReason: normalized.reason,
-      ...extra,
-    };
-    if (!existing || existing.date <= date) {
-      if (existing) Object.assign(existing, nextEntry);
-      else prices.push(nextEntry);
-    }
-  };
-
-  products.filter((candidate) => candidate.active !== false && productGroupMatches(product, candidate)).forEach((candidate) => {
-    addPrice(candidate.supplier, candidate.unitCost, candidate.priceHistory?.at(-1)?.date, candidate.packSize, candidate);
-    (candidate.supplierPrices || []).forEach((entry) => addPrice(entry.supplier, entry.price, entry.date, entry.packSize || candidate.packSize, entry));
-    (candidate.supplierFormats || []).forEach((entry) => addPrice(entry.supplier, entry.purchaseUnitCost ?? entry.price, entry.date, entry.packSize || candidate.packSize, entry));
-  });
-
-  return prices;
-}
-
-function buildProductRows(products) {
-  return products.filter((product) => product.active !== false).map((product) => {
-    const prices = collectSupplierPrices(product, products);
-    const comparison = priceComparisonForProduct(product, prices);
-    const cheapest = comparison.comparable ? comparison.cheapest : cheapestOffer(product, products);
-    const currentNormalized = normalisedCostForPrice(product.unitCost, product.packSize, product);
-    const difference = comparison.comparable ? comparison.differencePercent : 0;
-    return {
-      ...product,
-      cheapestSupplier: comparison.comparable
-        ? `${cheapest.supplier} ${money(cheapest.normalizedCost)} / ${comparison.normalizedUnit}`
-        : "Needs pack conversion",
-      priceDifference: difference,
-      priceDifferenceLabel: comparison.comparable ? (difference > 0 ? `+${percent(difference)}` : percent(difference)) : "Not comparable",
-      normalizedCostLabel: currentNormalized.normalizedCost ? `${money(currentNormalized.normalizedCost)} / ${currentNormalized.baseUnit}` : "-",
-      packReview: currentNormalized.reviewRequired || comparison.reviewRequired ? (comparison.message || currentNormalized.reason) : "OK",
-      aliasesLabel: (product.aliases || []).join(", "),
-    };
-  });
-}
-
 function supplierExists(suppliers, name) {
   return supplierExistsByIdentity(suppliers, name);
 }
@@ -2698,7 +2634,7 @@ function ensureSupplierList(suppliers, name) {
   if (canonical) return suppliers;
   const likelyDuplicate = findSupplierDuplicateCandidates(suppliers, name, { includeDeleted: true })[0];
   if (likelyDuplicate && likelyDuplicate.similarity >= 0.82) return suppliers;
-  return [...suppliers, { id: uid(), name: name.trim(), category: "New supplier", contact: "", email: "", phone: "", active: true }];
+  return [...suppliers, { id: uid(), name: name.trim(), category: "", contact: "", email: "", phone: "", active: true }];
 }
 
 function removeInvoiceProductHistory(products, invoiceId) {
@@ -5868,10 +5804,6 @@ function weekdayNameForDate(date) {
   return weekdays[index] || "Monday";
 }
 
-function weekDatesFromStart(weekStart) {
-  return weekdays.map((_, index) => shiftDate(weekStart, index));
-}
-
 function sameSupplier(left = "", right = "") {
   return sameSupplierIdentity(left, right);
 }
@@ -7799,14 +7731,14 @@ function InvoiceControlCentre({
   supplierDeliverySchedules,
   suppliers,
 }) {
-  const [weekStart, setWeekStart] = useState(toIsoDate(startOfWeek(parseDate(today()), "Monday")));
+  const [weekStart, setWeekStart] = useState(mondayWeekStart(today()));
   const [statusFilter, setStatusFilter] = useState("All suppliers");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
   const [summaryScope, setSummaryScope] = useState("Visible suppliers");
   const [summaryMode, setSummaryMode] = useState("Purchases + GP");
   const [selectedCell, setSelectedCell] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
-  const weekDates = weekDatesFromStart(weekStart);
+  const weekDates = mondaySundayWeekDates(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
   const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
@@ -7882,11 +7814,15 @@ function InvoiceControlCentre({
     setSupplierDeliverySchedules((rows) => upsertSupplierSchedule(rows, supplier, { deliveryDays, scheduleMode: "manual", defaultExpected: true }));
   };
 
+  const shiftWeek = (direction) => {
+    setWeekStart((current) => shiftMondayWeek(current, direction));
+  };
+
   return (
     <div className="page-grid invoice-control-page">
       <Panel title="Invoice Control Centre" action={`${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}>
         <div className="form-grid six range-grid">
-          <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(toIsoDate(startOfWeek(parseDate(value || today()), "Monday")))} />
+          <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(mondayWeekStart(value || today()))} />
           <label>Status filter<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
             {["All suppliers", "Missing only", "Expected only", "Received only"].map((option) => <option key={option}>{option}</option>)}
           </select></label>
@@ -7909,35 +7845,44 @@ function InvoiceControlCentre({
         <Metric label="Bought-in" value={money(weeklyBoughtInPurchases)} delta="Bought In" />
       </div>
 
-      <Panel title="Weekly supplier tracker" action={`${rows.length} supplier(s)`}>
-        <div className="invoice-control-grid-wrap">
-          <table className="invoice-control-grid">
-            <thead>
-              <tr>
-                <th>Supplier</th>
-                {weekDates.map((date, index) => <th key={date}>{weekdayShortLabels[index]}<small>{formatRangeDate(date)}</small></th>)}
-                <th>Weekly Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id || row.supplier.name}>
-                  <td className="supplier-cell">
-                    <strong>{row.supplier.name}</strong>
-                    <small>{row.supplier.category || "Supplier"}</small>
-                    {row.schedule.suggestedDeliveryDays?.length > 0 && !row.schedule.deliveryDays.length && (
-                      <button className="suggestion-pill" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
-                        Suggested: {row.schedule.suggestedDeliveryDays.join(", ")}
-                      </button>
-                    )}
-                  </td>
-                  {row.cells.map((cell) => <InvoiceControlCell cell={cell} key={`${row.supplier.id}-${cell.date}`} onClick={() => openCell(cell)} />)}
-                  <td className="weekly-total">{money(row.weeklyTotal)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <Panel title="Weekly supplier tracker" action={(
+        <div className="week-navigation">
+          <button aria-label="Previous week" className="icon small" onClick={() => shiftWeek(-1)} title="Previous week" type="button"><ChevronLeft size={16} /></button>
+          <span className="week-range-label">{formatRangeDate(weekRange.start)} - {formatRangeDate(weekRange.end)}</span>
+          <button aria-label="Next week" className="icon small" onClick={() => shiftWeek(1)} title="Next week" type="button"><ChevronRight size={16} /></button>
+          <span className="week-supplier-count">{rows.length} supplier(s)</span>
         </div>
+      )}>
+        {weeklyDocuments.length ? (
+          <div className="invoice-control-grid-wrap">
+            <table className="invoice-control-grid">
+              <thead>
+                <tr>
+                  <th>Supplier</th>
+                  {weekDates.map((date, index) => <th key={date}>{weekdayShortLabels[index]}<small>{formatRangeDate(date)}</small></th>)}
+                  <th>Weekly Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id || row.supplier.name}>
+                    <td className="supplier-cell">
+                      <strong>{row.supplier.name}</strong>
+                      <small>{row.supplier.category || "Supplier"}</small>
+                      {row.schedule.suggestedDeliveryDays?.length > 0 && !row.schedule.deliveryDays.length && (
+                        <button className="suggestion-pill" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
+                          Suggested: {row.schedule.suggestedDeliveryDays.join(", ")}
+                        </button>
+                      )}
+                    </td>
+                    {row.cells.map((cell) => <InvoiceControlCell cell={cell} key={`${row.supplier.id}-${cell.date}`} onClick={() => openCell(cell)} />)}
+                    <td className="weekly-total">{money(row.weeklyTotal)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <EmptyState />}
       </Panel>
 
       <div className="dashboard-layout secondary">
@@ -8115,7 +8060,9 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
   const [mergeSearch, setMergeSearch] = useState("");
   const [mergeStatus, setMergeStatus] = useState("");
   const [mergeBusy, setMergeBusy] = useState(false);
-  const rows = useMemo(() => buildProductRows(products), [products]);
+  const [productQuery, setProductQuery] = useState("");
+  const rows = useMemo(() => buildProductRows(products, { formatMoney: money, formatPercent: percent }), [products]);
+  const productRowsForExport = useMemo(() => tableRowsMatchingQuery(rows, productQuery), [productQuery, rows]);
   const activeProducts = useMemo(() => products.filter((product) => product.active !== false), [products]);
   const duplicateSuggestions = useMemo(() => mergeOpen ? suggestProductDuplicateGroups(activeProducts, { organisationId: companyId }) : [], [activeProducts, companyId, mergeOpen]);
   const visibleMergeProducts = useMemo(() => {
@@ -8254,6 +8201,16 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
     setModalOpen(true);
   };
 
+  const downloadProductExport = async () => {
+    if (!productRowsForExport.length) return;
+    try {
+      await downloadProductsExcel(productRowsForExport, `marginflow-products-${today()}.xlsx`);
+      setStatus(`${productRowsForExport.length} product row(s) exported.`);
+    } catch (error) {
+      setStatus(error.message || "Product Excel export failed.");
+    }
+  };
+
   return (
     <div className="page-grid">
       <Panel title="Product database" action="Aliases + supplier comparison">
@@ -8274,8 +8231,11 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
           onEdit={permissions.canEdit ? openProductModal : null}
           rows={rows}
+          query={productQuery}
+          onQueryChange={setProductQuery}
           toolbarAction={(
             <div className="button-row left tight">
+              <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button"><Download size={16} />Download Products Excel</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
               {permissions.canAdd && <button onClick={() => openProductModal()} type="button"><Plus size={16} />Add Product</button>}
             </div>
@@ -8600,11 +8560,11 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
     setStatus("Supplier import cancelled.");
   };
 
-  const openSupplierModal = (row = null) => {
+  const openSupplierModal = (row = null, initialTab = "Details") => {
     if (row) {
       setForm({ ...empty, ...row });
       setEditingId(row.id);
-      setActiveSupplierTab("Details");
+      setActiveSupplierTab(initialTab);
       setModalOpen(true);
       return;
     }
@@ -8637,7 +8597,27 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
       <Panel title="Supplier directory" action="Spend totals">
         <DataTable
           columns={[
-            { key: "name", label: "Supplier" },
+            {
+              key: "name",
+              label: "Supplier",
+              render: (value, row) => (
+                <div className="supplier-name-with-issues">
+                  <span>{value}</span>
+                  {row.openIssues > 0 && (
+                    <button
+                      aria-label={`${row.openIssues} open issue(s), ${money(row.valueToChase)} to chase`}
+                      className="supplier-issue-indicator"
+                      onClick={() => openSupplierModal(row, "Credit Notes / Issues")}
+                      title={`${row.openIssues} open issue(s), ${money(row.valueToChase)} to chase`}
+                      type="button"
+                    >
+                      <AlertTriangle size={14} />
+                      {row.openIssues} issue{row.openIssues === 1 ? "" : "s"}
+                    </button>
+                  )}
+                </div>
+              ),
+            },
             { key: "category", label: "Category" },
             { key: "contact", label: "Contact" },
             { key: "email", label: "Email" },
@@ -8646,8 +8626,6 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
             { key: "invoiceSpend", label: "Invoice purchases", render: (value) => money(value) },
             { key: "creditTotal", label: "Supplier credits", render: (value) => money(value) },
             { key: "netSpend", label: "Net spend", render: (value) => money(value) },
-            { key: "openIssues", label: "Open issues", render: (value) => value > 0 ? <Badge tone="amber">{value} open</Badge> : <Badge tone="green">0</Badge> },
-            { key: "valueToChase", label: "Value to chase", render: (value, row) => row.openIssues > 0 ? <Badge tone="amber">{money(value)}</Badge> : money(0) },
             { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
           ]}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
@@ -8703,7 +8681,7 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
           {activeSupplierTab === "Details" && (
             <div className="form-grid six">
               <Field label="Supplier name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-              <Field label="Category" value={form.category} onChange={(value) => setForm({ ...form, category: value })} />
+              <label>Category<SupplierCategorySelect value={form.category} onChange={(value) => setForm({ ...form, category: value })} /></label>
               <Field label="Contact" value={form.contact} onChange={(value) => setForm({ ...form, contact: value })} />
               <Field label="Email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
               <Field label="Phone" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
@@ -8843,7 +8821,7 @@ function BulkSuppliersTable({ rows, setRows, updateRow }) {
           {rows.map((row) => (
             <tr key={row.id}>
               <td><input value={row.name} onChange={(event) => updateRow(row.id, "name", event.target.value)} /></td>
-              <td><input value={row.category} onChange={(event) => updateRow(row.id, "category", event.target.value)} /></td>
+              <td><SupplierCategorySelect value={row.category} onChange={(value) => updateRow(row.id, "category", value)} /></td>
               <td><input value={row.contact} onChange={(event) => updateRow(row.id, "contact", event.target.value)} /></td>
               <td><input value={row.email} onChange={(event) => updateRow(row.id, "email", event.target.value)} /></td>
               <td><input value={row.phone} onChange={(event) => updateRow(row.id, "phone", event.target.value)} /></td>
@@ -8854,6 +8832,17 @@ function BulkSuppliersTable({ rows, setRows, updateRow }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function SupplierCategorySelect({ value = "", onChange }) {
+  const legacyValue = value && !supplierCategoryTaxonomy.includes(value) ? value : "";
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">Select category</option>
+      {legacyValue && <option disabled value={legacyValue}>{legacyValue} (existing category)</option>}
+      {supplierCategoryTaxonomy.map((category) => <option key={category} value={category}>{category}</option>)}
+    </select>
   );
 }
 
@@ -12511,13 +12500,12 @@ function SettingsPanel({
   );
 }
 
-function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
-  const [query, setQuery] = useState("");
+function DataTable({ columns, rows, onEdit, onDelete, toolbarAction, query: controlledQuery, onQueryChange }) {
+  const [uncontrolledQuery, setUncontrolledQuery] = useState("");
+  const query = controlledQuery ?? uncontrolledQuery;
   const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
   const filtered = useMemo(() => {
-    const lower = query.toLowerCase();
-    return [...rows]
-      .filter((row) => JSON.stringify(row).toLowerCase().includes(lower))
+    return [...tableRowsMatchingQuery(rows, query)]
       .sort((a, b) => {
         const av = String(a[sort.key] ?? "");
         const bv = String(b[sort.key] ?? "");
@@ -12530,7 +12518,7 @@ function DataTable({ columns, rows, onEdit, onDelete, toolbarAction }) {
   return (
     <>
       <div className="table-toolbar">
-        <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => (onQueryChange || setUncontrolledQuery)(event.target.value)} /></label>
         {toolbarAction}
       </div>
       <div className="table-wrap">
@@ -12657,7 +12645,7 @@ function Panel({ title, action, children }) {
     <section className="panel">
       <div className="panel-head">
         <h2>{title}</h2>
-        {action && <span>{action}</span>}
+        {action && <div className="panel-action">{action}</div>}
       </div>
       {children}
     </section>

@@ -580,7 +580,32 @@ nav button.active {
   border-bottom: 1px solid var(--line);
 }
 .panel-head h2 { margin: 0; font-size: 18px; }
-.panel-head span { color: var(--muted); font-size: 13px; font-weight: 800; }
+.panel-head > span, .panel-head > .panel-action { color: var(--muted); font-size: 13px; font-weight: 800; }
+.panel-action { min-width: 0; }
+
+.week-navigation {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.week-navigation button.icon.small {
+  width: 30px;
+  min-height: 30px;
+}
+
+.week-range-label {
+  min-width: 144px;
+  color: var(--text);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.week-supplier-count {
+  margin-left: 4px;
+  white-space: nowrap;
+}
 
 .drop-zone {
   display: grid;
@@ -1161,6 +1186,32 @@ td input, td select { min-width: 110px; }
 .supplier-cell small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.supplier-name-with-issues {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+button.supplier-issue-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+button.supplier-issue-indicator svg {
+  position: static;
+  color: currentColor;
 }
 
 .invoice-control-cell {
