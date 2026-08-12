@@ -4426,6 +4426,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
+  const [cloudLoadAttempt, setCloudLoadAttempt] = useState(0);
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
   const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
@@ -4721,10 +4722,16 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const withRelationalInvoices = async (snapshot) => {
     if (!cloudEnabled) return snapshot;
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-    const [relationalInvoices, archivedInvoices] = await Promise.all([
-      loadRelationalInvoices(supabase, scope),
-      loadLegacyInvoiceArchive(supabase, scope),
-    ]);
+    let relationalInvoices;
+    let archivedInvoices;
+    try {
+      [relationalInvoices, archivedInvoices] = await Promise.all([
+        loadRelationalInvoices(supabase, scope),
+        loadLegacyInvoiceArchive(supabase, scope),
+      ]);
+    } catch (error) {
+      throw new Error(`Relational invoice hydration failed [operation=loadRelationalInvoices company=${scope.companyId} location=${scope.locationId || "company"}]: ${error.message || "Unknown error"}`);
+    }
     setLegacyInvoiceArchive(archivedInvoices);
     const scopedDeviceInvoices = (snapshot.invoices || []).map((invoice) => ({
       ...invoice,
@@ -4856,7 +4863,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       cancelled = true;
       if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     };
-  }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey]);
+  }, [cloudEnabled, cloudLoadAttempt, cloudScope.companyId, cloudScope.scopeKey]);
 
   useEffect(() => {
     if (!cloudEnabled) return undefined;
@@ -4928,6 +4935,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     } catch {
       // Local storage is best-effort in preview environments.
     }
+  };
+
+  const retryCloudSync = () => {
+    cloudReadyRef.current = false;
+    setCloudLoadAttempt((current) => current + 1);
   };
 
   const requestDelete = ({ title = "Delete item", message = "Are you sure you want to delete this item?", onConfirm, pageId = active }) => {
@@ -5496,7 +5508,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             enabled={cloudEnabled}
             error={cloudError}
             loading={cloudLoading}
-            onRetry={() => saveSnapshotToCloud(cloudSnapshot)}
+            onRetry={retryCloudSync}
             status={cloudStatus}
           />
         )}
@@ -7845,15 +7857,18 @@ function InvoiceControlCentre({
         <Metric label="Bought-in" value={money(weeklyBoughtInPurchases)} delta="Bought In" />
       </div>
 
-      <Panel title="Weekly supplier tracker" action={(
+      <Panel
+        action={`${rows.length} supplier(s)`}
+        centerAction={(
         <div className="week-navigation">
           <button aria-label="Previous week" className="icon small" onClick={() => shiftWeek(-1)} title="Previous week" type="button"><ChevronLeft size={16} /></button>
           <span className="week-range-label">{formatRangeDate(weekRange.start)} - {formatRangeDate(weekRange.end)}</span>
           <button aria-label="Next week" className="icon small" onClick={() => shiftWeek(1)} title="Next week" type="button"><ChevronRight size={16} /></button>
-          <span className="week-supplier-count">{rows.length} supplier(s)</span>
         </div>
-      )}>
-        {weeklyDocuments.length ? (
+        )}
+        title="Weekly supplier tracker"
+      >
+        {rows.length ? (
           <div className="invoice-control-grid-wrap">
             <table className="invoice-control-grid">
               <thead>
@@ -12640,11 +12655,12 @@ function Metric({ label, value, delta, tone = "default" }) {
   );
 }
 
-function Panel({ title, action, children }) {
+function Panel({ title, action, centerAction = null, children }) {
   return (
     <section className="panel">
-      <div className="panel-head">
+      <div className={`panel-head ${centerAction ? "with-centered-action" : ""}`}>
         <h2>{title}</h2>
+        {centerAction && <div className="panel-center-action">{centerAction}</div>}
         {action && <div className="panel-action">{action}</div>}
       </div>
       {children}

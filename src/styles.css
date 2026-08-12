@@ -582,6 +582,13 @@ nav button.active {
 .panel-head h2 { margin: 0; font-size: 18px; }
 .panel-head > span, .panel-head > .panel-action { color: var(--muted); font-size: 13px; font-weight: 800; }
 .panel-action { min-width: 0; }
+.panel-head.with-centered-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+.panel-head.with-centered-action h2 { justify-self: start; }
+.panel-center-action { justify-self: center; }
+.panel-head.with-centered-action .panel-action { justify-self: end; white-space: nowrap; }
 
 .week-navigation {
   display: inline-flex;
@@ -598,13 +605,25 @@ nav button.active {
 .week-range-label {
   min-width: 144px;
   color: var(--text);
+  font-size: 15px;
   text-align: center;
   white-space: nowrap;
 }
 
-.week-supplier-count {
-  margin-left: 4px;
-  white-space: nowrap;
+@media (max-width: 640px) {
+  .panel-head.with-centered-action {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .panel-head.with-centered-action .panel-center-action {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .panel-head.with-centered-action .panel-action {
+    grid-column: 2;
+    grid-row: 1;
+  }
 }
 
 .drop-zone {

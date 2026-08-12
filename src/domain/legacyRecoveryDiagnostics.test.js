@@ -155,7 +155,7 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
   assert.deepEqual(deviceSnapshot, before);
   assert.equal(operations.some((operation) => operation.startsWith("rpc:")), false);
   assert.deepEqual(operations.filter((operation) => operation.startsWith("from:")), [
-    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:marginflow_recovery_resolutions", "from:supplier_product_mappings", "from:invoice_line_corrections", "from:marginflow_cloud_state", "from:invoices",
+    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:invoice_lines", "from:invoice_line_department_splits", "from:marginflow_recovery_resolutions", "from:supplier_product_mappings", "from:invoice_line_corrections", "from:marginflow_cloud_state", "from:invoices",
   ]);
 
   const source = readFileSync(new URL("../lib/legacyRecoveryDiagnosticRepository.js", import.meta.url), "utf8");

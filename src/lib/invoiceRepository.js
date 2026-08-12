@@ -244,14 +244,36 @@ export async function loadLegacyInvoiceArchive(client, scope = {}) {
 
 export async function loadRelationalInvoices(client, scope = {}) {
   if (!client || !validScope(scope)) return [];
-  let query = client
-    .from("invoices")
-    .select("*,invoice_lines(*,invoice_line_department_splits(*))")
-    .eq("company_id", scope.companyId);
-  if (scope.locationId) query = query.eq("location_id", scope.locationId);
-  const { data, error } = await query.order("invoice_date", { ascending: false });
-  if (error) throw error;
-  return (data || []).map(invoiceFromRelationalRow);
+  const scopedQuery = (table) => {
+    let query = client.from(table).select("*").eq("company_id", scope.companyId);
+    if (scope.locationId) query = query.eq("location_id", scope.locationId);
+    return query;
+  };
+  const [invoiceResult, lineResult, splitResult] = await Promise.all([
+    scopedQuery("invoices").order("invoice_date", { ascending: false }),
+    scopedQuery("invoice_lines"),
+    scopedQuery("invoice_line_department_splits"),
+  ]);
+  if (invoiceResult.error) throw invoiceResult.error;
+  if (lineResult.error) throw lineResult.error;
+  if (splitResult.error) throw splitResult.error;
+
+  const splitsByLineId = new Map();
+  (splitResult.data || []).forEach((split) => {
+    const rows = splitsByLineId.get(split.invoice_line_id) || [];
+    rows.push(split);
+    splitsByLineId.set(split.invoice_line_id, rows);
+  });
+  const linesByInvoiceId = new Map();
+  (lineResult.data || []).forEach((line) => {
+    const rows = linesByInvoiceId.get(line.invoice_id) || [];
+    rows.push({ ...line, invoice_line_department_splits: splitsByLineId.get(line.id) || [] });
+    linesByInvoiceId.set(line.invoice_id, rows);
+  });
+  return (invoiceResult.data || []).map((invoice) => invoiceFromRelationalRow({
+    ...invoice,
+    invoice_lines: linesByInvoiceId.get(invoice.id) || [],
+  }));
 }
 
 export async function importMissingRecoveryInvoices(client, invoices = [], scope = {}, onPersisted = () => {}) {

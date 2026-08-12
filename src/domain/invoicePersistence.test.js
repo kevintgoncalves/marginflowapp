@@ -109,7 +109,7 @@ test("legacy invoice rows and splits receive stable deterministic UUIDs before t
 
 test("TEST J: fresh device loads relational invoice rows with lines and splits", async () => {
   const splitId = "44444444-4444-4444-8444-444444444444";
-  const rows = [{
+  const invoices = [{
     id: invoiceId,
     company_id: companyId,
     invoice_number: "INV-D",
@@ -120,28 +120,34 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
     subtotal: 0,
     total_amount: 0,
     metadata: { marginflow_snapshot: sampleInvoice },
-    invoice_lines: [{
-      id: lineId,
-      product_name: "Apples",
-      quantity: 2,
-      unit_cost: 4,
-      net_line_total: 8,
-      metadata: { marginflow_snapshot: sampleInvoice.items[0] },
-      active: true,
-      invoice_line_department_splits: [{ id: splitId, department_id: null, percentage: 100, amount: 8, metadata: { marginflow_snapshot: { department: "Kitchen" } } }],
-    }, {
-      id: "55555555-5555-4555-8555-555555555555",
-      product_name: "Archived line",
-      active: false,
-      invoice_line_department_splits: [],
-    }],
   }];
-  const query = {
-    select() { return this; },
+  const lines = [{
+    id: lineId,
+    invoice_id: invoiceId,
+    product_name: "Apples",
+    quantity: 2,
+    unit_cost: 4,
+    net_line_total: 8,
+    metadata: { marginflow_snapshot: sampleInvoice.items[0] },
+    active: true,
+  }, {
+    id: "55555555-5555-4555-8555-555555555555",
+    invoice_id: invoiceId,
+    product_name: "Archived line",
+    active: false,
+  }];
+  const splits = [{ id: splitId, invoice_line_id: lineId, department_id: null, percentage: 100, amount: 8, metadata: { marginflow_snapshot: { department: "Kitchen" } } }];
+  const selectCalls = [];
+  const queryFor = (table) => ({
+    select(columns) { selectCalls.push({ table, columns }); return this; },
     eq() { return this; },
-    async order() { return { data: rows, error: null }; },
-  };
-  const client = { from(table) { assert.equal(table, "invoices"); return query; } };
+    order() { return Promise.resolve({ data: invoices, error: null }); },
+    then(resolve, reject) {
+      const data = table === "invoice_lines" ? lines : splits;
+      return Promise.resolve({ data, error: null }).then(resolve, reject);
+    },
+  });
+  const client = { from: queryFor };
   const loaded = await loadRelationalInvoices(client, { companyId });
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].syncStatus, "synced");
@@ -155,6 +161,11 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
     items: [{ ...sampleInvoice.items[0], departmentSplits: [{ id: splitId, department: "Kitchen", percentage: 100, amount: 8 }] }],
   };
   assert.equal(compareInvoiceCollections([originalWithSplit], loaded).counts.presentInBoth, 1);
+  assert.deepEqual(selectCalls, [
+    { table: "invoices", columns: "*" },
+    { table: "invoice_lines", columns: "*" },
+    { table: "invoice_line_department_splits", columns: "*" },
+  ]);
 });
 
 test("recovery imports only the previewed missing invoice and leaves existing cloud rows intact", async () => {
