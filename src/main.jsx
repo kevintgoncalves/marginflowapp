@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
-import marginflowMark from "./assets/marginflow-mark.svg";
+import marginflowLogo from "./assets/marginflow-logo.svg";
 import {
   AlertTriangle,
   ArrowDownUp,
@@ -3848,12 +3848,13 @@ function contextualPageSubtitle(active, {
   invoiceControlWeekRange,
 }) {
   const period = `${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`;
+  const month = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" }).format(parseDate(dateRange.start));
   const activeSupplierCount = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false).length;
-  if (active === "dashboard") return `${rangeLabel(dateRangeState, dateRange)}`;
-  if (active === "invoices") return `${invoices.length} purchasing document${invoices.length === 1 ? "" : "s"} · ${period}`;
+  if (active === "dashboard") return `${dateRangeState.preset === "This Month" ? "All departments" : "Current view"} - ${month}`;
+  if (active === "invoices") return `${invoices.length} invoice${invoices.length === 1 ? "" : "s"} - ${month}`;
   if (active === "invoiceControl") {
     const week = invoiceControlWeekRange ? `${formatRangeDate(invoiceControlWeekRange.start)} - ${formatRangeDate(invoiceControlWeekRange.end)}` : "";
-    return `${activeSupplierCount} active supplier${activeSupplierCount === 1 ? "" : "s"}${week ? ` · ${week}` : ""}`;
+    return `${activeSupplierCount} suppliers${week ? ` - Week ${week}` : ""}`;
   }
   if (active === "products") return `${products.length} product${products.length === 1 ? "" : "s"}`;
   if (active === "suppliers") return `${activeSupplierCount} active supplier${activeSupplierCount === 1 ? "" : "s"}`;
@@ -3862,8 +3863,10 @@ function contextualPageSubtitle(active, {
     const activeRecipeCount = recipes.filter((recipe) => recipe.status !== "Archived").length;
     return `${activeRecipeCount} active recipe${activeRecipeCount === 1 ? "" : "s"}`;
   }
-  if (active === "waste") return `${period} · ${wasteItems.filter((item) => dateInRange(item.date, dateRange)).length} record(s)`;
-  if (["gp", "labour"].includes(active)) return period;
+  if (active === "waste") return `${month} - ${wasteItems.filter((item) => dateInRange(item.date, dateRange)).length} records`;
+  if (["gp", "labour"].includes(active)) return month;
+  if (active === "ai") return "3 insights to review";
+  if (active === "settings") return "Account, company and cloud sync";
   return "";
 }
 
@@ -4474,6 +4477,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
   const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
   const [active, setActive] = useState("dashboard");
+  const [analysisRunId, setAnalysisRunId] = useState(0);
   const [pathname, setPathname] = useState(currentPathname);
   const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
     const dates = mondaySundayWeekDates(mondayWeekStart(today()));
@@ -5515,22 +5519,19 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     );
   }
 
+  const topbarAction = active === "dashboard"
+    ? <button className="page-primary-action" onClick={() => setActive("gp")} type="button">Input sales +</button>
+    : active === "invoiceControl" && permissionsByPage.invoiceControl?.canAdd
+      ? <button className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())} type="button">Upload invoice</button>
+      : active === "ai"
+        ? <button className="page-primary-action" onClick={() => setAnalysisRunId((current) => current + 1)} type="button">Run analysis</button>
+      : null;
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell app-page-${active}`}>
       <aside className="sidebar">
         <div className="brand">
-          <img alt="" className="brand-mark" src={marginflowMark} />
-          <strong className="brand-wordmark">MarginFlow</strong>
-        </div>
-        <div className="sidebar-user-switcher">
-          <span>{demoMode ? "Demo mode" : "Signed in"}</span>
-          <strong>{currentUser.name}</strong>
-          <small>{currentUser.email}</small>
-          {demoMode ? (
-            <a className="ghost sidebar-link-button" href="/?mode=register">Create account</a>
-          ) : (
-            <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
-          )}
+          <img alt="MarginFlow" className="brand-logo" src={marginflowLogo} />
         </div>
         <nav>
           {visibleNavItems.map((item) => {
@@ -5543,36 +5544,44 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             );
           })}
         </nav>
-        <details className="sidebar-card sidebar-workflow-note">
-          <summary><Sparkles size={15} /><span>Work Edition workflows</span></summary>
-          <p>Invoices use manual entry, CSV import and supplier parsers with review steps before changes affect GP.</p>
-        </details>
+        <div className="sidebar-user-switcher">
+          <button className="sidebar-location" onClick={() => setDepartmentOpen((current) => !current)} type="button">
+            <Store size={18} />
+            <span><strong>{department}</strong><small>Switch location</small></span>
+          </button>
+          <button aria-label="Collapse sidebar" className="sidebar-collapse" title="Collapse sidebar" type="button"><span aria-hidden="true">‹</span> Collapse</button>
+          <details className="sidebar-account">
+            <summary>Account</summary>
+            <strong>{currentUser.name}</strong>
+            <small>{currentUser.email}</small>
+            {demoMode ? (
+              <div className="sidebar-account-actions">
+                <button className="ghost" onClick={resetDemoData} type="button">Reset demo</button>
+                <a className="ghost sidebar-link-button" href="/?mode=register">Create account</a>
+              </div>
+            ) : (
+              <>
+                <CloudStatusBanner
+                  enabled={cloudEnabled}
+                  error={cloudError}
+                  loading={cloudLoading}
+                  onRetry={retryCloudSync}
+                  status={cloudStatus}
+                />
+                <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+              </>
+            )}
+          </details>
+        </div>
       </aside>
 
       <main className="workspace">
-        {demoMode && (
-          <div className="demo-banner">
-            <span>You are viewing demo data. Create an account to use your own data.</span>
-            <div>
-              <button className="ghost" onClick={resetDemoData} type="button">Reset Demo</button>
-              <a href="/?mode=register">Create account</a>
-            </div>
-          </div>
-        )}
-        {!demoMode && (
-          <CloudStatusBanner
-            enabled={cloudEnabled}
-            error={cloudError}
-            loading={cloudLoading}
-            onRetry={retryCloudSync}
-            status={cloudStatus}
-          />
-        )}
         <header className="topbar">
           <div>
             <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
             {pageSubtitle && <p className="page-subtitle">{pageSubtitle}</p>}
           </div>
+          {topbarAction}
         </header>
 
         {hasDepartmentContext && (
@@ -5610,6 +5619,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             permissions={permissionsByPage.dashboard}
             sales={sales}
             setDateRangeState={setDateRangeState}
+            onNavigate={setActive}
             stocktakes={stocktakes}
             suppliers={suppliers}
             supplierSpend={departmentSupplierSpend}
@@ -5702,7 +5712,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         )}
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={department} departmentNames={allowedDepartmentNames} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "waste" && <Waste department={department} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         {active === "gp" && (
           <SalesAnalysis
             dateRange={dateRange}
@@ -5739,11 +5749,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setLabourData={setLabourData}
           />
         )}
-        {active === "ai" && (
-          <Panel title="AI Insights">
-            <p className="helper-text">AI Insights permissions are ready for the future AI module. Invoice AI reading remains controlled from Invoices and Settings.</p>
-          </Panel>
-        )}
+        {active === "ai" && <AiInsightsPage metrics={metrics} onNavigate={setActive} runId={analysisRunId} />}
         {active === "settings" && (
           <SettingsPanel
             aiSettings={aiSettings}
@@ -6173,13 +6179,48 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
   );
 }
 
-function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
+function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
   const [breakdownView, setBreakdownView] = useState("Department");
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
   const chartData = aggregateDashboardRows(dailyRows, dateRange);
   const chartPrefix = chartTitlePrefix(chartData.granularity);
+
+  if (dashboardMode) {
+    return (
+      <>
+        <div className="dashboard-operational-view">
+          <Panel className="dashboard-supplier-spend" title="Supplier spend" action={(
+            <div className="segmented-control compact" role="group" aria-label="Supplier spend view">
+              <button className="active" type="button">By day</button>
+              <button type="button">By dept</button>
+            </div>
+          )}>
+            {hasData ? <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} /> : <EmptyState />}
+          </Panel>
+          <Panel
+            className="dashboard-performance-breakdown"
+            title="Performance breakdown"
+            action={(
+              <div className="segmented-control compact" role="group" aria-label="Performance breakdown view">
+                {[["Department", "By dept"], ["Daily", "By day"]].map(([option, label]) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{label}</button>)}
+              </div>
+            )}
+          >
+            {breakdownView === "Department" ? <DepartmentBreakdown rows={departmentRows} /> : <DailyGpTable rows={dailyRows} />}
+          </Panel>
+        </div>
+        <details className="dashboard-history">
+          <summary>More metrics</summary>
+          <div className="dashboard-layout">
+            <Panel title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}><DailyGpChart rows={chartData.rows} targetGp={gpTarget} /></Panel>
+            <Panel title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
+          </div>
+        </details>
+      </>
+    );
+  }
 
   if (!hasData) return <EmptyState />;
 
@@ -6212,7 +6253,7 @@ function PerformanceCharts({ dateRange, departmentRows, dailyRows, gpTarget, met
   );
 }
 
-function PerformanceSections({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
+function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -6224,14 +6265,22 @@ function PerformanceSections({ dateRange, dateRangeState, demoMode = false, depa
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
       <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
-      <PerformanceCharts dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
-      <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />
+      {dashboardMode && (
+        <div className="dashboard-period-note">
+          <AlertTriangle size={19} />
+          <div><strong>Comparing this selected period with the previous period</strong><span>Variance may look larger than it is.</span></div>
+        </div>
+      )}
+      <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
+      {dashboardMode ? (
+        <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} /></details>
+      ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />}
       {showSalesManager && <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const allDepartmentMetrics = useMemo(
     () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
     [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
@@ -6248,31 +6297,36 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
     .sort((a, b) => b.date.localeCompare(a.date));
 
   return (
-    <>
+    <div className="dashboard-page">
       {shouldUseAllDepartments && (
         <div className="notice-card">
           Dashboard is showing all departments because {department} has no sales in this date range.
         </div>
       )}
-      <PerformanceSections dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
-      <div className="dashboard-layout secondary">
-        <Panel title="Recent purchasing documents">
-          <DataTable
-            columns={[
-              { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
-              { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
-              { key: "supplier", label: "Supplier" },
-              { key: "date", label: "Date" },
-              { key: "total", label: "Signed total", render: (_, row) => money(row.departmentTotal) },
-            ]}
-            rows={recentInvoices}
-          />
-        </Panel>
-        <Panel title="Cost alerts">
-          <InsightList metrics={dashboardMetrics} />
-        </Panel>
+      <div className="dashboard-content">
+        <section className="dashboard-main-column">
+          <PerformanceSections dashboardMode dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+          <details className="dashboard-documents"><summary>Recent purchasing documents</summary>
+            <DataTable
+              columns={[
+                { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
+                { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
+                { key: "supplier", label: "Supplier" },
+                { key: "date", label: "Date" },
+                { key: "total", label: "Signed total", render: (_, row) => money(row.departmentTotal) },
+              ]}
+              rows={recentInvoices}
+            />
+          </details>
+        </section>
+        <aside className="dashboard-rail" aria-label="Operational summary">
+          <div className="dashboard-rail-card warning"><span>Invoices</span><strong>{dashboardMetrics.invoices.length}</strong><small>This month</small><button onClick={() => onNavigate?.("invoices")} type="button">View invoices</button></div>
+          <div className="dashboard-rail-card"><span>Waste</span><strong>{moneyOrEmpty(dashboardMetrics.waste, Boolean(dashboardMetrics.wasteRecords?.length))}</strong><small>{dashboardMetrics.netSales ? `${percent(dashboardMetrics.wastePercent)} of net sales` : "No sales baseline"}</small><button onClick={() => onNavigate?.("waste")} type="button">View waste</button></div>
+          <div className="dashboard-rail-card"><span>Labour</span><strong>–</strong><small>Available in Labour</small><button onClick={() => onNavigate?.("labour")} type="button">View labour</button></div>
+          <div className="dashboard-rail-card warning"><span>AI Insights</span><strong>3</strong><small>Insights to review</small><button onClick={() => onNavigate?.("ai")} type="button">View insights</button></div>
+        </aside>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -6377,6 +6431,8 @@ function Invoices({
     || (approvedDocumentFilter === "Invoices" && isInvoiceDocument(documentTypeFor(invoice)))
     || (approvedDocumentFilter === "Credit notes" && isCreditNoteDocument(documentTypeFor(invoice)))
   ));
+  const approvedInvoiceTotal = approvedDocuments.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
+  const reviewDocumentCount = invoices.filter((invoice) => invoiceHasBlockingReview(validateInvoiceExtraction({ invoice, lines: invoice.items || [] }))).length;
   const draftValidationState = useMemo(() => validateInvoiceExtraction({
     invoice: {
       supplier: draft.supplier || draft.items[0]?.supplier,
@@ -7197,9 +7253,24 @@ function Invoices({
     setDeleteTarget(null);
   };
 
+  const openInvoiceWorkflow = () => {
+    const workflow = document.querySelector(".invoice-workflow-panel");
+    if (!workflow) return;
+    workflow.open = true;
+    workflow.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
-    <div className="page-grid">
-      <Panel title="Invoice workflow" action={draft.status}>
+    <div className="page-grid invoices-page">
+      <div className="invoice-list-metrics metric-grid">
+        <Metric label="Total spend" value={money(approvedInvoiceTotal)} delta="All documents" />
+        <Metric label="Invoices" value={approvedDocuments.length} delta="This month" />
+        <Metric label="Avg. per invoice" value={money(approvedDocuments.length ? approvedInvoiceTotal / approvedDocuments.length : 0)} delta="Current selection" />
+        <Metric label="Awaiting review" value={reviewDocumentCount} delta="Review conflicts" tone={reviewDocumentCount ? "warn" : "good"} />
+      </div>
+      <details className="invoice-workflow-panel">
+        <summary>Upload invoice +</summary>
+        <Panel title="Invoice workflow" action={draft.status}>
         <div
           className={`drop-zone ${dragging ? "dragging" : ""}`}
           onDragOver={(event) => {
@@ -7285,9 +7356,9 @@ function Invoices({
             <button className="danger-button" disabled={isReading} onClick={requestCancelUpload} type="button"><X size={16} />Cancel Upload</button>
           )}
         </div>
-      </Panel>
+        </Panel>
 
-      <Panel title={`Review ${documentTypeLabel(draftDocumentType).toLowerCase()} lines`} action={`${draft.items.length} line(s)`}>
+        <Panel title={`Review ${documentTypeLabel(draftDocumentType).toLowerCase()} lines`} action={`${draft.items.length} line(s)`}>
         <InvoiceLineEditor
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
@@ -7311,42 +7382,56 @@ function Invoices({
             <button className="ghost" onClick={addDraftInvoiceLine} type="button"><Plus size={16} />Add line</button>
           </div>
         )}
-      </Panel>
+        </Panel>
+      </details>
 
-      <Panel title="Approved purchasing documents">
-        <DataTable
-          columns={[
-            { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
-            { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
-            { key: "supplier", label: "Supplier" },
-            { key: "date", label: "Date" },
-            { key: "items", label: "Lines", render: (items) => items.length },
-            { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
-            { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
-            { key: "syncStatus", label: "Cloud", render: (_, row) => {
-              const syncStatus = row.syncStatus || "legacy_local";
-              if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
-                return (
-                  <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
-                    {syncStatus === "pending_sync" ? "Saving…" : "Sync failed — Retry"}
-                  </button>
-                );
-              }
-              return <Badge tone="green">Saved to cloud</Badge>;
-            } },
-          ]}
-          onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
-          onEdit={permissions.canEdit ? (row) => openEditInvoice(row) : null}
-          rows={approvedDocuments}
-          toolbarAction={(
-            <label className="inline-filter">Type<select value={approvedDocumentFilter} onChange={(event) => setApprovedDocumentFilter(event.target.value)}>
-              <option>All</option>
-              <option>Invoices</option>
-              <option>Credit notes</option>
-            </select></label>
-          )}
-        />
-      </Panel>
+      <div className="invoice-overview-layout">
+        <Panel className="invoice-overview-table" title="Approved purchasing documents">
+          <DataTable
+            columns={[
+              { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
+              { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
+              { key: "supplier", label: "Supplier" },
+              { key: "date", label: "Date" },
+              { key: "items", label: "Lines", render: (items) => items.length },
+              { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
+              { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
+              { key: "syncStatus", label: "Cloud", render: (_, row) => {
+                const syncStatus = row.syncStatus || "legacy_local";
+                if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
+                  return (
+                    <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
+                      {syncStatus === "pending_sync" ? "Saving…" : "Sync failed — Retry"}
+                    </button>
+                  );
+                }
+                return <Badge tone="green">Saved to cloud</Badge>;
+              } },
+            ]}
+            onDelete={permissions.canDelete ? (id) => setDeleteTarget(invoices.find((invoice) => invoice.id === id)) : null}
+            onEdit={permissions.canEdit ? (row) => openEditInvoice(row) : null}
+            rows={approvedDocuments}
+            toolbarAction={(
+              <label className="inline-filter">Type<select value={approvedDocumentFilter} onChange={(event) => setApprovedDocumentFilter(event.target.value)}>
+                <option>All</option>
+                <option>Invoices</option>
+                <option>Credit notes</option>
+              </select></label>
+            )}
+          />
+        </Panel>
+        <aside className="invoice-overview-rail" aria-label="Invoice actions">
+          <section>
+            <h2>Actions</h2>
+            {permissions.canImport && <button onClick={openInvoiceWorkflow} type="button">Upload invoice</button>}
+            {permissions.canAdd && <button className="ghost" onClick={openManualInvoice} type="button">Add manual</button>}
+          </section>
+          <section className="invoice-help-card">
+            <h2>Need help?</h2>
+            <p>Review purchasing workflows and document status.</p>
+          </section>
+        </aside>
+      </div>
 
       {legacyInvoiceArchive.length > 0 && (
         <Panel title="Archived historical documents" action={`${legacyInvoiceArchive.length} read-only`}>
@@ -7870,6 +7955,7 @@ function InvoiceControlCentre({
   const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
   const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
   const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
+  const reviewDocuments = weeklyDocuments.filter((invoice) => invoiceHasBlockingReview(validateInvoiceExtraction({ invoice, lines: invoice.items || [] })));
 
   const markOverride = (supplier, date, statusOverride) => {
     if (!permissions.canEdit) return;
@@ -7909,10 +7995,12 @@ function InvoiceControlCentre({
 
   return (
     <div className="page-grid invoice-control-page">
-      <Panel
-        title="Invoice Control Centre"
-        action={permissions.canAdd ? <button onClick={() => onAddInvoice("", weekStart)} type="button">Upload invoice</button> : `${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
-      >
+      <details className="invoice-control-filters">
+        <summary>View controls</summary>
+        <Panel
+          title="Invoice Control Centre"
+          action={permissions.canAdd ? <button onClick={() => onAddInvoice("", weekStart)} type="button">Upload invoice</button> : `${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
+        >
         <div className="form-grid six range-grid">
           <Field label="Week starting" type="date" value={weekStart} onChange={(value) => setWeekStart(mondayWeekStart(value || today()))} />
           <label>Status filter<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
@@ -7922,23 +8010,46 @@ function InvoiceControlCentre({
             {categoryOptions.map((option) => <option key={option}>{option}</option>)}
           </select></label>
         </div>
+        </Panel>
+      </details>
+
+      <div className="invoice-status warn attention-summary invoice-control-attention">
+        <strong>{missingCells.length ? `${missingCells.length} invoice day${missingCells.length === 1 ? "" : "s"} require attention` : "Invoice delivery status is ready to review"}</strong>
+        <span>{missingCells.length ? "Review missing supplier deliveries to keep your data accurate." : "Review this week's supplier delivery schedule and any invoice exceptions."}</span>
+      </div>
+
+      <Panel className="invoice-review-panel" title="Invoices needing review">
+        {reviewDocuments.length ? (
+          <DataTable
+            columns={[
+              { key: "number", label: "Invoice #" },
+              { key: "supplier", label: "Supplier" },
+              { key: "issue", label: "Issue" },
+              { key: "date", label: "Invoice date", render: formatRangeDate },
+              { key: "total", label: "Amount", render: money },
+              { key: "status", label: "Status", render: () => <Badge tone="amber">Review conflict</Badge> },
+            ]}
+            rows={reviewDocuments.map((invoice) => ({
+              id: invoice.id,
+              number: documentNumberFor(invoice) || "-",
+              supplier: invoice.supplier || "-",
+              issue: getBlockingInvoiceIssues(validateInvoiceExtraction({ invoice, lines: invoice.items || [] }))[0]?.message || "Review required",
+              date: invoice.date,
+              total: invoiceTotal(invoice),
+              status: "review",
+            }))}
+          />
+        ) : <EmptyState />}
       </Panel>
 
-      {missingCells.length > 0 && (
-        <div className="invoice-status warn attention-summary">
-          <strong>{missingCells.length} invoice day{missingCells.length === 1 ? "" : "s"} need attention.</strong>
-          <span>Review missing supplier deliveries for this week.</span>
-        </div>
-      )}
-
-      <div className="metric-grid invoice-control-summary">
-        <Metric label="Uploaded" value={receivedCells.length} delta="invoice day(s)" tone="good" />
-        <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
-        <Metric label="Missing" value={missingCells.length} delta="past due" tone={missingCells.length ? "warn" : "good"} />
-        <Metric label="Not ordered" value={notOrderedCells.length} delta="manual override" />
-      </div>
       <details className="more-metrics invoice-control-more-metrics">
         <summary>More weekly metrics</summary>
+        <div className="metric-grid invoice-control-summary">
+          <Metric label="Uploaded" value={receivedCells.length} delta="invoice day(s)" tone="good" />
+          <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
+          <Metric label="Missing" value={missingCells.length} delta="past due" tone={missingCells.length ? "warn" : "good"} />
+          <Metric label="Not ordered" value={notOrderedCells.length} delta="manual override" />
+        </div>
         <div className="metric-grid secondary-metrics">
           <Metric empty={!weeklyDocuments.length} label="Invoices" value={moneyOrEmpty(weeklyInvoiceSpend, weeklyDocuments.length > 0)} delta="weekly invoice total" />
           <Metric empty={!weeklyDocuments.length} label="Credit notes" value={moneyOrEmpty(weeklyCreditTotal, weeklyDocuments.length > 0)} delta="weekly credit total" />
@@ -8325,15 +8436,11 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
         <DataTable
           columns={[
             { key: "name", label: "Product" },
-            { key: "supplier", label: "Current supplier" },
-            { key: "unitCost", label: "Current cost", render: (value) => money(value) },
-            { key: "normalizedCostLabel", label: "Normalised cost" },
-            { key: "cheapestSupplier", label: "Cheapest supplier" },
-            { key: "priceDifferenceLabel", label: "Price difference" },
-            { key: "packSize", label: "Pack" },
-            { key: "packReview", label: "Pack review" },
-            { key: "department", label: "Department" },
-            { key: "priceHistory", label: "Price history", render: (history) => `${history?.length || 0} entries` },
+            { key: "department", label: "Category" },
+            { key: "packSize", label: "Unit", render: (value, row) => value || row.baseUnit || "-" },
+            { key: "unitCost", label: "Cost (ex)", render: (value) => money(value) },
+            { key: "supplier", label: "Supplier" },
+            { key: "active", label: "Status", render: (value) => <Badge tone={value === false ? "amber" : "green"}>{value === false ? "Inactive" : "Active"}</Badge> },
           ]}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
           onEdit={permissions.canEdit ? openProductModal : null}
@@ -8530,7 +8637,8 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
   const supplierRows = supplierSpend.filter((supplier) => !isSupplierTombstone(supplier)).map((supplier) => {
     const summary = supplierIssueSummary(supplierIssues, supplier.name);
     const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
-    return { ...supplier, deliveryDaysLabel: schedule.deliveryDays.map((day) => day.slice(0, 3)).join(", ") || "-", openIssues: summary.openIssues, valueToChase: summary.valueToChase };
+    const latestInvoice = invoices.filter((invoice) => sameSupplierIdentity(invoice.supplier, supplier.name)).sort((left, right) => String(right.date).localeCompare(String(left.date)))[0];
+    return { ...supplier, deliveryDaysLabel: schedule.deliveryDays.map((day) => day.slice(0, 3)).join(", ") || "-", openIssues: summary.openIssues, valueToChase: summary.valueToChase, lastInvoice: latestInvoice?.date || "-" };
   });
   const supplierTabs = ["Details", "Delivery Schedule", "Invoices", "Products", "Credit Notes / Issues", "Price History"];
   const selectedSupplierName = form.name;
@@ -8726,14 +8834,9 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
               ),
             },
             { key: "category", label: "Category" },
-            { key: "contact", label: "Contact" },
-            { key: "email", label: "Email" },
-            { key: "phone", label: "Phone" },
-            { key: "deliveryDaysLabel", label: "Delivery days" },
-            { key: "invoiceSpend", label: "Invoice purchases", render: (value) => money(value) },
-            { key: "creditTotal", label: "Supplier credits", render: (value) => money(value) },
-            { key: "netSpend", label: "Net spend", render: (value) => money(value) },
-            { key: "active", label: "Status", render: (value) => <Badge tone={value ? "green" : "amber"}>{value ? "Active" : "Inactive"}</Badge> },
+            { key: "openIssues", label: "Open issues", render: (value) => value || "-" },
+            { key: "valueToChase", label: "Value to chase", render: (value) => value ? money(value) : "-" },
+            { key: "lastInvoice", label: "Last invoice", render: (value) => value === "-" ? value : formatRangeDate(value) },
           ]}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
           onEdit={permissions.canEdit ? openSupplierModal : null}
@@ -8981,6 +9084,23 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
   const [productCreation, setProductCreation] = useState(null);
   const productIndex = useMemo(() => createStocktakeProductIndex(products, { organisationId: companyScope.companyId || "" }), [companyScope.companyId, products]);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
+  const latestStocktake = [...visibleStocktakes].sort((left, right) => String(right.date).localeCompare(String(left.date)))[0];
+  const latestLines = latestStocktake?.lines || latestStocktake?.openingLines || [];
+  const latestValue = numberValue(latestStocktake?.totalValue, latestStocktake?.openingStockValue);
+  const countedItems = latestLines.filter((line) => numberValue(line.quantity) > 0).length;
+  const latestCategoryRows = useMemo(() => {
+    const grouped = new Map();
+    latestLines.forEach((line) => {
+      const product = products.find((item) => item.id === line.matchedProductId || item.name === line.productName);
+      const category = product?.department || line.department || latestStocktake?.department || "Uncategorised";
+      const current = grouped.get(category) || { category, items: 0, counted: 0, value: 0 };
+      current.items += 1;
+      current.counted += numberValue(line.quantity) > 0 ? 1 : 0;
+      current.value += numberValue(line.stockValue, numberValue(line.quantity) * numberValue(line.unitCost));
+      grouped.set(category, current);
+    });
+    return [...grouped.values()];
+  }, [latestLines, latestStocktake?.department, products]);
 
   const downloadStocktakeProductsCsv = () => {
     downloadTextFile(`marginflow-stocktake-products-${today()}.csv`, stocktakeProductsCsv(products), "text/csv;charset=utf-8");
@@ -9157,8 +9277,14 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
   }));
 
   return (
-    <div className="page-grid">
-      <Panel title="Stocktake">
+    <div className="page-grid stocktake-page">
+      <div className="metric-grid stocktake-metrics">
+        <Metric label="Total value (cost)" value={money(latestValue)} delta="Latest stocktake" />
+        <Metric label="Total items" value={latestLines.length} delta="Count lines" />
+        <Metric label="Variance vs theoretical" value="–" delta="Requires opening stock" tone="good" />
+        <Metric label="Counted items" value={latestLines.length ? `${Math.round((countedItems / latestLines.length) * 100)}%` : "–"} delta="Latest stocktake" />
+      </div>
+      <Panel className="stocktake-actions" title="Stocktake">
         <div className="button-row left">
           {permissions.canAdd && <button className="ghost" onClick={() => openModal("Opening Stock")} type="button"><Plus size={16} />Opening Stock</button>}
           {permissions.canAdd && <button onClick={() => openModal("Stocktake")} type="button"><Plus size={16} />New Stocktake</button>}
@@ -9166,7 +9292,21 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
           <button className="ghost" disabled={!products.length} onClick={downloadStocktakeProductsCsv} type="button"><Download size={16} />CSV</button>
         </div>
       </Panel>
-      <Panel title="Saved stocktakes">
+      <Panel className="stocktake-category-panel" title="">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Category</th><th>Items</th><th>Counted</th><th>Total value (cost)</th><th>Variance</th></tr></thead>
+            <tbody>
+              {latestCategoryRows.map((row) => <tr key={row.category}><td>{row.category}</td><td>{row.items}</td><td>{row.counted} ({row.items ? Math.round((row.counted / row.items) * 100) : 0}%)</td><td>{money(row.value)}</td><td><span className="stocktake-variance">–</span></td></tr>)}
+              {!latestCategoryRows.length && <tr><td colSpan="5">No stocktake lines available.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+      <button className="stocktake-history-link" onClick={() => document.querySelector(".stocktake-history")?.setAttribute("open", "")} type="button">View stocktake history</button>
+      <details className="stocktake-history">
+        <summary>Stocktake history</summary>
+        <Panel title="Saved stocktakes">
         <DataTable
           columns={[
             { key: "date", label: "Date" },
@@ -9186,7 +9326,8 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
           ]}
           rows={visibleStocktakes}
         />
-      </Panel>
+        </Panel>
+      </details>
       {modal && (
         <div className="modal-backdrop" role="presentation">
           <div className="split-modal wide stocktake-modal" role="dialog" aria-modal="true" aria-label={modal.type}>
@@ -9578,6 +9719,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   const menuGp = average(dishRows.map((dish) => dish.gp));
   const menuTarget = (menuSettings.allowMenuTargetOverride ? numberValue(activeMenu?.targetGp) : 0) || defaultTarget;
   const estimatedTotalCost = dishRows.reduce((sum, dish) => sum + dish.cost, 0);
+  const averageDishCost = dishRows.length ? estimatedTotalCost / dishRows.length : 0;
+  const highCostDishCount = dishRows.filter((dish) => dish.cost > averageDishCost).length;
 
   const createMenu = () => {
     if (!permissions.canAdd) return;
@@ -9694,17 +9837,37 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   };
 
   return (
-    <div className="page-grid menu-costing-page">
+    <div className="menu-costing-page menu-overview-page">
       {activeMenu && (
         <>
-          <div className="metric-grid compact menu-metrics">
-            <Metric label="Menu GP" value={percent(menuGp)} delta="Average GP without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
-            <Metric label="Target GP" value={percent(menuTarget)} delta={activeMenu.name} />
-            <Metric label="Variance" value={percent(menuGp - menuTarget)} delta={`${dishRows.length} dishes`} tone={menuGp >= menuTarget ? "good" : "warn"} />
-            <Metric label="Number of dishes" value={dishRows.length} delta="Active menu" />
-            <Metric label="Estimated total cost" value={money(estimatedTotalCost)} delta="All dishes" />
+          <div className="menu-primary-actions">
+            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button">Add dish</button>}
+            {permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button">Create menu +</button>}
           </div>
-          <Panel title="Menu hierarchy" action={activeMenu.name}>
+          <div className="metric-grid compact menu-metrics menu-overview-metrics">
+            <Metric label="Food GP %" value={percent(menuGp)} delta="Average without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
+            <Metric label="Average dish cost" value={money(averageDishCost)} delta="Active menu" />
+            <Metric label="Menu items" value={dishRows.length} delta="Active menu" />
+            <Metric label="High cost items" value={highCostDishCount} delta="Review needed" tone="warn" />
+          </div>
+          <Panel className="menu-overview-table" title="">
+            <DataTable
+              columns={[
+                { key: "name", label: "Menu item" },
+                { key: "subcategory", label: "Category" },
+                { key: "cost", label: "Cost", render: (value) => money(value) },
+                { key: "sellingPrice", label: "Price", render: (value) => money(value) },
+                { key: "gp", label: "GP %", render: (value) => percent(value) },
+                { key: "status", label: "Status" },
+              ]}
+              onDelete={permissions.canDelete ? deleteDish : null}
+              rows={dishRows}
+            />
+          </Panel>
+          <button className="menu-report-link" onClick={() => document.querySelector(".menu-management")?.setAttribute("open", "")} type="button">View full menu report</button>
+          <details className="menu-management">
+            <summary aria-label="Manage menu" title="Manage menu"><Settings size={16} /></summary>
+            <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
             </div>
@@ -9713,8 +9876,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
               {(permissions.canAdd || permissions.canEdit) && <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>}
               {permissions.canDelete && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
-          </Panel>
-          <Panel title="Subcategory summary">
+            </Panel>
+            <Panel title="Subcategory summary">
             <div className="stack-list">
               {subcategories.map((subcategory) => {
                 const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
@@ -9723,23 +9886,8 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
                 return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span>{permissions.canDelete && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
               })}
             </div>
-          </Panel>
-          <Panel title="Dish table">
-            <DataTable
-              columns={[
-                { key: "name", label: "Dish" },
-                { key: "subcategory", label: "Subcategory" },
-                { key: "cost", label: "Cost", render: (value) => money(value) },
-                { key: "sellingPrice", label: "Selling price", render: (value) => money(value) },
-                { key: "gp", label: "GP %", render: (value) => percent(value) },
-                { key: "targetGp", label: "Target GP %", render: (value) => percent(value) },
-                { key: "variance", label: "Variance", render: (value) => <Badge tone={value >= 0 ? "green" : "amber"}>{percent(value)}</Badge> },
-                { key: "status", label: "Status" },
-              ]}
-              onDelete={permissions.canDelete ? deleteDish : null}
-              rows={dishRows}
-            />
-          </Panel>
+            </Panel>
+          </details>
         </>
       )}
       {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}</div></Panel>}
@@ -9828,8 +9976,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   );
 }
 
-function Waste({ department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "waste"), products, requestDelete, wasteItems, setWasteItems }) {
+function Waste({ department, departmentNames, metrics, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "waste"), products, requestDelete, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
+  const visibleWasteCost = visibleWaste.reduce((sum, item) => sum + numberValue(item.cost), 0);
+  const visibleWasteDays = new Set(visibleWaste.map((item) => item.date).filter(Boolean)).size;
   const emptyWaste = { date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" };
   const [form, setForm] = useState(emptyWaste);
   const [editingWasteId, setEditingWasteId] = useState("");
@@ -9859,7 +10009,13 @@ function Waste({ department, departmentNames, permissions = permissionsForPage(r
   };
 
   return (
-    <div className="page-grid">
+    <div className="waste-page">
+      <div className="metric-grid waste-metrics">
+        <Metric label="Waste cost" value={money(visibleWasteCost)} delta="This month" />
+        <Metric label="% of net sales" value={percent(metrics?.wastePercent || 0)} delta="Current selected period" />
+        <Metric label="Average waste cost" value={money(visibleWaste.length ? visibleWasteCost / visibleWaste.length : 0)} delta="Per event" />
+        <Metric label="Waste events" value={visibleWaste.length} delta={`${visibleWasteDays} day${visibleWasteDays === 1 ? "" : "s"} logged`} />
+      </div>
       <Panel title="Waste tracking" action="Separate cost line">
         <DataTable
           columns={[
@@ -10436,7 +10592,28 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
   const employeeRows = useMemo(() => [...data.employees].sort((a, b) => a.name.localeCompare(b.name)), [data.employees]);
   const employeeOptions = useMemo(() => employeeRows.map((employee) => ({ id: employee.id, name: employee.name })), [employeeRows]);
   const holidaySummary = useMemo(() => labourHolidaySummary(data), [data]);
+  const labourDailyChartRows = useMemo(() => {
+    const values = new Map();
+    labourRows.forEach((row) => {
+      const date = row.date || row.dateFrom;
+      if (!date) return;
+      values.set(date, numberValue(values.get(date), 0) + numberValue(row.wages, 0));
+    });
+    return Array.from({ length: Math.min(daysBetween(dateRange.start, dateRange.end), 31) }, (_, index) => {
+      const date = shiftDate(dateRange.start, index);
+      return { day: new Intl.DateTimeFormat("en-GB", { day: "numeric" }).format(parseDate(date)), wages: numberValue(values.get(date), 0) };
+    });
+  }, [dateRange, labourRows]);
+  const labourRoleChartRows = useMemo(() => {
+    const values = new Map();
+    labourRows.forEach((row) => {
+      const role = row.employeeType || row.payType || "Other";
+      values.set(role, numberValue(values.get(role), 0) + numberValue(row.wages, 0));
+    });
+    return [...values.entries()].map(([day, wages]) => ({ day, wages }));
+  }, [labourRows]);
   const [status, setStatus] = useState("");
+  const [labourView, setLabourView] = useState("day");
   const [employeeModal, setEmployeeModal] = useState(null);
   const [departmentModal, setDepartmentModal] = useState(null);
   const [salesModal, setSalesModal] = useState(null);
@@ -11042,8 +11219,10 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
   };
 
   return (
-    <div className="page-grid">
-      <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+    <div className="labour-page">
+      <details className="labour-controls">
+        <summary>Import labour</summary>
+        <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
         <div className="button-row left labour-hub-actions">
           {permissions.canAdd && <button onClick={openWeeklyInput} type="button"><Plus size={16} />Input labour</button>}
@@ -11055,17 +11234,24 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
         </div>
         <div className="helper-text">{salesSourceLabel}. This page is designed to be managed weekly. Sales are pulled from the Sales page when available; use Input labour week for staff hours and Base Pay.</div>
         {status && <div className="invoice-status">{status}</div>}
-      </Panel>
+        </Panel>
+      </details>
 
-      <div className="metric-grid">
-        <Metric label="Food sales" value={money(salesTotals.foodSales)} delta={salesSourceLabel} tone="good" />
-        <Metric label="Total sales" value={money(salesTotals.totalSales || salesTotals.netSales)} delta={`${salesRows.length} labour import row(s)`} />
+      <div className="metric-grid labour-primary-metrics">
         <Metric label="Labour cost" value={money(labourSummary.wages)} delta={`${numberValue(labourSummary.hours).toFixed(1)} hours`} />
         <Metric label="Labour %" value={percent(labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales))} delta="Cost / sales" tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
-        <Metric label="Target" value="32%" delta={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "Above target" : "On/under target"} tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
-        <Metric label="Service charge" value={money(labourSummary.serviceCharge || salesTotals.serviceCharge)} delta="Allocated / sales page" />
-        <Metric label="Holiday liability" value={money(holidaySummary.totalLiability)} delta={`${numberValue(holidaySummary.totalRemainingHours).toFixed(1)}h owed`} />
+        <Metric label="Total hours" value={numberValue(labourSummary.hours).toFixed(1)} delta="This month" />
+        <Metric label="Avg hourly cost" value={money(labourSummary.hours ? labourSummary.wages / labourSummary.hours : 0)} delta="Base pay" />
       </div>
+
+      <div className="labour-view-tabs" role="tablist" aria-label="Labour chart view">
+        <button className={labourView === "day" ? "active" : ""} onClick={() => setLabourView("day")} role="tab" type="button">By day</button>
+        <button className={labourView === "role" ? "active" : ""} onClick={() => setLabourView("role")} role="tab" type="button">By role</button>
+      </div>
+      <Panel className="labour-chart-panel" title={labourView === "day" ? "Labour cost by day" : "Labour cost by role"}>
+        <BarSeries rows={labourView === "day" ? labourDailyChartRows : labourRoleChartRows} valueKey="wages" />
+      </Panel>
+      <button className="labour-report-link" onClick={() => setActiveLabourModal("imports")} type="button">View labour report</button>
 
       {duplicateWeekModal && (
         <AppModal
@@ -11483,7 +11669,6 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
   }));
   const departmentRows = salesByDepartment(sales, dateRange, departmentNames);
   const salesChartData = aggregateDashboardRows(dailyRows.map((row) => ({ ...row, purchases: 0, waste: 0 })), dateRange);
-  const salesChartPrefix = chartTitlePrefix(salesChartData.granularity);
 
   const openInputSales = () => {
     setSalesDraft(makeSalesDraft(today()));
@@ -11531,8 +11716,10 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
   };
 
   return (
-    <>
-      <Panel title="Sales controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
+    <div className="sales-page">
+      <details className="sales-controls">
+        <summary>Input sales +</summary>
+        <Panel title="Sales controls" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
         <div className="form-grid six">
           <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
           <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: value, endDate: dateRange.end })} />
@@ -11542,12 +11729,14 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         <div className="button-row left">
           {permissions.canAdd && <button onClick={openInputSales} type="button"><Plus size={16} />Input sales</button>}
         </div>
-      </Panel>
+        </Panel>
+      </details>
 
       <div className="metric-grid primary-metrics">
         <Metric empty={!hasSalesInput} label="Net sales" value={moneyOrEmpty(selectedTotals.netSales, hasSalesInput)} delta={hasSalesInput ? `${selectedTotals.rows.length} sales day(s)` : "No sales logged yet"} tone="good" />
         <Metric empty={!hasSalesInput} label="Gross sales" value={moneyOrEmpty(selectedTotals.grossSales, hasSalesInput)} delta={department} />
         <Metric empty={!hasSalesInput} label="Daily average" value={moneyOrEmpty(selectedTotals.averageDailyNet, hasSalesInput)} delta={`${periodLength} day period`} />
+        <Metric label="Days with sales" value={selectedTotals.rows.length} delta="This month" />
       </div>
       <details className="more-metrics">
         <summary>More sales metrics</summary>
@@ -11559,7 +11748,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       </details>
 
       <div className="dashboard-layout secondary">
-        <Panel title={`${salesChartPrefix} net sales`} action={`${salesChartData.granularity} view`}><LineSeries rows={salesChartData.rows} valueKey="netSales" /></Panel>
+        <Panel title="Net sales over time"><LineSeries rows={salesChartData.rows} valueKey="netSales" /></Panel>
         <Panel title="Comparison">
           <DataTable
             columns={[
@@ -11639,7 +11828,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
           </div>
         </div>
       </AppModal>
-    </>
+    </div>
   );
 }
 
@@ -11710,6 +11899,7 @@ function SettingsPanel({
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
   const [userModal, setUserModal] = useState(null);
+  const [settingsSection, setSettingsSection] = useState("");
 
   const canChangeSettings = permissions.canAdd || permissions.canEdit;
   const updateCompany = (field, value) => {
@@ -12081,6 +12271,16 @@ function SettingsPanel({
 
   return (
     <div className="settings-grid settings-page">
+      {!settingsSection ? (
+        <SettingsLanding
+          cloudEnabled={cloudEnabled}
+          cloudStatus={cloudStatus}
+          demoMode={demoMode}
+          onOpen={setSettingsSection}
+        />
+      ) : (
+        <>
+          <button className="settings-back-link" onClick={() => setSettingsSection("")} type="button">Back to Settings</button>
       {!demoMode && (
         <Panel title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
           <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
@@ -12610,6 +12810,40 @@ function SettingsPanel({
           </div>
         </div>
       )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
+  const integrationStatus = cloudEnabled && cloudStatus === "synced" ? "Connected" : "Manage";
+
+  return (
+    <div className="settings-landing-grid">
+      <section className="settings-summary-card">
+        <h2>Business</h2>
+        <div className="settings-summary-row"><span>Business details</span><button onClick={() => onOpen("business")} type="button">Update profile</button></div>
+        <div className="settings-summary-row"><span>Locations</span><button onClick={() => onOpen("business")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Users</span><button onClick={() => onOpen("business")} type="button">Team access</button></div>
+      </section>
+      <section className="settings-summary-card">
+        <h2>Integrations</h2>
+        <div className="settings-summary-row"><span>Cloud sync</span><button className={integrationStatus === "Connected" ? "success" : ""} onClick={() => onOpen("integrations")} type="button">{integrationStatus}</button></div>
+        <div className="settings-summary-row"><span>Data &amp; Time</span><button onClick={() => onOpen("business")} type="button">Preferences</button></div>
+        <div className="settings-summary-row"><span>Notifications</span><button onClick={() => onOpen("integrations")} type="button">Manage</button></div>
+      </section>
+      <section className="settings-summary-card">
+        <h2>Data</h2>
+        <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("data")} type="button">Manage</button></div>
+        <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("data")} type="button">Manage</button></div>
+      </section>
+      <section className="settings-summary-card danger-zone-card">
+        <h2>Danger Zone</h2>
+        <strong>Delete Data</strong>
+        <p>{demoMode ? "Reset this temporary demo data" : "Permanently delete saved application data"}</p>
+        <button className="danger" onClick={() => onOpen("data")} type="button">{demoMode ? "Reset demo" : "Delete data"}</button>
+      </section>
     </div>
   );
 }
@@ -12953,6 +13187,25 @@ function InsightList({ metrics }) {
       <Opportunity title="Invoice GP" body={`Invoice GP is ${percent(metrics.invoiceGp)}. Review high-value invoices before the next order.`} />
       <Opportunity title="Stocktake cost" body={`Opening + purchases - closing gives ${money(metrics.stocktakeCost)} real cost used.`} />
       <Opportunity title="Waste pressure" body={`Waste is ${money(metrics.waste)} or ${percent(metrics.wastePercent)} of current sales.`} />
+    </div>
+  );
+}
+
+function AiInsightsPage({ metrics, onNavigate, runId = 0 }) {
+  const insights = [
+    { id: "waste", tone: "warning", title: "Waste pressure", body: `Waste is ${percent(metrics.wastePercent)} of net sales, which is above your target.`, action: "Review waste records", page: "waste", age: "3h ago" },
+    { id: "menu", tone: "warning", title: "Menu item below target GP", body: "Review dishes that are below the current gross-profit target.", action: "Review menu costing", page: "menu", age: "1d ago" },
+    { id: "supplier", tone: "success", title: "Supplier price increase detected", body: "Review recent purchasing documents for changes in supplier costs.", action: "View supplier", page: "suppliers", age: "2d ago" },
+  ];
+  return (
+    <div className="ai-insights-page">
+      {insights.map((insight) => (
+        <article className={`ai-insight-card ${insight.tone}`} key={insight.id}>
+          <div className="ai-insight-symbol">{insight.tone === "success" ? "!" : "!"}</div>
+          <div><h2>{insight.title}</h2><p>{insight.body}</p><button onClick={() => onNavigate?.(insight.page)} type="button">{insight.action}</button></div>
+          <time>{runId ? "Just now" : insight.age}</time>
+        </article>
+      ))}
     </div>
   );
 }

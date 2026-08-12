@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 48" role="img" aria-label="MarginFlow">
+  <g fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M3 38V10l12 12 12-12v28M27 10l12 12 12-12v28" stroke="#171716" stroke-width="5"/>
+    <path d="M15 22 27 10l12 12 12-12" stroke="#c77b17" stroke-width="5"/>
+  </g>
+  <circle cx="52" cy="10" r="3.5" fill="#c77b17"/>
+  <text x="70" y="33" fill="#171716" font-family="Inter, Arial, sans-serif" font-size="23" font-weight="760" letter-spacing="0">MarginFlow</text>
+</svg>
