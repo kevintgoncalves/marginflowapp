@@ -8,7 +8,7 @@ import {
 } from "../lib/cloudStateRepository.js";
 
 const scope = { companyId: "11111111-1111-4111-8111-111111111111", locationId: "", scopeKey: "company" };
-const definitions = [{ key: "products" }, { key: "invoices" }];
+const definitions = [{ key: "products" }, { key: "invoices" }, { key: "sales" }];
 const hardeningMigration = readFileSync(new URL("../../supabase/migrations/20260807233000_harden_cloud_state_module_rpc.sql", import.meta.url), "utf8");
 
 function revisionServer(initialModules = {}) {
@@ -91,6 +91,13 @@ test("invoice snapshots are never written by revisioned module sync", async () =
   await saveRevisionedCloudModules(client, scope, { products: [{ id: "p1" }], invoices: [{ id: "a" }, { id: "b" }] }, definitions, { revisions: { products: 1 } });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.p_module_key, "products");
+});
+
+test("sales snapshots are never written by revisioned module sync", async () => {
+  const calls = [];
+  const client = { async rpc(name, payload) { calls.push({ name, payload }); return { data: { revision: 2 }, error: null }; } };
+  await saveRevisionedCloudModules(client, scope, { sales: [{ id: "s1", netSales: 100 }] }, definitions);
+  assert.equal(calls.length, 0);
 });
 
 test("TEST C: stale revision conflict rejects the write rather than replacing newer cloud state", async () => {

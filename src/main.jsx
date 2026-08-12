@@ -86,6 +86,8 @@ import {
 import { diagnoseLaptopLegacyRecovery } from "./lib/legacyRecoveryDiagnosticRepository.js";
 import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
+import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
+import { comparisonRangesForChosenWeek } from "./domain/salesComparison.js";
 import {
   departmentAllocationRows,
   departmentAssignmentForLine,
@@ -261,7 +263,7 @@ const cloudModuleDefinitions = [
   { key: "aiSettings", storageKey: "marginflow.aiSettings" },
   { key: "departmentSelection", storageKey: "marginflow.department" },
 ];
-const cloudWritableModuleDefinitions = cloudModuleDefinitions.filter((definition) => definition.key !== "invoices");
+const cloudWritableModuleDefinitions = cloudModuleDefinitions.filter((definition) => !["invoices", "sales"].includes(definition.key));
 
 function currentSearchParams() {
   try {
@@ -4156,7 +4158,8 @@ function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
     invoices: Array.isArray(read(byKey.invoices, initialInvoices)) ? read(byKey.invoices, initialInvoices) : initialInvoices,
     creditNotes: Array.isArray(read(byKey.creditNotes, [])) ? read(byKey.creditNotes, []) : [],
     invoiceDayStatusOverrides: Array.isArray(read(byKey.invoiceDayStatusOverrides, [])) ? read(byKey.invoiceDayStatusOverrides, []) : [],
-    sales: normalizeSalesRows(Array.isArray(read(byKey.sales, initialSales)) ? read(byKey.sales, initialSales) : initialSales),
+    // Sales are relational/cloud-first; storage snapshots must not hydrate operational sales.
+    sales: [],
     labourData: normalizeLabourData(read(byKey.labourData, createInitialLabourData())),
     recipes: Array.isArray(read(byKey.recipes, initialRecipes)) ? read(byKey.recipes, initialRecipes) : initialRecipes,
     menus: Array.isArray(read(byKey.menus, initialMenus)) ? read(byKey.menus, initialMenus) : initialMenus,
@@ -4509,7 +4512,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
   const [invoices, setInvoicesState] = useState(() => demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
-  const [sales, setSalesState] = useState(() => demoInitialData?.sales || normalizeSalesRows(safeReadLocalStorageArray("marginflow.sales", initialSales)));
+  const [sales, setSalesState] = useState(() => demoInitialData?.sales || []);
+  const salesRef = useRef(sales);
   const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
   const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", initialWaste));
   const [creditNotes, setCreditNotesState] = useState(() => demoInitialData?.creditNotes || safeReadLocalStorageArray("marginflow.creditNotes", []));
@@ -4529,6 +4533,45 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true"
     || (import.meta.env.DEV && new URLSearchParams(window.location.search).get("internalRecovery") === "true");
   const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
+  const salesRowKey = (row = {}) => row.relationalId || row.id || "";
+  const syncRelationalSalesChange = async (previousRows = [], nextRows = []) => {
+    if (!cloudEnabled) return;
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    const previousByKey = new Map(previousRows.map((row) => [salesRowKey(row), row]).filter(([key]) => key));
+    const nextByKey = new Map(nextRows.map((row) => [salesRowKey(row), row]).filter(([key]) => key));
+    const deletedRows = previousRows.filter((row) => {
+      const key = salesRowKey(row);
+      return key && !nextByKey.has(key);
+    });
+    const changedRows = nextRows.filter((row) => {
+      const key = salesRowKey(row);
+      const previous = key ? previousByKey.get(key) : null;
+      return !previous || JSON.stringify(previous) !== JSON.stringify(row);
+    });
+    if (!deletedRows.length && !changedRows.length) return;
+    try {
+      await Promise.all([
+        ...deletedRows.map((row) => deleteRelationalSalesEntry(supabase, row, scope)),
+        ...changedRows.map((row) => persistRelationalSalesEntry(supabase, row, scope)),
+      ]);
+      const freshSales = await loadRelationalSales(supabase, scope);
+      salesRef.current = freshSales;
+      setSalesState(freshSales);
+      setCloudStatus("synced");
+      setCloudError("");
+    } catch (error) {
+      setCloudStatus("error");
+      setCloudError(error.message || "Relational sales sync failed.");
+    }
+  };
+  const setSales = demoMode ? makeStateUpdater(setSalesState) : (value) => {
+    const current = salesRef.current || [];
+    const next = typeof value === "function" ? value(current) : value;
+    const normalized = normalizeSalesRows(next || []);
+    salesRef.current = normalized;
+    setSalesState(normalized);
+    syncRelationalSalesChange(current, normalized);
+  };
   const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
   const setSupplierDeliverySchedules = demoMode ? makeStateUpdater(setSupplierDeliverySchedulesState) : makeStateUpdater(setSupplierDeliverySchedulesState, "marginflow.supplierDeliverySchedules");
@@ -4536,7 +4579,6 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const setInvoiceLineCorrections = demoMode ? makeStateUpdater(setInvoiceLineCorrectionsState) : makeStateUpdater(setInvoiceLineCorrectionsState, "marginflow.invoiceLineCorrections");
   const setInvoices = demoMode ? makeStateUpdater(setInvoicesState) : makeStateUpdater(setInvoicesState, "marginflow.invoices");
   const setInvoiceDayStatusOverrides = demoMode ? makeStateUpdater(setInvoiceDayStatusOverridesState) : makeStateUpdater(setInvoiceDayStatusOverridesState, "marginflow.invoiceDayStatusOverrides");
-  const setSales = demoMode ? makeStateUpdater(setSalesState) : makeStateUpdater(setSalesState, "marginflow.sales");
   const setStocktakes = demoMode ? makeStateUpdater(setStocktakesState) : makeStateUpdater(setStocktakesState, "marginflow.stocktakes");
   const setWasteItems = demoMode ? makeStateUpdater(setWasteItemsState) : makeStateUpdater(setWasteItemsState, "marginflow.waste");
   const setCreditNotes = demoMode ? makeStateUpdater(setCreditNotesState) : makeStateUpdater(setCreditNotesState, "marginflow.creditNotes");
@@ -4573,6 +4615,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     if (!demoMode) saveLocalStorage("marginflow.departmentSettings", value);
   };
 
+  useEffect(() => {
+    salesRef.current = sales;
+  }, [sales]);
+
   const resetDemoData = () => {
     if (!demoMode) return;
     const next = createDemoData();
@@ -4586,6 +4632,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setInvoiceLineCorrectionsState(next.invoiceLineCorrections);
     setInvoicesState(next.invoices);
     setInvoiceDayStatusOverridesState(next.invoiceDayStatusOverrides);
+    salesRef.current = next.sales;
     setSalesState(next.sales);
     setStocktakesState(next.stocktakes);
     setWasteItemsState(next.wasteItems);
@@ -4675,6 +4722,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     setInvoicesState(snapshot.invoices);
     setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
     setCreditNotesState(snapshot.creditNotes);
+    salesRef.current = snapshot.sales;
     setSalesState(snapshot.sales);
     setLabourDataState(snapshot.labourData);
     setRecipesState(snapshot.recipes);
@@ -4748,6 +4796,13 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     const reconciled = mergeInvoiceCollectionsPreservingAll(scopedDeviceInvoices, relationalInvoices);
     saveLocalStorage("marginflow.invoices", reconciled.invoices);
     return { ...snapshot, invoices: reconciled.invoices };
+  };
+
+  const withRelationalSales = async (snapshot) => {
+    if (!cloudEnabled) return snapshot;
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    const relationalSales = await loadRelationalSales(supabase, scope);
+    return { ...snapshot, sales: relationalSales };
   };
 
   const persistConfirmedLearning = async (learnedMappings = []) => {
@@ -4836,13 +4891,15 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             ? mergeMarginFlowStorage(localStorageData, cloudStorage, false).nextStorage
             : cloudStorage;
           const learnedSnapshot = await withRelationalLearning(cloudSnapshotFromStorage(merged));
-          const nextSnapshot = await withRelationalInvoices(learnedSnapshot);
+          const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
+          const nextSnapshot = await withRelationalSales(invoiceSnapshot);
           applyCloudSnapshot(nextSnapshot);
           if (cancelled) return;
           setCloudStatus("synced");
         } else {
           const learnedSnapshot = await withRelationalLearning(hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot);
-          const firstSnapshot = await withRelationalInvoices(learnedSnapshot);
+          const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
+          const firstSnapshot = await withRelationalSales(invoiceSnapshot);
           applyCloudSnapshot(firstSnapshot);
           if (cancelled) return;
           setCloudStatus("synced");
@@ -4866,34 +4923,37 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   useEffect(() => {
     if (!cloudEnabled) return undefined;
     let cancelled = false;
-    const refreshRelationalInvoices = async () => {
+    const refreshRelationalOperations = async () => {
       if (!cloudReadyRef.current || invoiceRefreshRef.current || cancelled) return;
       invoiceRefreshRef.current = true;
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-        const [freshInvoices, freshArchive] = await Promise.all([
+        const [freshInvoices, freshArchive, freshSales] = await Promise.all([
           loadRelationalInvoices(supabase, scope),
           loadLegacyInvoiceArchive(supabase, scope),
+          loadRelationalSales(supabase, scope),
         ]);
         if (cancelled) return;
         setInvoices((current) => mergeInvoiceCollectionsPreservingAll(current, freshInvoices).invoices);
         setLegacyInvoiceArchive(freshArchive);
+        salesRef.current = freshSales;
+        setSalesState(freshSales);
       } catch (error) {
-        if (!cancelled) setCloudError(error.message || "Could not refresh relational invoices.");
+        if (!cancelled) setCloudError(error.message || "Could not refresh relational operating data.");
       } finally {
         invoiceRefreshRef.current = false;
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === "visible") refreshRelationalInvoices();
+      if (document.visibilityState === "visible") refreshRelationalOperations();
     };
-    const interval = window.setInterval(refreshRelationalInvoices, 30000);
-    window.addEventListener("focus", refreshRelationalInvoices);
+    const interval = window.setInterval(refreshRelationalOperations, 30000);
+    window.addEventListener("focus", refreshRelationalOperations);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener("focus", refreshRelationalInvoices);
+      window.removeEventListener("focus", refreshRelationalOperations);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [cloudEnabled, cloudScope.companyId, cloudScope.locationId]);
@@ -11301,12 +11361,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
   const selectedTotals = salesTotalsForRange(sales, dateRange, department);
   const periodLength = daysBetween(dateRange.start, dateRange.end);
   const customWeekRange = rangeFromStartAndLength(compareWeekStart, 7);
-  const comparisonRows = [
-    { id: "previous-day", period: "Previous day", range: shiftRangeByDays(dateRange, -1) },
-    { id: "previous-week", period: "Previous week", range: shiftRangeByDays(dateRange, -7) },
-    { id: "previous-year", period: "Previous year", range: shiftRangeByYears(dateRange, -1) },
-    { id: "chosen-week", period: "Chosen week", range: customWeekRange },
-  ].map((row) => {
+  const comparisonRows = comparisonRangesForChosenWeek(customWeekRange).map((row) => {
     const totals = salesTotalsForRange(sales, row.range, department);
     const variance = selectedTotals.netSales - totals.netSales;
     return {

@@ -1,4 +1,4 @@
-export const SNAPSHOT_WRITE_EXCLUDED_MODULES = Object.freeze(["invoices"]);
+export const SNAPSHOT_WRITE_EXCLUDED_MODULES = Object.freeze(["invoices", "sales"]);
 export const CLOUD_STATE_SAVE_RPC = "save_cloud_state_module_v2";
 export const CLOUD_STATE_SAVE_ARGUMENTS = Object.freeze([
   "p_company_id",
