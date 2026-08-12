@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildEmergencyBackup,
   compareInvoiceCollections,
+  invoiceOnlyRecoveryDryRun,
   inspectEmergencyBackup,
   mergeInvoiceCollectionsPreservingAll,
   recoveryPreviewForBackup,
@@ -68,6 +69,61 @@ test("backup recovery preview separates existing, missing and conflicting invoic
   assert.equal(preview.comparison.counts.onlyLocal, 1);
   assert.equal(preview.comparison.onlyLocal[0].documentNumber, "B");
   assert.equal(preview.comparison.counts.conflicts, 1);
+});
+
+test("invoice-only recovery dry run classifies every backup invoice without writes", () => {
+  const exact = invoice("backup-a", "A", 10);
+  const missing = invoice("backup-b", "B", 20);
+  const conflictMarkedButExact = invoice("backup-c", "C", 30, {
+    syncStatus: "conflict",
+    recoveryConflictVersions: [invoice("old-cloud-c", "C", 31)],
+  });
+  const cloudNewer = invoice("backup-d", "D", 40, { updatedAt: "2026-08-01T00:00:00Z" });
+  const mergeCandidate = invoice("backup-e", "E", 50, {
+    items: [{ id: "backup-e-line", productName: "Apples", quantity: 1, unitCost: 50 }],
+  });
+  const duplicateOne = invoice("backup-f1", "F", 60);
+  const duplicateTwo = invoice("backup-f2", "F", 60);
+  const backup = buildEmergencyBackup({
+    exportedAt: "2026-08-10T15:47:48.757Z",
+    company: { id: "company-a", name: "Reading Room" },
+    location: { id: "location-a", name: "Main" },
+    currentSnapshot: {
+      invoices: [exact, missing, conflictMarkedButExact, cloudNewer, mergeCandidate, duplicateOne, duplicateTwo],
+    },
+  });
+  const run = invoiceOnlyRecoveryDryRun(backup, {
+    invoices: [
+      exact,
+      invoice("cloud-c", "C", 30),
+      invoice("cloud-d", "D", 40, { updatedAt: "2026-08-11T00:00:00Z", items: [{ id: "cloud-d-line", productName: "Apples", quantity: 1, unitCost: 40 }, { id: "cloud-d-line-2", productName: "Pears", quantity: 1, unitCost: 1 }] }),
+      { ...mergeCandidate, items: [] },
+    ],
+  });
+  assert.equal(run.invariant.exact, true);
+  assert.equal(run.invariant.totalBackupInvoices, 7);
+  assert.equal(run.categoryCounts.exactlyExists, 2);
+  assert.equal(run.categoryCounts.missing, 2);
+  assert.equal(run.categoryCounts.cloudNewerOrMoreComplete, 1);
+  assert.equal(run.categoryCounts.safeMergeCandidates, 1);
+  assert.equal(run.categoryCounts.duplicatesInsideBackup, 1);
+  assert.equal(run.preview.invoicesThatWouldBeDeleted, 0);
+  assert.equal(run.preview.currentCloudInvoicesThatWouldBeOverwritten, 0);
+  assert.equal(run.preview.dataModified, false);
+  assert.equal(run.idempotency.pass, true);
+});
+
+test("invoice-only dry run treats conflicting backup duplicates as manual review, not inserts", () => {
+  const backup = buildEmergencyBackup({
+    company: { id: "company-a" },
+    currentSnapshot: { invoices: [invoice("a", "A", 10), invoice("b", "A", 11)] },
+  });
+  const run = invoiceOnlyRecoveryDryRun(backup, { invoices: [] });
+  assert.equal(run.invariant.exact, true);
+  assert.equal(run.categoryCounts.duplicatesInsideBackup, 2);
+  assert.equal(run.preview.invoicesRequiringManualReview, 2);
+  assert.equal(run.categoryCounts.missing, 0);
+  assert.equal(run.preview.invoicesThatWouldBeInserted, 0);
 });
 
 test("backup company scope and supplier name identify a legacy invoice despite relational-only IDs", () => {

@@ -6161,6 +6161,7 @@ button.icon {
 .settings-section-cloud > .settings-cloud-section,
 .settings-section-datetime > .settings-datetime-section,
 .settings-section-notifications > .settings-notifications-section,
+.settings-section-backup > .settings-backup-section,
 .settings-section-categories > .settings-categories-section,
 .settings-section-units > .settings-units-section,
 .settings-section-danger > .settings-danger-section { display: block; }

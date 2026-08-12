@@ -75,9 +75,9 @@ import {
   buildEmergencyBackup,
   compareInvoiceCollections,
   inspectEmergencyBackup,
+  invoiceOnlyRecoveryDryRun,
   invoiceRecoveryIdentity,
   mergeInvoiceCollectionsPreservingAll,
-  recoveryPreviewForBackup,
 } from "./domain/emergencyRecovery.js";
 import {
   loadLegacyInvoiceArchive,
@@ -5156,10 +5156,23 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     const canonicalInvoices = cloudEnabled
       ? await loadRelationalInvoices(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" })
       : invoices;
-    const preview = recoveryPreviewForBackup(payload, canonicalInvoices);
-    const sourceCompanyId = preview.company?.id || preview.company?.company_id || "";
+    const preview = invoiceOnlyRecoveryDryRun(payload, {
+      invoices: canonicalInvoices,
+      products: cloudSnapshot.products || products,
+      suppliers: cloudSnapshot.suppliers || suppliers,
+      stocktakes: cloudSnapshot.stocktakes || stocktakes,
+    });
+    const sourceCompanyId = preview.backup.company?.id || preview.backup.company?.company_id || "";
     return {
       ...preview,
+      counts: preview.backup.counts,
+      company: preview.backup.company,
+      location: preview.backup.location,
+      exportedAt: preview.backup.exportedAt,
+      schema: preview.backup.schema,
+      schemaVersion: preview.backup.schemaVersion,
+      invoiceDateRange: preview.backup.invoiceDateRange,
+      invoiceNumbers: preview.backup.invoiceNumbers,
       scopeMismatch: Boolean(sourceCompanyId && cloudScope.companyId && sourceCompanyId !== cloudScope.companyId),
     };
   };
@@ -12041,7 +12054,10 @@ function SettingsPanel({
       if (sourceCompanyId && activeCompanyId && sourceCompanyId !== activeCompanyId) {
         setEmergencyBackupPreview({
           ...localInspection,
+          backup: localInspection,
           scopeMismatch: true,
+          categoryCounts: {},
+          currentCloud: {},
           comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []),
         });
         setDataStatus("This backup belongs to a different company. Preview is available, but import is blocked.");
@@ -12049,9 +12065,9 @@ function SettingsPanel({
       }
       try {
         const preview = await onInspectRecoveryBackup?.(payload);
-        setEmergencyBackupPreview(preview || { ...localInspection, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []) });
+        setEmergencyBackupPreview(preview || { ...localInspection, backup: localInspection, categoryCounts: {}, currentCloud: {}, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []) });
       } catch (error) {
-        setEmergencyBackupPreview({ ...localInspection, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []), cloudError: error.message || "Cloud comparison unavailable." });
+        setEmergencyBackupPreview({ ...localInspection, backup: localInspection, categoryCounts: {}, currentCloud: {}, comparison: compareInvoiceCollections(localInspection.snapshot.invoices || [], []), cloudError: error.message || "Cloud comparison unavailable." });
       }
     } catch (error) {
       setDataStatus(error.message || "Choose a valid MarginFlow emergency backup JSON file.");
@@ -12621,15 +12637,15 @@ function SettingsPanel({
         onVerify={onVerifyRecovery}
       />}
 
-      {false && <Panel title="Emergency data recovery" action="Reads this device without cloud sync">
+      <Panel className="settings-backup-section" title="Backup & Restore" action="Invoices only">
         <div className="button-row left wrap">
           <button onClick={exportEmergencyBackup} type="button"><Download size={16} />Download Emergency Backup</button>
-          <label className="file-button secondary">Inspect Emergency Backup<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
+          <label className="file-button secondary">Choose backup file<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={previewLaptopMigration} type="button"><PackageSearch size={16} />Preview laptop migration</button>
           <button className="ghost recovery-diagnostic-button" disabled={recoveryBusy || !cloudEnabled} onClick={diagnoseRecoveryConflicts} type="button"><FileSearch size={16} /><span>Diagnose recovery conflicts<small>Read-only</small></span></button>
         </div>
-        <p className="helper-text">Emergency export uses the current device state and works even when cloud sync is failing. Inspection is preview-only.</p>
+        <p className="helper-text">Emergency backup recovery is preview-only here. It compares backup invoices with relational cloud invoices and never restores settings, suppliers, products or other modules.</p>
         {syncDiagnostic && (
           <div className="recovery-summary-grid">
             <div><strong>Relational invoices</strong><span>Device {syncDiagnostic.relational.counts.local} · Cloud {syncDiagnostic.relational.counts.cloud}</span><span>Only device {syncDiagnostic.relational.counts.onlyLocal} · Only cloud {syncDiagnostic.relational.counts.onlyCloud} · Conflicts {syncDiagnostic.relational.counts.conflicts}</span></div>
@@ -12740,24 +12756,39 @@ function SettingsPanel({
         )}
         {emergencyBackupPreview && (
           <div className="recovery-preview">
-            <div className="panel-head"><div><h3>Backup preview</h3><span>{emergencyBackupPreview.schema}</span></div></div>
+            <div className="panel-head"><div><h3>Emergency backup</h3><span>{emergencyBackupPreview.schema} · {emergencyBackupPreview.exportedAt || "No backup date"}</span></div></div>
             <div className="merge-impact-grid">
+              <span><strong>{emergencyBackupPreview.company?.name || "Unknown company"}</strong> company</span>
+              <span><strong>{emergencyBackupPreview.location?.name || "Unknown location"}</strong> location</span>
               <span><strong>{emergencyBackupPreview.counts.invoices}</strong> invoices</span>
               <span><strong>{emergencyBackupPreview.counts.products}</strong> products</span>
               <span><strong>{emergencyBackupPreview.counts.suppliers}</strong> suppliers</span>
-              <span><strong>{emergencyBackupPreview.counts.stocktakes}</strong> Stock Takes</span>
-              <span><strong>{emergencyBackupPreview.comparison.counts.onlyLocal}</strong> missing from relational cloud</span>
-              <span><strong>{emergencyBackupPreview.comparison.counts.conflicts}</strong> conflicts requiring review</span>
+              <span><strong>{emergencyBackupPreview.counts.stocktakes}</strong> stocktakes</span>
+              <span><strong>{emergencyBackupPreview.scopeMismatch ? "Not compatible" : "Compatible"}</strong> compatibility</span>
+              <span><strong>{emergencyBackupPreview.currentCloud?.invoices ?? 0}</strong> cloud invoices</span>
+            </div>
+            <div className="panel-head"><div><h3>Preview recovery</h3><span>Conflicts will not be overwritten.</span></div></div>
+            <div className="merge-impact-grid">
+              <span><strong>{emergencyBackupPreview.categoryCounts?.exactlyExists ?? 0}</strong> already in cloud</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.missing ?? 0}</strong> missing</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.cloudNewerOrMoreComplete ?? 0}</strong> cloud newer</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.safeMergeCandidates ?? 0}</strong> merge candidates</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.trueConflicts ?? 0}</strong> conflicts</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.duplicatesInsideBackup ?? 0}</strong> backup duplicates</span>
+              <span><strong>{emergencyBackupPreview.categoryCounts?.unclassified ?? 0}</strong> unclassified</span>
             </div>
             <p>Invoice dates: {emergencyBackupPreview.invoiceDateRange.from || "-"} to {emergencyBackupPreview.invoiceDateRange.to || "-"}</p>
-            <p className="recovery-invoice-numbers"><strong>Invoice numbers</strong> {emergencyBackupPreview.invoiceNumbers.join(", ") || "None"}</p>
+            <div className="button-row left">
+              <button disabled type="button"><Upload size={16} />Restore missing invoices</button>
+              <span className="helper-text">Restore remains disabled until you approve a completed dry-run report.</span>
+            </div>
             {emergencyBackupPreview.scopeMismatch && <div className="invoice-status warning">This backup belongs to another company. Import is blocked.</div>}
             {emergencyBackupPreview.cloudError && <div className="invoice-status warning">{emergencyBackupPreview.cloudError} Preview remains read-only.</div>}
-            <div className="invoice-status info">Backup files remain preview-only while the current laptop is recovered first.</div>
+            <div className="invoice-status info">Data modified: no. Restore executed: no. Invoices that would be deleted: 0. Cloud invoices that would be overwritten: 0.</div>
           </div>
         )}
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
-      </Panel>}
+      </Panel>
 
       {demoMode ? (
         <Panel className="settings-danger-section" title="Demo data" action="Temporary">
@@ -12856,6 +12887,7 @@ function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
       </section>
       <section className="settings-summary-card">
         <h2>Data</h2>
+        <div className="settings-summary-row"><span>Backup &amp; Restore</span><button onClick={() => onOpen("backup")} type="button">Open</button></div>
         <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("categories")} type="button">Manage</button></div>
         <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("units")} type="button">Manage</button></div>
       </section>
