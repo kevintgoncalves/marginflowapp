@@ -5496,6 +5496,7 @@ button.icon {
 }
 
 .dashboard-main-column > .primary-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   max-width: none;
   gap: 28px;
   padding: 32px 0 10px;
@@ -5533,6 +5534,21 @@ button.icon {
 .dashboard-period-note div { display: grid; gap: 4px; }
 .dashboard-period-note strong { color: var(--text); font-size: 14px; font-weight: 730; }
 .dashboard-period-note span { color: var(--muted); font-size: 12px; }
+
+.comparison-duration-note {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 2px;
+  padding: 0 11px;
+  border: 1px solid #edc77d;
+  border-radius: 6px;
+  background: #fff4dd;
+  color: #8f580e;
+  font-size: 12px;
+  font-weight: 700;
+}
 
 .dashboard-operational-view {
   display: grid;
@@ -5588,6 +5604,15 @@ button.icon {
 .dashboard-comparison[open],
 .dashboard-documents[open] {
   padding-bottom: 18px;
+}
+
+.dashboard-compact-chart-panel .empty-state {
+  min-height: 82px;
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed var(--border-subtle);
+  background: transparent;
+  text-align: left;
 }
 
 .dashboard-documents .table-wrap {
@@ -6106,6 +6131,77 @@ button.icon {
 .dashboard-performance-breakdown .breakdown-layout .donut-list { display: none; }
 .dashboard-performance-breakdown .breakdown-layout .table-wrap { width: 100%; margin: 0; }
 .dashboard-performance-breakdown .table-wrap { overflow-x: auto; }
+
+.recipe-optional-fields {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 18px;
+}
+
+.recipe-optional-field {
+  display: grid;
+  gap: 7px;
+}
+
+.recipe-optional-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recipe-optional-field-head label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.recipe-optional-trigger {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--data-accent);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.recipe-optional-trigger:hover:not(:disabled) {
+  border: 0;
+  background: transparent;
+  color: #1c5ba5;
+}
+
+.menu-lifecycle-action {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid #c9b37a;
+  border-radius: 6px;
+  background: #fffdf7;
+  color: #6d531d;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.menu-lifecycle-action:hover:not(:disabled) {
+  border-color: #ae8b38;
+  background: #fff4dd;
+}
+
+.menu-archived-notice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: -8px 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
 
 .invoice-control-cell.missing {
   border-color: #dea44c;

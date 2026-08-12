@@ -94,6 +94,7 @@ import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js"
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
 import { comparisonRangesForChosenWeek } from "./domain/salesComparison.js";
+import { archiveMenu, isMenuArchived, restoreMenu, visibleMenus } from "./domain/menuLifecycle.js";
 import {
   departmentAllocationRows,
   departmentAssignmentForLine,
@@ -6089,8 +6090,10 @@ function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn
   return { current: currentCustom, previous: previousCustom };
 }
 
-function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, department, gpTarget }) {
-  const hasSales = (metrics.salesRows || []).length > 0;
+function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeState, dateRange, department, gpTarget }) {
+  // Sales rows are hydrated from the relational Sales repository before reaching this view.
+  const hasRelationalSalesEntries = (metrics.salesRows || []).length > 0;
+  const hasSales = hasRelationalSalesEntries;
   const hasPurchases = (metrics.invoices || []).length > 0;
   const hasWaste = (metrics.wasteRecords || []).length > 0;
   const hasGp = hasSales && numberValue(metrics.netSales) > 0;
@@ -6099,15 +6102,16 @@ function PerformanceSummaryCards({ metrics, dateRangeState, dateRange, departmen
       <div className="metric-grid primary-metrics">
         <Metric empty={!hasSales} label="Net Sales" value={moneyOrEmpty(metrics.netSales, hasSales)} delta={hasSales ? "Used for GP" : "No sales logged yet"} />
         <Metric empty={!hasPurchases} label="Purchases" value={moneyOrEmpty(metrics.purchases, hasPurchases)} delta={hasPurchases ? department : "No invoices logged yet"} />
-        <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp && metrics.realGp >= gpTarget ? "good" : "warn"} />
+        {dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
+        <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.realGp >= gpTarget ? "good" : "warn") : "default"} />
       </div>
       <details className="more-metrics">
         <summary>More metrics</summary>
         <div className="metric-grid secondary-metrics">
           <Metric empty={!hasSales} label="Gross Sales" value={moneyOrEmpty(metrics.grossSales, hasSales)} delta={rangeLabel(dateRangeState, dateRange)} />
-          <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp && metrics.invoiceGp >= gpTarget ? "good" : "warn"} />
-          <Metric empty={!hasGp} label="Stocktake GP %" value={hasGp ? percent(metrics.stocktakeGp) : "–"} delta="Opening + purchases - closing" tone={hasGp && metrics.stocktakeGp >= gpTarget ? "good" : "warn"} />
-          <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? `${percent(metrics.wastePercent)} of GP base` : "No waste logged yet"} tone="warn" />
+          {!dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
+          <Metric empty={!hasGp} label="Stocktake GP %" value={hasGp ? percent(metrics.stocktakeGp) : "–"} delta="Opening + purchases - closing" tone={hasGp ? (metrics.stocktakeGp >= gpTarget ? "good" : "warn") : "default"} />
+          <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? `${percent(metrics.wastePercent)} of GP base` : "No waste logged yet"} tone={hasSales && hasWaste ? "warn" : "default"} />
         </div>
       </details>
     </>
@@ -6175,12 +6179,22 @@ function aggregateDashboardRows(rows, range) {
   return { granularity, rows: groupedRows };
 }
 
-function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, metrics }) {
+function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, comparisonRange, dateRange, metrics }) {
+  const currentDuration = dateRange ? dateRangeLength(dateRange) : 0;
+  const comparisonDuration = comparisonRange ? dateRangeLength(comparisonRange) : 0;
+  const periodsHaveDifferentDurations = Boolean(comparisonRange && currentDuration !== comparisonDuration);
+  const dayLabel = (count) => `${count} day${count === 1 ? "" : "s"}`;
   return (
     <Panel title="Comparison" action={comparisonMode}>
       <div className="form-grid six compact-form">
         <label>Compare with<select value={comparisonMode} onChange={(event) => setComparisonMode(event.target.value)}><option>Previous period</option><option>Same period last year</option><option>None</option></select></label>
       </div>
+      {periodsHaveDifferentDurations && (
+        <div className="comparison-duration-note">
+          <AlertTriangle size={17} />
+          <span>Comparing {dayLabel(currentDuration)} with {dayLabel(comparisonDuration)}</span>
+        </div>
+      )}
       {comparisonMode === "None" || !comparisonMetrics ? (
         <EmptyState />
       ) : (
@@ -6226,7 +6240,7 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
             title="Performance breakdown"
             action={(
               <div className="segmented-control compact" role="group" aria-label="Performance breakdown view">
-                {[["Department", "By dept"], ["Daily", "By day"]].map(([option, label]) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{label}</button>)}
+                {[["Daily", "By day"], ["Department", "By department"]].map(([option, label]) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{label}</button>)}
               </div>
             )}
           >
@@ -6236,8 +6250,8 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
         <details className="dashboard-history">
           <summary>More metrics</summary>
           <div className="dashboard-layout">
-            <Panel title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}><DailyGpChart rows={chartData.rows} targetGp={gpTarget} /></Panel>
-            <Panel title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
+            <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}><DailyGpChart rows={chartData.rows} targetGp={gpTarget} /></Panel>
+            <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
           </div>
         </details>
       </>
@@ -6261,7 +6275,7 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
           title="Performance breakdown"
           action={(
             <div className="segmented-control compact" role="group" aria-label="Performance breakdown view">
-              {["Department", "Daily"].map((option) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{option}</button>)}
+              {[["Daily", "By day"], ["Department", "By department"]].map(([option, label]) => <button className={breakdownView === option ? "active" : ""} key={option} onClick={() => setBreakdownView(option)} type="button">{label}</button>)}
             </div>
           )}
         >
@@ -6286,17 +6300,11 @@ function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState,
       <Panel className="dashboard-range-panel" title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
-      <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
-      {dashboardMode && (
-        <div className="dashboard-period-note">
-          <AlertTriangle size={19} />
-          <div><strong>Comparing this selected period with the previous period</strong><span>Variance may look larger than it is.</span></div>
-        </div>
-      )}
+      <PerformanceSummaryCards dashboardMode={dashboardMode} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
       <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       {dashboardMode ? (
-        <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} /></details>
-      ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} metrics={metrics} />}
+        <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
+      ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} />}
       {showSalesManager && <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
@@ -9484,6 +9492,8 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
   const [form, setForm] = useState(empty);
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [methodOpen, setMethodOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [createProductForIngredientId, setCreateProductForIngredientId] = useState("");
   const [productForm, setProductForm] = useState(emptyProduct);
 
@@ -9600,9 +9610,13 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
       }));
       setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", ingredients: ingredients.length ? ingredients : [blankIngredient(), blankIngredient()] });
       setEditingId(row.id);
+      setMethodOpen(Boolean(row.method?.trim()));
+      setNotesOpen(Boolean(row.notes?.trim()));
     } else {
       setForm(empty);
       setEditingId("");
+      setMethodOpen(false);
+      setNotesOpen(false);
     }
     setCreateProductForIngredientId("");
     setModalOpen(true);
@@ -9641,8 +9655,20 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
             <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
             <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
             <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
-            <label>Recipe notes<textarea rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
-            <label className="wide-field">Method<textarea rows={7} placeholder="large text box" value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} /></label>
+          </div>
+          <div className="recipe-optional-fields">
+            {methodOpen ? (
+              <div className="recipe-optional-field wide-field">
+                <div className="recipe-optional-field-head"><label htmlFor="recipe-method">Method</label><button className="recipe-optional-trigger" onClick={() => setMethodOpen(false)} type="button">Hide method</button></div>
+                <textarea id="recipe-method" rows={7} placeholder="Add preparation method" value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} />
+              </div>
+            ) : <button aria-expanded="false" className="recipe-optional-trigger" onClick={() => setMethodOpen(true)} type="button"><Plus size={15} />Add method</button>}
+            {notesOpen ? (
+              <div className="recipe-optional-field">
+                <div className="recipe-optional-field-head"><label htmlFor="recipe-notes">Recipe notes</label><button className="recipe-optional-trigger" onClick={() => setNotesOpen(false)} type="button">Hide notes</button></div>
+                <textarea id="recipe-notes" rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+              </div>
+            ) : <button aria-expanded="false" className="recipe-optional-trigger" onClick={() => setNotesOpen(true)} type="button"><Plus size={15} />Add notes</button>}
           </div>
           <div className="table-wrap bulk-entry-table recipe-builder-table">
             <table>
@@ -9702,7 +9728,8 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
 function MenuCosting({ financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
-  const [activeMenuId, setActiveMenuId] = useState(menus[0]?.id || "");
+  const [showArchived, setShowArchived] = useState(false);
+  const [activeMenuId, setActiveMenuId] = useState(() => visibleMenus(menus)[0]?.id || "");
   const [menuSubcategoryRows, setMenuSubcategoryRows] = useState([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
   const [dishForm, setDishForm] = useState({ menuId: menus[0]?.id || "", subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" });
   const [menuModalOpen, setMenuModalOpen] = useState(false);
@@ -9710,10 +9737,18 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
   const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
   const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
-  const activeMenu = menus.find((menu) => menu.id === activeMenuId) || menus[0];
+  const selectableMenus = useMemo(() => visibleMenus(menus, showArchived), [menus, showArchived]);
+  const editableMenus = useMemo(() => visibleMenus(menus), [menus]);
+  const activeMenu = selectableMenus.find((menu) => menu.id === activeMenuId) || selectableMenus[0];
+  const activeMenuArchived = isMenuArchived(activeMenu);
   const subcategories = activeMenu?.subcategories || [];
-  const dishMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
+  const dishMenu = editableMenus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
   const dishSubcategories = dishMenu?.subcategories || [];
+
+  useEffect(() => {
+    if (selectableMenus.some((menu) => menu.id === activeMenuId)) return;
+    setActiveMenuId(selectableMenus[0]?.id || "");
+  }, [activeMenuId, selectableMenus]);
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
     subcategory.dishes.map((dish) => {
       const cost = dishCost(dish, recipes);
@@ -9814,6 +9849,22 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
     }));
   };
 
+  const archiveActiveMenu = () => {
+    if (!permissions.canEdit || !activeMenu || activeMenuArchived) return;
+    const archivedMenuId = activeMenu.id;
+    setMenus((current) => current.map((menu) => (menu.id === archivedMenuId ? archiveMenu(menu) : menu)));
+    setShowArchived(false);
+    setActiveMenuId(editableMenus.find((menu) => menu.id !== archivedMenuId)?.id || "");
+  };
+
+  const restoreActiveMenu = () => {
+    if (!permissions.canEdit || !activeMenu || !activeMenuArchived) return;
+    const restoredMenuId = activeMenu.id;
+    setMenus((current) => current.map((menu) => (menu.id === restoredMenuId ? restoreMenu(menu) : menu)));
+    setShowArchived(false);
+    setActiveMenuId(restoredMenuId);
+  };
+
   const deleteMenu = () => {
     if (!permissions.canDelete) return;
     if (!activeMenu) return;
@@ -9858,13 +9909,15 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
       {activeMenu && (
         <>
           <div className="menu-primary-actions">
-            {(permissions.canAdd || permissions.canEdit) && <PrimaryAction className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+            {!activeMenuArchived && (permissions.canAdd || permissions.canEdit) && <PrimaryAction className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+            {permissions.canEdit && (activeMenuArchived ? <button className="menu-lifecycle-action" onClick={restoreActiveMenu} type="button">Restore Menu</button> : <button className="menu-lifecycle-action" onClick={archiveActiveMenu} type="button">Archive Menu</button>)}
             {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
           </div>
+          {activeMenuArchived && <div className="menu-archived-notice"><Badge tone="amber">Archived</Badge><span>This menu is read-only until restored.</span></div>}
           <div className="metric-grid compact menu-metrics menu-overview-metrics">
             <Metric label="Food GP %" value={percent(menuGp)} delta="Average without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
-            <Metric label="Average dish cost" value={money(averageDishCost)} delta="Active menu" />
-            <Metric label="Menu items" value={dishRows.length} delta="Active menu" />
+            <Metric label="Average dish cost" value={money(averageDishCost)} delta={activeMenuArchived ? "Archived menu" : "Active menu"} />
+            <Metric label="Menu items" value={dishRows.length} delta={activeMenuArchived ? "Archived menu" : "Active menu"} />
             <Metric label="High cost items" value={highCostDishCount} delta="Review needed" tone="warn" />
           </div>
           <Panel className="menu-overview-table" title="">
@@ -9877,7 +9930,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
                 { key: "gp", label: "GP %", render: (value) => percent(value) },
                 { key: "status", label: "Status" },
               ]}
-              onDelete={permissions.canDelete ? deleteDish : null}
+              onDelete={permissions.canDelete && !activeMenuArchived ? deleteDish : null}
               rows={dishRows}
             />
           </Panel>
@@ -9886,11 +9939,13 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
             <summary>{menuHierarchyOpen ? "Hide hierarchy" : "Menu hierarchy"}</summary>
             <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
-              <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+              <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{selectableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}{isMenuArchived(menu) ? " (Archived)" : ""}</option>)}</select></label>
+              <CheckboxField checked={showArchived} label="Show archived" onChange={setShowArchived} />
             </div>
             <div className="button-row left menu-hierarchy-actions">
               {permissions.canAdd && <PrimaryAction className="ghost" onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
-              {(permissions.canAdd || permissions.canEdit) && <PrimaryAction onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+              {!activeMenuArchived && (permissions.canAdd || permissions.canEdit) && <PrimaryAction onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+              {permissions.canEdit && (activeMenuArchived ? <button className="menu-lifecycle-action" onClick={restoreActiveMenu} type="button">Restore Menu</button> : <button className="menu-lifecycle-action" onClick={archiveActiveMenu} type="button">Archive Menu</button>)}
               {permissions.canDelete && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
             </Panel>
@@ -9900,14 +9955,14 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
                 const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
                 const gp = average(rows.map((dish) => dish.gp));
                 const target = numberValue(subcategory.targetGp, menuTarget);
-                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span>{permissions.canDelete && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span>{permissions.canDelete && !activeMenuArchived && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
               })}
             </div>
             </Panel>
           </details>
         </>
       )}
-      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}</div></Panel>}
+      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{menus.some((menu) => isMenuArchived(menu)) && <CheckboxField checked={showArchived} label="Show archived" onChange={setShowArchived} />}{permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}</div></Panel>}
       {menuModalOpen && permissions.canAdd && (
         <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
           <div className="form-grid six">
@@ -9937,7 +9992,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
             <label>Menu<select value={dishForm.menuId} onChange={(event) => {
               const nextMenu = menus.find((menu) => menu.id === event.target.value);
               setDishForm({ ...dishForm, menuId: event.target.value, subcategoryId: nextMenu?.subcategories?.[0]?.id || "" });
-            }}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
+            }}>{editableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
             <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{dishSubcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
             <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
             <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
