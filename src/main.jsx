@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createRoot } from "react-dom/client";
+import marginflowMark from "./assets/marginflow-mark.svg";
 import {
   AlertTriangle,
   ArrowDownUp,
@@ -5518,11 +5519,8 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">MF</div>
-          <div>
-            <strong>MarginFlow</strong>
-            <span>Hospitality profit management</span>
-          </div>
+          <img alt="" className="brand-mark" src={marginflowMark} />
+          <strong className="brand-wordmark">MarginFlow</strong>
         </div>
         <div className="sidebar-user-switcher">
           <span>{demoMode ? "Demo mode" : "Signed in"}</span>
@@ -5545,11 +5543,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             );
           })}
         </nav>
-        <div className="sidebar-card">
-          <Sparkles size={18} />
-          <strong>Work Edition workflows</strong>
+        <details className="sidebar-card sidebar-workflow-note">
+          <summary><Sparkles size={15} /><span>Work Edition workflows</span></summary>
           <p>Invoices use manual entry, CSV import and supplier parsers with review steps before changes affect GP.</p>
-        </div>
+        </details>
       </aside>
 
       <main className="workspace">
@@ -6223,7 +6220,7 @@ function PerformanceSections({ dateRange, dateRangeState, demoMode = false, depa
 
   return (
     <>
-      <Panel title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
+      <Panel className="dashboard-range-panel" title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
         <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
       </Panel>
       <PerformanceSummaryCards metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
@@ -9697,10 +9694,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   };
 
   return (
-    <div className="page-grid">
+    <div className="page-grid menu-costing-page">
       {activeMenu && (
         <>
-          <div className="metric-grid compact">
+          <div className="metric-grid compact menu-metrics">
             <Metric label="Menu GP" value={percent(menuGp)} delta="Average GP without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
             <Metric label="Target GP" value={percent(menuTarget)} delta={activeMenu.name} />
             <Metric label="Variance" value={percent(menuGp - menuTarget)} delta={`${dishRows.length} dishes`} tone={menuGp >= menuTarget ? "good" : "warn"} />
@@ -9711,10 +9708,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{menus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
             </div>
-            <div className="button-row left">
-              {permissions.canAdd && <button onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}
+            <div className="button-row left menu-hierarchy-actions">
+              {permissions.canAdd && <button className="ghost" onClick={() => setMenuModalOpen(true)} type="button"><Plus size={16} />Create Menu</button>}
               {(permissions.canAdd || permissions.canEdit) && <button onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }} type="button"><Plus size={16} />Add Dish</button>}
-              {permissions.canDelete && <button className="ghost danger" onClick={deleteMenu} type="button"><Trash2 size={16} />Delete Menu</button>}
+              {permissions.canDelete && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
           </Panel>
           <Panel title="Subcategory summary">
@@ -12083,7 +12080,7 @@ function SettingsPanel({
   };
 
   return (
-    <div className="settings-grid">
+    <div className="settings-grid settings-page">
       {!demoMode && (
         <Panel title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
           <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
@@ -12757,9 +12754,9 @@ function Metric({ label, value, delta, tone = "default", empty = false }) {
   );
 }
 
-function Panel({ title, action, centerAction = null, children }) {
+function Panel({ title, action, centerAction = null, children, className = "" }) {
   return (
-    <section className="panel">
+    <section className={`panel ${className}`.trim()}>
       <div className={`panel-head ${centerAction ? "with-centered-action" : ""}`}>
         <h2>{title}</h2>
         {centerAction && <div className="panel-center-action">{centerAction}</div>}
