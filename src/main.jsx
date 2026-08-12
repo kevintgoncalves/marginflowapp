@@ -94,7 +94,7 @@ import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js"
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
 import { comparisonRangesForChosenWeek } from "./domain/salesComparison.js";
-import { archiveMenu, isMenuArchived, restoreMenu, visibleMenus } from "./domain/menuLifecycle.js";
+import { MENU_STATUS_OPTIONS, MENU_STATUSES, isMenuArchived, updateMenuStatus, visibleMenus } from "./domain/menuLifecycle.js";
 import {
   departmentAllocationRows,
   departmentAssignmentForLine,
@@ -6211,15 +6211,9 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
 
 function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
   const [breakdownView, setBreakdownView] = useState("Department");
-  const [supplierSpendView, setSupplierSpendView] = useState("day");
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
-  const departmentSpendRows = departmentRows
-    .map((row) => ({ id: row.department, name: displayDepartmentName(row.department), spend: numberValue(row.purchases) }))
-    .filter((row) => row.spend);
-  const displayedSupplierSpend = supplierSpendView === "department" ? departmentSpendRows : sortedSuppliers;
-  const displayedSupplierSpendTotal = displayedSupplierSpend.reduce((sum, row) => sum + numberValue(row.spend), 0);
   const chartData = aggregateDashboardRows(dailyRows, dateRange);
   const chartPrefix = chartTitlePrefix(chartData.granularity);
 
@@ -6227,13 +6221,8 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
     return (
       <>
         <div className="dashboard-operational-view">
-          <Panel className="dashboard-supplier-spend" title="Supplier spend" action={(
-            <div className="segmented-control compact" role="group" aria-label="Supplier spend view">
-              <button className={supplierSpendView === "day" ? "active" : ""} onClick={() => setSupplierSpendView("day")} type="button">By day</button>
-              <button className={supplierSpendView === "department" ? "active" : ""} onClick={() => setSupplierSpendView("department")} type="button">By department</button>
-            </div>
-          )}>
-            {hasData ? <SupplierSpendChart rows={displayedSupplierSpend} total={displayedSupplierSpendTotal} /> : <EmptyState />}
+          <Panel className="dashboard-supplier-spend" title="Supplier spend">
+            {hasData ? <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} /> : <EmptyState />}
           </Panel>
           <Panel
             className="dashboard-performance-breakdown"
@@ -9735,10 +9724,12 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   const [menuModalOpen, setMenuModalOpen] = useState(false);
   const [dishModalOpen, setDishModalOpen] = useState(false);
   const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
+  const [archivedMenusOpen, setArchivedMenusOpen] = useState(false);
   const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
   const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
   const selectableMenus = useMemo(() => visibleMenus(menus, showArchived), [menus, showArchived]);
   const editableMenus = useMemo(() => visibleMenus(menus), [menus]);
+  const archivedMenus = useMemo(() => menus.filter((menu) => isMenuArchived(menu)), [menus]);
   const activeMenu = selectableMenus.find((menu) => menu.id === activeMenuId) || selectableMenus[0];
   const activeMenuArchived = isMenuArchived(activeMenu);
   const subcategories = activeMenu?.subcategories || [];
@@ -9849,20 +9840,25 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
     }));
   };
 
-  const archiveActiveMenu = () => {
-    if (!permissions.canEdit || !activeMenu || activeMenuArchived) return;
-    const archivedMenuId = activeMenu.id;
-    setMenus((current) => current.map((menu) => (menu.id === archivedMenuId ? archiveMenu(menu) : menu)));
+  const updateActiveMenuStatus = (nextStatus) => {
+    if (!permissions.canEdit || !activeMenu) return;
+    const updatedMenuId = activeMenu.id;
+    setMenus((current) => current.map((menu) => (menu.id === updatedMenuId ? updateMenuStatus(menu, nextStatus) : menu)));
+    setArchivedMenusOpen(false);
+    if (nextStatus === MENU_STATUSES.ARCHIVED) {
+      setShowArchived(false);
+      setActiveMenuId(editableMenus.find((menu) => menu.id !== updatedMenuId)?.id || "");
+      return;
+    }
     setShowArchived(false);
-    setActiveMenuId(editableMenus.find((menu) => menu.id !== archivedMenuId)?.id || "");
+    setActiveMenuId(updatedMenuId);
   };
 
-  const restoreActiveMenu = () => {
-    if (!permissions.canEdit || !activeMenu || !activeMenuArchived) return;
-    const restoredMenuId = activeMenu.id;
-    setMenus((current) => current.map((menu) => (menu.id === restoredMenuId ? restoreMenu(menu) : menu)));
-    setShowArchived(false);
-    setActiveMenuId(restoredMenuId);
+  const openArchivedMenu = (menuId) => {
+    setShowArchived(true);
+    setActiveMenuId(menuId);
+    setArchivedMenusOpen(false);
+    setMenuHierarchyOpen(true);
   };
 
   const deleteMenu = () => {
@@ -9906,14 +9902,29 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
 
   return (
     <div className="menu-costing-page menu-overview-page">
+      <div className="menu-header-actions" aria-label="Menu actions">
+        <button aria-expanded={menuHierarchyOpen} className="menu-header-action" onClick={() => { setMenuHierarchyOpen((current) => !current); setArchivedMenusOpen(false); }} type="button">Menu hierarchy</button>
+        <button aria-expanded={archivedMenusOpen} className="menu-header-action" onClick={() => { setArchivedMenusOpen((current) => !current); setMenuHierarchyOpen(false); }} type="button">Archived Menus</button>
+        {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
+      </div>
+      {archivedMenusOpen && (
+        <Panel className="archived-menus-panel" title="Archived Menus" action={`${archivedMenus.length} archived`}>
+          {archivedMenus.length ? (
+            <div className="archived-menu-list">
+              {archivedMenus.map((menu) => (
+                <button className="archived-menu-list-item" key={menu.id} onClick={() => openArchivedMenu(menu.id)} type="button">
+                  <span><strong>{menu.name}</strong><small>{menu.season || "Archived menu"}</small></span>
+                  <span>{(menu.subcategories || []).reduce((count, subcategory) => count + (subcategory.dishes || []).length, 0)} dishes</span>
+                  <span>Open</span>
+                </button>
+              ))}
+            </div>
+          ) : <EmptyState />}
+        </Panel>
+      )}
       {activeMenu && (
         <>
-          <div className="menu-primary-actions">
-            {!activeMenuArchived && (permissions.canAdd || permissions.canEdit) && <PrimaryAction className="ghost" onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
-            {permissions.canEdit && (activeMenuArchived ? <button className="menu-lifecycle-action" onClick={restoreActiveMenu} type="button">Restore Menu</button> : <button className="menu-lifecycle-action" onClick={archiveActiveMenu} type="button">Archive Menu</button>)}
-            {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
-          </div>
-          {activeMenuArchived && <div className="menu-archived-notice"><Badge tone="amber">Archived</Badge><span>This menu is read-only until restored.</span></div>}
+          {activeMenuArchived && <div className="menu-archived-notice"><Badge tone="amber">Archived</Badge><span>This menu is read-only until its status changes.</span></div>}
           <div className="metric-grid compact menu-metrics menu-overview-metrics">
             <Metric label="Food GP %" value={percent(menuGp)} delta="Average without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
             <Metric label="Average dish cost" value={money(averageDishCost)} delta={activeMenuArchived ? "Archived menu" : "Active menu"} />
@@ -9935,18 +9946,16 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
             />
           </Panel>
           <button className="menu-report-link" onClick={() => setMenuHierarchyOpen(true)} type="button">View full menu report</button>
-          <details className="menu-management" onToggle={(event) => setMenuHierarchyOpen(event.currentTarget.open)} open={menuHierarchyOpen}>
-            <summary>{menuHierarchyOpen ? "Hide hierarchy" : "Menu hierarchy"}</summary>
+          {menuHierarchyOpen && (
+            <section className="menu-management">
             <Panel title="Menu hierarchy" action={activeMenu.name}>
             <div className="form-grid six">
               <label>Menu<select value={activeMenu.id} onChange={(event) => setActiveMenuId(event.target.value)}>{selectableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}{isMenuArchived(menu) ? " (Archived)" : ""}</option>)}</select></label>
-              <CheckboxField checked={showArchived} label="Show archived" onChange={setShowArchived} />
+              <label>Lifecycle status<select disabled={!permissions.canEdit} value={activeMenu.status || MENU_STATUSES.DRAFT} onChange={(event) => updateActiveMenuStatus(event.target.value)}>{MENU_STATUS_OPTIONS.map((status) => <option key={status}>{status}</option>)}</select></label>
             </div>
             <div className="button-row left menu-hierarchy-actions">
-              {permissions.canAdd && <PrimaryAction className="ghost" onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
               {!activeMenuArchived && (permissions.canAdd || permissions.canEdit) && <PrimaryAction onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
-              {permissions.canEdit && (activeMenuArchived ? <button className="menu-lifecycle-action" onClick={restoreActiveMenu} type="button">Restore Menu</button> : <button className="menu-lifecycle-action" onClick={archiveActiveMenu} type="button">Archive Menu</button>)}
-              {permissions.canDelete && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
+              {permissions.canDelete && !activeMenuArchived && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
             </Panel>
             <Panel title="Subcategory summary">
@@ -9959,10 +9968,11 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
               })}
             </div>
             </Panel>
-          </details>
+            </section>
+          )}
         </>
       )}
-      {!activeMenu && <Panel title="Menu costing"><div className="button-row left">{menus.some((menu) => isMenuArchived(menu)) && <CheckboxField checked={showArchived} label="Show archived" onChange={setShowArchived} />}{permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}</div></Panel>}
+      {!activeMenu && <Panel title="Menu costing"><EmptyState /></Panel>}
       {menuModalOpen && permissions.canAdd && (
         <EditModal title="Create menu" onCancel={() => setMenuModalOpen(false)} onSave={createMenu} saveLabel="Save Menu">
           <div className="form-grid six">

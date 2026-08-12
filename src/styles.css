@@ -5935,8 +5935,10 @@ button.icon {
 .invoice-control-filters[open] > .panel { border: 1px solid var(--border-subtle); border-radius: 7px; background: #fff; }
 
 .menu-overview-page { display: grid; gap: 26px; position: relative; }
-.menu-primary-actions { position: absolute; top: -132px; right: 8px; display: flex; gap: 8px; }
-.menu-primary-actions button { min-height: 38px; padding: 0 15px; border-radius: 6px; font-size: 13px; font-weight: 700; }
+.menu-header-actions { position: absolute; top: -132px; right: 8px; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.menu-header-actions button { min-height: 38px; padding: 0 15px; border-radius: 6px; font-size: 13px; font-weight: 700; }
+.menu-header-action { border: 1px solid var(--border-subtle); background: #fff; color: var(--text-secondary); }
+.menu-header-action:hover:not(:disabled), .menu-header-action[aria-expanded="true"] { border-color: #c7c4bb; background: #f2f1ee; color: var(--text); }
 .menu-overview-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); max-width: 980px; gap: 34px; padding: 10px 0; }
 .menu-overview-metrics .metric-card { min-width: 0; min-height: 96px; padding: 10px 0; }
 .menu-overview-metrics .metric-card.good,
@@ -5948,12 +5950,16 @@ button.icon {
 .menu-overview-table .table-wrap { border: 1px solid var(--border-subtle); border-radius: 7px; }
 .menu-report-link { width: fit-content; min-height: 22px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--data-accent); font-size: 13px; font-weight: 720; }
 .menu-report-link:hover:not(:disabled) { border: 0; background: transparent; color: #1c5ba5; }
-.menu-management { position: absolute; top: -128px; right: 250px; z-index: 4; }
-.menu-management > summary { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--border-subtle); border-radius: 6px; background: #fff; color: var(--text-secondary); cursor: pointer; list-style: none; }
-.menu-management > summary::-webkit-details-marker { display: none; }
-.menu-management[open] { position: relative; top: auto; right: auto; display: grid; gap: 20px; }
-.menu-management[open] > summary { width: fit-content; }
-.menu-management[open] > .panel { border: 1px solid var(--border-subtle); border-radius: 7px; background: #fff; }
+.menu-management { display: grid; gap: 20px; }
+.menu-management > .panel, .archived-menus-panel { border: 1px solid var(--border-subtle); border-radius: 7px; background: #fff; }
+.archived-menu-list { display: grid; gap: 0; }
+.archived-menu-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 20px; width: 100%; min-height: 64px; padding: 12px 18px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: #fff; color: var(--text); text-align: left; }
+.archived-menu-list-item:last-child { border-bottom: 0; }
+.archived-menu-list-item:hover:not(:disabled) { background: var(--surface-subtle); }
+.archived-menu-list-item > span:first-child { display: grid; gap: 3px; }
+.archived-menu-list-item strong { font-size: 14px; }
+.archived-menu-list-item small, .archived-menu-list-item > span:not(:first-child) { color: var(--muted); font-size: 12px; }
+.archived-menu-list-item > span:last-child { color: var(--data-accent); font-weight: 720; }
 
 .app-page-products .page-grid,
 .app-page-suppliers .page-grid,
@@ -6110,7 +6116,7 @@ button.icon {
 .page-component-hidden { display: none; }
 
 .table-toolbar .page-primary-action,
-.menu-primary-actions .page-primary-action,
+.menu-header-actions .page-primary-action,
 .stocktake-actions .page-primary-action,
 .sales-controls.page-primary-action,
 .labour-controls.page-primary-action { margin-top: 0; }
@@ -6122,8 +6128,11 @@ button.icon {
   gap: 7px;
 }
 
-.dashboard-supplier-spend .segmented-control button { min-width: 76px; }
-.dashboard-performance-breakdown { min-height: 322px; }
+.dashboard-performance-breakdown { width: 100%; min-width: 0; min-height: 322px; }
+.dashboard-performance-breakdown > .panel-head { display: grid; grid-template-columns: minmax(0, 1fr) 222px; align-items: center; }
+.dashboard-performance-breakdown > .panel-head .panel-action { justify-self: end; width: 222px; }
+.dashboard-performance-breakdown > .panel-head .segmented-control { display: flex; width: 100%; margin: 0; }
+.dashboard-performance-breakdown > .panel-head .segmented-control button { min-width: 0; flex: 1 1 0; white-space: nowrap; }
 .dashboard-performance-breakdown > .breakdown-layout,
 .dashboard-performance-breakdown > .table-wrap,
 .dashboard-performance-breakdown > .table-toolbar { width: 100%; }
@@ -6131,6 +6140,10 @@ button.icon {
 .dashboard-performance-breakdown .breakdown-layout .donut-list { display: none; }
 .dashboard-performance-breakdown .breakdown-layout .table-wrap { width: 100%; margin: 0; }
 .dashboard-performance-breakdown .table-wrap { overflow-x: auto; }
+
+@media (max-width: 900px) {
+  .menu-header-actions { position: static; justify-content: flex-start; }
+}
 
 .recipe-optional-fields {
   display: grid;
@@ -6177,22 +6190,6 @@ button.icon {
   color: #1c5ba5;
 }
 
-.menu-lifecycle-action {
-  min-height: 38px;
-  padding: 0 14px;
-  border: 1px solid #c9b37a;
-  border-radius: 6px;
-  background: #fffdf7;
-  color: #6d531d;
-  font-size: 13px;
-  font-weight: 720;
-}
-
-.menu-lifecycle-action:hover:not(:disabled) {
-  border-color: #ae8b38;
-  background: #fff4dd;
-}
-
 .menu-archived-notice {
   display: flex;
   align-items: center;
@@ -6235,18 +6232,6 @@ button.icon {
   border-color: #bfe4cf;
   background: var(--success-bg);
   color: var(--success);
-}
-
-.menu-management { right: 268px; }
-.menu-management > summary {
-  display: inline-flex;
-  width: auto;
-  min-height: 38px;
-  height: auto;
-  align-items: center;
-  padding: 0 13px;
-  font-size: 13px;
-  font-weight: 700;
 }
 
 .settings-detail-view > .panel,
@@ -6294,8 +6279,11 @@ button.icon {
   .labour-primary-metrics { grid-template-columns: 1fr 1fr; gap: 12px; }
   .labour-chart-panel .bar-series { padding: 30px 18px; }
   .menu-overview-metrics { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .menu-primary-actions { top: -130px; right: 0; }
-  .menu-management { top: -130px; right: 214px; }
+  .menu-header-actions { position: static; justify-content: flex-start; }
+  .archived-menu-list-item { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+  .archived-menu-list-item > span:nth-child(2) { display: none; }
+  .dashboard-performance-breakdown > .panel-head { grid-template-columns: 1fr; align-items: start; }
+  .dashboard-performance-breakdown > .panel-head .panel-action { justify-self: stretch; width: 100%; margin-top: 4px; }
   .waste-metrics { grid-template-columns: 1fr 1fr; gap: 12px; }
   .ai-insight-card { grid-template-columns: 22px minmax(0, 1fr); padding: 20px; }
   .ai-insight-card time { display: none; }
