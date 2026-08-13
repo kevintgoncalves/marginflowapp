@@ -2843,8 +2843,18 @@ code {
   gap: 8px;
   min-height: 46px;
   padding: 6px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  background: #ffffff;
+  color: #111827;
   text-align: left;
   white-space: normal;
+}
+
+.match-hint.product-result:hover,
+.match-hint.product-result:focus-visible {
+  border-color: rgba(16, 185, 129, 0.55);
+  background: #ecfdf5;
+  color: #064e3b;
 }
 
 .match-hint.product-result > span {
@@ -2853,15 +2863,25 @@ code {
 }
 
 .match-hint.product-result strong {
-  color: #fde68a;
+  color: #111827;
   font-size: 11px;
   line-height: 1.2;
 }
 
 .match-hint.product-result small {
-  color: #fcd34d;
+  color: #475569;
   font-size: 10px;
   font-weight: 800;
+}
+
+.match-hint.product-result:hover strong,
+.match-hint.product-result:focus-visible strong {
+  color: #064e3b;
+}
+
+.match-hint.product-result:hover small,
+.match-hint.product-result:focus-visible small {
+  color: #047857;
 }
 
 .line-suggestions.warn {
