@@ -31,6 +31,9 @@ import {
   resolveExplicitNewProductLines,
 } from "./invoiceProductResolution.js";
 import {
+  rankProductCandidates,
+} from "./productMatching.js";
+import {
   mergeRelationalSupplierProductMappings,
   persistRelationalSupplierProductMappings,
   relationalMappingFromRow,
@@ -430,6 +433,94 @@ test("existing product suggestions can be manually selected and persist through 
   assert.equal(resolved.conflicts.length, 0);
   assert.equal(resolved.createdProducts.length, 0);
   assert.equal(resolved.items[0].matchedProductId, "radish");
+});
+
+test("RED CHILLIES product search result binds directly without create-new flow", () => {
+  const redChillies = { id: "red-chillies", companyId: "c1", name: "RED CHILLIES", supplier: "TG Fruits", packSize: "BOX X3KG", unitCost: 18 };
+  const searchResults = rankProductCandidates("RED CHILLIES", [redChillies], { organisationId: "c1", limit: 5, minimumScore: 0.28 });
+  assert.equal(searchResults[0].product.id, "red-chillies");
+
+  const unmatchedLine = {
+    id: "line-red-chillies",
+    supplier: "TG Fruits",
+    rawDescription: "RED CHILLIES",
+    productName: "RED CHILLIES",
+    packSize: "BOX X3KG",
+    quantity: 1,
+    unitCost: 18,
+    lineTotal: 18,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+    productMatchSource: "no_product_match",
+    matchStatus: "No product match found",
+    needsReview: true,
+    reviewReasons: ["no_confirmed_product_match"],
+  };
+  const selected = lineWithExistingProductResolution(unmatchedLine, searchResults[0].product);
+  assert.equal(selected.productName, "RED CHILLIES");
+  assert.equal(selected.matchedProductId, "red-chillies");
+  assert.equal(selected.productId, "red-chillies");
+  assert.equal(selected.productResolution, PRODUCT_RESOLUTION_MODES.MANUAL_MATCH);
+  assert.equal(selected.productMatchSource, "manual_selection");
+  assert.equal(selected.needsReview, false);
+  assert.deepEqual(selected.reviewReasons, []);
+  assert.deepEqual(selected.duplicateProductCandidates, []);
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "RC-1", invoiceDate: "2026-07-23" },
+    lines: [selected],
+  });
+  assert.equal(reviewed.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
+  assert.equal(reviewed.lines[0].hasBlockingReview, false);
+  assert.equal(reviewed.invoiceHasBlockingReview, false);
+  assert.equal(canConfirmInvoice(reviewed), true);
+
+  const resolved = resolveExplicitNewProductLines({
+    products: [redChillies],
+    items: [reviewed.lines[0]],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "should-not-create",
+  });
+  assert.equal(resolved.createdProducts.length, 0);
+  assert.equal(resolved.items[0].matchedProductId, "red-chillies");
+});
+
+test("fuzzy product search result also binds as a confirmed manual existing product", () => {
+  const chilliProducts = [{ id: "red-chillies", companyId: "c1", name: "RED CHILLIES", supplier: "TG Fruits", packSize: "BOX X3KG", unitCost: 18 }];
+  const searchResults = rankProductCandidates("RED CHILLI", chilliProducts, { organisationId: "c1", limit: 5, minimumScore: 0.28 });
+  assert.equal(searchResults[0].product.id, "red-chillies");
+  assert.ok(searchResults[0].score < 1);
+
+  const unresolvedLine = {
+    id: "line-fuzzy-red-chilli",
+    supplier: "TG Fruits",
+    rawDescription: "RED CHILLI",
+    productName: "RED CHILLI",
+    packSize: "BOX X3KG",
+    quantity: 1,
+    unitCost: 18,
+    lineTotal: 18,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+    productMatchSource: "no_product_match",
+    reviewReasons: ["no_confirmed_product_match"],
+  };
+  const selected = lineWithExistingProductResolution(unresolvedLine, searchResults[0].product);
+  assert.equal(selected.matchedProductId, "red-chillies");
+  assert.equal(selected.productMatchSource, "manual_selection");
+  assert.equal(selected.reviewReasons.length, 0);
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "RC-2", invoiceDate: "2026-07-23" },
+    lines: [selected],
+  });
+  assert.equal(reviewed.invoiceHasBlockingReview, false);
+  assert.equal(canConfirmInvoice(reviewed), true);
 });
 
 test("create-new duplicate review offers existing products before final confirmation", () => {

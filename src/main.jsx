@@ -7019,8 +7019,10 @@ function Invoices({
   };
 
   const applySuggestion = (id, productId = "") => {
+    const clickedProduct = productId ? products.find((candidate) => candidate.id === productId) : null;
     setDraft((current) => ({
       ...current,
+      status: clickedProduct ? `Matched to ${productDisplayName(clickedProduct)}.` : current.status,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
         const selectedProductId = productId || item.suggestedProductId || item.suggestedProducts?.[0]?.id || "";
@@ -7052,6 +7054,7 @@ function Invoices({
     if (!product) return;
     setDraft((current) => ({
       ...current,
+      status: `Matched to ${productDisplayName(product)}.`,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
         const assignment = departmentAssignmentForResolvedLine({
@@ -7951,6 +7954,9 @@ function InvoiceLineEditor({
               || (Boolean(item.matchedProductId) && !createNewSelected && !isUnresolvedProductResolution(item));
             const duplicateCandidates = Array.isArray(item.duplicateProductCandidates) ? item.duplicateProductCandidates : [];
             const blockingDuplicateCandidate = hasBlockingCreateNewProductConflict(duplicateCandidates);
+            const directProductSuggestions = applyExistingProduct && !createNewSelected && !existingSelected && !duplicateCandidates.length
+              ? productMatches.filter((product) => product.id).slice(0, 5)
+              : [];
             const ambiguousMatch = item.productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS || reviewReasons.includes("ambiguous_product_match");
             const automaticCandidate = item.automaticProductMatch || null;
             const matchTone = item.hasBlockingReview || ambiguousMatch ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
@@ -7959,16 +7965,18 @@ function InvoiceLineEditor({
                 <td>
                   <input
                     autoComplete="off"
-                    list={productListId}
+                    list={applyExistingProduct ? undefined : productListId}
                     title={item.productName || ""}
                     value={item.productName || ""}
                     onChange={(event) => updateLine(item.id, "productName", event.target.value)}
                   />
-                  <datalist id={productListId}>
-                    {productMatches.map((product) => (
-                      <option key={product.id} label={productOptionLabel(product)} value={productDisplayName(product)} />
-                    ))}
-                  </datalist>
+                  {!applyExistingProduct && (
+                    <datalist id={productListId}>
+                      {productMatches.map((product) => (
+                        <option key={product.id} label={productOptionLabel(product)} value={productDisplayName(product)} />
+                      ))}
+                    </datalist>
+                  )}
                   {autoMatched && existingSelected && (
                     <div className="product-resolution auto-match">
                       <strong>Matched to: {item.matchedProductName || item.productName}</strong>
@@ -7990,12 +7998,26 @@ function InvoiceLineEditor({
                       Use automatic match: {automaticCandidate.productName || automaticCandidate.matchedProductName}
                     </button>
                   )}
-                  {item.suggestedProductName && applySuggestion && !createNewSelected && !existingSelected && (
+                  {directProductSuggestions.length > 0 && (
+                    <div className="line-suggestions product-search-results">
+                      <small className="line-note">Existing products</small>
+                      {directProductSuggestions.map((product) => (
+                        <button className="match-hint product-result" key={product.id} onClick={() => applyExistingProduct?.(item.id, product.id)} type="button">
+                          <span>
+                            <strong>{productDisplayName(product)}</strong>
+                            <small>{productOptionLabel(product) || "Existing product"}</small>
+                          </span>
+                          <Badge tone="green">Select</Badge>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {!directProductSuggestions.length && item.suggestedProductName && applySuggestion && !createNewSelected && !existingSelected && (
                     <button className="match-hint" onClick={() => applySuggestion(item.id, item.suggestedProductId)} type="button">
                       Select existing product: {item.suggestedProductName}
                     </button>
                   )}
-                  {applyExistingProduct && !createNewSelected && !existingSelected && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
+                  {!directProductSuggestions.length && applyExistingProduct && !createNewSelected && !existingSelected && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
                     <div className="line-suggestions">
                       <small className="line-note">Possible product matches</small>
                       {item.suggestedProducts.slice(0, 3).map((suggestion) => (
