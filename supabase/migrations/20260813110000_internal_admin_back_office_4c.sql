@@ -587,7 +587,7 @@ $$;
 do $$
 declare table_name text;
 begin
-  foreach table_name in array[
+  foreach table_name in array array[
     'locations', 'departments', 'company_settings', 'labour_settings', 'ai_settings',
     'suppliers', 'products', 'product_supplier_prices', 'product_price_history',
     'invoices', 'invoice_lines', 'invoice_line_department_splits', 'invoice_files', 'credit_notes',
