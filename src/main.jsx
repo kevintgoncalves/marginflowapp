@@ -113,6 +113,8 @@ import {
 import {
   PRODUCT_RESOLUTION_MODES,
   canonicalProductMatchSource,
+  createNewProductConflictCandidates,
+  hasBlockingCreateNewProductConflict,
   isAutoMatchedProductResolution,
   isManuallyMatchedProductResolution,
   isResolvedExistingProductResolution,
@@ -122,6 +124,7 @@ import {
   lineWithAutoMatchedProductResolution,
   lineWithAmbiguousProductResolution,
   lineWithCreateNewProductResolution,
+  lineWithCreateNewProductDuplicateReview,
   lineWithExistingProductResolution,
   lineWithResetProductResolution,
   resolveExplicitNewProductLines,
@@ -1794,24 +1797,36 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
     updated.forgetLearnedRule = false;
     const selectedProduct = productForEnteredName(products, value);
     if (isCreateNewProductResolution(item)) {
-      updated = {
-        ...updated,
-        productName: value,
-        matchedProductId: "",
-        matchedProductName: "",
-        productId: "",
-        suggestedProductId: "",
-        suggestedProductName: "",
-        suggestedProducts: [],
-        duplicateProductCandidates: [],
-        productResolution: PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT,
-        productMatchSource: "new_product",
-        productMatchConfidence: 1,
-        matchConfidence: 1,
-        matchStatus: value?.trim() ? `New product will be created: ${value.trim().toUpperCase()}` : "New product will be created",
-        needsReview: false,
-        reviewReasons: [],
-      };
+      const duplicateCandidates = String(value || "").trim().length >= 3
+        ? createNewProductConflictCandidates({
+          products,
+          line: { ...updated, productName: value },
+          supplierMappings,
+          supplier: updated.supplier || item.supplier || "",
+          supplierId: updated.supplierId || item.supplierId || "",
+          organisationId,
+        })
+        : [];
+      updated = duplicateCandidates.length
+        ? lineWithCreateNewProductDuplicateReview({ ...updated, productName: value }, duplicateCandidates)
+        : {
+          ...updated,
+          productName: value,
+          matchedProductId: "",
+          matchedProductName: "",
+          productId: "",
+          suggestedProductId: "",
+          suggestedProductName: "",
+          suggestedProducts: [],
+          duplicateProductCandidates: [],
+          productResolution: PRODUCT_RESOLUTION_MODES.CREATE_NEW_PRODUCT,
+          productMatchSource: "new_product",
+          productMatchConfidence: 1,
+          matchConfidence: 1,
+          matchStatus: value?.trim() ? `New product will be created: ${value.trim().toUpperCase()}` : "New product will be created",
+          needsReview: false,
+          reviewReasons: [],
+        };
     } else if (selectedProduct) {
       const assignment = departmentAssignmentForResolvedLine({
         line: updated,
@@ -1829,14 +1844,26 @@ function updateInvoiceLineForEditor(item, field, value, { products = [], matchin
         departmentSplits: assignment.departmentSplits,
       };
     } else if (item.productMatchCorrectionMode) {
-      updated = {
-        ...lineWithResetProductResolution(updated),
-        productName: value,
-        suggestedProducts: item.suggestedProducts || [],
-        productMatchConfidence: null,
-        matchConfidence: 0,
-        matchStatus: value?.trim() ? "Choose a product match" : "No existing product found",
-      };
+      const duplicateCandidates = String(value || "").trim().length >= 3
+        ? createNewProductConflictCandidates({
+          products,
+          line: { ...updated, productName: value },
+          supplierMappings,
+          supplier: updated.supplier || item.supplier || "",
+          supplierId: updated.supplierId || item.supplierId || "",
+          organisationId,
+        })
+        : [];
+      updated = duplicateCandidates.length
+        ? lineWithCreateNewProductDuplicateReview({ ...updated, productName: value }, duplicateCandidates)
+        : {
+          ...lineWithResetProductResolution(updated),
+          productName: value,
+          suggestedProducts: item.suggestedProducts || [],
+          productMatchConfidence: null,
+          matchConfidence: 0,
+          matchStatus: value?.trim() ? "Choose a product match" : "No existing product found",
+        };
     } else {
       const enriched = enrichInvoiceLine(updated, products, matchingSettings, supplierMappings, { organisationId, locationId, departmentNames });
       updated = { ...enriched, productName: value };
@@ -1937,6 +1964,10 @@ function matchProduct(productName, products) {
 
 function productAutocomplete(products, query, limit = 8) {
   return rankProductCandidates(query, products, { limit, minimumScore: 0.28 }).map((entry) => entry.product);
+}
+
+function productDisplayName(product = {}) {
+  return product.name || product.productName || "";
 }
 
 function productOptionLabel(product) {
@@ -6987,20 +7018,30 @@ function Invoices({
     }));
   };
 
-  const applySuggestion = (id) => {
+  const applySuggestion = (id, productId = "") => {
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const product = products.find((candidate) => candidate.id === item.suggestedProductId);
+        const selectedProductId = productId || item.suggestedProductId || item.suggestedProducts?.[0]?.id || "";
+        const product = products.find((candidate) => candidate.id === selectedProductId);
+        const assignment = product ? departmentAssignmentForResolvedLine({
+          line: item,
+          product,
+          departmentNames,
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+        }) : null;
         return product
-          ? {
+          ? normalizeInvoiceLineForEditor({
             ...lineWithExistingProductResolution(item, product),
             forgetLearnedRule: false,
-            suggestedProductId: "",
-            suggestedProductName: "",
-            suggestedProducts: [],
-          }
+            packSize: item.packSize || product.packSize || "",
+            supplier: item.supplier || product.supplier || current.supplier,
+            department: assignment.department,
+            departmentId: assignment.departmentId || item.departmentId || "",
+            departmentMode: assignment.departmentMode,
+            departmentSplits: assignment.departmentSplits,
+          }, departmentNames)
           : item;
       }),
     }));
@@ -7013,22 +7054,48 @@ function Invoices({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const department = item.department || product.department || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+        const assignment = departmentAssignmentForResolvedLine({
+          line: item,
+          product,
+          departmentNames,
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+        });
         return normalizeInvoiceLineForEditor({
           ...lineWithExistingProductResolution(item, product),
           forgetLearnedRule: false,
           packSize: item.packSize || product.packSize || "",
           supplier: item.supplier || product.supplier || current.supplier,
-          department,
+          department: assignment.department,
+          departmentId: assignment.departmentId || item.departmentId || "",
+          departmentMode: assignment.departmentMode,
+          departmentSplits: assignment.departmentSplits,
         }, departmentNames);
       }),
     }));
   };
 
-  const createProductFromDraftLine = (id) => {
+  const createProductFromDraftLine = (id, { allowSimilarDuplicate = false } = {}) => {
     if (!permissions.canAdd) return;
     const line = draft.items.find((item) => item.id === id);
     if (!line?.productName?.trim()) return;
+    const duplicateCandidates = createNewProductConflictCandidates({
+      products,
+      line,
+      supplierMappings: supplierProductMappings,
+      supplier: line.supplier || draft.supplier || "",
+      supplierId: line.supplierId || canonicalSupplierForName(suppliers, line.supplier || draft.supplier)?.id || "",
+      organisationId: companyId,
+    });
+    if (duplicateCandidates.length && (!allowSimilarDuplicate || hasBlockingCreateNewProductConflict(duplicateCandidates))) {
+      setDraft((current) => ({
+        ...current,
+        items: current.items.map((item) => item.id === id ? lineWithCreateNewProductDuplicateReview(item, duplicateCandidates) : item),
+        status: hasBlockingCreateNewProductConflict(duplicateCandidates)
+          ? `Existing product found: ${duplicateCandidates[0].name}. Use the existing product before confirming.`
+          : `Possible existing product found: ${duplicateCandidates[0].name}. Choose it or create a new product anyway.`,
+      }));
+      return;
+    }
     setDraft((current) => ({
       ...current,
       items: current.items.map((item) => item.id === id ? lineWithCreateNewProductResolution(item) : item),
@@ -7882,6 +7949,8 @@ function InvoiceLineEditor({
             const manualMatched = isManuallyMatchedProductResolution(item) || (Boolean(item.matchedProductId) && !autoMatched && !createNewSelected);
             const existingSelected = isResolvedExistingProductResolution(item)
               || (Boolean(item.matchedProductId) && !createNewSelected && !isUnresolvedProductResolution(item));
+            const duplicateCandidates = Array.isArray(item.duplicateProductCandidates) ? item.duplicateProductCandidates : [];
+            const blockingDuplicateCandidate = hasBlockingCreateNewProductConflict(duplicateCandidates);
             const ambiguousMatch = item.productResolution === PRODUCT_RESOLUTION_MODES.AMBIGUOUS || reviewReasons.includes("ambiguous_product_match");
             const automaticCandidate = item.automaticProductMatch || null;
             const matchTone = item.hasBlockingReview || ambiguousMatch ? "amber" : (createNewSelected || existingSelected || item.productMatchSource ? "green" : "gray");
@@ -7897,12 +7966,12 @@ function InvoiceLineEditor({
                   />
                   <datalist id={productListId}>
                     {productMatches.map((product) => (
-                      <option key={product.id} label={productOptionLabel(product)} value={product.name} />
+                      <option key={product.id} label={productOptionLabel(product)} value={productDisplayName(product)} />
                     ))}
                   </datalist>
                   {autoMatched && existingSelected && (
                     <div className="product-resolution auto-match">
-                      <strong>Matched product</strong>
+                      <strong>Matched to: {item.matchedProductName || item.productName}</strong>
                       <small>{item.matchedProductName || item.productName}</small>
                       <small>Matched by {productMatchSourceText(item.productMatchSource).toLowerCase()}</small>
                       {resetProductResolution && <button className="icon small subtle-action" onClick={() => resetProductResolution(item.id)} title="Change matched product" type="button"><Edit3 size={12} /></button>}
@@ -7910,7 +7979,7 @@ function InvoiceLineEditor({
                   )}
                   {manualMatched && existingSelected && !autoMatched && (
                     <div className="product-resolution manual-match">
-                      <strong>Matched product</strong>
+                      <strong>Matched to: {item.matchedProductName || item.productName}</strong>
                       <small>{item.matchedProductName || item.productName}</small>
                       <small>Matched by manual selection</small>
                       {resetProductResolution && <button className="icon small subtle-action" onClick={() => resetProductResolution(item.id)} title="Change matched product" type="button"><Edit3 size={12} /></button>}
@@ -7922,8 +7991,8 @@ function InvoiceLineEditor({
                     </button>
                   )}
                   {item.suggestedProductName && applySuggestion && !createNewSelected && !existingSelected && (
-                    <button className="match-hint" onClick={() => applySuggestion(item.id)} type="button">
-                      Did you mean: {item.suggestedProductName}?
+                    <button className="match-hint" onClick={() => applySuggestion(item.id, item.suggestedProductId)} type="button">
+                      Select existing product: {item.suggestedProductName}
                     </button>
                   )}
                   {applyExistingProduct && !createNewSelected && !existingSelected && Array.isArray(item.suggestedProducts) && item.suggestedProducts.length > 0 && (
@@ -7931,24 +8000,24 @@ function InvoiceLineEditor({
                       <small className="line-note">Possible product matches</small>
                       {item.suggestedProducts.slice(0, 3).map((suggestion) => (
                         <button className="match-hint" key={suggestion.id} onClick={() => applyExistingProduct?.(item.id, suggestion.id)} type="button">
-                          Use {suggestion.name}
+                          Select existing product: {suggestion.name}
                         </button>
                       ))}
                     </div>
                   )}
-                  {applyExistingProduct && Array.isArray(item.duplicateProductCandidates) && item.duplicateProductCandidates.length > 0 && (
+                  {applyExistingProduct && duplicateCandidates.length > 0 && (
                     <div className="line-suggestions warn">
-                      <small className="line-note warn-text">Possible existing products found</small>
-                      {item.duplicateProductCandidates.slice(0, 3).map((candidate) => (
+                      <small className="line-note warn-text">Existing product found: {duplicateCandidates[0].name}</small>
+                      {duplicateCandidates.slice(0, 3).map((candidate) => (
                         <button className="match-hint" key={candidate.id} onClick={() => applyExistingProduct?.(item.id, candidate.id)} type="button">
-                          Use {candidate.name}
+                          Use existing product: {candidate.name}
                         </button>
                       ))}
                     </div>
                   )}
-                  {createProductFromLine && !item.matchedProductId && !createNewSelected && (
-                    <button className="ghost mini-button" onClick={() => createProductFromLine(item.id)} type="button">
-                      <Plus size={12} />Create new product
+                  {createProductFromLine && !item.matchedProductId && !createNewSelected && !blockingDuplicateCandidate && (
+                    <button className="ghost mini-button" onClick={() => createProductFromLine(item.id, { allowSimilarDuplicate: duplicateCandidates.length > 0 })} type="button">
+                      <Plus size={12} />{duplicateCandidates.length ? "Create new product anyway" : "Create new product"}
                     </button>
                   )}
                   {createNewSelected && (

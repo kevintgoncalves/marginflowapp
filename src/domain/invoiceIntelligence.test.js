@@ -21,8 +21,11 @@ import {
 } from "./departmentAssignment.js";
 import {
   PRODUCT_RESOLUTION_MODES,
+  createNewProductConflictCandidates,
+  hasBlockingCreateNewProductConflict,
   lineWithAutoMatchedProductResolution,
   lineWithCreateNewProductResolution,
+  lineWithCreateNewProductDuplicateReview,
   lineWithExistingProductResolution,
   lineWithResetProductResolution,
   resolveExplicitNewProductLines,
@@ -369,6 +372,139 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
   });
   assert.equal(future.matchedProductId, "horseradish-product");
   assert.equal(future.productMatchSource, "supplier_code");
+});
+
+test("existing product suggestions can be manually selected and persist through confirmation", () => {
+  const radishProducts = [{ id: "radish", companyId: "c1", name: "RADISH", packSize: "kg", supplier: "TG Fruits" }];
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: "c1",
+    supplierName: "TG Fruits",
+    rawDescription: "horseradish",
+    productName: "horseradish",
+    packSize: "kg",
+    existingProducts: radishProducts,
+  });
+  assert.equal(match.matchedProductId, null);
+  assert.equal(match.suggestedProducts[0].id, "radish");
+
+  const unresolvedLine = {
+    id: "line-horseradish",
+    supplier: "TG Fruits",
+    rawDescription: "horseradish",
+    productName: "horseradish",
+    packSize: "kg",
+    quantity: 1,
+    unitCost: 2.5,
+    lineTotal: 2.5,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+    productMatchSource: "no_product_match",
+    suggestedProductId: match.suggestedProducts[0].id,
+    suggestedProductName: match.suggestedProducts[0].name,
+    suggestedProducts: match.suggestedProducts,
+    reviewReasons: match.reviewReasons,
+  };
+  const selected = lineWithExistingProductResolution(unresolvedLine, radishProducts[0]);
+  assert.equal(selected.matchedProductId, "radish");
+  assert.equal(selected.productId, "radish");
+  assert.equal(selected.productResolution, PRODUCT_RESOLUTION_MODES.MANUAL_MATCH);
+  assert.equal(selected.productMatchSource, "manual_selection");
+  assert.deepEqual(selected.suggestedProducts, []);
+
+  const reviewed = validateInvoiceExtraction({
+    invoice: { supplier: "TG Fruits", invoiceNumber: "H-2", invoiceDate: "2026-07-23" },
+    lines: [selected],
+  });
+  assert.equal(reviewed.lines[0].matchedProductId, "radish");
+  assert.equal(reviewed.invoiceHasBlockingReview, false);
+
+  const resolved = resolveExplicitNewProductLines({
+    products: radishProducts,
+    items: [reviewed.lines[0]],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "should-not-create",
+  });
+  assert.equal(resolved.conflicts.length, 0);
+  assert.equal(resolved.createdProducts.length, 0);
+  assert.equal(resolved.items[0].matchedProductId, "radish");
+});
+
+test("create-new duplicate review offers existing products before final confirmation", () => {
+  const createLine = lineWithCreateNewProductResolution({
+    id: "line-duplicate",
+    supplier: "TG Fruits",
+    supplierProductCode: "HRS123",
+    productName: "Cherry Tomatoes 250g",
+    packSize: "250g",
+    quantity: 1,
+    unitCost: 2,
+    department: "Kitchen Made",
+    departmentMode: "Single",
+    departmentSplits: [{ department: "Kitchen Made", percentage: 100 }],
+  });
+  const candidates = createNewProductConflictCandidates({
+    products,
+    line: createLine,
+    supplier: "TG Fruits",
+    organisationId: "c1",
+  });
+  assert.equal(candidates[0].id, "p1");
+  assert.equal(candidates[0].conflictType, "exact_product");
+  assert.equal(hasBlockingCreateNewProductConflict(candidates), true);
+
+  const reviewLine = lineWithCreateNewProductDuplicateReview(createLine, candidates);
+  assert.equal(reviewLine.matchedProductId, "");
+  assert.equal(reviewLine.productResolution, PRODUCT_RESOLUTION_MODES.UNRESOLVED);
+  assert.equal(reviewLine.duplicateProductCandidates[0].id, "p1");
+  assert.equal(reviewLine.reviewReasons.includes("exact_product_duplicate"), true);
+
+  const selected = lineWithExistingProductResolution(reviewLine, products[0]);
+  const resolved = resolveExplicitNewProductLines({
+    products,
+    items: [selected],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "should-not-create",
+  });
+  assert.equal(resolved.conflicts.length, 0);
+  assert.equal(resolved.createdProducts.length, 0);
+  assert.equal(resolved.items[0].matchedProductId, "p1");
+});
+
+test("likely duplicate create-new review can still create a genuinely distinct product", () => {
+  const radishProducts = [{ id: "radish", companyId: "c1", name: "RADISH", packSize: "kg", supplier: "TG Fruits" }];
+  const createLine = lineWithCreateNewProductResolution({
+    id: "line-similar",
+    supplier: "TG Fruits",
+    productName: "horseradish",
+    packSize: "kg",
+    quantity: 1,
+    unitCost: 2,
+    department: "Kitchen Made",
+  });
+  const candidates = createNewProductConflictCandidates({
+    products: radishProducts,
+    line: createLine,
+    supplier: "TG Fruits",
+    organisationId: "c1",
+  });
+  assert.equal(candidates[0].id, "radish");
+  assert.equal(candidates[0].conflictType, "similar_product");
+  assert.equal(hasBlockingCreateNewProductConflict(candidates), false);
+
+  const resolved = resolveExplicitNewProductLines({
+    products: radishProducts,
+    items: [createLine],
+    supplier: "TG Fruits",
+    organisationId: "c1",
+    idFactory: () => "horseradish-product",
+  });
+  assert.equal(resolved.conflicts.length, 0);
+  assert.equal(resolved.createdProducts.length, 1);
+  assert.equal(resolved.createdProducts[0].name, "horseradish");
 });
 
 test("explicit create-new is materialized once per confirmation and exact duplicates block", () => {

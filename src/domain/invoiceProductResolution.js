@@ -1,5 +1,6 @@
 import { normalizeHeader, numberValue } from "./numberUtils.js";
 import {
+  findProductDuplicateCandidates,
   LEGACY_PRODUCT_MATCH_SOURCES,
   PRODUCT_MATCH_SOURCES,
   normalizeSupplierDescription,
@@ -324,14 +325,91 @@ function newProductTransactionKey(line = {}, supplier = "") {
   ].join(":");
 }
 
-function conflictCandidate(product = {}, type = "exact_product") {
+function conflictCandidate(product = {}, type = "exact_product", score = 1) {
   return {
     id: product.id,
     name: product.name || product.productName || "",
-    score: 1,
+    score,
     packSize: product.packSize || "",
     supplier: product.supplier || "",
     conflictType: type,
+  };
+}
+
+function uniqueConflictCandidates(candidates = []) {
+  const byId = new Map();
+  candidates.forEach((candidate) => {
+    if (!candidate?.id) return;
+    const existing = byId.get(candidate.id);
+    if (!existing || numberValue(candidate.score, 0) > numberValue(existing.score, 0)) byId.set(candidate.id, candidate);
+  });
+  return [...byId.values()];
+}
+
+export function createNewProductConflictCandidates({
+  products = [],
+  line = {},
+  supplierMappings = [],
+  supplier = "",
+  supplierId = "",
+  organisationId = "",
+  threshold = 0.72,
+} = {}) {
+  const productName = String(line.productName || line.rawDescription || "").trim();
+  if (!productName) return [];
+
+  const candidates = [];
+  const exactProduct = findExactProductForInvoiceLine(products, line, { organisationId });
+  if (exactProduct) candidates.push(conflictCandidate(exactProduct, "exact_product", 1));
+
+  const codeProduct = findSupplierCodeMappedProduct(products, supplierMappings, line, { organisationId, supplierId, supplierName: supplier });
+  if (codeProduct) candidates.push(conflictCandidate(codeProduct, "supplier_code", 1));
+
+  findProductDuplicateCandidates(products, {
+    name: productName,
+    packSize: line.packSize || "",
+    unitOfMeasure: line.unitOfMeasure || line.unit || "",
+  }, { organisationId, threshold }).forEach((candidate) => {
+    candidates.push(conflictCandidate(
+      candidate.product,
+      numberValue(candidate.score, 0) >= 0.98 ? "exact_product" : "similar_product",
+      numberValue(candidate.score, 0)
+    ));
+  });
+
+  return uniqueConflictCandidates(candidates);
+}
+
+export function hasBlockingCreateNewProductConflict(candidates = []) {
+  return candidates.some((candidate) => ["exact_product", "supplier_code"].includes(candidate.conflictType));
+}
+
+export function lineWithCreateNewProductDuplicateReview(line = {}, candidates = []) {
+  const duplicateCandidates = uniqueConflictCandidates(candidates);
+  const primary = duplicateCandidates[0] || null;
+  const reviewReasons = [...new Set([
+    ...(line.reviewReasons || []),
+    ...(duplicateCandidates.some((candidate) => candidate.conflictType === "exact_product") ? ["exact_product_duplicate"] : []),
+    ...(duplicateCandidates.some((candidate) => candidate.conflictType === "supplier_code") ? ["supplier_code_product_conflict"] : []),
+    ...(hasBlockingCreateNewProductConflict(duplicateCandidates) ? [] : ["no_confirmed_product_match"]),
+  ])];
+  return {
+    ...line,
+    matchedProductId: "",
+    matchedProductName: "",
+    productId: "",
+    suggestedProductId: primary?.id || line.suggestedProductId || "",
+    suggestedProductName: primary?.name || line.suggestedProductName || "",
+    duplicateProductCandidates: duplicateCandidates,
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+    productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
+    productMatchConfidence: primary?.score ?? line.productMatchConfidence ?? null,
+    matchConfidence: primary?.score ?? line.matchConfidence ?? 0,
+    matchStatus: primary ? `Existing product found: ${primary.name}` : "Choose a product match",
+    productMatchCorrectionMode: true,
+    productMatchOverridden: false,
+    needsReview: true,
+    reviewReasons,
   };
 }
 
