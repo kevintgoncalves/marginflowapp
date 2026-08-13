@@ -93,6 +93,11 @@ import { diagnoseLaptopLegacyRecovery } from "./lib/legacyRecoveryDiagnosticRepo
 import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
+import { loadCustomerOnboardingState } from "./lib/onboardingRepository.js";
+import { claimInternalStaffInvite, closeSupportWorkspace } from "./lib/adminRepository.js";
+import { onboardingNeedsRedirect } from "./domain/onboarding.js";
+import OnboardingWizard from "./components/OnboardingWizard.jsx";
+import InternalAdmin from "./components/InternalAdmin.jsx";
 import { comparisonRangesForChosenWeek } from "./domain/salesComparison.js";
 import { MENU_STATUS_OPTIONS, MENU_STATUSES, isMenuArchived, updateMenuStatus, visibleMenus } from "./domain/menuLifecycle.js";
 import {
@@ -330,6 +335,7 @@ const defaultCompanySettings = {
   email: "hello@readingroom.example",
   phone: "020 7000 0000",
   website: "https://readingroom.example",
+  language: "en",
 };
 
 const defaultFinancialSettings = {
@@ -591,6 +597,21 @@ const navItems = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+const supportFeatureByPage = {
+  dashboard: "dashboard",
+  gp: "sales",
+  invoices: "invoices",
+  invoiceControl: "invoice_control_centre",
+  products: "products",
+  suppliers: "suppliers",
+  stocktake: "stocktake",
+  recipes: "recipes",
+  menu: "menu_costing",
+  waste: "waste",
+  labour: "labour",
+  ai: "ai_insights",
+};
+
 const permissionLevels = [
   { value: "none", label: "No access" },
   { value: "view", label: "View only" },
@@ -785,7 +806,7 @@ async function loadAuthMembership(user) {
   await ensureAuthProfile(user);
   const { data, error } = await supabase
     .from("company_members")
-    .select("id, company_id, location_id, role_label, status, companies(name, trading_name), locations(name)")
+    .select("id, company_id, location_id, role_label, status, companies(name, trading_name, onboarding_status, onboarding_step, onboarding_completed_at), locations(name)")
     .eq("user_id", user.id)
     .eq("status", "active")
     .order("created_at", { ascending: true })
@@ -796,15 +817,31 @@ async function loadAuthMembership(user) {
   return data || null;
 }
 
+async function loadInternalStaffStatus() {
+  if (!supabase) return false;
+  try {
+    await claimInternalStaffInvite();
+  } catch (error) {
+    // The invite claim is additive. A deployment without 4C should retain the
+    // existing 4A routing behaviour until its migration is applied.
+    if (!/could not find|schema cache|PGRST202/i.test(error.message || "")) throw error;
+  }
+  const { data, error } = await supabase.rpc("is_internal_staff");
+  if (error) throw error;
+  return Boolean(data);
+}
+
 function AuthGate() {
   const demoMode = isDemoUrl();
   const initialAuthMode = authModeFromUrl();
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
   const [membership, setMembership] = useState(null);
+  const [internalStaff, setInternalStaff] = useState(false);
   const [loadingMembership, setLoadingMembership] = useState(false);
   const [authError, setAuthError] = useState("");
   const [passwordRecovery, setPasswordRecovery] = useState(false);
+  const [supportWorkspace, setSupportWorkspace] = useState(null);
 
   useEffect(() => {
     if (demoMode || !isSupabaseConfigured || !supabase) {
@@ -832,15 +869,22 @@ function AuthGate() {
   const refreshMembership = async (user = session?.user) => {
     if (!user) {
       setMembership(null);
+      setInternalStaff(false);
       return;
     }
     setLoadingMembership(true);
     setAuthError("");
     try {
-      setMembership(await loadAuthMembership(user));
+      const [nextMembership, nextInternalStaff] = await Promise.all([
+        loadAuthMembership(user),
+        loadInternalStaffStatus(),
+      ]);
+      setMembership(nextMembership);
+      setInternalStaff(nextInternalStaff);
     } catch (error) {
       setAuthError(error.message || "Could not load your MarginFlow company.");
       setMembership(null);
+      setInternalStaff(false);
     } finally {
       setLoadingMembership(false);
     }
@@ -849,16 +893,31 @@ function AuthGate() {
   useEffect(() => {
     if (!session?.user) {
       setMembership(null);
+      setInternalStaff(false);
       return;
     }
     refreshMembership(session.user);
   }, [session?.user?.id]);
 
+  useEffect(() => {
+    if (loadingMembership) return;
+    if (internalStaff && !supportWorkspace && !currentPathname().startsWith("/internal")) {
+      window.history.replaceState({}, "", "/internal");
+    } else if (!internalStaff && currentPathname().startsWith("/internal")) {
+      window.history.replaceState({}, "", "/");
+    }
+  }, [internalStaff, loadingMembership, supportWorkspace]);
+
   const signOut = async () => {
+    if (supportWorkspace?.session_id) {
+      try { await closeSupportWorkspace(supportWorkspace.session_id); } catch { /* session can expire independently */ }
+      setSupportWorkspace(null);
+    }
     if (!supabase) return;
     await supabase.auth.signOut();
     setSession(null);
     setMembership(null);
+    setInternalStaff(false);
   };
 
   if (demoMode) return <App authMembership={demoAuthMembership} authUser={demoAuthUser} demoMode onSignOut={() => { window.location.href = "/?mode=login"; }} />;
@@ -867,11 +926,40 @@ function AuthGate() {
   if (!session) return <AuthScreen initialError={authError} initialMode={initialAuthMode} />;
   if (passwordRecovery) return <UpdatePasswordScreen onSignOut={signOut} onUpdated={() => setPasswordRecovery(false)} />;
   if (loadingMembership) return <AuthLoading message="Loading company access..." />;
-  if (!membership) {
+  if (internalStaff) {
+    if (supportWorkspace) {
+      return (
+        <App
+          authMembership={{
+            id: `support-${supportWorkspace.session_id}`,
+            company_id: supportWorkspace.company_id,
+            location_id: supportWorkspace.location_id,
+            role_label: "Support Mode",
+            status: "active",
+            companies: { name: supportWorkspace.company_name, trading_name: supportWorkspace.company_name },
+            locations: { name: supportWorkspace.location_name || "All locations" },
+          }}
+          authUser={session.user}
+          entitlementFeatureKeys={supportWorkspace.feature_keys || []}
+          onExitSupport={async () => {
+            try { await closeSupportWorkspace(supportWorkspace.session_id); } catch (error) { setAuthError(error.message || "Could not close Support Mode."); return; }
+            setSupportWorkspace(null);
+          }}
+          onSignOut={signOut}
+          readOnly
+          supportMode
+          supportSessionId={supportWorkspace.session_id}
+        />
+      );
+    }
+    return <InternalAdmin onOpenSupport={setSupportWorkspace} onSignOut={signOut} />;
+  }
+  if (!membership || onboardingNeedsRedirect(membership, internalStaff)) {
     return (
-      <CreateCompanyScreen
-        error={authError}
-        onCreated={() => refreshMembership(session.user)}
+      <OnboardingWizard
+        membership={membership}
+        onCompleted={() => refreshMembership(session.user)}
+        onWorkspaceCreated={() => refreshMembership(session.user)}
         onSignOut={signOut}
         user={session.user}
       />
@@ -918,11 +1006,22 @@ function SupabaseSetupNotice() {
   );
 }
 
+function InternalStaffAccessNotice({ onSignOut }) {
+  return (
+    <AuthLayout>
+      <h1>Internal access</h1>
+      <p className="auth-copy">This account is managed through MarginFlow internal administration and does not enter customer onboarding.</p>
+      <div className="button-row left"><button className="ghost" onClick={onSignOut} type="button">Sign out</button></div>
+    </AuthLayout>
+  );
+}
+
 function AuthScreen({ initialError = "", initialMode = "login" }) {
   const [mode, setMode] = useState(authModes.includes(initialMode) ? initialMode : "login");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [status, setStatus] = useState(initialError);
   const [busy, setBusy] = useState(false);
 
@@ -944,6 +1043,8 @@ function AuthScreen({ initialError = "", initialMode = "login" }) {
         return;
       }
       if (mode === "register") {
+        if (password.length < 8) throw new Error("Use a password with at least 8 characters.");
+        if (password !== passwordConfirmation) throw new Error("Passwords do not match.");
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
@@ -976,8 +1077,9 @@ function AuthScreen({ initialError = "", initialMode = "login" }) {
         {mode === "register" && <Field label="Name" value={name} onChange={setName} />}
         <Field label="Email" type="email" value={email} onChange={setEmail} />
         {mode !== "forgot" && <Field label="Password" type="password" value={password} onChange={setPassword} />}
+        {mode === "register" && <Field label="Confirm password" type="password" value={passwordConfirmation} onChange={setPasswordConfirmation} />}
         {status && <div className={`auth-status ${status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid") ? "error" : "info"}`}>{status}</div>}
-        <button disabled={busy || !email || (mode !== "forgot" && !password)} type="submit">
+        <button disabled={busy || !email || (mode !== "forgot" && !password) || (mode === "register" && (!name.trim() || password.length < 8 || password !== passwordConfirmation))} type="submit">
           {busy ? "Please wait..." : title}
         </button>
       </form>
@@ -4459,7 +4561,7 @@ function parseLabourCsv(text, fallbackDate = today()) {
     };
   }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && row.hours);
 }
-function App({ authMembership, authUser, demoMode = false, onSignOut }) {
+function App({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
   const effectiveAuthUser = demoMode ? demoAuthUser : authUser;
   const effectiveAuthMembership = demoMode ? demoAuthMembership : authMembership;
@@ -4526,10 +4628,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true"
     || (import.meta.env.DEV && new URLSearchParams(window.location.search).get("internalRecovery") === "true");
-  const makeStateUpdater = demoMode ? transientStateUpdater : storedStateUpdater;
+  const makeStateUpdater = demoMode || readOnly ? transientStateUpdater : storedStateUpdater;
   const salesRowKey = (row = {}) => row.relationalId || row.id || "";
   const syncRelationalSalesChange = async (previousRows = [], nextRows = []) => {
-    if (!cloudEnabled) return;
+    if (!cloudEnabled || readOnly) return;
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
     const previousByKey = new Map(previousRows.map((row) => [salesRowKey(row), row]).filter(([key]) => key));
     const nextByKey = new Map(nextRows.map((row) => [salesRowKey(row), row]).filter(([key]) => key));
@@ -4582,31 +4684,31 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const setCompanySettings = (value) => {
     setCompanySettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.companySettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.companySettings", value);
   };
   const setFinancialSettings = (value) => {
     setFinancialSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.financialSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.financialSettings", value);
   };
   const setLabourSettings = (value) => {
     setLabourSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.labourSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.labourSettings", value);
   };
   const setMenuSettings = (value) => {
     setMenuSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.menuSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.menuSettings", value);
   };
   const setInvoiceSettings = (value) => {
     setInvoiceSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.invoiceSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.invoiceSettings", value);
   };
   const setAiSettings = (value) => {
     setAiSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.aiSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.aiSettings", value);
   };
   const setDepartmentSettings = (value) => {
     setDepartmentSettingsState(value);
-    if (!demoMode) saveLocalStorage("marginflow.departmentSettings", value);
+    if (!demoMode && !readOnly) saveLocalStorage("marginflow.departmentSettings", value);
   };
 
   useEffect(() => {
@@ -4648,7 +4750,11 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
 
   const currentUser = useMemo(() => authUserToPermissionUser(effectiveAuthUser, effectiveAuthMembership, departmentSettings), [effectiveAuthUser, effectiveAuthMembership, departmentSettings]);
   const users = useMemo(() => [currentUser], [currentUser]);
-  const visibleNavItems = useMemo(() => navItems.filter((item) => userCanViewPage(currentUser, item.id)), [currentUser]);
+  const visibleNavItems = useMemo(() => navItems.filter((item) => {
+    if (!userCanViewPage(currentUser, item.id)) return false;
+    if (!supportMode || item.id === "settings") return true;
+    return entitlementFeatureKeys.includes(supportFeatureByPage[item.id]);
+  }), [currentUser, entitlementFeatureKeys, supportMode]);
   const allowedDepartmentNames = useMemo(() => departmentNames.filter((name) => userCanViewDepartment(currentUser, name)), [currentUser, departmentNames]);
   const visibleDepartmentOptions = useMemo(() => {
     if (!allowedDepartmentNames.length) return ["All departments"];
@@ -4708,7 +4814,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, supplierProductMappings, invoiceLineCorrections, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
   const applyCloudSnapshot = (snapshot) => {
-    if (!demoMode) {
+    if (!demoMode && !readOnly) {
       try {
         Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => localStorage.setItem(key, value));
       } catch {
@@ -4741,7 +4847,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   };
 
   const saveSnapshotToCloud = async (snapshot, migratedFromLocalStorage = false) => {
-    if (!cloudEnabled) return;
+    if (!cloudEnabled || readOnly) return;
     setCloudLoading(true);
     setCloudError("");
     try {
@@ -4793,7 +4899,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     try {
       [relationalInvoices, archivedInvoices] = await Promise.all([
         loadRelationalInvoices(supabase, scope),
-        loadLegacyInvoiceArchive(supabase, scope),
+        readOnly ? Promise.resolve([]) : loadLegacyInvoiceArchive(supabase, scope),
       ]);
     } catch (error) {
       throw new Error(`Relational invoice hydration failed [operation=loadRelationalInvoices company=${scope.companyId} location=${scope.locationId || "company"}]: ${error.message || "Unknown error"}`);
@@ -4805,7 +4911,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       locationId: invoice.locationId || invoice.location_id || cloudScope.locationId || "",
     }));
     const reconciled = mergeInvoiceCollectionsPreservingAll(scopedDeviceInvoices, relationalInvoices);
-    saveLocalStorage("marginflow.invoices", reconciled.invoices);
+    if (!readOnly) saveLocalStorage("marginflow.invoices", reconciled.invoices);
     return { ...snapshot, invoices: reconciled.invoices };
   };
 
@@ -4816,8 +4922,48 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     return { ...snapshot, sales: relationalSales };
   };
 
+  const withCompletedOnboardingSetup = async (snapshot) => {
+    if (!cloudEnabled || !effectiveAuthMembership?.companies?.onboarding_completed_at) return snapshot;
+
+    const onboarding = await loadCustomerOnboardingState(cloudScope.companyId);
+    if (onboarding?.company?.onboarding_status !== "complete") return snapshot;
+
+    const settings = onboarding.settings || {};
+    const departments = Array.isArray(onboarding.departments) ? onboarding.departments : [];
+    return {
+      ...snapshot,
+      companySettings: {
+        ...snapshot.companySettings,
+        companyName: settings.company_name || onboarding.company.name || snapshot.companySettings.companyName,
+        tradingName: settings.trading_name || onboarding.company.trading_name || snapshot.companySettings.tradingName,
+        country: settings.country || snapshot.companySettings.country,
+        countryCode: settings.country_code || onboarding.company.country_code || snapshot.companySettings.countryCode,
+        language: settings.language || snapshot.companySettings.language || "en",
+      },
+      financialSettings: {
+        ...snapshot.financialSettings,
+        currency: settings.currency || onboarding.company.currency || snapshot.financialSettings.currency,
+        timezone: settings.timezone || onboarding.company.timezone || snapshot.financialSettings.timezone,
+        defaultVat: numberValue(settings.default_vat_percent, snapshot.financialSettings.defaultVat),
+        weekStartsOn: settings.week_starts_on || snapshot.financialSettings.weekStartsOn,
+        targetGp: numberValue(settings.target_gp_percent, snapshot.financialSettings.targetGp),
+      },
+      departmentSettings: departments.length
+        ? departments.map((department, index) => ({
+          id: department.id,
+          name: department.name,
+          type: "Food",
+          targetGp: numberValue(settings.target_gp_percent, 75),
+          active: true,
+          sortOrder: department.sort_order ?? index * 10,
+        }))
+        : snapshot.departmentSettings,
+      departmentSelection: "All departments",
+    };
+  };
+
   const persistConfirmedLearning = async (learnedMappings = []) => {
-    if (!cloudEnabled || !learnedMappings.length) return { persisted: [], skipped: [] };
+    if (!cloudEnabled || readOnly || !learnedMappings.length) return { persisted: [], skipped: [] };
     try {
       const result = await persistRelationalSupplierProductMappings(supabase, learnedMappings, {
         companyId: cloudScope.companyId,
@@ -4838,7 +4984,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
   };
 
   const forgetPersistentLearning = async (mapping = {}) => {
-    if (!cloudEnabled) return { persisted: false, skipped: true };
+    if (!cloudEnabled || readOnly) return { persisted: false, skipped: true };
     try {
       return await forgetRelationalSupplierProductMapping(supabase, mapping, {
         companyId: cloudScope.companyId,
@@ -4901,14 +5047,22 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
           const merged = hasLocalMarginFlowData
             ? mergeMarginFlowStorage(localStorageData, cloudStorage, false).nextStorage
             : cloudStorage;
-          const learnedSnapshot = await withRelationalLearning(cloudSnapshotFromStorage(merged));
+          const hasPersistedSetup = ["companySettings", "financialSettings", "departmentSettings"]
+            .every((moduleKey) => rows.some((row) => row.module_key === moduleKey));
+          const baseSnapshot = cloudSnapshotFromStorage(merged);
+          const configuredSnapshot = hasPersistedSetup || readOnly
+            ? baseSnapshot
+            : await withCompletedOnboardingSetup(baseSnapshot);
+          const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
           const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
           const nextSnapshot = await withRelationalSales(invoiceSnapshot);
           applyCloudSnapshot(nextSnapshot);
           if (cancelled) return;
           setCloudStatus("synced");
         } else {
-          const learnedSnapshot = await withRelationalLearning(hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot);
+          const baseSnapshot = hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot;
+          const configuredSnapshot = readOnly ? baseSnapshot : await withCompletedOnboardingSetup(baseSnapshot);
+          const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
           const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
           const firstSnapshot = await withRelationalSales(invoiceSnapshot);
           applyCloudSnapshot(firstSnapshot);
@@ -4929,7 +5083,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       cancelled = true;
       if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     };
-  }, [cloudEnabled, cloudLoadAttempt, cloudScope.companyId, cloudScope.scopeKey]);
+  }, [cloudEnabled, cloudLoadAttempt, cloudScope.companyId, cloudScope.scopeKey, readOnly]);
 
   useEffect(() => {
     if (!cloudEnabled) return undefined;
@@ -4941,7 +5095,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
         const [freshInvoices, freshArchive, freshSales] = await Promise.all([
           loadRelationalInvoices(supabase, scope),
-          loadLegacyInvoiceArchive(supabase, scope),
+          readOnly ? Promise.resolve([]) : loadLegacyInvoiceArchive(supabase, scope),
           loadRelationalSales(supabase, scope),
         ]);
         if (cancelled) return;
@@ -4967,10 +5121,10 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       window.removeEventListener("focus", refreshRelationalOperations);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [cloudEnabled, cloudScope.companyId, cloudScope.locationId]);
+  }, [cloudEnabled, cloudScope.companyId, cloudScope.locationId, readOnly]);
 
   useEffect(() => {
-    if (!cloudEnabled || !cloudReadyRef.current) return undefined;
+    if (!cloudEnabled || readOnly || !cloudReadyRef.current) return undefined;
     if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     cloudSaveTimerRef.current = window.setTimeout(() => {
       saveSnapshotToCloud(cloudSnapshot).catch(() => {
@@ -4980,7 +5134,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     return () => {
       if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     };
-  }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey, cloudSnapshot]);
+  }, [cloudEnabled, cloudScope.companyId, cloudScope.scopeKey, cloudSnapshot, readOnly]);
 
   useEffect(() => {
     if (!visibleNavItems.some((item) => item.id === active)) setActive(visibleNavItems[0]?.id || "dashboard");
@@ -5536,7 +5690,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
     );
   }
 
-  const topbarAction = active === "dashboard"
+  const topbarAction = readOnly ? null : active === "dashboard"
     ? <PrimaryAction className="page-primary-action" onClick={() => setSalesInputRequest({ id: uid() })}>Input Sales</PrimaryAction>
     : active === "invoices" && permissionsByPage.invoices?.canImport
       ? <PrimaryAction className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())}>Upload Invoice</PrimaryAction>
@@ -5593,6 +5747,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
       </aside>
 
       <main className="workspace">
+        {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
         <header className="topbar">
           <div>
             <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
@@ -5815,7 +5970,7 @@ function App({ authMembership, authUser, demoMode = false, onSignOut }) {
             setMenuSettings={setMenuSettings}
             setUsers={() => {}}
             setActiveUserId={() => {}}
-            showRecoveryTools={recoveryToolsEnabled}
+            showRecoveryTools={recoveryToolsEnabled && (!authMembership?.role_label || String(authMembership.role_label).toLowerCase() === "owner") && !readOnly}
           />
         )}
         <AppModal
@@ -11986,6 +12141,13 @@ function SettingsPanel({
   const [settingsSection, setSettingsSection] = useState("");
 
   const canChangeSettings = permissions.canAdd || permissions.canEdit;
+  const isCompanyOwner = !authMode || String(authMembership?.role_label || "").toLowerCase() === "owner";
+  const companyNameForConfirmation = authMembership?.companies?.trading_name
+    || authMembership?.companies?.name
+    || companySettings.tradingName
+    || companySettings.companyName
+    || "";
+  const canManageBackups = !authMode || isCompanyOwner;
   const updateCompany = (field, value) => {
     if (!canChangeSettings) return;
     setCompanySettings({ ...companySettings, [field]: value });
@@ -12013,7 +12175,12 @@ function SettingsPanel({
   };
 
   const resetDataSection = (label, keys) => {
-    if (demoMode || !permissions.canReset) return;
+    if (demoMode || !permissions.canReset || !isCompanyOwner) return;
+    const confirmation = window.prompt(`Type the company name to reset ${label.toLowerCase()}: ${companyNameForConfirmation}`);
+    if (confirmation !== companyNameForConfirmation) {
+      setDataStatus("Reset cancelled. The company name did not match.");
+      return;
+    }
     requestDelete({
       title: `Reset ${label}?`,
       message: `This will permanently remove saved ${label.toLowerCase()} data from this browser. Export a full backup first if you may need it later.`,
@@ -12078,6 +12245,7 @@ function SettingsPanel({
   const lightspeedSalesTemplate = "Date,Category,Gross,Net,Tax,Service Charge,Discounts,Refunds\n2026-06-10,Food,2053.75,1821.49,232.26,0,0,0";
 
   const exportFullBackup = () => {
+    if (!canManageBackups) return;
     const payload = cloudEnabled && cloudSnapshot
       ? buildFullBackupPayloadFromSnapshot(cloudSnapshot, cloudStatus === "synced" ? "cloud" : "app-state")
       : buildFullBackupPayload();
@@ -12087,6 +12255,7 @@ function SettingsPanel({
   };
 
   const exportEmergencyBackup = () => {
+    if (!canManageBackups) return;
     const companyName = companySettings.tradingName || companySettings.companyName || authMembership?.companies?.trading_name || authMembership?.companies?.name || "company";
     const payload = buildEmergencyBackup({
       currentSnapshot: cloudSnapshot || {},
@@ -12217,7 +12386,7 @@ function SettingsPanel({
   };
 
   const importFullBackup = async (file) => {
-    if (demoMode || !permissions.canImport) return;
+    if (demoMode || !permissions.canImport || !canManageBackups) return;
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
@@ -12238,13 +12407,13 @@ function SettingsPanel({
   };
 
   const savePreImportBackup = () => {
-    if (demoMode) return;
+    if (demoMode || !canManageBackups) return;
     const preImportBackup = buildFullBackupPayload();
     localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
   };
 
   const mergeFullBackup = async () => {
-    if (demoMode || !permissions.canImport) return;
+    if (demoMode || !permissions.canImport || !canManageBackups) return;
     if (!pendingFullBackup) return;
     if (cloudEnabled && onImportBackupToCloud) {
       try {
@@ -12269,7 +12438,7 @@ function SettingsPanel({
   };
 
   const resetDemoSettings = () => {
-    if (!permissions.canReset) return;
+    if (!permissions.canReset || !isCompanyOwner) return;
     if (demoMode) {
       onResetDemo?.();
       setDataStatus("Demo data reset.");
@@ -12375,19 +12544,6 @@ function SettingsPanel({
               <strong>{cloudLoading ? "Syncing..." : cloudStatusText[cloudStatus] || cloudStatusText.local}</strong>
               <p>{cloudError || (cloudEnabled ? "Data is synced by company and location after login. Local browser data remains as a fallback." : "Cloud sync is waiting for Supabase Auth company access.")}</p>
             </div>
-            {permissions.canImport && (
-              <button disabled={!cloudEnabled || cloudLoading} onClick={async () => {
-                try {
-                  setDataStatus("");
-                  await onMigrateLocalToCloud?.();
-                  setDataStatus("Local data migrated to cloud.");
-                } catch (error) {
-                  setDataStatus(error.message || "Cloud migration failed.");
-                }
-              }} type="button">
-                {cloudLoading ? "Syncing..." : "Migrate all local data to cloud"}
-              </button>
-            )}
           </div>
           {dataStatus && <div className={`invoice-status ${cloudStatus === "error" ? "error" : "info"}`}>{dataStatus}</div>}
         </Panel>
@@ -12531,6 +12687,7 @@ function SettingsPanel({
           <Field label="Address" value={companySettings.address} onChange={(value) => updateCompany("address", value)} />
           <Field label="Postcode" value={companySettings.postcode} onChange={(value) => updateCompany("postcode", value)} />
           <Field label="Country" value={companySettings.country} onChange={(value) => updateCompany("country", value)} />
+          <label>Language<select value={companySettings.language || "en"} onChange={(event) => updateCompany("language", event.target.value)}><option value="en">English</option><option value="pt">Portuguese</option></select></label>
           <Field label="VAT number" value={companySettings.vatNumber} onChange={(value) => updateCompany("vatNumber", value)} />
           <Field label="Email" type="email" value={companySettings.email} onChange={(value) => updateCompany("email", value)} />
           <Field label="Phone" value={companySettings.phone} onChange={(value) => updateCompany("phone", value)} />
@@ -12866,6 +13023,7 @@ function SettingsPanel({
         </Panel>
       ) : (
         <>
+      {isCompanyOwner && (
       <Panel className="settings-danger-section" title="Reset data by page">
         <p className="helper-text">Use these only when you want to clear one module. Each reset asks for confirmation and only affects this browser until Supabase/cloud sync is added.</p>
         <div className="button-row left wrap">
@@ -12881,14 +13039,16 @@ function SettingsPanel({
           {permissions.canReset && <button className="ghost danger" onClick={() => resetDataSection("Settings", ["marginflow.companySettings", "marginflow.financialSettings", "marginflow.departmentSettings", "marginflow.invoiceSettings", "marginflow.aiSettings", "marginflow.menuSettings", "marginflow.labourSettings"])} type="button">Reset settings</button>}
         </div>
       </Panel>
+      )}
 
       <Panel className="settings-danger-section" title="Data settings">
         <div className="button-row left">
-          <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>
-          {permissions.canImport && <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>}
+          {canManageBackups && <button onClick={exportFullBackup} type="button"><Save size={16} />Export Full Backup</button>}
+          {canManageBackups && permissions.canImport && <label className="file-button secondary">Import Full Backup<input accept="application/json,.json" key={backupInputKey} onChange={(event) => importFullBackup(event.target.files?.[0])} type="file" /></label>}
           <a className="file-button secondary" download="marginflow-departments.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(departmentCsv)}`}>Export CSV</a>
-          {permissions.canReset && <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>}
+          {isCompanyOwner && permissions.canReset && <button className="ghost" onClick={resetDemoSettings} type="button">Reset demo data</button>}
         </div>
+        {authMode && !isCompanyOwner && <p className="helper-text">Backup export/import and reset tools are restricted to the company Owner.</p>}
         {dataStatus && <div className="invoice-status info">{dataStatus}</div>}
         {importSummary && (
           <div className="code-card">
@@ -12921,7 +13081,7 @@ function SettingsPanel({
               <label>Settings during merge<select value={backupImportSettingsMode} onChange={(event) => setBackupImportSettingsMode(event.target.value)}><option>Keep current settings</option><option>Use imported settings</option></select></label>
             </div>
             <div className="button-row left">
-              {permissions.canImport && <button onClick={mergeFullBackup} type="button">Merge</button>}
+              {canManageBackups && permissions.canImport && <button onClick={mergeFullBackup} type="button">Merge</button>}
               <button className="ghost" onClick={() => { setPendingFullBackup(null); setDataStatus("Full backup import cancelled."); }} type="button">Cancel</button>
             </div>
           </div>
