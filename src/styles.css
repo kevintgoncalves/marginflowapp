@@ -6643,3 +6643,274 @@ button.icon {
   .admin-role-row { grid-template-columns: 1fr; gap: 4px; }
   .support-mode-banner button { width: 100%; }
 }
+
+/* Customer-aligned account action and internal admin presentation. */
+.sidebar-signout {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sidebar-signout:hover:not(:disabled) {
+  border: 0;
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.admin-shell {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.admin-sidebar {
+  gap: 22px;
+  border-right-color: var(--border-subtle);
+  background: #fcfbf9;
+}
+
+.admin-brand span,
+.admin-eyebrow {
+  color: var(--muted);
+}
+
+.admin-staff-chip {
+  border-color: var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.admin-staff-chip small,
+.admin-page-intro p,
+.admin-company-heading p,
+.admin-card > p,
+.admin-role-row small,
+.admin-attention p {
+  color: var(--muted);
+}
+
+.admin-nav button,
+.admin-signout {
+  color: var(--text-secondary);
+}
+
+.admin-nav button.active {
+  background: #ecece8;
+  color: var(--text);
+}
+
+.admin-nav button:hover,
+.admin-signout:hover {
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.admin-workspace {
+  background: var(--bg);
+}
+
+.admin-topbar {
+  border-bottom-color: var(--border-subtle);
+}
+
+.admin-topbar h1,
+.admin-page-intro h2,
+.admin-company-heading h2,
+.admin-card-heading h3,
+.admin-metric strong,
+.admin-plan-counts strong,
+.admin-big-number {
+  color: var(--text);
+}
+
+.admin-primary {
+  background: var(--action-primary);
+}
+
+.admin-primary:hover:not(:disabled) {
+  background: var(--action-primary-hover);
+}
+
+.admin-secondary,
+.admin-back-button,
+.admin-close {
+  border-color: var(--border-subtle);
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.admin-secondary:hover:not(:disabled),
+.admin-back-button:hover:not(:disabled),
+.admin-close:hover:not(:disabled) {
+  border-color: #cfcfc8;
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.admin-secondary-danger {
+  border-color: #f1c6c1;
+  color: var(--danger);
+}
+
+.admin-back-button,
+.admin-back-link {
+  color: var(--action-primary);
+}
+
+.admin-read-only,
+.admin-status,
+.admin-access-state {
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.admin-alert {
+  border-color: var(--border-subtle);
+  background: var(--surface);
+}
+
+.admin-alert.error {
+  border-color: #f1c6c1;
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.admin-alert.success {
+  border-color: #b9e4d2;
+  background: #edf9f3;
+  color: #176b4b;
+}
+
+.admin-loading {
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.admin-metric,
+.admin-card {
+  border-color: var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.admin-metric span,
+.admin-card-heading span,
+.admin-definition-list dt,
+.admin-plan-counts span,
+.admin-table th,
+.admin-empty,
+.admin-table td small,
+.admin-mono,
+.admin-table code,
+.admin-feature-list small,
+.admin-role-row span,
+.admin-trial-line small {
+  color: var(--muted);
+}
+
+.admin-metric.success strong { color: #19734f; }
+.admin-metric.warning strong { color: #a16207; }
+.admin-metric.danger strong { color: #b42318; }
+
+.admin-plan-counts div {
+  border-color: var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
+.admin-table-wrap {
+  border-color: var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.admin-table th,
+.admin-table td {
+  border-bottom-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.admin-table th { color: var(--muted); }
+.admin-table tbody tr:hover { background: var(--surface-subtle); }
+.admin-definition-list dd { color: var(--text); }
+
+.admin-form-grid label,
+.admin-feature-list > div,
+.admin-feature-list > li,
+.admin-permission-editor label {
+  color: var(--text-secondary);
+}
+
+.admin-form-grid input,
+.admin-form-grid select,
+.admin-permission-editor input {
+  color: var(--text);
+}
+
+.admin-trial-line { color: #a16207; }
+.admin-feature-list > div,
+.admin-feature-list > li,
+.admin-role-row,
+.admin-permission-editor,
+.admin-inline-editor { border-color: var(--border-subtle); }
+
+.admin-permission-editor fieldset {
+  border-color: var(--border-subtle);
+}
+
+.admin-permission-editor legend { color: var(--action-primary); }
+.admin-access-state { display: inline-flex; padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.admin-access-active { border-color: #b9e4d2; color: #19734f; }
+.admin-access-trialing { border-color: #ead7a4; color: #a16207; }
+.admin-access-expired, .admin-access-cancelled { border-color: #f1c6c1; color: var(--danger); }
+
+.admin-support-return button {
+  background: var(--action-primary);
+  box-shadow: var(--shadow);
+}
+
+@media (max-width: 640px) {
+  .sidebar-signout { width: 100%; }
+}
+
+@media (min-width: 641px) {
+  .sidebar {
+    overflow-y: auto;
+    padding-top: 24px;
+  }
+
+  .brand { margin-bottom: 0; }
+
+  .sidebar nav {
+    gap: 2px;
+    padding-bottom: 112px;
+  }
+
+  .sidebar nav button { min-height: 36px; }
+
+  .sidebar-user-switcher {
+    gap: 8px;
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    z-index: 3;
+    width: 309px;
+    margin: 0;
+    padding: 12px 12px 14px;
+    background: #fcfbf9;
+  }
+
+  .sidebar-location,
+  .sidebar-signout { min-height: 32px; }
+}

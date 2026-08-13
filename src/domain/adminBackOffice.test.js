@@ -14,6 +14,8 @@ const migration = readFileSync(
   'utf8',
 );
 const mainSource = readFileSync(new URL('../main.jsx', import.meta.url), 'utf8');
+const internalAdminSource = readFileSync(new URL('../components/InternalAdmin.jsx', import.meta.url), 'utf8');
+const stylesSource = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 
 test('internal navigation is separate from the customer workspace', () => {
   assert.deepEqual(ADMIN_NAV_ITEMS.map((item) => item.label), [
@@ -28,6 +30,15 @@ test('internal navigation is separate from the customer workspace', () => {
   ]);
   assert.match(mainSource, /if \(!internalStaff && currentPathname\(\)\.startsWith\("\/internal"\)\)/);
   assert.match(mainSource, /return <InternalAdmin onOpenSupport=/);
+});
+
+test('customer sign out and admin subscription purpose stay visible in the UI contract', () => {
+  assert.match(mainSource, /className="sidebar-signout" onClick=\{onSignOut\}/);
+  assert.match(internalAdminSource, /Find workspaces, see who uses them/);
+  assert.match(internalAdminSource, /Manage plan access, trial dates, and subscription status/);
+  assert.match(internalAdminSource, /Extend 7 days/);
+  assert.match(internalAdminSource, /Cancel access/);
+  assert.match(stylesSource, /\.admin-shell \{[\s\S]*background: var\(--bg\)/);
 });
 
 test('admin company filters and subscription trial states remain deterministic', () => {

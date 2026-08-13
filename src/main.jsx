@@ -19,6 +19,7 @@ import {
   FileSearch,
   Gauge,
   Home,
+  LogOut,
   PackageSearch,
   Plus,
   ReceiptText,
@@ -5721,6 +5722,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
             <span><strong>{department}</strong><small>Switch location</small></span>
           </button>
           <button aria-label="Collapse sidebar" className="sidebar-collapse" title="Collapse sidebar" type="button"><span aria-hidden="true">‹</span> Collapse</button>
+          <button className="sidebar-signout" onClick={onSignOut} type="button"><LogOut size={17} /> <span>Sign out</span></button>
           <details className="sidebar-account">
             <summary>Account</summary>
             <strong>{currentUser.name}</strong>
