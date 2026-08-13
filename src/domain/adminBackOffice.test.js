@@ -86,5 +86,6 @@ test('customer settings keep destructive recovery owner-only and remove customer
   assert.doesNotMatch(mainSource, /Migrate all local data to cloud/);
   assert.match(mainSource, /Type the company name to reset/);
   assert.match(mainSource, /showRecoveryTools=\{recoveryToolsEnabled[\s\S]*authMembership\?\.role_label[\s\S]*owner/);
-  assert.match(mainSource, /readOnly \? Promise\.resolve\(\[\]\) : loadLegacyInvoiceArchive/);
+  assert.match(mainSource, /relationalOperationalInvoiceCollection/);
+  assert.doesNotMatch(mainSource, /loadLegacyInvoiceArchive/);
 });

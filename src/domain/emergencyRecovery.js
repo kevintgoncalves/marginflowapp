@@ -506,6 +506,38 @@ export function mergeInvoiceCollectionsPreservingAll(localInvoices = [], relatio
   return { invoices: merged, comparison };
 }
 
+const UNSYNCED_INVOICE_STATUSES = new Set(["pending_sync", "sync_failed", "local_only"]);
+
+function invoiceMatchesOperationalScope(invoice = {}, companyId = "", locationId = "") {
+  const invoiceCompanyId = invoice.companyId || invoice.company_id || "";
+  const invoiceLocationId = invoice.locationId || invoice.location_id || "";
+  return invoiceCompanyId === companyId && (!locationId || invoiceLocationId === locationId);
+}
+
+export function relationalOperationalInvoiceCollection({
+  localInvoices = [],
+  relationalInvoices = [],
+  companyId = "",
+  locationId = "",
+  readOnly = false,
+} = {}) {
+  const canonicalInvoices = Array.isArray(relationalInvoices) ? relationalInvoices : [];
+  if (readOnly) return canonicalInvoices;
+
+  const canonicalIds = new Set(canonicalInvoices.map(invoiceId).filter(Boolean));
+  const canonicalIdentities = new Set(canonicalInvoices.map((invoice) => invoiceRecoveryIdentity(invoice).key));
+  const unsyncedInvoices = (Array.isArray(localInvoices) ? localInvoices : [])
+    .filter((invoice) => UNSYNCED_INVOICE_STATUSES.has(invoice?.syncStatus))
+    .filter((invoice) => invoiceMatchesOperationalScope(invoice, companyId, locationId))
+    .filter((invoice) => {
+      const id = invoiceId(invoice);
+      const identity = invoiceRecoveryIdentity(invoice).key;
+      return (!id || !canonicalIds.has(id)) && !canonicalIdentities.has(identity);
+    });
+
+  return [...unsyncedInvoices, ...canonicalInvoices];
+}
+
 export function inspectEmergencyBackup(payload = {}) {
   const snapshot = backupBusinessSnapshot(payload);
   const invoices = Array.isArray(snapshot.invoices) ? snapshot.invoices : [];

@@ -79,9 +79,9 @@ import {
   invoiceOnlyRecoveryDryRun,
   invoiceRecoveryIdentity,
   mergeInvoiceCollectionsPreservingAll,
+  relationalOperationalInvoiceCollection,
 } from "./domain/emergencyRecovery.js";
 import {
-  loadLegacyInvoiceArchive,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   upsertInvoiceInCollection,
@@ -4896,24 +4896,21 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     if (!cloudEnabled) return snapshot;
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
     let relationalInvoices;
-    let archivedInvoices;
     try {
-      [relationalInvoices, archivedInvoices] = await Promise.all([
-        loadRelationalInvoices(supabase, scope),
-        readOnly ? Promise.resolve([]) : loadLegacyInvoiceArchive(supabase, scope),
-      ]);
+      relationalInvoices = await loadRelationalInvoices(supabase, scope);
     } catch (error) {
       throw new Error(`Relational invoice hydration failed [operation=loadRelationalInvoices company=${scope.companyId} location=${scope.locationId || "company"}]: ${error.message || "Unknown error"}`);
     }
-    setLegacyInvoiceArchive(archivedInvoices);
-    const scopedDeviceInvoices = (snapshot.invoices || []).map((invoice) => ({
-      ...invoice,
-      companyId: invoice.companyId || invoice.company_id || cloudScope.companyId,
-      locationId: invoice.locationId || invoice.location_id || cloudScope.locationId || "",
-    }));
-    const reconciled = mergeInvoiceCollectionsPreservingAll(scopedDeviceInvoices, relationalInvoices);
-    if (!readOnly) saveLocalStorage("marginflow.invoices", reconciled.invoices);
-    return { ...snapshot, invoices: reconciled.invoices };
+    const operationalInvoices = relationalOperationalInvoiceCollection({
+      localInvoices: snapshot.invoices || [],
+      relationalInvoices,
+      companyId: scope.companyId,
+      locationId: scope.locationId,
+      readOnly,
+    });
+    setLegacyInvoiceArchive([]);
+    if (!readOnly) saveLocalStorage("marginflow.invoices", operationalInvoices);
+    return { ...snapshot, invoices: operationalInvoices };
   };
 
   const withRelationalSales = async (snapshot) => {
@@ -5094,14 +5091,19 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       invoiceRefreshRef.current = true;
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-        const [freshInvoices, freshArchive, freshSales] = await Promise.all([
+        const [freshInvoices, freshSales] = await Promise.all([
           loadRelationalInvoices(supabase, scope),
-          readOnly ? Promise.resolve([]) : loadLegacyInvoiceArchive(supabase, scope),
           loadRelationalSales(supabase, scope),
         ]);
         if (cancelled) return;
-        setInvoices((current) => mergeInvoiceCollectionsPreservingAll(current, freshInvoices).invoices);
-        setLegacyInvoiceArchive(freshArchive);
+        setInvoices((current) => relationalOperationalInvoiceCollection({
+          localInvoices: current,
+          relationalInvoices: freshInvoices,
+          companyId: scope.companyId,
+          locationId: scope.locationId,
+          readOnly,
+        }));
+        setLegacyInvoiceArchive([]);
         salesRef.current = freshSales;
         setSalesState(freshSales);
       } catch (error) {

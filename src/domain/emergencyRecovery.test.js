@@ -6,6 +6,7 @@ import {
   invoiceOnlyRecoveryDryRun,
   inspectEmergencyBackup,
   mergeInvoiceCollectionsPreservingAll,
+  relationalOperationalInvoiceCollection,
   recoveryPreviewForBackup,
 } from "./emergencyRecovery.js";
 
@@ -149,6 +150,39 @@ test("TEST H: conflict reconciliation preserves both versions for Review conflic
   assert.equal(result.invoices[0].total, 10);
   assert.equal(result.invoices[0].syncStatus, "conflict");
   assert.equal(result.invoices[0].recoveryConflictVersions[0].total, 11);
+});
+
+test("relational operational hydration prefers canonical rows over stale snapshots", () => {
+  const stale = invoice("same-id", "A", 10, { syncStatus: "synced" });
+  const canonical = invoice("same-id", "A", 11, { persistenceSource: "relational", syncStatus: "synced" });
+  const legacyOnly = invoice("legacy-only", "B", 20);
+  const pending = invoice("pending", "C", 30, {
+    companyId: "company-a",
+    locationId: "location-a",
+    syncStatus: "pending_sync",
+  });
+  const wrongScopePending = invoice("wrong-scope", "D", 40, {
+    companyId: "company-b",
+    locationId: "location-b",
+    syncStatus: "pending_sync",
+  });
+
+  const result = relationalOperationalInvoiceCollection({
+    localInvoices: [stale, legacyOnly, pending, wrongScopePending],
+    relationalInvoices: [canonical],
+    companyId: "company-a",
+    locationId: "location-a",
+  });
+
+  assert.deepEqual(result.map((row) => row.documentNumber), ["C", "A"]);
+  assert.equal(result.find((row) => row.documentNumber === "A")?.total, 11);
+  assert.equal(relationalOperationalInvoiceCollection({
+    localInvoices: [pending],
+    relationalInvoices: [canonical],
+    companyId: "company-a",
+    locationId: "location-a",
+    readOnly: true,
+  }).length, 1);
 });
 
 test("backup inspection rejects unrelated or malformed JSON objects", () => {
