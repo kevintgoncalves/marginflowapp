@@ -96,18 +96,47 @@ function cleanDocumentNumberCandidate(value = "") {
   return cleaned;
 }
 
+function documentNumberCandidateScore(value = "") {
+  const candidate = cleanDocumentNumberCandidate(value);
+  if (!candidate) return 0;
+  const digitCount = (candidate.match(/\d/g) || []).length;
+  const hasLetter = /[a-z]/i.test(candidate);
+  if (digitCount >= 5) return 20 + digitCount + (hasLetter ? 2 : 0);
+  if (hasLetter && digitCount >= 2) return 12 + digitCount;
+  if (digitCount >= 4) return 4 + digitCount;
+  return 0;
+}
+
+function bestDocumentNumberNearLabel(source = "") {
+  const labelPattern = /\b(?:credit\s+(?:note|memo)|document|tax\s+invoice|invoice|inv)\s*(?:no\.?|number|num|#)\b/ig;
+  const candidates = [];
+  for (const labelMatch of source.matchAll(labelPattern)) {
+    const afterLabel = source.slice(labelMatch.index + labelMatch[0].length, labelMatch.index + labelMatch[0].length + 180);
+    for (const tokenMatch of afterLabel.matchAll(/[A-Z0-9][A-Z0-9./-]{2,}/ig)) {
+      const candidate = cleanDocumentNumberCandidate(tokenMatch[0]);
+      const score = documentNumberCandidateScore(candidate);
+      if (score) candidates.push({ candidate, score, offset: tokenMatch.index || 0 });
+    }
+  }
+  candidates.sort((left, right) => right.score - left.score || left.offset - right.offset);
+  return candidates[0]?.candidate || "";
+}
+
 export function extractBatchDocumentNumberFromText(text = "") {
   const source = normalizedText(text);
   const patterns = [
-    /\b(?:credit\s+(?:note|memo)|document|tax\s+invoice|invoice|inv)\s*(?:no\.?|number|num|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9./-]{2,})\b/i,
-    /\b(?:document|invoice)\s+(?:number|no\.?)\s+([A-Z0-9][A-Z0-9./-]{2,})\b/i,
+    /\b(?:credit\s+(?:note|memo)|document|tax\s+invoice|invoice|inv)\s*(?:no\.?|number|num|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./-]{2,})\b/ig,
+    /\b(?:document|invoice)\s+(?:number|no\.?)\s+([A-Z0-9][A-Z0-9./-]{2,})\b/ig,
+    /\b(?:tax\s+invoice|invoice|inv)\s*[:#-]\s*([A-Z0-9][A-Z0-9./-]{2,})\b/ig,
+    /\b(?:tax\s+invoice|invoice|inv)\s+([A-Z0-9][A-Z0-9./-]{2,})\b/ig,
   ];
   for (const pattern of patterns) {
-    const match = source.match(pattern);
-    const candidate = cleanDocumentNumberCandidate(match?.[1] || "");
-    if (candidate) return candidate;
+    for (const match of source.matchAll(pattern)) {
+      const candidate = cleanDocumentNumberCandidate(match?.[1] || "");
+      if (candidate) return candidate;
+    }
   }
-  return "";
+  return bestDocumentNumberNearLabel(source);
 }
 
 export function extractBatchInvoiceDateFromText(text = "") {

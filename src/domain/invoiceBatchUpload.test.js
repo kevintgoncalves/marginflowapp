@@ -35,6 +35,27 @@ test("splits one multi-page PDF when invoice numbers change between pages", () =
   assert.equal(documents[1].pageCount, 1);
 });
 
+test("splits Elite pages when invoice date appears before invoice number", () => {
+  const documents = splitBatchInvoiceDocuments([
+    page("elite-august.pdf", 1, "Elite Fine Foods Invoice Date 11/08/2026 Account 1821 Invoice Number 14258777 Product Qty Total £257.26", 2),
+    page("elite-august.pdf", 2, "Elite Fine Foods Invoice Date 12/08/2026 Account 1821 Invoice Number 14259212 Product Qty Total £338.43", 2),
+  ], { suppliers });
+
+  assert.equal(documents.length, 2);
+  assert.deepEqual(documents.map((document) => document.signature.documentNumber), ["14258777", "14259212"]);
+  assert.deepEqual(documents.map((document) => document.signature.invoiceDate), ["2026-08-11", "2026-08-12"]);
+});
+
+test("splits Elite pages when header labels and values are extracted separately", () => {
+  const documents = splitBatchInvoiceDocuments([
+    page("elite-august.pdf", 1, "Elite Fine Foods Invoice Date Invoice Number Account No Page 11/08/2026 14258777 1821 1 Product Qty Total £257.26", 2),
+    page("elite-august.pdf", 2, "Elite Fine Foods Invoice Date Invoice Number Account No Page 12/08/2026 14259212 1821 1 Product Qty Total £338.43", 2),
+  ], { suppliers });
+
+  assert.equal(documents.length, 2);
+  assert.deepEqual(documents.map((document) => document.signature.documentNumber), ["14258777", "14259212"]);
+});
+
 test("keeps multi-page invoices together when the same invoice number repeats", () => {
   const documents = splitBatchInvoiceDocuments([
     page("albion-august.pdf", 1, "Albion Fine Foods Invoice No 11676921 Delivery Date 09/08/2026 Product Qty Total", 3),
