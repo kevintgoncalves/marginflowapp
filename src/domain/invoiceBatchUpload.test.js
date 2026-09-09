@@ -8,6 +8,7 @@ import {
   invoiceBatchSummary,
   runInvoiceBatchQueue,
   splitBatchInvoiceDocuments,
+  splitBatchInvoiceDocumentsBySourceFile,
 } from "./invoiceBatchUpload.js";
 
 const suppliers = [{ name: "Elite Fine Foods" }, { name: "Albion Fine Foods" }, { name: "Woods" }];
@@ -77,6 +78,21 @@ test("starts a new document for each separate uploaded file", () => {
   ], { suppliers });
 
   assert.deepEqual(documents.map((document) => document.signature.documentNumber), ["W-100", "W-101", "14259212"]);
+});
+
+test("falls back to one document per uploaded file when no document numbers are readable", () => {
+  const documents = splitBatchInvoiceDocumentsBySourceFile([
+    page("invoice1127219.pdf", 1, ""),
+    page("invoice1127023.pdf", 1, ""),
+    page("invoice1126894.pdf", 1, ""),
+  ], { suppliers });
+
+  assert.equal(documents.length, 3);
+  assert.deepEqual(documents.map((document) => document.sourceFileName), [
+    "invoice1127219.pdf",
+    "invoice1127023.pdf",
+    "invoice1126894.pdf",
+  ]);
 });
 
 test("marks existing supplier and document number matches as possible duplicates", () => {

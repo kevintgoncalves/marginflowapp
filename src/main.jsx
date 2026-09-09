@@ -79,6 +79,7 @@ import {
   runInvoiceBatchQueue,
   serializeInvoiceBatch,
   splitBatchInvoiceDocuments,
+  splitBatchInvoiceDocumentsBySourceFile,
   withDerivedInvoiceBatchStage,
 } from "./domain/invoiceBatchUpload.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
@@ -2364,6 +2365,30 @@ function isImageInvoiceFile(file) {
   return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(name);
 }
 
+function isPdfInvoiceFile(file) {
+  const name = file.name.toLowerCase();
+  return file.type === "application/pdf" || /\.pdf$/i.test(name);
+}
+
+function invoiceUploadFileKey(file, index = "") {
+  return `${file.name}-${file.size}-${file.lastModified || index}`;
+}
+
+function fileToInvoiceInput(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      fileName: file.name,
+      fileType: file.type || "application/octet-stream",
+      name: file.name,
+      type: file.type || "application/octet-stream",
+      dataUrl: reader.result,
+    });
+    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
 function loadBrowserImage(file) {
   return new Promise((resolve, reject) => {
     const objectUrl = URL.createObjectURL(file);
@@ -2406,6 +2431,23 @@ async function invoiceImagesFromFiles(files) {
   return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
 }
 
+async function fallbackInvoiceSourcePageFromFile(file, index = 0, error = null) {
+  return {
+    sourceFileId: invoiceUploadFileKey(file, index),
+    sourceFileName: file.name,
+    sourceFileType: file.type || "application/octet-stream",
+    pageNumber: 1,
+    pageCount: 1,
+    text: canReadFileAsText(file) ? await file.text().catch(() => "") : "",
+    aiFile: isImageInvoiceFile(file)
+      ? await imageFileToInvoiceInput(file)
+      : isPdfInvoiceFile(file)
+        ? await fileToInvoiceInput(file)
+        : null,
+    extractionWarning: error?.message || "",
+  };
+}
+
 async function pdfPageToInvoiceImageInput(page, file, pageNumber) {
   const baseViewport = page.getViewport({ scale: 1 });
   const maxDimension = 1600;
@@ -2438,7 +2480,7 @@ async function extractPdfPages(file, { renderSparsePages = true } = {}) {
     const text = content.items.map((item) => item.str).join(" ");
     const sparseText = text.replace(/\s+/g, " ").trim().length < 80;
     pages.push({
-      sourceFileId: `${file.name}-${file.size}-${file.lastModified || ""}`,
+      sourceFileId: invoiceUploadFileKey(file),
       sourceFileName: file.name,
       sourceFileType: file.type || "application/pdf",
       pageNumber,
@@ -2460,8 +2502,7 @@ async function textFromInvoiceFiles(files) {
   const chunks = [];
 
   for (const file of Array.from(files || [])) {
-    const name = file.name.toLowerCase();
-    if (file.type === "application/pdf" || name.endsWith(".pdf")) {
+    if (isPdfInvoiceFile(file)) {
       chunks.push(await extractPdfText(file));
     } else if (canReadFileAsText(file)) {
       chunks.push(await file.text());
@@ -2474,12 +2515,16 @@ async function textFromInvoiceFiles(files) {
 async function sourcePagesFromInvoiceFiles(files) {
   const sourcePages = [];
   for (const [index, file] of Array.from(files || []).entries()) {
-    const name = file.name.toLowerCase();
-    if (file.type === "application/pdf" || name.endsWith(".pdf")) {
-      sourcePages.push(...await extractPdfPages(file));
+    if (isPdfInvoiceFile(file)) {
+      try {
+        const pages = await extractPdfPages(file);
+        sourcePages.push(...(pages.length ? pages : [await fallbackInvoiceSourcePageFromFile(file, index)]));
+      } catch (error) {
+        sourcePages.push(await fallbackInvoiceSourcePageFromFile(file, index, error));
+      }
     } else if (isImageInvoiceFile(file)) {
       sourcePages.push({
-        sourceFileId: `${file.name}-${file.size}-${file.lastModified || index}`,
+        sourceFileId: invoiceUploadFileKey(file, index),
         sourceFileName: file.name,
         sourceFileType: file.type || "image",
         pageNumber: 1,
@@ -2489,7 +2534,7 @@ async function sourcePagesFromInvoiceFiles(files) {
       });
     } else if (canReadFileAsText(file)) {
       sourcePages.push({
-        sourceFileId: `${file.name}-${file.size}-${file.lastModified || index}`,
+        sourceFileId: invoiceUploadFileKey(file, index),
         sourceFileName: file.name,
         sourceFileType: file.type || "text/plain",
         pageNumber: 1,
@@ -2654,16 +2699,8 @@ function preferredInvoiceDateForSupplier(supplier = "", invoiceText = "", fallba
 }
 
 async function invoiceFilesForAi(files) {
-  const supported = Array.from(files || []).filter((file) => {
-    const name = file.name.toLowerCase();
-    return isImageInvoiceFile(file) || file.type === "application/pdf" || name.endsWith(".pdf");
-  });
-  const encoded = await Promise.all(supported.map((file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve({ name: file.name, type: file.type, dataUrl: reader.result });
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  })));
+  const supported = Array.from(files || []).filter((file) => isImageInvoiceFile(file) || isPdfInvoiceFile(file));
+  const encoded = await Promise.all(supported.map(fileToInvoiceInput));
   return encoded;
 }
 
@@ -7705,24 +7742,57 @@ function Invoices({
     processInvoiceBatchItems(batch.id, batch.items);
   };
 
+  const prepareInvoiceBatchDocumentsFromFiles = async (files) => {
+    const sourcePages = await sourcePagesFromInvoiceFiles(files);
+    let documents = splitBatchInvoiceDocuments(sourcePages, {
+      suppliers,
+      idFactory: () => uid(),
+    });
+    const sourceFileCount = new Set(sourcePages.map((page) => page.sourceFileId).filter(Boolean)).size;
+    const lacksReadableDocumentNumbers = !documents.some((document) => document.signature?.hasStrongDocumentNumber);
+    if (sourceFileCount > 1 && documents.length <= 1 && lacksReadableDocumentNumbers) {
+      documents = splitBatchInvoiceDocumentsBySourceFile(sourcePages, {
+        suppliers,
+        idFactory: () => uid(),
+      });
+    }
+    return documents;
+  };
+
+  const startInvoiceBatchFromFiles = async (files) => {
+    const uploadedFiles = Array.from(files || []);
+    if (!uploadedFiles.length) return false;
+    setDraft((current) => ({ ...current, status: `Preparing ${uploadedFiles.length} uploaded file(s) for batch review...` }));
+    const documents = await prepareInvoiceBatchDocumentsFromFiles(uploadedFiles);
+    if (!documents.length) {
+      setDraft((current) => ({ ...current, status: "Could not find readable invoice documents in those files." }));
+      return false;
+    }
+    await startInvoiceBatchUpload(documents);
+    setDraft(emptyInvoiceDraft());
+    setUploadInputKey((current) => current + 1);
+    setUploadModalOpen(false);
+    return true;
+  };
+
   const addFiles = async (files) => {
     if (!permissions.canImport) return;
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
-    setDraft((current) => ({ ...current, status: `Preparing ${uploaded.length} uploaded file(s)...` }));
+    const filesForBatch = [...(draft.files || []), ...uploaded];
+    setDraft((current) => ({ ...current, status: `Preparing ${filesForBatch.length} uploaded file(s)...` }));
     try {
-      const sourcePages = await sourcePagesFromInvoiceFiles(uploaded);
-      const documents = splitBatchInvoiceDocuments(sourcePages, {
-        suppliers,
-        idFactory: () => uid(),
-      });
+      if (filesForBatch.length > 1) {
+        await startInvoiceBatchFromFiles(filesForBatch);
+        return;
+      }
+      const documents = await prepareInvoiceBatchDocumentsFromFiles(uploaded);
       if (documents.length > 1) {
-        await startInvoiceBatchUpload(documents);
-        setUploadInputKey((current) => current + 1);
+        await startInvoiceBatchFromFiles(uploaded);
         return;
       }
       setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded. Ready for AI reading.` }));
-      const uploadedText = documents[0]?.invoiceText || await textFromInvoiceFiles(uploaded);
+      const uploadedText = documents[0]?.invoiceText || await textFromInvoiceFiles(uploaded).catch(() => "");
       if (uploadedText) {
         setDraft((current) => ({
           ...current,
@@ -8000,7 +8070,15 @@ function Invoices({
       setDraft((current) => ({ ...current, status: "AI failed. AI invoice reading is disabled in Settings." }));
       return;
     }
-    const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files);
+    if ((draft.files || []).length > 1) {
+      try {
+        await startInvoiceBatchFromFiles(draft.files);
+      } catch (error) {
+        setDraft((current) => ({ ...current, status: `Could not start batch upload. ${error.message || "Try the documents again."}` }));
+      }
+      return;
+    }
+    const uploadedText = draft.invoiceText.trim() ? "" : await textFromInvoiceFiles(draft.files).catch(() => "");
     const invoiceText = [draft.invoiceText, uploadedText].filter(Boolean).join("\n\n").trim();
     const aiFiles = await invoiceFilesForAi(draft.files);
 

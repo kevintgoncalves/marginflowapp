@@ -303,6 +303,29 @@ export function splitBatchInvoiceDocuments(sourcePages = [], { suppliers = [], i
   return groups.map((group, index) => documentFromGroup(group, index, idFactory));
 }
 
+export function splitBatchInvoiceDocumentsBySourceFile(sourcePages = [], { suppliers = [], idFactory } = {}) {
+  const groups = [];
+  let current = null;
+  sourcePages.forEach((sourcePage, index) => {
+    const page = {
+      ...sourcePage,
+      sourceFileId: sourcePage.sourceFileId || sourcePage.sourceFileName || `file-${index}`,
+      sourceFileName: sourcePage.sourceFileName || sourcePage.fileName || `Uploaded file ${index + 1}`,
+      pageNumber: sourcePage.pageNumber || 1,
+      pageCount: sourcePage.pageCount || 1,
+      signature: sourcePage.signature || batchPageSignature(sourcePage, { suppliers }),
+    };
+    if (!current || current.sourceFileId !== page.sourceFileId) {
+      if (current) groups.push(current);
+      current = createGroup(page);
+      return;
+    }
+    current = appendPage(current, page);
+  });
+  if (current) groups.push(current);
+  return groups.map((group, index) => documentFromGroup(group, index, idFactory));
+}
+
 export function createInvoiceBatch(documents = [], { id = "", now = () => new Date().toISOString(), concurrency = 5 } = {}) {
   const createdAt = now();
   return {
