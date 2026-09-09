@@ -8869,6 +8869,67 @@ function Invoices({
     }
   };
 
+  const importSelectedBatchInvoice = async () => {
+    if (!selectedBatchItem?.invoice || batchImporting || currentBatchSummary.processing > 0) return;
+    setBatchImporting(true);
+    setBatchStatus("Preparing this invoice for import...");
+    try {
+      const normalized = normalizeBatchInvoiceForReview(selectedBatchItem.invoice);
+      const documentType = documentTypeFor(normalized);
+      const validation = validateInvoiceLinesForApproval(normalized.items || [], {
+        documentType,
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) {
+        setBatchStatus(validation.errors[0] || "Review invoice lines before importing this invoice.");
+        return;
+      }
+      if ((normalized.items || []).some((item) => !splitIsValid(item))) {
+        setBatchStatus("Department split must total 100% before importing this invoice.");
+        return;
+      }
+      const extractionValidation = batchValidationForInvoice(normalized);
+      const invoiceForBatch = invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(normalized), extractionValidation);
+      const classification = batchItemStatusForInvoice(invoiceForBatch, extractionValidation, {
+        existingInvoices: invoices,
+        batchItems: invoiceBatchRef.current?.items || [],
+        companyId,
+      });
+      const reviewedItem = {
+        ...selectedBatchItem,
+        ...classification,
+        invoice: invoiceForBatch,
+        error: "",
+        statusLabel: classification.statusLabel,
+      };
+      updateBatchItem(selectedBatchItem.id, reviewedItem);
+      if (classification.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE) {
+        setBatchStatus("Possible duplicate found. Review or skip this invoice before importing.");
+        return;
+      }
+      if (classification.status !== BATCH_INVOICE_ITEM_STATUSES.READY) {
+        setBatchStatus("This invoice still needs review. Fix the highlighted issues, or use Invoice is correct if this is a false positive.");
+        return;
+      }
+      setBatchStatus("Importing this invoice...");
+      const result = await importBatchItem(reviewedItem);
+      if (result.imported) {
+        setBatchReviewItemId("");
+        setBatchStatus("Invoice imported.");
+      } else if (result.duplicate) {
+        setBatchStatus("Possible duplicate found. This invoice was held for review.");
+      } else {
+        setBatchStatus("This invoice could not be imported. Review the error and retry.");
+      }
+    } catch (error) {
+      setBatchStatus(error.message || "Could not import this invoice.");
+    } finally {
+      setBatchImporting(false);
+      setInvoiceBatch((current) => current);
+    }
+  };
+
   const importAllReadyBatchInvoices = async () => {
     if (!invoiceBatch || batchImporting) return;
     const readyItems = (invoiceBatch.items || []).filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.READY && item.invoice);
@@ -9358,7 +9419,8 @@ function Invoices({
             <button className="ghost" onClick={() => setBatchReviewItemId("")} type="button"><ChevronLeft size={16} />Back to batch</button>
             {[BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE, BATCH_INVOICE_ITEM_STATUSES.FAILED].includes(selectedBatchItem.status) && <button className="ghost" onClick={() => skipBatchItem(selectedBatchItem.id)} type="button">Skip</button>}
             {selectedBatchInvoice && permissions.canEdit && <button className="ghost review-correct-action" onClick={() => saveBatchReviewInvoice({ markCorrect: true })} type="button"><Check size={16} />Invoice is correct</button>}
-            {selectedBatchInvoice && permissions.canEdit && <button onClick={() => saveBatchReviewInvoice()} type="button"><Save size={16} />Save to batch</button>}
+            {selectedBatchInvoice && permissions.canEdit && <button className="ghost" onClick={() => saveBatchReviewInvoice()} type="button"><Save size={16} />Save review</button>}
+            {selectedBatchInvoice && permissions.canApprove && <button disabled={batchImporting || currentBatchSummary.processing > 0} onClick={importSelectedBatchInvoice} type="button"><Upload size={16} />Import invoice</button>}
           </>
         ) : (
           <>
