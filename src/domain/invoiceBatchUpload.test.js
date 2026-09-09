@@ -95,6 +95,36 @@ test("falls back to one document per uploaded file when no document numbers are 
   ]);
 });
 
+test("keeps separate uploaded PDFs separate even when only the first has readable identity", () => {
+  const documents = splitBatchInvoiceDocumentsBySourceFile([
+    page("Invoice1127219.pdf", 1, "Brighton & Newhaven Fish Sales Invoice Number 1127219 Invoice date 07/09/2026 Product Qty Total £101.33"),
+    page("Invoice1127023.pdf", 1, "Brighton & Newhaven Fish Sales Product Qty Total"),
+    page("Invoice1126894.pdf", 1, "Brighton & Newhaven Fish Sales Product Qty Total"),
+  ], { suppliers });
+
+  assert.equal(documents.length, 3);
+  assert.deepEqual(documents.map((document) => document.sourceFileName), [
+    "Invoice1127219.pdf",
+    "Invoice1127023.pdf",
+    "Invoice1126894.pdf",
+  ]);
+  assert.deepEqual(documents.map((document) => document.pageCount), [1, 1, 1]);
+});
+
+test("still splits multiple invoices inside one uploaded PDF when grouping by source file", () => {
+  const documents = splitBatchInvoiceDocumentsBySourceFile([
+    page("elite-august.pdf", 1, "Elite Fine Foods Invoice Number 14258777 Invoice date 11/08/2026 Product Qty Total £257.26", 3),
+    page("elite-august.pdf", 2, "Elite Fine Foods Invoice Number 14258777 continued products", 3),
+    page("elite-august.pdf", 3, "Elite Fine Foods Invoice Number 14259212 Invoice date 12/08/2026 Product Qty Total £338.43", 3),
+  ], { suppliers });
+
+  assert.equal(documents.length, 2);
+  assert.equal(documents[0].signature.documentNumber, "14258777");
+  assert.equal(documents[0].pageCount, 2);
+  assert.equal(documents[1].signature.documentNumber, "14259212");
+  assert.equal(documents[1].pageCount, 1);
+});
+
 test("marks existing supplier and document number matches as possible duplicates", () => {
   const invoice = {
     id: "batch-item",

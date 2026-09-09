@@ -304,26 +304,33 @@ export function splitBatchInvoiceDocuments(sourcePages = [], { suppliers = [], i
 }
 
 export function splitBatchInvoiceDocumentsBySourceFile(sourcePages = [], { suppliers = [], idFactory } = {}) {
-  const groups = [];
-  let current = null;
-  sourcePages.forEach((sourcePage, index) => {
-    const page = {
-      ...sourcePage,
-      sourceFileId: sourcePage.sourceFileId || sourcePage.sourceFileName || `file-${index}`,
-      sourceFileName: sourcePage.sourceFileName || sourcePage.fileName || `Uploaded file ${index + 1}`,
-      pageNumber: sourcePage.pageNumber || 1,
-      pageCount: sourcePage.pageCount || 1,
-      signature: sourcePage.signature || batchPageSignature(sourcePage, { suppliers }),
-    };
-    if (!current || current.sourceFileId !== page.sourceFileId) {
-      if (current) groups.push(current);
-      current = createGroup(page);
-      return;
+  const normalizedPages = (Array.isArray(sourcePages) ? sourcePages : []).map((sourcePage, index) => ({
+    ...sourcePage,
+    sourceFileId: sourcePage.sourceFileId || sourcePage.sourceFileName || `file-${index}`,
+    sourceFileName: sourcePage.sourceFileName || sourcePage.fileName || `Uploaded file ${index + 1}`,
+    pageNumber: sourcePage.pageNumber || 1,
+    pageCount: sourcePage.pageCount || 1,
+    signature: sourcePage.signature || batchPageSignature(sourcePage, { suppliers }),
+  }));
+  const sourceFileOrder = [];
+  const pagesBySourceFile = new Map();
+  normalizedPages.forEach((page) => {
+    if (!pagesBySourceFile.has(page.sourceFileId)) {
+      pagesBySourceFile.set(page.sourceFileId, []);
+      sourceFileOrder.push(page.sourceFileId);
     }
-    current = appendPage(current, page);
+    pagesBySourceFile.get(page.sourceFileId).push(page);
   });
-  if (current) groups.push(current);
-  return groups.map((group, index) => documentFromGroup(group, index, idFactory));
+
+  let documentIndex = 0;
+  return sourceFileOrder.flatMap((sourceFileId) => splitBatchInvoiceDocuments(pagesBySourceFile.get(sourceFileId) || [], {
+    suppliers,
+    idFactory: (group) => {
+      const id = idFactory?.(group, documentIndex) || `batch-document-${documentIndex + 1}`;
+      documentIndex += 1;
+      return id;
+    },
+  }));
 }
 
 export function createInvoiceBatch(documents = [], { id = "", now = () => new Date().toISOString(), concurrency = 5 } = {}) {

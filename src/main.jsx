@@ -7846,19 +7846,17 @@ function Invoices({
 
   const prepareInvoiceBatchDocumentsFromFiles = async (files) => {
     const sourcePages = await sourcePagesFromInvoiceFiles(files);
-    let documents = splitBatchInvoiceDocuments(sourcePages, {
-      suppliers,
-      idFactory: () => uid(),
-    });
     const sourceFileCount = new Set(sourcePages.map((page) => page.sourceFileId).filter(Boolean)).size;
-    const lacksReadableDocumentNumbers = !documents.some((document) => document.signature?.hasStrongDocumentNumber);
-    if (sourceFileCount > 1 && documents.length <= 1 && lacksReadableDocumentNumbers) {
-      documents = splitBatchInvoiceDocumentsBySourceFile(sourcePages, {
+    if (sourceFileCount > 1) {
+      return splitBatchInvoiceDocumentsBySourceFile(sourcePages, {
         suppliers,
         idFactory: () => uid(),
       });
     }
-    return documents;
+    return splitBatchInvoiceDocuments(sourcePages, {
+      suppliers,
+      idFactory: () => uid(),
+    });
   };
 
   const startInvoiceBatchFromFiles = async (files) => {
