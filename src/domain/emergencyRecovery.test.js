@@ -185,6 +185,47 @@ test("relational operational hydration prefers canonical rows over stale snapsho
   }).length, 1);
 });
 
+test("relational operational hydration keeps cached relational invoices when a refresh is incomplete", () => {
+  const cachedRelational = invoice("cached-a", "A", 10, {
+    syncStatus: "synced",
+    persistenceSource: "relational",
+    relationalId: "cached-a",
+  });
+  const cachedRelationalDevice = invoice("cached-b", "B", 20, {
+    syncStatus: "synced",
+    persistenceSource: "relational+device",
+    relationalId: "cached-b",
+  });
+  const staleSnapshotOnly = invoice("snapshot-only", "C", 30, { syncStatus: "synced" });
+
+  const result = relationalOperationalInvoiceCollection({
+    localInvoices: [cachedRelational, cachedRelationalDevice, staleSnapshotOnly],
+    relationalInvoices: [],
+    companyId: "company-a",
+    locationId: "",
+  });
+
+  assert.deepEqual(result.map((row) => row.documentNumber), ["A", "B"]);
+});
+
+test("relational operational hydration preserves cached relational invoices missing from a partial refresh", () => {
+  const cachedA = invoice("cached-a", "A", 10, {
+    syncStatus: "synced",
+    persistenceSource: "relational",
+    relationalId: "cached-a",
+  });
+  const canonicalB = invoice("cloud-b", "B", 20, { persistenceSource: "relational", syncStatus: "synced" });
+
+  const result = relationalOperationalInvoiceCollection({
+    localInvoices: [cachedA],
+    relationalInvoices: [canonicalB],
+    companyId: "company-a",
+    locationId: "",
+  });
+
+  assert.deepEqual(new Set(result.map((row) => row.documentNumber)), new Set(["A", "B"]));
+});
+
 test("backup inspection rejects unrelated or malformed JSON objects", () => {
   assert.equal(inspectEmergencyBackup({ hello: "world" }).valid, false);
   assert.equal(inspectEmergencyBackup({ businessData: { invoices: {} } }).valid, false);

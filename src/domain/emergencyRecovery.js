@@ -506,7 +506,19 @@ export function mergeInvoiceCollectionsPreservingAll(localInvoices = [], relatio
   return { invoices: merged, comparison };
 }
 
-const UNSYNCED_INVOICE_STATUSES = new Set(["pending_sync", "sync_failed", "local_only"]);
+const LOCAL_OPERATIONAL_INVOICE_STATUSES = new Set(["pending_sync", "sync_failed", "local_only"]);
+
+function invoiceHasRelationalPersistence(invoice = {}) {
+  const persistenceSource = String(invoice.persistenceSource || invoice.persistence_source || "");
+  return persistenceSource === "relational"
+    || persistenceSource.startsWith("relational+")
+    || Boolean(invoice.relationalId || invoice.relational_id);
+}
+
+export function invoiceIsOperational(invoice = {}) {
+  return invoiceHasRelationalPersistence(invoice)
+    || LOCAL_OPERATIONAL_INVOICE_STATUSES.has(invoice?.syncStatus);
+}
 
 function invoiceMatchesOperationalScope(invoice = {}, companyId = "", locationId = "") {
   const invoiceCompanyId = invoice.companyId || invoice.company_id || "";
@@ -526,8 +538,8 @@ export function relationalOperationalInvoiceCollection({
 
   const canonicalIds = new Set(canonicalInvoices.map(invoiceId).filter(Boolean));
   const canonicalIdentities = new Set(canonicalInvoices.map((invoice) => invoiceRecoveryIdentity(invoice).key));
-  const unsyncedInvoices = (Array.isArray(localInvoices) ? localInvoices : [])
-    .filter((invoice) => UNSYNCED_INVOICE_STATUSES.has(invoice?.syncStatus))
+  const localOperationalInvoices = (Array.isArray(localInvoices) ? localInvoices : [])
+    .filter(invoiceIsOperational)
     .filter((invoice) => invoiceMatchesOperationalScope(invoice, companyId, locationId))
     .filter((invoice) => {
       const id = invoiceId(invoice);
@@ -535,7 +547,7 @@ export function relationalOperationalInvoiceCollection({
       return (!id || !canonicalIds.has(id)) && !canonicalIdentities.has(identity);
     });
 
-  return [...unsyncedInvoices, ...canonicalInvoices];
+  return [...localOperationalInvoices, ...canonicalInvoices];
 }
 
 export function inspectEmergencyBackup(payload = {}) {

@@ -90,6 +90,7 @@ import {
   compareInvoiceCollections,
   inspectEmergencyBackup,
   invoiceOnlyRecoveryDryRun,
+  invoiceIsOperational,
   invoiceRecoveryIdentity,
   mergeInvoiceCollectionsPreservingAll,
   relationalOperationalInvoiceCollection,
@@ -3759,9 +3760,70 @@ function safeReadLocalStorageArray(key, fallback) {
   }
 }
 
+const invoiceAutoBackupIndexKey = "marginflow.invoices.autoBackups";
+const maxInvoiceAutoBackups = 8;
+
+function parseSerializedArray(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveInvoiceDropSafetyBackup(key, nextSerialized, reason = "state_update") {
+  if (key !== "marginflow.invoices") return;
+  try {
+    const previousSerialized = localStorage.getItem(key);
+    if (!previousSerialized || previousSerialized === nextSerialized) return;
+    const previousRows = parseSerializedArray(previousSerialized);
+    const nextRows = parseSerializedArray(nextSerialized);
+    if (!previousRows || !nextRows) return;
+    if (!previousRows.length || nextRows.length >= previousRows.length) return;
+
+    const createdAt = new Date().toISOString();
+    const backupKey = `marginflow.invoices.autoBackup.${createdAt}`;
+    localStorage.setItem(backupKey, previousSerialized);
+
+    const existingIndex = parseSerializedArray(localStorage.getItem(invoiceAutoBackupIndexKey)) || [];
+    const entries = existingIndex
+      .map((entry) => (typeof entry === "string" ? { key: entry } : entry))
+      .filter((entry) => entry?.key && entry.key !== backupKey);
+    const nextIndex = [{
+      key: backupKey,
+      createdAt,
+      invoiceCount: previousRows.length,
+      nextInvoiceCount: nextRows.length,
+      reason,
+    }, ...entries];
+    nextIndex.slice(maxInvoiceAutoBackups).forEach((entry) => localStorage.removeItem(entry.key));
+    localStorage.setItem(invoiceAutoBackupIndexKey, JSON.stringify(nextIndex.slice(0, maxInvoiceAutoBackups)));
+  } catch {
+    // Best-effort safety net; the write below should still continue.
+  }
+}
+
+function saveSerializedLocalStorage(key, serializedValue, reason = "state_update") {
+  saveInvoiceDropSafetyBackup(key, serializedValue, reason);
+  localStorage.setItem(key, serializedValue);
+}
+
+function readInvoiceAutoBackups() {
+  try {
+    const index = parseSerializedArray(localStorage.getItem(invoiceAutoBackupIndexKey)) || [];
+    return index
+      .map((entry) => (typeof entry === "string" ? { key: entry } : entry))
+      .filter((entry) => entry?.key && localStorage.getItem(entry.key))
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+  } catch {
+    return [];
+  }
+}
+
 function saveLocalStorage(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    saveSerializedLocalStorage(key, JSON.stringify(value));
   } catch {
     // Local storage can be unavailable in private or embedded preview contexts.
   }
@@ -5663,10 +5725,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   }, [allowedDepartmentNames, departmentNames]);
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
-  const operationalInvoices = useMemo(() => demoMode ? invoices : invoices.filter((invoice) => (
-    invoice.persistenceSource === "relational"
-    || ["pending_sync", "sync_failed", "local_only"].includes(invoice.syncStatus)
-  )), [demoMode, invoices]);
+  const operationalInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
   const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
   const supplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, legacyInvoiceArchive]);
   const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive]);
@@ -5717,7 +5776,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const applyCloudSnapshot = (snapshot) => {
     if (!demoMode && !readOnly) {
       try {
-        Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => localStorage.setItem(key, value));
+        Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => saveSerializedLocalStorage(key, value, "cloud_snapshot"));
       } catch {
         // The in-memory state remains usable when browser storage is unavailable.
       }
@@ -7512,6 +7571,7 @@ function Invoices({
   const [batchImporting, setBatchImporting] = useState(false);
   const batchUploadDocumentsRef = useRef(new Map());
   const batchRunIdRef = useRef("");
+  const batchImportRecoveryAttemptRef = useRef("");
   const batchStorageKey = `marginflow.invoiceBatch.${companyId || "local"}.${locationId || "all"}`;
   const readStoredInvoiceBatch = () => {
     try {
@@ -7617,6 +7677,10 @@ function Invoices({
   }) : null, [invoiceProductPriceHistory, selectedBatchDocumentNumber, selectedBatchInvoice]);
   const selectedBatchBlockingIssues = selectedBatchValidation ? getBlockingInvoiceIssues(selectedBatchValidation) : [];
   const selectedBatchWarningIssues = selectedBatchValidation ? getWarningInvoiceIssues(selectedBatchValidation) : [];
+  const batchImportRecoveryKey = useMemo(() => (invoiceBatch?.items || [])
+    .filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.IMPORTED && item.invoice)
+    .map((item) => `${item.id}:${item.invoice.id || item.invoice.relationalId || ""}:${documentNumberFor(item.invoice)}:${item.importedAt || ""}`)
+    .join("|"), [invoiceBatch]);
 
   useEffect(() => {
     invoiceBatchRef.current = invoiceBatch;
@@ -7627,6 +7691,44 @@ function Invoices({
       // A large batch can exceed local browser storage. The in-memory queue still remains usable for the current session.
     }
   }, [batchStorageKey, invoiceBatch]);
+
+  useEffect(() => {
+    if (!batchImportRecoveryKey || !invoiceBatch?.id) return;
+    const attemptKey = `${batchImportRecoveryKey}:${invoices.length}`;
+    if (batchImportRecoveryAttemptRef.current === attemptKey) return;
+    batchImportRecoveryAttemptRef.current = attemptKey;
+
+    const importedInvoices = (invoiceBatch.items || [])
+      .filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.IMPORTED && item.invoice)
+      .map((item) => item.invoice);
+    if (!importedInvoices.length) return;
+
+    setInvoices((current) => {
+      const idFor = (invoice = {}) => invoice.relationalId || invoice.relational_id || invoice.id || "";
+      const knownIds = new Set((current || []).map(idFor).filter(Boolean));
+      const knownIdentities = new Set((current || []).map((invoice) => invoiceRecoveryIdentity(invoice).key));
+      const recovered = [];
+
+      importedInvoices.forEach((invoice) => {
+        const id = idFor(invoice);
+        const identity = invoiceRecoveryIdentity(invoice).key;
+        if ((id && knownIds.has(id)) || knownIdentities.has(identity)) return;
+        knownIds.add(id);
+        knownIdentities.add(identity);
+        recovered.push({
+          ...invoice,
+          companyId: invoice.companyId || invoice.company_id || companyId,
+          locationId: invoice.locationId || invoice.location_id || locationId,
+          syncStatus: invoice.syncStatus || "local_only",
+          syncError: invoice.syncError || "Recovered from the batch review cache.",
+          recoveredFromBatchId: invoiceBatch.id,
+          recoveredAt: new Date().toISOString(),
+        });
+      });
+
+      return recovered.length ? [...recovered, ...(current || [])] : current;
+    });
+  }, [batchImportRecoveryKey, companyId, invoiceBatch, invoices.length, locationId, setInvoices]);
 
   const resetUploadDraft = () => {
     setDraft(emptyInvoiceDraft());
@@ -14906,6 +15008,7 @@ function SettingsPanel({
   const [syncDiagnostic, setSyncDiagnostic] = useState(null);
   const [laptopRecoveryPreview, setLaptopRecoveryPreview] = useState(null);
   const [recoveryConflictDiagnostic, setRecoveryConflictDiagnostic] = useState(null);
+  const [invoiceSafetyBackups, setInvoiceSafetyBackups] = useState(() => readInvoiceAutoBackups());
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
@@ -14920,6 +15023,9 @@ function SettingsPanel({
     || companySettings.companyName
     || "";
   const canManageBackups = !authMode || isCompanyOwner;
+  useEffect(() => {
+    setInvoiceSafetyBackups(readInvoiceAutoBackups());
+  }, [settingsSection]);
   const updateCompany = (field, value) => {
     if (!canChangeSettings) return;
     setCompanySettings({ ...companySettings, [field]: value });
@@ -15182,6 +15288,39 @@ function SettingsPanel({
     if (demoMode || !canManageBackups) return;
     const preImportBackup = buildFullBackupPayload();
     localStorage.setItem("marginflow.preImportBackup", JSON.stringify(preImportBackup));
+  };
+
+  const restoreLatestInvoiceSafetyBackup = () => {
+    if (demoMode || !permissions.canImport || !canManageBackups) return;
+    const latest = readInvoiceAutoBackups()[0];
+    if (!latest) {
+      setInvoiceSafetyBackups([]);
+      setDataStatus("No invoice safety copy was found on this device.");
+      return;
+    }
+    const invoiceBackup = localStorage.getItem(latest.key);
+    if (!invoiceBackup) {
+      setInvoiceSafetyBackups(readInvoiceAutoBackups());
+      setDataStatus("That invoice safety copy is no longer available on this device.");
+      return;
+    }
+
+    try {
+      savePreImportBackup();
+      const { nextStorage, summary } = mergeMarginFlowStorage(readMarginFlowLocalStorage(), { "marginflow.invoices": invoiceBackup }, false);
+      Object.entries(nextStorage).forEach(([key, value]) => {
+        if (key === "marginflow.preImportBackup") return;
+        const serialized = stringifyStorageValue(value);
+        if (key === "marginflow.invoices") saveSerializedLocalStorage(key, serialized, "invoice_safety_restore");
+        else localStorage.setItem(key, serialized);
+      });
+      setImportSummary(summary);
+      setInvoiceSafetyBackups(readInvoiceAutoBackups());
+      setDataStatus(`Restored latest invoice safety copy. ${summary.invoicesAdded} missing invoice(s) merged. Reloading app...`);
+      window.setTimeout(() => window.location.reload(), 1200);
+    } catch (error) {
+      setDataStatus(error.message || "Could not restore the invoice safety copy.");
+    }
   };
 
   const mergeFullBackup = async () => {
@@ -15636,9 +15775,15 @@ function SettingsPanel({
           <button onClick={exportEmergencyBackup} type="button"><Download size={16} />Download Emergency Backup</button>
           <label className="file-button secondary">Choose backup file<input accept="application/json,.json" disabled={recoveryBusy} key={emergencyBackupInputKey} onChange={(event) => inspectEmergencyBackupFile(event.target.files?.[0])} type="file" /></label>
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={runSyncDiagnostic} type="button"><Search size={16} />Compare Device With Cloud</button>
+          {canManageBackups && permissions.canImport && invoiceSafetyBackups.length > 0 && <button className="ghost" disabled={recoveryBusy} onClick={restoreLatestInvoiceSafetyBackup} type="button"><RefreshCw size={16} />Restore latest invoice safety copy</button>}
           <button className="ghost" disabled={recoveryBusy || !cloudEnabled} onClick={previewLaptopMigration} type="button"><PackageSearch size={16} />Preview laptop migration</button>
           <button className="ghost recovery-diagnostic-button" disabled={recoveryBusy || !cloudEnabled} onClick={diagnoseRecoveryConflicts} type="button"><FileSearch size={16} /><span>Diagnose recovery conflicts<small>Read-only</small></span></button>
         </div>
+        {invoiceSafetyBackups[0] && (
+          <div className="invoice-status warning">
+            Invoice safety copy available: {invoiceSafetyBackups[0].invoiceCount || "saved"} invoice(s), created {invoiceSafetyBackups[0].createdAt ? new Date(invoiceSafetyBackups[0].createdAt).toLocaleString() : "recently"}.
+          </div>
+        )}
         <p className="helper-text">Emergency backup recovery is preview-only here. It compares backup invoices with relational cloud invoices and never restores settings, suppliers, products or other modules.</p>
         {syncDiagnostic && (
           <div className="recovery-summary-grid">
