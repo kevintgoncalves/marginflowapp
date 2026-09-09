@@ -7,6 +7,7 @@ import {
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   persistRelationalInvoice,
+  replaceInvoiceInCollection,
 } from "../lib/invoiceRepository.js";
 import { compareInvoiceCollections } from "./emergencyRecovery.js";
 
@@ -21,6 +22,15 @@ const sampleInvoice = {
   date: "2026-08-07",
   items: [{ id: lineId, productName: "Apples", quantity: 2, unitCost: 4, departmentSplits: [] }],
 };
+
+test("an invoice update replaces a legacy source id without leaving a duplicate", () => {
+  const existing = { ...sampleInvoice, id: "legacy-invoice" };
+  const saved = { ...sampleInvoice, id: invoiceId, status: "Approved" };
+  const result = replaceInvoiceInCollection([existing], existing.id, saved);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, invoiceId);
+  assert.equal(result[0].status, "Approved");
+});
 
 test("confirmed invoice persistence sends the full document to one atomic RPC", async () => {
   const calls = [];

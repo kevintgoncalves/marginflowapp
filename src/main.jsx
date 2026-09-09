@@ -70,6 +70,17 @@ import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
+import {
+  BATCH_INVOICE_ITEM_STATUSES,
+  batchItemStatusForInvoice,
+  createInvoiceBatch,
+  hydrateInvoiceBatch,
+  invoiceBatchSummary,
+  runInvoiceBatchQueue,
+  serializeInvoiceBatch,
+  splitBatchInvoiceDocuments,
+  withDerivedInvoiceBatchStage,
+} from "./domain/invoiceBatchUpload.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
 import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
@@ -85,6 +96,7 @@ import {
 import {
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
+  replaceInvoiceInCollection,
   upsertInvoiceInCollection,
 } from "./lib/invoiceRepository.js";
 import {
@@ -1038,6 +1050,18 @@ function AuthScreen({ initialError = "", initialMode = "login" }) {
   const submit = async (event) => {
     event.preventDefault();
     if (!supabase) return;
+    if (!email.trim()) {
+      setStatus("Enter your email address.");
+      return;
+    }
+    if (mode !== "forgot" && !password) {
+      setStatus("Enter your password.");
+      return;
+    }
+    if (mode === "register" && !name.trim()) {
+      setStatus("Enter your name.");
+      return;
+    }
     setBusy(true);
     setStatus("");
     try {
@@ -1084,7 +1108,7 @@ function AuthScreen({ initialError = "", initialMode = "login" }) {
         {mode !== "forgot" && <Field label="Password" type="password" value={password} onChange={setPassword} />}
         {mode === "register" && <Field label="Confirm password" type="password" value={passwordConfirmation} onChange={setPasswordConfirmation} />}
         {status && <div className={`auth-status ${status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid") ? "error" : "info"}`}>{status}</div>}
-        <button disabled={busy || !email || (mode !== "forgot" && !password) || (mode === "register" && (!name.trim() || password.length < 8 || password !== passwordConfirmation))} type="submit">
+        <button aria-busy={busy} disabled={busy} type="submit">
           {busy ? "Please wait..." : title}
         </button>
       </form>
@@ -2382,7 +2406,28 @@ async function invoiceImagesFromFiles(files) {
   return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
 }
 
-async function extractPdfText(file) {
+async function pdfPageToInvoiceImageInput(page, file, pageNumber) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  const maxDimension = 1600;
+  const scale = Math.min(2, maxDimension / Math.max(baseViewport.width, baseViewport.height));
+  const viewport = page.getViewport({ scale: Math.max(1, scale) });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(viewport.width));
+  canvas.height = Math.max(1, Math.round(viewport.height));
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  return {
+    fileName: `${file.name} page ${pageNumber}`,
+    fileType: "image/jpeg",
+    name: `${file.name} page ${pageNumber}.jpg`,
+    type: "image/jpeg",
+    dataUrl: canvas.toDataURL("image/jpeg", 0.82),
+  };
+}
+
+async function extractPdfPages(file, { renderSparsePages = true } = {}) {
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
   const pages = [];
@@ -2390,10 +2435,25 @@ async function extractPdfText(file) {
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
     const content = await page.getTextContent();
-    pages.push(content.items.map((item) => item.str).join(" "));
+    const text = content.items.map((item) => item.str).join(" ");
+    const sparseText = text.replace(/\s+/g, " ").trim().length < 80;
+    pages.push({
+      sourceFileId: `${file.name}-${file.size}-${file.lastModified || ""}`,
+      sourceFileName: file.name,
+      sourceFileType: file.type || "application/pdf",
+      pageNumber,
+      pageCount: pdf.numPages,
+      text,
+      aiFile: renderSparsePages && sparseText ? await pdfPageToInvoiceImageInput(page, file, pageNumber) : null,
+    });
   }
 
-  return pages.join("\n");
+  return pages;
+}
+
+async function extractPdfText(file) {
+  const pages = await extractPdfPages(file, { renderSparsePages: false });
+  return pages.map((page) => page.text).join("\n");
 }
 
 async function textFromInvoiceFiles(files) {
@@ -2409,6 +2469,147 @@ async function textFromInvoiceFiles(files) {
   }
 
   return chunks.map((text) => text.trim()).filter(Boolean).join("\n\n");
+}
+
+async function sourcePagesFromInvoiceFiles(files) {
+  const sourcePages = [];
+  for (const [index, file] of Array.from(files || []).entries()) {
+    const name = file.name.toLowerCase();
+    if (file.type === "application/pdf" || name.endsWith(".pdf")) {
+      sourcePages.push(...await extractPdfPages(file));
+    } else if (isImageInvoiceFile(file)) {
+      sourcePages.push({
+        sourceFileId: `${file.name}-${file.size}-${file.lastModified || index}`,
+        sourceFileName: file.name,
+        sourceFileType: file.type || "image",
+        pageNumber: 1,
+        pageCount: 1,
+        text: "",
+        aiFile: await imageFileToInvoiceInput(file),
+      });
+    } else if (canReadFileAsText(file)) {
+      sourcePages.push({
+        sourceFileId: `${file.name}-${file.size}-${file.lastModified || index}`,
+        sourceFileName: file.name,
+        sourceFileType: file.type || "text/plain",
+        pageNumber: 1,
+        pageCount: 1,
+        text: await file.text(),
+        aiFile: null,
+      });
+    }
+  }
+  return sourcePages;
+}
+
+const invoiceBatchDbName = "marginflow-invoice-batches";
+const invoiceBatchDocumentStoreName = "invoiceBatchDocuments";
+
+function invoiceBatchDocumentStorageKey(batchId = "", documentId = "") {
+  return `${batchId}::${documentId}`;
+}
+
+function openInvoiceBatchDocumentDb() {
+  if (typeof window === "undefined" || !window.indexedDB) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(invoiceBatchDbName, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      const store = db.objectStoreNames.contains(invoiceBatchDocumentStoreName)
+        ? request.transaction.objectStore(invoiceBatchDocumentStoreName)
+        : db.createObjectStore(invoiceBatchDocumentStoreName, { keyPath: "key" });
+      if (!store.indexNames.contains("batchId")) {
+        store.createIndex("batchId", "batchId", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open invoice batch storage."));
+    request.onblocked = () => reject(new Error("Invoice batch storage is blocked by another browser tab."));
+  });
+}
+
+function waitForIndexedDbTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("Invoice batch storage failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("Invoice batch storage was cancelled."));
+  });
+}
+
+function storageReadyInvoiceBatchDocument(document = {}) {
+  return {
+    id: document.id || "",
+    sourceFileName: document.sourceFileName || "",
+    sourceFileNames: document.sourceFileNames || [document.sourceFileName].filter(Boolean),
+    pageLabels: document.pageLabels || [],
+    pageCount: document.pageCount || 1,
+    pages: document.pages || [],
+    invoiceText: document.invoiceText || "",
+    files: document.files || [],
+    signature: document.signature || {},
+  };
+}
+
+async function persistInvoiceBatchDocuments(batchId = "", documents = []) {
+  if (!batchId || !documents.length) return false;
+  const db = await openInvoiceBatchDocumentDb();
+  if (!db) return false;
+  try {
+    const transaction = db.transaction(invoiceBatchDocumentStoreName, "readwrite");
+    const store = transaction.objectStore(invoiceBatchDocumentStoreName);
+    documents.forEach((document) => {
+      const documentId = document.id || "";
+      if (!documentId) return;
+      store.put({
+        key: invoiceBatchDocumentStorageKey(batchId, documentId),
+        batchId,
+        documentId,
+        document: storageReadyInvoiceBatchDocument(document),
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    await waitForIndexedDbTransaction(transaction);
+    return true;
+  } finally {
+    db.close();
+  }
+}
+
+async function loadInvoiceBatchDocument(batchId = "", documentId = "") {
+  if (!batchId || !documentId) return null;
+  const db = await openInvoiceBatchDocumentDb();
+  if (!db) return null;
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(invoiceBatchDocumentStoreName, "readonly");
+      const request = transaction.objectStore(invoiceBatchDocumentStoreName).get(invoiceBatchDocumentStorageKey(batchId, documentId));
+      request.onsuccess = () => resolve(request.result?.document || null);
+      request.onerror = () => reject(request.error || new Error("Could not read stored invoice batch document."));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteInvoiceBatchDocuments(batchId = "") {
+  if (!batchId) return false;
+  const db = await openInvoiceBatchDocumentDb();
+  if (!db) return false;
+  try {
+    const transaction = db.transaction(invoiceBatchDocumentStoreName, "readwrite");
+    const index = transaction.objectStore(invoiceBatchDocumentStoreName).index("batchId");
+    const range = window.IDBKeyRange.only(batchId);
+    index.openCursor(range).onsuccess = (event) => {
+      const cursor = event.target.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+    await waitForIndexedDbTransaction(transaction);
+    return true;
+  } finally {
+    db.close();
+  }
 }
 
 function isoDateFromInvoiceToken(value = "") {
@@ -2453,7 +2654,10 @@ function preferredInvoiceDateForSupplier(supplier = "", invoiceText = "", fallba
 }
 
 async function invoiceFilesForAi(files) {
-  const supported = Array.from(files || []).filter(isImageInvoiceFile);
+  const supported = Array.from(files || []).filter((file) => {
+    const name = file.name.toLowerCase();
+    return isImageInvoiceFile(file) || file.type === "application/pdf" || name.endsWith(".pdf");
+  });
   const encoded = await Promise.all(supported.map((file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve({ name: file.name, type: file.type, dataUrl: reader.result });
@@ -5888,13 +6092,32 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setDuplicatePrompt(null);
   };
 
-  const persistInvoiceDocument = async (invoice) => {
-    const assessment = assessPurchasingDocumentDuplicate(operationalInvoices, invoice, { companyId: cloudScope.companyId });
+  const persistInvoiceDocument = async (invoice, { forceUpdate = false } = {}) => {
+    const sourceInvoice = forceUpdate
+      ? operationalInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
+      : null;
+    const sourceInvoiceId = sourceInvoice?.id || invoice.id || "";
+    const assessment = forceUpdate && sourceInvoice
+      ? { kind: "forced_update", existing: sourceInvoice }
+      : assessPurchasingDocumentDuplicate(operationalInvoices, invoice, { companyId: cloudScope.companyId });
     let duplicateAction = null;
     let existingInvoiceId = null;
     let expectedRevision = null;
     let invoiceForPersistence = invoice;
-    if (assessment.kind === "same_document") {
+    if (assessment.kind === "forced_update") {
+      const relationalSourceId = sourceInvoice.relationalId || (sourceInvoice.persistenceSource === "relational" ? sourceInvoice.id : "");
+      if (relationalSourceId) {
+        duplicateAction = "update_existing";
+        existingInvoiceId = relationalSourceId;
+        expectedRevision = Number(sourceInvoice.syncRevision || 0);
+        invoiceForPersistence = {
+          ...invoice,
+          id: existingInvoiceId,
+          relationalId: existingInvoiceId,
+          syncRevision: expectedRevision,
+        };
+      }
+    } else if (assessment.kind === "same_document") {
       const decision = await requestDuplicateDecision(assessment, invoice);
       if (decision === "open_existing") setActive("invoices");
       return { invoice: assessment.existing, persisted: true, cancelled: true, decision };
@@ -5920,7 +6143,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       client: cloudEnabled ? supabase : null,
       invoice: invoiceForPersistence,
       scope: { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
-      storeLocal: (storedInvoice) => setInvoices((current) => upsertInvoiceInCollection(current, storedInvoice)),
+      storeLocal: (storedInvoice) => setInvoices((current) => forceUpdate
+        ? replaceInvoiceInCollection(current, sourceInvoiceId, storedInvoice)
+        : upsertInvoiceInCollection(current, storedInvoice)),
       duplicateAction,
       existingInvoiceId,
       expectedRevision,
@@ -5932,7 +6157,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       setCloudStatus("synced");
       setCloudError("");
     }
-    return result;
+    return { ...result, sourceInvoiceId };
   };
 
   const compareDeviceWithCloud = async () => {
@@ -6355,7 +6580,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const topbarAction = readOnly ? null : active === "dashboard"
     ? <PrimaryAction className="page-primary-action" onClick={() => setSalesInputRequest({ id: uid() })}>Input Sales</PrimaryAction>
     : active === "invoices" && permissionsByPage.invoices?.canImport
-      ? <PrimaryAction className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())}>Upload Invoice</PrimaryAction>
+      ? <PrimaryAction className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())}>Upload Invoices</PrimaryAction>
       : active === "ai"
         ? <button className="page-primary-action" onClick={() => setAnalysisRunId((current) => current + 1)} type="button">Run analysis</button>
       : null;
@@ -7244,6 +7469,29 @@ function Invoices({
   const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const [uploadModalOpen, setUploadModalOpen] = useState(() => demoCaptureMode === "invoice-review");
+  const [batchReviewOpen, setBatchReviewOpen] = useState(false);
+  const [batchReviewItemId, setBatchReviewItemId] = useState("");
+  const [batchStatus, setBatchStatus] = useState("");
+  const [batchImporting, setBatchImporting] = useState(false);
+  const batchUploadDocumentsRef = useRef(new Map());
+  const batchRunIdRef = useRef("");
+  const batchStorageKey = `marginflow.invoiceBatch.${companyId || "local"}.${locationId || "all"}`;
+  const readStoredInvoiceBatch = () => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(batchStorageKey) || "null");
+      return hydrateInvoiceBatch(stored);
+    } catch {
+      return null;
+    }
+  };
+  const [invoiceBatch, setInvoiceBatchState] = useState(() => readStoredInvoiceBatch());
+  const invoiceBatchRef = useRef(invoiceBatch);
+  const setInvoiceBatch = (updater) => {
+    setInvoiceBatchState((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      return next ? withDerivedInvoiceBatchStage(next) : null;
+    });
+  };
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
@@ -7287,6 +7535,7 @@ function Invoices({
   ));
   const approvedInvoiceTotal = approvedDocuments.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
   const reviewDocumentCount = invoices.filter((invoice) => invoiceHasBlockingReview(validateInvoiceExtraction({ invoice, lines: invoice.items || [] }))).length;
+  const invoiceProductPriceHistory = useMemo(() => products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))), [products]);
   const draftValidationState = useMemo(() => validateInvoiceExtraction({
     invoice: {
       supplier: draft.supplier || draft.items[0]?.supplier,
@@ -7308,11 +7557,39 @@ function Invoices({
       invoiceReviewReasons: draft.invoiceReviewReasons || [],
     },
     lines: draft.items,
-    historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
-  }), [draft.additionalCharges, draft.adjustments, draft.creditReason, draft.date, draftDocumentNumber, draftDocumentType, draft.inventoryEffect, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal, products]);
+    historicalPrices: invoiceProductPriceHistory,
+  }), [draft.additionalCharges, draft.adjustments, draft.creditReason, draft.date, draftDocumentNumber, draftDocumentType, draft.inventoryEffect, draft.invoiceReviewReasons, draft.invoiceSubtotal, draft.invoiceTotal, draft.items, draft.sourceInvoiceSubtotal, draft.sourceInvoiceTotal, draft.supplier, draft.vatTotal, invoiceProductPriceHistory]);
   const draftHasBlockingReview = invoiceHasBlockingReview(draftValidationState);
   const blockingReviewIssues = getBlockingInvoiceIssues(draftValidationState);
   const warningReviewIssues = getWarningInvoiceIssues(draftValidationState);
+  const currentBatchSummary = invoiceBatchSummary(invoiceBatch || {});
+  const selectedBatchItem = invoiceBatch?.items?.find((item) => item.id === batchReviewItemId) || null;
+  const selectedBatchInvoice = selectedBatchItem?.invoice || null;
+  const selectedBatchDocumentType = selectedBatchInvoice ? documentTypeFor(selectedBatchInvoice) : PURCHASING_DOCUMENT_TYPES.INVOICE;
+  const selectedBatchDocumentNumber = selectedBatchInvoice ? documentNumberFor(selectedBatchInvoice) : "";
+  const selectedBatchValidation = useMemo(() => selectedBatchInvoice ? validateInvoiceExtraction({
+    invoice: {
+      ...selectedBatchInvoice,
+      invoiceDate: selectedBatchInvoice.date,
+      documentNumber: selectedBatchDocumentNumber,
+      document_number: selectedBatchDocumentNumber,
+      invoiceNumber: selectedBatchDocumentNumber,
+    },
+    lines: selectedBatchInvoice.items || [],
+    historicalPrices: invoiceProductPriceHistory,
+  }) : null, [invoiceProductPriceHistory, selectedBatchDocumentNumber, selectedBatchInvoice]);
+  const selectedBatchBlockingIssues = selectedBatchValidation ? getBlockingInvoiceIssues(selectedBatchValidation) : [];
+  const selectedBatchWarningIssues = selectedBatchValidation ? getWarningInvoiceIssues(selectedBatchValidation) : [];
+
+  useEffect(() => {
+    invoiceBatchRef.current = invoiceBatch;
+    try {
+      if (invoiceBatch) localStorage.setItem(batchStorageKey, JSON.stringify(serializeInvoiceBatch(invoiceBatch)));
+      else localStorage.removeItem(batchStorageKey);
+    } catch {
+      // A large batch can exceed local browser storage. The in-memory queue still remains usable for the current session.
+    }
+  }, [batchStorageKey, invoiceBatch]);
 
   const resetUploadDraft = () => {
     setDraft(emptyInvoiceDraft());
@@ -7328,18 +7605,133 @@ function Invoices({
     setCancelUploadOpen(true);
   };
 
+  const updateBatchItem = (itemId, patch) => {
+    setInvoiceBatch((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === itemId ? { ...item, ...patch } : item),
+    } : current);
+  };
+
+  const batchInvoiceFromExtraction = (item, document, extraction) => {
+    const invoice = {
+      ...extraction.draft,
+      id: item.id,
+      batchUploadId: invoiceBatchRef.current?.id || "",
+      batchUploadSource: {
+        sourceFileNames: document.sourceFileNames || [document.sourceFileName].filter(Boolean),
+        pageLabels: document.pageLabels || [],
+        pageCount: document.pageCount || 1,
+      },
+      source: "Batch invoice upload",
+      status: "Batch review",
+    };
+    return invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(invoice), extraction.validation);
+  };
+
+  const classifyBatchInvoice = (itemId, invoice, validation) => batchItemStatusForInvoice(invoice, validation, {
+    existingInvoices: invoices,
+    batchItems: invoiceBatchRef.current?.items || [],
+    companyId,
+  });
+
+  const processInvoiceBatchItems = async (batchId, itemsToProcess) => {
+    if (!aiSettings.enableAiInvoiceReading) {
+      setBatchStatus("AI invoice reading is disabled in Settings.");
+      return;
+    }
+    batchRunIdRef.current = batchId;
+    await runInvoiceBatchQueue(itemsToProcess, async (item) => {
+      let document = batchUploadDocumentsRef.current.get(item.documentId) || batchUploadDocumentsRef.current.get(item.id);
+      if (!document) {
+        document = await loadInvoiceBatchDocument(batchId, item.documentId || item.id);
+        if (document?.id) batchUploadDocumentsRef.current.set(document.id, document);
+      }
+      if (!document) {
+        throw new Error("Original file data is no longer available. Upload this document again to retry it.");
+      }
+      if (!document.invoiceText && !document.files?.length) {
+        throw new Error("No readable invoice text or image was found for this document.");
+      }
+      const extraction = await extractInvoiceDraftFromAi({
+        invoiceText: document.invoiceText,
+        aiFiles: document.files || [],
+        baseDraft: {
+          ...emptyInvoiceDraft(),
+          supplier: draft.supplier || "",
+          date: draft.date || today(),
+        },
+      });
+      const invoice = batchInvoiceFromExtraction(item, document, extraction);
+      const classification = classifyBatchInvoice(item.id, invoice, extraction.validation);
+      return {
+        ...classification,
+        invoice,
+        error: "",
+        processedAt: new Date().toISOString(),
+      };
+    }, {
+      concurrency: invoiceBatchRef.current?.concurrency || 5,
+      onItemUpdate: updateBatchItem,
+    });
+    if (batchRunIdRef.current === batchId) {
+      setBatchStatus("Batch ready for review.");
+      setInvoiceBatch((current) => current);
+    }
+  };
+
+  const startInvoiceBatchProcessing = () => {
+    if (!invoiceBatch || currentBatchSummary.processing || currentBatchSummary.importing) return;
+    const itemsToProcess = (invoiceBatch.items || []).filter((item) => (
+      item.status === BATCH_INVOICE_ITEM_STATUSES.PENDING || item.status === BATCH_INVOICE_ITEM_STATUSES.FAILED
+    ));
+    if (!itemsToProcess.length) return;
+    setBatchStatus(`Processing ${itemsToProcess.length} queued invoice${itemsToProcess.length === 1 ? "" : "s"}.`);
+    processInvoiceBatchItems(invoiceBatch.id, itemsToProcess);
+  };
+
+  const startInvoiceBatchUpload = async (documents) => {
+    const batch = createInvoiceBatch(documents, { id: uid(), concurrency: 5 });
+    batchUploadDocumentsRef.current = new Map(documents.map((document) => [document.id, document]));
+    setInvoiceBatch(batch);
+    setBatchReviewOpen(true);
+    setBatchReviewItemId("");
+    setBatchStatus(`${documents.length} invoice${documents.length === 1 ? "" : "s"} detected. Saving batch state...`);
+    try {
+      await persistInvoiceBatchDocuments(batch.id, documents);
+      setBatchStatus(`${documents.length} invoice${documents.length === 1 ? "" : "s"} detected. Processing has started.`);
+    } catch {
+      setBatchStatus(`${documents.length} invoice${documents.length === 1 ? "" : "s"} detected. Processing has started. Keep this tab open for retries.`);
+    }
+    processInvoiceBatchItems(batch.id, batch.items);
+  };
+
   const addFiles = async (files) => {
     if (!permissions.canImport) return;
     const uploaded = Array.from(files || []);
     if (!uploaded.length) return;
-    setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded. Ready for AI reading.` }));
-    const uploadedText = await textFromInvoiceFiles(uploaded);
-    if (uploadedText) {
-      setDraft((current) => ({
-        ...current,
-        invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
-        status: `${uploaded.length} file(s) uploaded. Ready for AI reading.`,
-      }));
+    setDraft((current) => ({ ...current, status: `Preparing ${uploaded.length} uploaded file(s)...` }));
+    try {
+      const sourcePages = await sourcePagesFromInvoiceFiles(uploaded);
+      const documents = splitBatchInvoiceDocuments(sourcePages, {
+        suppliers,
+        idFactory: () => uid(),
+      });
+      if (documents.length > 1) {
+        await startInvoiceBatchUpload(documents);
+        setUploadInputKey((current) => current + 1);
+        return;
+      }
+      setDraft((current) => ({ ...current, files: [...current.files, ...uploaded], status: `${uploaded.length} file(s) uploaded. Ready for AI reading.` }));
+      const uploadedText = documents[0]?.invoiceText || await textFromInvoiceFiles(uploaded);
+      if (uploadedText) {
+        setDraft((current) => ({
+          ...current,
+          invoiceText: [current.invoiceText, uploadedText].filter(Boolean).join("\n\n"),
+          status: `${uploaded.length} file(s) uploaded. Ready for AI reading.`,
+        }));
+      }
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: `Could not prepare this upload. ${error.message || "Try the document again."}` }));
     }
   };
 
@@ -7416,6 +7808,190 @@ function Invoices({
       inventoryEffect,
       inventory_effect: inventoryEffect,
     }));
+  };
+
+  const extractInvoiceDraftFromAi = async ({ invoiceText = "", aiFiles = [], baseDraft = draft } = {}) => {
+    const response = await fetch("/api/read-invoice-ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        invoiceText,
+        files: aiFiles,
+        companyId,
+        locationId,
+        suppliers,
+        products: products.filter((product) => product.active !== false).map((product) => ({
+          id: product.id,
+          name: product.productName || product.name,
+          supplier: product.supplier,
+          packSize: product.packSize,
+          unit: product.unit || product.unitOfMeasure || "",
+          aliases: product.aliases || [],
+        })),
+        supplierMappings: supplierProductMappings,
+      }),
+    });
+    const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
+    if (!response.ok) throw new Error(payload.detail || payload.error || "AI failed");
+
+    const supplierRecord = canonicalSupplierForName(suppliers, payload.supplier || baseDraft.supplier);
+    const supplier = supplierRecord?.name || payload.supplier || baseDraft.supplier || "Unknown Supplier";
+    const detectedDocumentType = normalizeDocumentType(
+      payload.documentType || payload.document_type || inferDocumentTypeFromText(invoiceText, payload),
+      { allowUnknown: true }
+    );
+    const documentType = detectedDocumentType === PURCHASING_DOCUMENT_TYPES.UNKNOWN ? PURCHASING_DOCUMENT_TYPES.INVOICE : detectedDocumentType;
+    const creditReason = normalizeCreditReason(payload.creditReason || payload.credit_reason || inferCreditReasonFromText(invoiceText));
+    const inventoryEffect = normalizeInventoryEffect(payload.inventoryEffect || payload.inventory_effect, defaultInventoryEffectForCreditReason(creditReason));
+    const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
+      mapping.active !== false
+      && (!companyId || !mapping.companyId || mapping.companyId === companyId)
+      && (!locationId || !mapping.locationId || mapping.locationId === locationId)
+      && (supplierRecord?.id && mapping.supplierId
+        ? mapping.supplierId === supplierRecord.id
+        : sameSupplierIdentity(mapping.supplierName || mapping.supplier || "", supplier))
+    ));
+    invoiceLearningDebug("mappings-loaded", {
+      supplierId: supplierRecord?.id || "",
+      supplierName: supplier,
+      mappingCount: supplierScopedMappings.length,
+    });
+    const items = (payload.lines || []).map((line) => {
+      const quantity = numberValue(line.quantity, 1);
+      const unitCost = extractedInvoiceUnitCost(line);
+      const normalizedLine = normalizePurchasingLineForDocument({
+        ...line,
+        quantity,
+        unitCost,
+        lineTotal: line.lineTotal || quantity * unitCost,
+      }, documentType);
+      return enrichInvoiceLine(
+        {
+          id: uid(),
+          productName: line.productName || line.rawDescription || "Unknown product",
+          rawDescription: line.rawDescription || line.productName || "",
+          supplierProductCode: line.supplierProductCode || "",
+          packSize: line.packSize || "",
+          quantity: normalizedLine.quantity,
+          unitCost: normalizedLine.unitCost,
+          lineTotal: normalizedLine.lineTotal,
+          unit: line.unit || line.unitOfMeasure || "",
+          unitOfMeasure: line.unitOfMeasure || line.unit || "",
+          supplier,
+          supplierId: supplierRecord?.id || "",
+          currency: payload.currency || financialSettings.currency || "GBP",
+          departmentId: line.departmentId || "",
+          department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
+          departmentMode: line.departmentMode || (/^split$/i.test(line.allocationMode || "") ? "Split" : "Single"),
+          departmentSplits: Array.isArray(line.departmentSplits) ? line.departmentSplits : [],
+          source: "OpenAI",
+          sourceMetadata: { parser: "OpenAI", confidence: line.confidence, reviewFlags: line.reviewFlags || [], originalExtraction: line },
+          originalExtraction: line,
+          sourceQuantity: normalizedLine.sourceQuantity,
+          sourceUnitCost: normalizedLine.sourceUnitCost,
+          sourceLineTotal: normalizedLine.sourceLineTotal,
+          matchedProductId: line.matchedProductId || "",
+          matchedProductName: line.matchedProductName || "",
+          suggestedProductId: line.suggestedProducts?.[0]?.id || line.suggestedProductId || "",
+          suggestedProductName: line.suggestedProducts?.[0]?.name || line.suggestedProductName || "",
+          suggestedProducts: line.suggestedProducts || [],
+          productResolution: line.productResolution || line.product_resolution_mode || PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+          productMatchSource: canonicalProductMatchSource(line.productMatchSource || "no_product_match"),
+          productMatchConfidence: line.productMatchConfidence,
+          matchStatus: line.matchStatus || productMatchStatusText(line.productMatchSource || "no_product_match", line.productResolution),
+          allocationSource: line.allocationSource || "",
+          learnedMappingId: line.learnedMappingId || "",
+          needsReview: Boolean(line.needsReview),
+          reviewReasons: line.reviewReasons || [],
+        },
+        products,
+        aiSettings,
+        supplierScopedMappings,
+        { organisationId: companyId, locationId, departmentNames }
+      );
+    });
+    const documentNumber = payload.documentNumber || payload.document_number || payload.invoiceNumber || baseDraft.documentNumber || baseDraft.invoiceNumber;
+    const validated = validateInvoiceExtraction({
+      invoice: {
+        supplier,
+        documentType,
+        document_type: documentType,
+        documentNumber,
+        document_number: documentNumber,
+        invoiceNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || baseDraft.invoiceNumber,
+        invoiceDate: payload.invoiceDate || baseDraft.date,
+        invoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+        invoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+        vatTotal: payload.vatTotal ?? payload.vat_total,
+        additionalCharges: payload.additionalCharges ?? payload.handlingCharge ?? payload.deliveryCharge ?? 0,
+        additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || "",
+        adjustments: payload.adjustments || [],
+        creditReason,
+        credit_reason: creditReason,
+        inventoryEffect,
+        inventory_effect: inventoryEffect,
+      },
+      lines: items,
+      historicalPrices: invoiceProductPriceHistory,
+    });
+    const extractedDate = preferredInvoiceDateForSupplier(supplier, invoiceText, payload.invoiceDate || baseDraft.date || today());
+    const draftPatch = {
+      supplier,
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: payload.documentNumber || payload.document_number || payload.invoiceNumber || baseDraft.invoiceNumber,
+      date: extractedDate,
+      items: validated.lines,
+      invoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+      invoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+      sourceInvoiceSubtotal: payload.netTotal ?? payload.net_total ?? payload.invoiceSubtotal,
+      sourceInvoiceTotal: payload.grossTotal ?? payload.gross_total ?? payload.invoiceTotal,
+      vatTotal: payload.vatTotal ?? payload.vat_total,
+      originalInvoiceNumber: payload.originalInvoiceNumber || payload.original_invoice_number || baseDraft.originalInvoiceNumber || "",
+      original_invoice_number: payload.originalInvoiceNumber || payload.original_invoice_number || baseDraft.originalInvoiceNumber || "",
+      originalInvoiceId: baseDraft.originalInvoiceId || "",
+      creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+      credit_reason: isCreditNoteDocument(documentType) ? creditReason : "",
+      inventoryEffect: isCreditNoteDocument(documentType) ? inventoryEffect : "",
+      inventory_effect: isCreditNoteDocument(documentType) ? inventoryEffect : "",
+      currency: payload.currency || baseDraft.currency || financialSettings.currency || "GBP",
+      auditEvents: [
+        ...(baseDraft.auditEvents || []),
+        ...(isCreditNoteDocument(documentType) ? [{
+          id: uid(),
+          event: "credit_note_detected_by_ai",
+          documentType,
+          documentNumber,
+          createdAt: new Date().toISOString(),
+        }] : []),
+      ],
+      additionalCharges: validated.additionalCharges || 0,
+      additionalChargesDescription: payload.additionalChargesDescription || payload.handlingChargeDescription || payload.deliveryChargeDescription || (validated.inferredAdditionalCharges ? "Inferred non-product charge" : ""),
+      adjustments: validated.adjustments || payload.adjustments || [],
+      discountAmount: Math.abs(numberValue(validated.reconciliation?.negativeAdjustmentTotal, 0)),
+      inferredAdditionalCharges: validated.inferredAdditionalCharges || 0,
+      invoiceNeedsReview: validated.invoiceNeedsReview,
+      invoiceHasBlockingReview: validated.invoiceHasBlockingReview,
+      invoiceReviewReasons: validated.invoiceReviewReasons,
+      invoiceReviewSeverity: validated.invoiceReviewSeverity,
+      extractionModel: payload.extractionModel,
+      fallbackModelUsed: payload.fallbackModelUsed,
+      fallbackReason: payload.fallbackReason,
+    };
+
+    return {
+      draft: { ...baseDraft, ...draftPatch },
+      draftPatch,
+      validation: validated,
+      payload,
+      supplier,
+      supplierRecord,
+      documentType,
+      documentNumber,
+      itemCount: items.length,
+    };
   };
 
   const readInvoice = async () => {
@@ -7934,6 +8510,421 @@ function Invoices({
     await persistInvoiceLearning(learningResult.learned);
   };
 
+  const batchValidationForInvoice = (invoice) => validateInvoiceExtraction({
+    invoice: {
+      ...invoice,
+      invoiceDate: invoice.date,
+      documentNumber: documentNumberFor(invoice),
+      document_number: documentNumberFor(invoice),
+      invoiceNumber: documentNumberFor(invoice),
+    },
+    lines: invoice.items || [],
+    historicalPrices: invoiceProductPriceHistory,
+  });
+
+  const normalizeBatchInvoiceForReview = (invoice) => {
+    const supplierRecord = canonicalSupplierForName(suppliers, invoice.supplier || invoice.items?.[0]?.supplier);
+    const supplier = supplierRecord?.name || invoice.supplier || invoice.items?.[0]?.supplier || "Unknown Supplier";
+    const documentType = normalizeDocumentType(invoice.documentType || invoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+    const documentNumber = documentNumberFor(invoice);
+    const items = (invoice.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+    return {
+      ...invoice,
+      supplier,
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber,
+      creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(invoice.creditReason) : "",
+      inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(invoice.inventoryEffect, defaultInventoryEffectForCreditReason(invoice.creditReason)) : "",
+      status: "Batch review",
+      items,
+    };
+  };
+
+  const saveBatchReviewInvoice = ({ markCorrect = false } = {}) => {
+    if (!selectedBatchItem?.invoice) return;
+    try {
+      const normalized = normalizeBatchInvoiceForReview(selectedBatchItem.invoice);
+      const documentType = documentTypeFor(normalized);
+      const validation = validateInvoiceLinesForApproval(normalized.items || [], {
+        documentType,
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) {
+        setBatchStatus(validation.errors[0] || "Review invoice lines before saving this batch item.");
+        return;
+      }
+      if ((normalized.items || []).some((item) => !splitIsValid(item))) {
+        setBatchStatus("Department split must total 100% before saving this batch item.");
+        return;
+      }
+      const extractionValidation = batchValidationForInvoice(normalized);
+      const invoiceForBatch = markCorrect
+        ? invoiceMarkedAsCorrect(normalized, extractionValidation)
+        : invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(normalized), extractionValidation);
+      const finalValidation = batchValidationForInvoice(invoiceForBatch);
+      const classification = batchItemStatusForInvoice(invoiceForBatch, finalValidation, {
+        existingInvoices: invoices,
+        batchItems: invoiceBatchRef.current?.items || [],
+        companyId,
+      });
+      updateBatchItem(selectedBatchItem.id, {
+        ...classification,
+        invoice: invoiceForBatch,
+        error: "",
+        statusLabel: classification.statusLabel,
+      });
+      setBatchStatus(markCorrect ? "Invoice marked as correct in the batch." : "Batch invoice changes saved.");
+    } catch (error) {
+      setBatchStatus(error.message || "Could not save this batch invoice.");
+    }
+  };
+
+  const updateSelectedBatchInvoice = (updater) => {
+    if (!selectedBatchItem) return;
+    setInvoiceBatch((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => {
+        if (item.id !== selectedBatchItem.id) return item;
+        const base = invoiceWithClearedReviewConfirmation(item.invoice || {});
+        const invoice = typeof updater === "function" ? updater(base) : updater;
+        return { ...item, invoice };
+      }),
+    } : current);
+  };
+
+  const updateBatchReviewInvoice = (field, value) => {
+    updateSelectedBatchInvoice((base) => {
+      if (field === "documentType") {
+        const documentType = normalizeDocumentType(value);
+        const creditReason = normalizeCreditReason(base.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT);
+        return {
+          ...base,
+          documentType,
+          document_type: documentType,
+          creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+          inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(base.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason)) : "",
+          items: normalizeInvoiceItemsForDocument(base.items || [], documentType),
+        };
+      }
+      if (field === "documentNumber" || field === "invoiceNumber") {
+        return { ...base, documentNumber: value, document_number: value, invoiceNumber: value };
+      }
+      if (field === "creditReason") {
+        const creditReason = normalizeCreditReason(value);
+        return { ...base, creditReason, credit_reason: creditReason, inventoryEffect: defaultInventoryEffectForCreditReason(creditReason), inventory_effect: defaultInventoryEffectForCreditReason(creditReason) };
+      }
+      if (field === "inventoryEffect") {
+        const inventoryEffect = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
+        return { ...base, inventoryEffect, inventory_effect: inventoryEffect };
+      }
+      if (field !== "supplier") return { ...base, [field]: value };
+      return {
+        ...base,
+        supplier: value,
+        items: propagateInvoiceSupplierToLines(base.items || [], value, base.supplier),
+      };
+    });
+  };
+
+  const updateBatchReviewLine = (id, field, value) => {
+    updateSelectedBatchInvoice((base) => {
+      const documentType = normalizeDocumentType(base.documentType || base.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      return {
+        ...base,
+        items: (base.items || []).map((item) => {
+          if (item.id !== id) return item;
+          const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
+          return isCreditNoteDocument(documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, documentType), departmentNames) : updated;
+        }),
+      };
+    });
+  };
+
+  const setBatchReviewDepartmentMode = (id, mode) => {
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    }));
+  };
+
+  const updateBatchReviewSplit = (id, splitIndex, field, value) => {
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
+    }));
+  };
+
+  const addBatchReviewSplit = (id) => {
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
+    }));
+  };
+
+  const removeBatchReviewSplit = (id, splitIndex) => {
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    }));
+  };
+
+  const addBatchReviewLine = () => {
+    const supplier = selectedBatchInvoice?.supplier || visibleSuppliers[0]?.name || "Unknown Supplier";
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: [
+        ...(base.items || []),
+        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made"),
+      ],
+    }));
+  };
+
+  const applyExistingProductToBatchLine = (id, productId) => {
+    const product = products.find((candidate) => candidate.id === productId);
+    if (!product) return;
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => {
+        if (item.id !== id) return item;
+        const assignment = departmentAssignmentForResolvedLine({
+          line: item,
+          product,
+          departmentNames,
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+        });
+        return normalizeInvoiceLineForEditor({
+          ...lineWithExistingProductResolution(item, product),
+          forgetLearnedRule: false,
+          packSize: item.packSize || product.packSize || "",
+          supplier: item.supplier || product.supplier || base.supplier,
+          department: assignment.department,
+          departmentId: assignment.departmentId || item.departmentId || "",
+          departmentMode: assignment.departmentMode,
+          departmentSplits: assignment.departmentSplits,
+        }, departmentNames);
+      }),
+    }));
+    setBatchStatus(`Matched to ${productDisplayName(product)}.`);
+  };
+
+  const createProductFromBatchLine = (id, { allowSimilarDuplicate = false } = {}) => {
+    if (!permissions.canAdd) return;
+    const line = selectedBatchInvoice?.items?.find((item) => item.id === id);
+    if (!line?.productName?.trim()) return;
+    const duplicateCandidates = createNewProductConflictCandidates({
+      products,
+      line,
+      supplierMappings: supplierProductMappings,
+      supplier: line.supplier || selectedBatchInvoice?.supplier || "",
+      supplierId: line.supplierId || canonicalSupplierForName(suppliers, line.supplier || selectedBatchInvoice?.supplier)?.id || "",
+      organisationId: companyId,
+    });
+    if (duplicateCandidates.length && (!allowSimilarDuplicate || hasBlockingCreateNewProductConflict(duplicateCandidates))) {
+      updateSelectedBatchInvoice((base) => ({
+        ...base,
+        items: (base.items || []).map((item) => item.id === id ? lineWithCreateNewProductDuplicateReview(item, duplicateCandidates) : item),
+      }));
+      setBatchStatus(hasBlockingCreateNewProductConflict(duplicateCandidates)
+        ? `Existing product found: ${duplicateCandidates[0].name}. Use the existing product before importing.`
+        : `Possible existing product found: ${duplicateCandidates[0].name}. Choose it or create a new product anyway.`);
+      return;
+    }
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? lineWithCreateNewProductResolution(item) : item),
+    }));
+    setBatchStatus(`New product will be created when this ${purchasingDocumentNoun(selectedBatchDocumentType)} is imported.`);
+  };
+
+  const resetBatchProductResolution = (id) => {
+    updateSelectedBatchInvoice((base) => ({
+      ...base,
+      items: (base.items || []).map((item) => item.id === id ? lineWithResetProductResolution(item) : item),
+    }));
+    setBatchStatus("Choose an existing product or create a new one.");
+  };
+
+  const prepareBatchInvoiceForImport = (item) => {
+    const sourceInvoice = item.invoice || {};
+    const supplierRecord = canonicalSupplierForName(suppliers, sourceInvoice.supplier || sourceInvoice.items?.[0]?.supplier);
+    const supplier = supplierRecord?.name || sourceInvoice.supplier || sourceInvoice.items?.[0]?.supplier || "Unknown Supplier";
+    const documentType = normalizeDocumentType(sourceInvoice.documentType || sourceInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+    const documentNumber = documentNumberFor(sourceInvoice);
+    const normalizedItems = (sourceInvoice.items || []).map((line) => normalizeInvoiceLineForSave(line, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+    const validation = validateInvoiceLinesForApproval(normalizedItems, {
+      documentType,
+      splitValidator: splitIsValid,
+      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+    });
+    if (!validation.valid) throw new Error(validation.errors[0] || "Review invoice lines before importing.");
+    if (normalizedItems.some((line) => !splitIsValid(line))) throw new Error("Department split must total 100% before importing.");
+    const explicitResolution = resolveExplicitNewProductLines({
+      products,
+      items: normalizedItems,
+      supplierMappings: supplierProductMappings,
+      supplier,
+      supplierId: supplierRecord?.id || "",
+      organisationId: companyId,
+      idFactory: uid,
+      createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
+        supplier,
+        invoiceDate: sourceInvoice.date || today(),
+        fallbackDepartment: invoiceSettings.defaultInvoiceDepartment,
+        departmentNames,
+      }),
+    });
+    if (explicitResolution.conflicts.length) {
+      throw new Error("Exact product or supplier-code duplicate found. Review this invoice before importing.");
+    }
+    const prepared = prepareApprovedInvoice({
+      ...sourceInvoice,
+      supplier,
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber,
+      creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(sourceInvoice.creditReason) : "",
+      inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(sourceInvoice.inventoryEffect, defaultInventoryEffectForCreditReason(sourceInvoice.creditReason)) : "",
+      status: "Approved",
+      items: explicitResolution.items,
+    });
+    const preparedValidation = batchValidationForInvoice(prepared);
+    if (invoiceHasBlockingReview(preparedValidation)) {
+      throw new Error("This invoice still needs review before import.");
+    }
+    return { prepared: invoiceWithValidationReviewState(prepared, preparedValidation), explicitResolution, supplier, supplierRecord };
+  };
+
+  const importBatchItem = async (item) => {
+    updateBatchItem(item.id, { status: BATCH_INVOICE_ITEM_STATUSES.IMPORTING, statusLabel: "Importing", error: "" });
+    try {
+      const { prepared, explicitResolution, supplier, supplierRecord } = prepareBatchInvoiceForImport(item);
+      const duplicateCheck = batchItemStatusForInvoice(prepared, batchValidationForInvoice(prepared), {
+        existingInvoices: invoices,
+        batchItems: invoiceBatchRef.current?.items || [],
+        companyId,
+      });
+      if (duplicateCheck.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE) {
+        updateBatchItem(item.id, { ...duplicateCheck, invoice: prepared, error: "" });
+        return { imported: false, duplicate: true };
+      }
+      const productsForLearning = [
+        ...products,
+        ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
+      ];
+      const persistence = await persistInvoiceDocument(prepared);
+      if (persistence.cancelled) {
+        updateBatchItem(item.id, {
+          status: BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE,
+          statusLabel: "Possible duplicate",
+          invoice: prepared,
+          error: "Import was stopped for duplicate review.",
+        });
+        return { imported: false, duplicate: true };
+      }
+      const savedInvoice = persistence.invoice;
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
+      setSuppliers((current) => ensureSupplierList(current, supplier));
+      setProducts((current) => {
+        const withCreatedProducts = [
+          ...current,
+          ...explicitResolution.createdProducts.filter((product) => !current.some((existing) => existing.id === product.id)),
+        ];
+        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice);
+      });
+      const learningResult = learnSupplierProductMappings({
+        mappings: supplierProductMappings,
+        invoice: savedInvoice,
+        products: productsForLearning,
+        companyId,
+        locationId,
+        supplierId: supplierRecord?.id || "",
+        supplierName: supplier,
+        departments: departmentSettings,
+        storageTarget: companyId ? "relational+snapshot" : "snapshot",
+      });
+      setSupplierProductMappings(learningResult.mappings);
+      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
+      await persistInvoiceLearning(learningResult.learned);
+      updateBatchItem(item.id, {
+        status: BATCH_INVOICE_ITEM_STATUSES.IMPORTED,
+        statusLabel: "Imported",
+        invoice: savedInvoice,
+        importedAt: new Date().toISOString(),
+        error: "",
+      });
+      return { imported: true };
+    } catch (error) {
+      updateBatchItem(item.id, {
+        status: BATCH_INVOICE_ITEM_STATUSES.FAILED,
+        statusLabel: "Failed",
+        error: error.message || "Could not import this invoice.",
+      });
+      return { imported: false, failed: true };
+    }
+  };
+
+  const importAllReadyBatchInvoices = async () => {
+    if (!invoiceBatch || batchImporting) return;
+    const readyItems = (invoiceBatch.items || []).filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.READY && item.invoice);
+    if (!readyItems.length) return;
+    setBatchImporting(true);
+    setBatchStatus(`Importing ${readyItems.length} ready invoice${readyItems.length === 1 ? "" : "s"}...`);
+    let imported = 0;
+    let failed = 0;
+    let duplicates = 0;
+    try {
+      for (const item of readyItems) {
+        const result = await importBatchItem(item);
+        if (result.imported) imported += 1;
+        else if (result.duplicate) duplicates += 1;
+        else failed += 1;
+      }
+      setBatchStatus(`${imported} imported. ${duplicates} duplicate${duplicates === 1 ? "" : "s"} held for review. ${failed} failed.`);
+    } finally {
+      setBatchImporting(false);
+      setInvoiceBatch((current) => current);
+    }
+  };
+
+  const retryFailedBatchInvoices = () => {
+    if (!invoiceBatch || currentBatchSummary.processing || currentBatchSummary.importing) return;
+    const failedItems = (invoiceBatch.items || []).filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.FAILED);
+    if (!failedItems.length) return;
+    setBatchStatus(`Retrying ${failedItems.length} failed invoice${failedItems.length === 1 ? "" : "s"}...`);
+    processInvoiceBatchItems(invoiceBatch.id, failedItems);
+  };
+
+  const reviewFirstFlaggedBatchInvoice = () => {
+    const flagged = (invoiceBatch?.items || []).find((item) => (
+      [BATCH_INVOICE_ITEM_STATUSES.NEEDS_REVIEW, BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE, BATCH_INVOICE_ITEM_STATUSES.FAILED].includes(item.status)
+    ));
+    if (flagged) setBatchReviewItemId(flagged.id);
+  };
+
+  const skipBatchItem = (itemId) => {
+    updateBatchItem(itemId, {
+      status: BATCH_INVOICE_ITEM_STATUSES.SKIPPED,
+      statusLabel: "Skipped",
+      error: "",
+    });
+    if (batchReviewItemId === itemId) setBatchReviewItemId("");
+  };
+
+  const clearCompletedBatch = () => {
+    if (invoiceBatch?.id) deleteInvoiceBatchDocuments(invoiceBatch.id).catch(() => {});
+    setInvoiceBatch(null);
+    batchUploadDocumentsRef.current = new Map();
+    setBatchReviewOpen(false);
+    setBatchReviewItemId("");
+    setBatchStatus("");
+  };
+
   const saveManualInvoice = async () => {
     if (!permissions.canAdd && !permissions.canApprove) return;
     const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
@@ -8127,7 +9118,7 @@ function Invoices({
       status: editDraft.status || "Approved",
       items,
     });
-    const persistence = await persistInvoiceDocument(cleaned);
+    const persistence = await persistInvoiceDocument(cleaned, { forceUpdate: true });
     if (persistence.cancelled) return;
     const savedInvoice = persistence.invoice;
     setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
@@ -8146,6 +9137,52 @@ function Invoices({
     setDeleteTarget(null);
   };
 
+  const batchReadyPercent = currentBatchSummary.total
+    ? Math.round((currentBatchSummary.completed / currentBatchSummary.total) * 100)
+    : 0;
+  const batchStatusBadge = (status) => {
+    const labels = {
+      [BATCH_INVOICE_ITEM_STATUSES.PENDING]: "Queued",
+      [BATCH_INVOICE_ITEM_STATUSES.PROCESSING]: "Processing",
+      [BATCH_INVOICE_ITEM_STATUSES.READY]: "Ready",
+      [BATCH_INVOICE_ITEM_STATUSES.NEEDS_REVIEW]: "Needs review",
+      [BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE]: "Possible duplicate",
+      [BATCH_INVOICE_ITEM_STATUSES.FAILED]: "Failed",
+      [BATCH_INVOICE_ITEM_STATUSES.IMPORTING]: "Importing",
+      [BATCH_INVOICE_ITEM_STATUSES.IMPORTED]: "Imported",
+      [BATCH_INVOICE_ITEM_STATUSES.SKIPPED]: "Skipped",
+    };
+    const tone = {
+      [BATCH_INVOICE_ITEM_STATUSES.READY]: "green",
+      [BATCH_INVOICE_ITEM_STATUSES.IMPORTED]: "green",
+      [BATCH_INVOICE_ITEM_STATUSES.NEEDS_REVIEW]: "amber",
+      [BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE]: "amber",
+      [BATCH_INVOICE_ITEM_STATUSES.FAILED]: "red",
+      [BATCH_INVOICE_ITEM_STATUSES.SKIPPED]: "gray",
+      [BATCH_INVOICE_ITEM_STATUSES.PROCESSING]: "blue",
+      [BATCH_INVOICE_ITEM_STATUSES.IMPORTING]: "blue",
+    }[status] || "gray";
+    return <Badge tone={tone}>{labels[status] || status}</Badge>;
+  };
+  const batchReviewRows = (invoiceBatch?.items || []).map((item, index) => {
+    const invoice = item.invoice || {};
+    const sourceLabel = (item.pageLabels || []).length
+      ? item.pageLabels.slice(0, 2).join(", ") + (item.pageLabels.length > 2 ? ` +${item.pageLabels.length - 2}` : "")
+      : (item.sourceFileNames || [item.sourceFileName]).filter(Boolean).join(", ");
+    return {
+      id: item.id,
+      sortIndex: index + 1,
+      supplier: invoice.supplier || item.signature?.supplier || "-",
+      number: documentNumberFor(invoice) || item.signature?.documentNumber || "-",
+      date: invoice.date || item.signature?.invoiceDate || "-",
+      total: item.invoice ? invoiceTotal(invoice) : 0,
+      lines: item.invoice ? (item.invoice.items || []).length : "-",
+      source: sourceLabel || item.sourceFileName || "-",
+      status: item.status,
+      error: item.error || "",
+    };
+  });
+
   useEffect(() => {
     if (uploadRequest?.id) setUploadModalOpen(true);
   }, [uploadRequest?.id]);
@@ -8162,8 +9199,37 @@ function Invoices({
         <Metric label="Avg. per invoice" value={money(approvedDocuments.length ? approvedInvoiceTotal / approvedDocuments.length : 0)} delta="Current selection" />
         <Metric label="Awaiting review" value={reviewDocumentCount} delta="Review conflicts" tone={reviewDocumentCount ? "warn" : "good"} />
       </div>
+      {invoiceBatch && (
+        <Panel
+          className="batch-upload-panel"
+          title="Batch invoice upload"
+          action={invoiceBatch.stage === "complete" ? "Complete" : currentBatchSummary.progressLabel}
+        >
+          <div className="batch-upload-summary">
+            <div className="batch-progress-track" aria-label={currentBatchSummary.progressLabel}>
+              <span style={{ width: `${batchReadyPercent}%` }} />
+            </div>
+            <div className="batch-status-grid">
+              <span><strong>{currentBatchSummary.total}</strong>Total</span>
+              <span><strong>{currentBatchSummary.ready}</strong>Ready</span>
+              <span><strong>{currentBatchSummary.needsReview}</strong>Needs review</span>
+              <span><strong>{currentBatchSummary.possibleDuplicate}</strong>Possible duplicate</span>
+              <span><strong>{currentBatchSummary.failed}</strong>Failed</span>
+              <span><strong>{currentBatchSummary.imported}</strong>Imported</span>
+            </div>
+            {batchStatus && <div className="invoice-status info">{batchStatus}</div>}
+            <div className="button-row left tight">
+              <button onClick={() => setBatchReviewOpen(true)} type="button"><Eye size={16} />Open Batch Review</button>
+              {currentBatchSummary.ready > 0 && permissions.canApprove && <button disabled={batchImporting || currentBatchSummary.processing > 0} onClick={importAllReadyBatchInvoices} type="button"><Upload size={16} />Import all ready invoices</button>}
+              {(currentBatchSummary.needsReview > 0 || currentBatchSummary.possibleDuplicate > 0 || currentBatchSummary.failed > 0) && <button className="ghost" onClick={() => { setBatchReviewOpen(true); reviewFirstFlaggedBatchInvoice(); }} type="button"><FileSearch size={16} />Review flagged invoices</button>}
+              {currentBatchSummary.failed > 0 && <button className="ghost" disabled={currentBatchSummary.processing > 0} onClick={retryFailedBatchInvoices} type="button"><RefreshCw size={16} />Retry failed</button>}
+              {!currentBatchSummary.hasOpenWork && <button className="ghost" onClick={clearCompletedBatch} type="button"><Check size={16} />Clear batch</button>}
+            </div>
+          </div>
+        </Panel>
+      )}
       <AppModal
-        title="Upload invoice"
+        title="Upload invoices"
         open={uploadModalOpen}
         onClose={() => setUploadModalOpen(false)}
         wide
@@ -8187,7 +9253,7 @@ function Invoices({
           <h3>Upload purchasing document PDF or image</h3>
           <p>Drag and drop files here, or choose a file. Extracted lines stay in review until approved.</p>
           {permissions.canImport && <label className="file-button">
-            Choose document
+            Choose documents
             <input key={uploadInputKey} accept="image/*,.pdf,.txt,.csv,.tsv,text/plain,text/csv" multiple onChange={(event) => addFiles(event.target.files)} type="file" />
           </label>}
         </div>
@@ -8283,6 +9349,161 @@ function Invoices({
         )}
         </Panel>
         </div>
+      </AppModal>
+
+      <AppModal
+        className="batch-review-modal"
+        footer={selectedBatchItem ? (
+          <>
+            <button className="ghost" onClick={() => setBatchReviewItemId("")} type="button"><ChevronLeft size={16} />Back to batch</button>
+            {[BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE, BATCH_INVOICE_ITEM_STATUSES.FAILED].includes(selectedBatchItem.status) && <button className="ghost" onClick={() => skipBatchItem(selectedBatchItem.id)} type="button">Skip</button>}
+            {selectedBatchInvoice && permissions.canEdit && <button className="ghost review-correct-action" onClick={() => saveBatchReviewInvoice({ markCorrect: true })} type="button"><Check size={16} />Invoice is correct</button>}
+            {selectedBatchInvoice && permissions.canEdit && <button onClick={() => saveBatchReviewInvoice()} type="button"><Save size={16} />Save to batch</button>}
+          </>
+        ) : (
+          <>
+            <button className="ghost" onClick={() => setBatchReviewOpen(false)} type="button">Close</button>
+            {currentBatchSummary.pending > 0 && <button disabled={currentBatchSummary.processing > 0} onClick={startInvoiceBatchProcessing} type="button"><Sparkles size={16} />Start AI processing</button>}
+            {currentBatchSummary.ready > 0 && permissions.canApprove && <button disabled={batchImporting || currentBatchSummary.processing > 0} onClick={importAllReadyBatchInvoices} type="button"><Upload size={16} />Import all ready invoices</button>}
+            {currentBatchSummary.failed > 0 && <button className="ghost" disabled={currentBatchSummary.processing > 0} onClick={retryFailedBatchInvoices} type="button"><RefreshCw size={16} />Retry failed</button>}
+          </>
+        )}
+        onClose={() => setBatchReviewOpen(false)}
+        open={batchReviewOpen}
+        title={selectedBatchItem ? `${selectedBatchInvoice ? documentTypeLabel(selectedBatchDocumentType) : "Batch item"} ${selectedBatchDocumentNumber || selectedBatchItem.sourceFileName || ""}` : "Batch Review"}
+        wide
+      >
+        {invoiceBatch ? (
+          selectedBatchItem ? (
+            selectedBatchInvoice ? (
+              <div className="modal-stack batch-review-detail">
+                {batchStatus && <div className="invoice-status info">{batchStatus}</div>}
+                <div className="batch-source-summary">
+                  <span>{batchStatusBadge(selectedBatchItem.status)}</span>
+                  <strong>{(selectedBatchItem.pageLabels || []).join(", ") || selectedBatchItem.sourceFileName}</strong>
+                  {selectedBatchItem.error && <small>{selectedBatchItem.error}</small>}
+                </div>
+                <div className="form-grid six">
+                  <SupplierSelector id="supplier-list-batch-review" suppliers={suppliers} value={selectedBatchInvoice.supplier || ""} onChange={(value) => updateBatchReviewInvoice("supplier", value)} />
+                  <label>Document type<select value={selectedBatchDocumentType} onChange={(event) => updateBatchReviewInvoice("documentType", event.target.value)}>
+                    {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Document number<input value={selectedBatchDocumentNumber} onChange={(event) => updateBatchReviewInvoice("documentNumber", event.target.value)} /></label>
+                  <label>Date<input type="date" value={selectedBatchInvoice.date || today()} onChange={(event) => updateBatchReviewInvoice("date", event.target.value)} /></label>
+                  <Field label="Signed total" readOnly value={money(invoiceTotal(selectedBatchInvoice))} />
+                </div>
+                {isCreditNoteDocument(selectedBatchDocumentType) && (
+                  <div className="credit-note-summary compact">
+                    <div><Badge tone="amber">{documentTypeBadgeLabel(selectedBatchDocumentType)}</Badge><strong>{selectedBatchDocumentNumber || "Document number needed"}</strong></div>
+                    <div className="form-grid four compact-form">
+                      <label>Credit reason<select value={normalizeCreditReason(selectedBatchInvoice.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => updateBatchReviewInvoice("creditReason", event.target.value)}>
+                        {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select></label>
+                      <label>Credit treatment<select value={normalizeInventoryEffect(selectedBatchInvoice.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => updateBatchReviewInvoice("inventoryEffect", event.target.value)}>
+                        {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select></label>
+                      <label>Original invoice number<input value={selectedBatchInvoice.originalInvoiceNumber || ""} onChange={(event) => updateBatchReviewInvoice("originalInvoiceNumber", event.target.value)} /></label>
+                    </div>
+                  </div>
+                )}
+                <InvoiceFinancialSummary invoice={{ ...selectedBatchValidation, documentNumber: selectedBatchDocumentNumber }} currency={selectedBatchInvoice.currency || financialSettings.currency || "GBP"} />
+                {selectedBatchItem.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE && (
+                  <div className="invoice-status warn review-issue-list">
+                    <strong>Possible duplicate</strong>
+                    <span>{selectedBatchItem.duplicate?.existing?.supplier || selectedBatchInvoice.supplier} {documentNumberFor(selectedBatchItem.duplicate?.existing || selectedBatchInvoice)} may already exist. Review it or skip this item before import.</span>
+                  </div>
+                )}
+                {selectedBatchBlockingIssues.length > 0 && (
+                  <div className="invoice-status error review-issue-list">
+                    <strong>Required corrections</strong>
+                    {[...new Set(selectedBatchBlockingIssues.map((issue) => invoiceReviewIssueText(issue, selectedBatchDocumentType)))].map((message) => <span key={message}>{message}</span>)}
+                  </div>
+                )}
+                {selectedBatchWarningIssues.length > 0 && (
+                  <div className="invoice-status warn review-issue-list">
+                    <strong>Warnings</strong>
+                    {[...new Set(selectedBatchWarningIssues.map((issue) => invoiceReviewIssueText(issue, selectedBatchDocumentType)))].map((message) => <span key={message}>{message}</span>)}
+                  </div>
+                )}
+                <InvoiceLineEditor
+                  addSplit={addBatchReviewSplit}
+                  applyExistingProduct={applyExistingProductToBatchLine}
+                  createProductFromLine={permissions.canAdd ? createProductFromBatchLine : null}
+                  departmentNames={departmentNames}
+                  documentType={selectedBatchDocumentType}
+                  items={selectedBatchInvoice.items || []}
+                  products={products}
+                  removeLine={(id) => updateSelectedBatchInvoice((base) => ({ ...base, items: (base.items || []).filter((line) => line.id !== id) }))}
+                  removeSplit={removeBatchReviewSplit}
+                  resetProductResolution={resetBatchProductResolution}
+                  setDepartmentMode={setBatchReviewDepartmentMode}
+                  updateLine={updateBatchReviewLine}
+                  updateSplit={updateBatchReviewSplit}
+                  wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+                />
+                {permissions.canAdd && (
+                  <div className="button-row left tight panel-inline-actions">
+                    <button className="ghost" onClick={addBatchReviewLine} type="button"><Plus size={16} />Add line</button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="modal-stack batch-review-detail">
+                <div className="batch-source-summary">
+                  <span>{batchStatusBadge(selectedBatchItem.status)}</span>
+                  <strong>{(selectedBatchItem.pageLabels || []).join(", ") || selectedBatchItem.sourceFileName}</strong>
+                  <small>{selectedBatchItem.error || "This invoice has not been processed yet."}</small>
+                </div>
+                <div className="button-row left tight">
+                  {selectedBatchItem.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost" onClick={() => processInvoiceBatchItems(invoiceBatch.id, [selectedBatchItem])} type="button"><RefreshCw size={16} />Retry this invoice</button>}
+                  <button className="ghost" onClick={() => skipBatchItem(selectedBatchItem.id)} type="button">Skip</button>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="modal-stack batch-review-list">
+              <div className="invoice-review-modal-summary batch-review-summary">
+                <div><span>Detected</span><strong>{currentBatchSummary.total}</strong></div>
+                <div><span>Progress</span><strong>{currentBatchSummary.completed} / {currentBatchSummary.total}</strong></div>
+                <div><span>Ready</span><strong>{currentBatchSummary.ready}</strong></div>
+                <div><span>Flagged</span><strong>{currentBatchSummary.needsReview + currentBatchSummary.possibleDuplicate + currentBatchSummary.failed}</strong></div>
+              </div>
+              <div className="batch-progress-track" aria-label={currentBatchSummary.progressLabel}>
+                <span style={{ width: `${batchReadyPercent}%` }} />
+              </div>
+              {batchStatus && <div className="invoice-status info">{batchStatus}</div>}
+              <DataTable
+                columns={[
+                  { key: "sortIndex", label: "#" },
+                  { key: "supplier", label: "Supplier" },
+                  { key: "number", label: "Invoice #" },
+                  { key: "date", label: "Invoice date", render: (value) => value && value !== "-" ? formatRangeDate(value) : "-" },
+                  { key: "total", label: "Total", render: (value, row) => row.lines === "-" ? "-" : money(value) },
+                  { key: "lines", label: "Lines" },
+                  { key: "source", label: "Source" },
+                  { key: "status", label: "Status", render: (value, row) => (
+                    <span className="batch-status-cell">
+                      {batchStatusBadge(value)}
+                      {row.error && <small>{row.error}</small>}
+                    </span>
+                  ) },
+                  { key: "actions", label: "Actions", render: (_, row) => {
+                    const item = invoiceBatch.items.find((candidate) => candidate.id === row.id);
+                    return (
+                      <span className="batch-row-actions">
+                        <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); setBatchReviewItemId(row.id); }} type="button">Review</button>
+                        {item?.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE && <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); skipBatchItem(row.id); }} type="button">Skip</button>}
+                        {item?.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); processInvoiceBatchItems(invoiceBatch.id, [item]); }} type="button">Retry</button>}
+                      </span>
+                    );
+                  } },
+                ]}
+                onRowClick={(row) => setBatchReviewItemId(row.id)}
+                rows={batchReviewRows}
+              />
+            </div>
+          )
+        ) : <EmptyState />}
       </AppModal>
 
       <Panel className="invoice-overview-table" title="Approved purchasing documents">
@@ -8838,6 +10059,9 @@ function InvoiceControlCentre({
   const [reviewDetailStatus, setReviewDetailStatus] = useState("");
   const [reviewQuery, setReviewQuery] = useState("");
   const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewSelectedIds, setReviewSelectedIds] = useState([]);
+  const [reviewBulkConfirmOpen, setReviewBulkConfirmOpen] = useState(false);
+  const [reviewBulkSaving, setReviewBulkSaving] = useState(false);
   const weekDates = mondaySundayWeekDates(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
   useEffect(() => {
@@ -8894,7 +10118,7 @@ function InvoiceControlCentre({
       const warningIssues = getWarningInvoiceIssues(validation);
       const primaryIssue = blockingIssues[0] || warningIssues[0] || {};
       return {
-        id: invoice.id,
+        id: invoice.id || `${invoice.supplier || "supplier"}-${documentNumberFor(invoice) || "document"}-${invoice.date || "undated"}`,
         invoice,
         validation,
         number: documentNumberFor(invoice) || "-",
@@ -8909,6 +10133,15 @@ function InvoiceControlCentre({
     })
     .filter((row) => invoiceHasBlockingReview(row.validation));
   const reviewDocuments = reviewDocumentRows.map((row) => row.invoice);
+  const selectedReviewRows = reviewDocumentRows.filter((row) => reviewSelectedIds.includes(row.id));
+  const reviewDocumentIdKey = reviewDocumentRows.map((row) => row.id).join("|");
+  useEffect(() => {
+    const availableIds = new Set(reviewDocumentRows.map((row) => row.id));
+    setReviewSelectedIds((current) => {
+      const next = current.filter((id) => availableIds.has(id));
+      return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
+    });
+  }, [reviewDocumentIdKey]);
   const reviewDetailValidation = useMemo(() => reviewDetailDraft ? validateInvoiceExtraction({
     invoice: {
       ...reviewDetailDraft,
@@ -8951,6 +10184,7 @@ function InvoiceControlCentre({
     setReviewModalOpen(false);
     setReviewDetailDraft(null);
     setReviewDetailStatus("");
+    setReviewBulkConfirmOpen(false);
   };
 
   const openReviewDetail = (invoice) => {
@@ -9128,11 +10362,54 @@ function InvoiceControlCentre({
     setReviewDetailStatus("Choose an existing product or create a new one.");
   };
 
+  const persistCorrectReviewResolution = async (invoice, validation = null) => {
+    const supplierRecord = canonicalSupplierForName(suppliers, invoice.supplier || invoice.items?.[0]?.supplier || invoice.lines?.[0]?.supplier);
+    const supplier = supplierRecord?.name || invoice.supplier || invoice.items?.[0]?.supplier || invoice.lines?.[0]?.supplier || "Unknown Supplier";
+    const documentType = normalizeDocumentType(invoice.documentType || invoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+    const documentNumber = documentNumberFor(invoice);
+    const items = (invoice.items || invoice.lines || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+    const invoiceForReview = {
+      ...invoice,
+      supplier,
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber || invoice.invoiceNumber,
+      status: "Approved",
+      items,
+      lines: items,
+    };
+    const currentReview = validation || validateInvoiceExtraction({ invoice: invoiceForReview, lines: items, historicalPrices: productPriceHistory });
+    const resolvedInvoice = invoiceMarkedAsCorrect(invoiceForReview, currentReview);
+    const persistence = await persistInvoiceDocument(resolvedInvoice, { forceUpdate: true });
+    if (persistence.cancelled) throw new Error("The invoice update was cancelled.");
+    const savedInvoice = persistence.invoice || resolvedInvoice;
+    setInvoices((current) => replaceInvoiceInCollection(current, persistence.sourceInvoiceId || invoice.id, savedInvoice));
+    setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
+    setSuppliers((current) => ensureSupplierList(current, supplier));
+    return persistence;
+  };
+
+  const finishSelectedReview = (reviewId, successMessage) => {
+    setReviewSelectedIds((current) => current.filter((id) => id !== reviewId));
+    setReviewDetailDraft(null);
+    setReviewDetailStatus(successMessage);
+  };
+
   const commitReviewInvoice = async ({ markCorrect = false } = {}) => {
     if (!permissions.canEdit || !reviewDetailDraft || reviewSaving) return;
     setReviewSaving(true);
     setReviewDetailStatus("");
     try {
+      if (markCorrect) {
+        const persistence = await persistCorrectReviewResolution(reviewDetailDraft, reviewDetailValidation);
+        finishSelectedReview(
+          reviewDetailDraft.id,
+          persistence.error ? "Invoice marked as correct and saved on this device. Cloud sync will retry." : "Invoice marked as correct."
+        );
+        return;
+      }
       const supplierRecord = canonicalSupplierForName(suppliers, reviewDetailDraft.supplier || reviewDetailDraft.items?.[0]?.supplier);
       const supplier = supplierRecord?.name || reviewDetailDraft.supplier || reviewDetailDraft.items?.[0]?.supplier || "Unknown Supplier";
       const documentType = normalizeDocumentType(reviewDetailDraft.documentType || reviewDetailDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
@@ -9151,7 +10428,7 @@ function InvoiceControlCentre({
         setReviewDetailStatus("Department split must total 100% before saving.");
         return;
       }
-      const explicitResolution = markCorrect ? { items: normalizedItems, createdProducts: [], conflicts: [] } : resolveExplicitNewProductLines({
+      const explicitResolution = resolveExplicitNewProductLines({
         products,
         items: normalizedItems,
         supplierMappings: supplierProductMappings,
@@ -9188,22 +10465,20 @@ function InvoiceControlCentre({
         items: explicitResolution.items,
       });
       const currentReview = validateInvoiceExtraction({ invoice: prepared, lines: prepared.items, historicalPrices: productPriceHistory });
-      if (!markCorrect && invoiceHasBlockingReview(currentReview)) {
+      if (invoiceHasBlockingReview(currentReview)) {
         setReviewDetailDraft(invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(prepared), currentReview));
         setReviewDetailStatus("Resolve the required corrections, or use Invoice is correct if this is a false positive.");
         return;
       }
-      const invoiceForPersistence = markCorrect
-        ? invoiceMarkedAsCorrect(prepared, currentReview)
-        : invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(prepared), currentReview);
+      const invoiceForPersistence = invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(prepared), currentReview);
       const productsForLearning = [
         ...products,
         ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
       ];
-      const persistence = await persistInvoiceDocument(invoiceForPersistence);
+      const persistence = await persistInvoiceDocument(invoiceForPersistence, { forceUpdate: true });
       if (persistence.cancelled) return;
       const savedInvoice = persistence.invoice;
-      setInvoices((current) => upsertInvoiceInCollection(current, savedInvoice));
+      setInvoices((current) => replaceInvoiceInCollection(current, persistence.sourceInvoiceId || reviewDetailDraft.id, savedInvoice));
       setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
       setSuppliers((current) => ensureSupplierList(current, supplier));
       setProducts((current) => {
@@ -9227,12 +10502,43 @@ function InvoiceControlCentre({
       setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
-      setReviewDetailDraft(null);
-      setReviewDetailStatus(markCorrect ? "Invoice marked as correct." : "Invoice review saved.");
+      finishSelectedReview(reviewDetailDraft.id, "Invoice review saved.");
     } catch (error) {
       setReviewDetailStatus(error.message || "Could not save this invoice review.");
     } finally {
       setReviewSaving(false);
+    }
+  };
+
+  const markSelectedReviewsCorrect = async () => {
+    if (!permissions.canEdit || reviewBulkSaving || !selectedReviewRows.length) return;
+    const targets = [...selectedReviewRows];
+    setReviewBulkSaving(true);
+    setReviewDetailStatus("");
+    let savedCount = 0;
+    let localOnlyCount = 0;
+    const failures = [];
+    try {
+      for (const target of targets) {
+        try {
+          const persistence = await persistCorrectReviewResolution(target.invoice, target.validation);
+          savedCount += 1;
+          if (persistence.error) localOnlyCount += 1;
+        } catch (error) {
+          failures.push(`${target.number}: ${error.message || "could not update"}`);
+        }
+      }
+      setReviewSelectedIds((current) => current.filter((id) => !targets.some((target) => target.id === id)));
+      setReviewBulkConfirmOpen(false);
+      if (failures.length) {
+        setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct. ${failures.length} could not be updated.`);
+      } else if (localOnlyCount) {
+        setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct. ${localOnlyCount} saved on this device will retry cloud sync.`);
+      } else {
+        setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct.`);
+      }
+    } finally {
+      setReviewBulkSaving(false);
     }
   };
 
@@ -9269,6 +10575,23 @@ function InvoiceControlCentre({
     lines,
     status,
   }));
+  const visibleReviewTableRows = tableRowsMatchingQuery(reviewTableRows, reviewQuery);
+  const visibleReviewIds = visibleReviewTableRows.map((row) => row.id);
+  const allVisibleReviewsSelected = visibleReviewIds.length > 0 && visibleReviewIds.every((id) => reviewSelectedIds.includes(id));
+  const toggleReviewSelection = (reviewId, checked) => {
+    setReviewSelectedIds((current) => checked
+      ? [...new Set([...current, reviewId])]
+      : current.filter((id) => id !== reviewId));
+  };
+  const toggleVisibleReviewSelection = (checked) => {
+    setReviewSelectedIds((current) => checked
+      ? [...new Set([...current, ...visibleReviewIds])]
+      : current.filter((id) => !visibleReviewIds.includes(id)));
+  };
+  const openSelectedReview = () => {
+    const firstSelected = selectedReviewRows[0];
+    if (firstSelected) openReviewDetail(firstSelected.invoice);
+  };
   const reviewDetailDocumentType = reviewDetailDraft ? normalizeDocumentType(reviewDetailDraft.documentType || reviewDetailDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
   const reviewDetailDocumentNumber = reviewDetailDraft ? documentNumberFor(reviewDetailDraft) : "";
   const reviewDetailStatusTone = /could not|failed|must|choose|duplicate|found|required|resolve|before saving/i.test(reviewDetailStatus) ? "warn" : "success";
@@ -9338,7 +10661,12 @@ function InvoiceControlCentre({
             {permissions.canEdit && <button disabled={reviewSaving} onClick={() => commitReviewInvoice()} type="button"><Save size={16} />{reviewSaving ? "Saving..." : "Save changes"}</button>}
           </>
         ) : (
-          <button onClick={closeReviewModal} type="button">Close</button>
+          <>
+            <span className="review-selection-count">{reviewSelectedIds.length ? `${reviewSelectedIds.length} selected` : "Select invoices to review together"}</span>
+            {permissions.canEdit && <button className="ghost" disabled={!selectedReviewRows.length || reviewBulkSaving} onClick={openSelectedReview} type="button">Review selected</button>}
+            {permissions.canEdit && <button className="ghost review-correct-action" disabled={!selectedReviewRows.length || reviewBulkSaving} onClick={() => setReviewBulkConfirmOpen(true)} type="button"><Check size={16} />Mark selected correct</button>}
+            <button disabled={reviewBulkSaving} onClick={closeReviewModal} type="button">Close</button>
+          </>
         )}
         onClose={closeReviewModal}
         open={reviewModalOpen}
@@ -9385,25 +10713,34 @@ function InvoiceControlCentre({
                 {[...new Set(reviewDetailWarningIssues.map((issue) => invoiceReviewIssueText(issue, reviewDetailDocumentType)))].map((message) => <span key={message}>{message}</span>)}
               </div>
             )}
-            <InvoiceLineEditor
-              addSplit={addReviewSplit}
-              applyExistingProduct={applyExistingProductToReviewLine}
-              createProductFromLine={permissions.canAdd ? createProductFromReviewLine : null}
-              departmentNames={departmentNames}
-              documentType={reviewDetailDocumentType}
-              items={reviewDetailDraft.items || []}
-              products={products}
-              removeLine={(id) => setReviewDetailDraft((current) => current ? ({ ...invoiceWithClearedReviewConfirmation(current), items: (current.items || []).filter((line) => line.id !== id) }) : current)}
-              removeSplit={removeReviewSplit}
-              resetProductResolution={resetReviewProductResolution}
-              setDepartmentMode={setReviewDepartmentMode}
-              updateLine={updateReviewLine}
-              updateSplit={updateReviewSplit}
-              wrapClassName="table-wrap modal-table invoice-review-table-wrap"
-            />
-            {permissions.canAdd && (
-              <div className="button-row left tight panel-inline-actions">
-                <button className="ghost" onClick={addReviewLine} type="button"><Plus size={16} />Add line</button>
+            {(reviewDetailDraft.items || []).length ? (
+              <>
+                <div className="invoice-review-lines-heading">
+                  <strong>Invoice lines</strong>
+                  {permissions.canEdit && <button className="ghost" onClick={addReviewLine} type="button"><Plus size={16} />Add line</button>}
+                </div>
+                <InvoiceLineEditor
+                  addSplit={addReviewSplit}
+                  applyExistingProduct={applyExistingProductToReviewLine}
+                  createProductFromLine={permissions.canAdd ? createProductFromReviewLine : null}
+                  departmentNames={departmentNames}
+                  documentType={reviewDetailDocumentType}
+                  items={reviewDetailDraft.items || []}
+                  products={products}
+                  removeLine={(id) => setReviewDetailDraft((current) => current ? ({ ...invoiceWithClearedReviewConfirmation(current), items: (current.items || []).filter((line) => line.id !== id) }) : current)}
+                  removeSplit={removeReviewSplit}
+                  resetProductResolution={resetReviewProductResolution}
+                  setDepartmentMode={setReviewDepartmentMode}
+                  updateLine={updateReviewLine}
+                  updateSplit={updateReviewSplit}
+                  wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+                />
+              </>
+            ) : (
+              <div className="invoice-review-empty-lines">
+                <strong>No invoice lines were extracted</strong>
+                <span>Add the products from the invoice to correct this review, or confirm the invoice if the warning is a false positive.</span>
+                {permissions.canEdit && <button onClick={addReviewLine} type="button"><Plus size={16} />Add first line</button>}
               </div>
             )}
           </div>
@@ -9417,6 +10754,29 @@ function InvoiceControlCentre({
             {reviewDocumentRows.length ? (
               <DataTable
                 columns={[
+                  {
+                    key: "selected",
+                    label: "Select",
+                    sortable: false,
+                    headerRender: () => (
+                      <input
+                        aria-label="Select all visible invoices"
+                        checked={allVisibleReviewsSelected}
+                        onChange={(event) => toggleVisibleReviewSelection(event.target.checked)}
+                        onClick={(event) => event.stopPropagation()}
+                        type="checkbox"
+                      />
+                    ),
+                    render: (_value, row) => (
+                      <input
+                        aria-label={`Select invoice ${row.number}`}
+                        checked={reviewSelectedIds.includes(row.id)}
+                        onChange={(event) => toggleReviewSelection(row.id, event.target.checked)}
+                        onClick={(event) => event.stopPropagation()}
+                        type="checkbox"
+                      />
+                    ),
+                  },
                   { key: "number", label: "Invoice #" },
                   { key: "supplier", label: "Supplier" },
                   { key: "issue", label: "Issue" },
@@ -9436,6 +10796,20 @@ function InvoiceControlCentre({
             ) : <EmptyState />}
           </div>
         )}
+      </AppModal>
+
+      <AppModal
+        footer={(
+          <>
+            <button className="ghost" disabled={reviewBulkSaving} onClick={() => setReviewBulkConfirmOpen(false)} type="button">Cancel</button>
+            <button className="review-correct-action" disabled={reviewBulkSaving} onClick={markSelectedReviewsCorrect} type="button"><Check size={16} />{reviewBulkSaving ? "Updating..." : "Mark as correct"}</button>
+          </>
+        )}
+        onClose={() => !reviewBulkSaving && setReviewBulkConfirmOpen(false)}
+        open={reviewBulkConfirmOpen}
+        title={`Mark ${selectedReviewRows.length} invoice${selectedReviewRows.length === 1 ? "" : "s"} as correct?`}
+      >
+        <p className="modal-copy">This resolves the current review warnings for the selected invoices. Use this only when the invoice values are correct and the warnings are false positives.</p>
       </AppModal>
 
       <details className="more-metrics invoice-control-more-metrics">
@@ -9595,14 +10969,14 @@ function InvoiceControlCentre({
           footer={selectedCellHasInvoices ? (
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
-              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoice</PrimaryAction>}
+              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoices</PrimaryAction>}
             </>
           ) : (
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
               {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
               {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "not_ordered")} type="button">Mark as Not Ordered</button>}
-              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoice</PrimaryAction>}
+              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoices</PrimaryAction>}
             </>
           )}
           onClose={() => setSelectedCell(null)}
@@ -9634,7 +11008,7 @@ function InvoiceControlCentre({
                 />
               </>
             ) : (
-              <p className="helper-text">Quick actions update this supplier/day only. Upload Invoice opens the invoice workflow with supplier and date prepared.</p>
+              <p className="helper-text">Quick actions update this supplier/day only. Upload Invoices opens the invoice workflow with supplier and date prepared.</p>
             )}
           </div>
         </AppModal>
@@ -14410,7 +15784,13 @@ function DataTable({ columns, rows, onEdit, onDelete, onRowClick, toolbarAction,
           <thead>
             <tr>
               {columns.map((column) => (
-                <th key={column.key}><button className="sort-button" onClick={() => toggleSort(column.key)} type="button">{column.label}<ArrowDownUp size={13} /></button></th>
+                <th key={column.key}>
+                  {column.headerRender
+                    ? column.headerRender()
+                    : column.sortable === false
+                      ? <span className="table-column-label">{column.label}</span>
+                      : <button className="sort-button" onClick={() => toggleSort(column.key)} type="button">{column.label}<ArrowDownUp size={13} /></button>}
+                </th>
               ))}
               {(onEdit || onDelete) && <th>Actions</th>}
             </tr>
@@ -14422,6 +15802,7 @@ function DataTable({ columns, rows, onEdit, onDelete, onRowClick, toolbarAction,
                 key={row.id}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 onKeyDown={onRowClick ? (event) => {
+                  if (event.target !== event.currentTarget) return;
                   if (event.key !== "Enter" && event.key !== " ") return;
                   event.preventDefault();
                   onRowClick(row);

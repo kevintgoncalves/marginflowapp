@@ -128,6 +128,13 @@ export function upsertInvoiceInCollection(invoices = [], invoice = {}) {
     : [invoice, ...invoices];
 }
 
+export function replaceInvoiceInCollection(invoices = [], sourceInvoiceId = "", invoice = {}) {
+  const withoutSource = sourceInvoiceId && sourceInvoiceId !== invoice.id
+    ? invoices.filter((entry) => entry.id !== sourceInvoiceId)
+    : invoices;
+  return upsertInvoiceInCollection(withoutSource, invoice);
+}
+
 export async function persistRelationalInvoice(client, invoice = {}, scope = {}, {
   duplicateAction = null,
   existingInvoiceId = null,

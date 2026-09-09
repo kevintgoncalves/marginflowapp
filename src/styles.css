@@ -4413,6 +4413,11 @@ tbody tr.clickable-table-row:focus-visible {
   color: var(--danger);
 }
 
+.badge.blue {
+  background: #eaf1f9;
+  color: var(--data-accent);
+}
+
 .badge.gray {
   background: #efefeb;
   color: var(--text-secondary);
@@ -6191,6 +6196,169 @@ button.icon {
 .invoice-review-list > .invoice-status {
   margin: 0;
 }
+
+.batch-upload-panel .panel-head {
+  align-items: center;
+}
+
+.batch-upload-summary {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.batch-progress-track {
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #eceae5;
+}
+
+.batch-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--data-accent), var(--success));
+  transition: width 180ms ease;
+}
+
+.batch-status-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(112px, 1fr));
+  gap: 8px;
+}
+
+.batch-status-grid span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.batch-status-grid strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.batch-review-modal.wide {
+  width: min(1280px, 96vw);
+}
+
+.batch-review-modal .modal-body {
+  max-height: calc(100dvh - 178px);
+}
+
+.batch-review-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.batch-review-list .table-wrap,
+.batch-review-detail .invoice-review-table-wrap {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+}
+
+.batch-review-list .table-wrap {
+  max-height: 58vh;
+  overflow: auto;
+}
+
+.batch-source-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 54px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+}
+
+.batch-source-summary strong {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.batch-source-summary small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.batch-status-cell {
+  display: grid;
+  gap: 5px;
+  align-items: start;
+}
+
+.batch-status-cell small {
+  max-width: 230px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.batch-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.batch-row-actions .mini-button {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.batch-review-modal .form-grid.six {
+  grid-template-columns: minmax(180px, 1.25fr) repeat(4, minmax(140px, 1fr));
+}
+
+@media (max-width: 900px) {
+  .batch-status-grid,
+  .batch-review-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-review-modal .form-grid.six {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .batch-upload-summary {
+    padding: 14px;
+  }
+
+  .batch-status-grid,
+  .batch-review-summary,
+  .batch-review-modal .form-grid.six {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-review-modal .modal-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .batch-review-modal .modal-footer button {
+    width: 100%;
+  }
+}
+
 .invoice-review-back {
   width: fit-content;
 }
@@ -7034,4 +7202,85 @@ button.icon {
 
   .sidebar-location,
   .sidebar-signout { min-height: 32px; }
+}
+
+.auth-form button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.invoice-review-modal .modal-footer {
+  flex-wrap: wrap;
+}
+
+.review-selection-count {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.invoice-review-list th:first-child,
+.invoice-review-list td:first-child {
+  width: 48px;
+  min-width: 48px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+.invoice-review-list th:first-child input[type="checkbox"],
+.invoice-review-list td:first-child input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.invoice-review-lines-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.invoice-review-lines-heading > strong {
+  font-size: 14px;
+}
+
+.invoice-review-empty-lines {
+  display: grid;
+  justify-items: start;
+  gap: 7px;
+  padding: 18px;
+  border: 1px dashed #d6b467;
+  border-radius: 7px;
+  background: #fff9ed;
+}
+
+.invoice-review-empty-lines strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.invoice-review-empty-lines span {
+  max-width: 680px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .invoice-review-modal .modal-footer {
+    align-items: stretch;
+  }
+
+  .invoice-review-modal .modal-footer > button {
+    flex: 1 1 100%;
+  }
+
+  .review-selection-count {
+    width: 100%;
+    margin-right: 0;
+  }
 }
