@@ -8,6 +8,7 @@ import {
   getBlockingInvoiceIssues,
   getWarningInvoiceIssues,
   invoiceHasBlockingReview,
+  invoiceReviewMarkedCorrect,
   priceDeviationForLine,
   reconcileInvoiceTotals,
   reviewReasonSeverity,
@@ -921,6 +922,36 @@ test("hard review reasons still block unsafe invoice confirmation", () => {
   assert.equal(validated.invoiceHasBlockingReview, true);
   assert.ok(getBlockingInvoiceIssues(validated).length >= 1);
   assert.equal(canConfirmInvoice(validated), false);
+});
+
+test("user-confirmed false positive review no longer blocks the invoice", () => {
+  const reviewed = validateInvoiceExtraction({
+    invoice: {
+      supplier: "TG Fruits",
+      invoiceNumber: "817703",
+      invoiceDate: "2026-07-17",
+      invoiceSubtotal: 20,
+      invoiceTotal: 20,
+      reviewResolution: { status: "confirmed_correct", resolvedAt: "2026-07-17T12:00:00.000Z" },
+    },
+    lines: [{
+      id: "unmatched-line",
+      productName: "Unknown fruit",
+      quantity: 1,
+      unitCost: 20,
+      lineTotal: 20,
+      department: "Bar",
+      departmentMode: "Single",
+      departmentSplits: [{ department: "Bar", percentage: 100 }],
+      productMatchSource: "no_product_match",
+    }],
+  });
+
+  assert.equal(invoiceReviewMarkedCorrect(reviewed), true);
+  assert.equal(reviewed.lines[0].reviewReasons.length, 0);
+  assert.equal(reviewed.invoiceNeedsReview, false);
+  assert.equal(invoiceHasBlockingReview(reviewed), false);
+  assert.equal(canConfirmInvoice(reviewed), true);
 });
 
 test("confirming a price warning still persists and reapplies department learning", () => {

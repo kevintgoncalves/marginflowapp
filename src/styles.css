@@ -4380,6 +4380,15 @@ tbody tr:hover {
   background: #fafaf8;
 }
 
+tbody tr.clickable-table-row {
+  cursor: pointer;
+}
+
+tbody tr.clickable-table-row:focus-visible {
+  outline: 3px solid rgba(37, 99, 168, 0.22);
+  outline-offset: -3px;
+}
+
 .badge {
   min-height: 24px;
   padding: 0 8px;
@@ -6119,16 +6128,77 @@ button.icon {
 .labour-report-link:hover:not(:disabled) { border: 0; background: transparent; color: #1c5ba5; }
 
 .invoice-control-page > .invoice-control-attention { order: 1; }
-.invoice-control-page > .invoice-review-panel { order: 2; min-height: 208px; }
 .invoice-control-page > .panel:not(.invoice-review-panel) { order: 3; }
 .invoice-control-filters { order: 4; }
 .invoice-control-more-metrics { order: 5; }
 .invoice-control-page > .dashboard-layout { order: 6; }
-.invoice-control-attention { min-height: 66px; padding: 13px 20px; border: 1px solid #edc77d; border-radius: 7px; background: #fff4dd; color: #6c542e; }
+.invoice-control-attention {
+  min-height: 66px;
+  width: 100%;
+  padding: 13px 20px;
+  border: 1px solid #edc77d;
+  border-radius: 7px;
+  background: #fff4dd;
+  color: #6c542e;
+  text-align: left;
+}
+.invoice-control-attention.clickable {
+  cursor: pointer;
+}
+.invoice-control-attention.clickable:hover,
+.invoice-control-attention.clickable:focus-visible {
+  border-color: #dea44c;
+  background: #ffedc2;
+}
 .invoice-control-attention strong { color: #2b2924; font-size: 15px; }
 .invoice-control-attention span { color: #7a746b; font-size: 12px; }
-.invoice-review-panel .panel-head { min-height: 54px; padding: 18px 20px 8px; border: 0; }
-.invoice-review-panel .empty-state { min-height: 120px; margin: 0; }
+.invoice-control-attention small {
+  color: #795013;
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+.invoice-review-modal-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.invoice-review-modal-summary > div {
+  display: grid;
+  gap: 4px;
+  min-height: 70px;
+  padding: 13px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+}
+.invoice-review-modal-summary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+.invoice-review-modal-summary strong {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+}
+.invoice-review-modal .table-wrap {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+}
+.invoice-review-detail > .invoice-status,
+.invoice-review-list > .invoice-status {
+  margin: 0;
+}
+.invoice-review-back {
+  width: fit-content;
+}
+.review-correct-action {
+  border-color: #bfe4cf;
+  background: var(--success-bg);
+  color: var(--success);
+}
 .invoice-control-filters > summary { display: flex; width: fit-content; min-height: 34px; align-items: center; padding: 0 12px; border: 1px solid var(--border-subtle); border-radius: 6px; background: #fff; color: var(--text-secondary); cursor: pointer; font-size: 12px; font-weight: 680; list-style: none; }
 .invoice-control-filters > summary::-webkit-details-marker { display: none; }
 .invoice-control-filters[open] { display: grid; gap: 16px; }

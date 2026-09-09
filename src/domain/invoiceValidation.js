@@ -41,6 +41,7 @@ const recalculatedLineReasons = new Set([
 const recalculatedInvoiceReasons = new Set(["invoice_total_mismatch", "invoice_subtotal_mismatch", "vat_mismatch", "unaccounted_invoice_charge"]);
 const reducingAdjustmentTypes = new Set(["discount", "credit"]);
 const chargeAdjustmentTypes = new Set(["handling", "delivery", "carriage", "shipping", "service_charge", "other"]);
+const confirmedReviewResolutionStatuses = new Set(["confirmed_correct", "invoice_correct", "correct", "accepted"]);
 
 export const REVIEW_REASON_SEVERITY = Object.freeze({
   missing_supplier: "error",
@@ -88,13 +89,23 @@ export function invoiceLineHasBlockingReview(line = {}) {
   return hasBlockingReviewReasons(line.reviewReasons || []);
 }
 
+export function invoiceReviewMarkedCorrect(invoice = {}) {
+  const resolution = invoice.reviewResolution || invoice.invoiceReviewResolution || {};
+  const status = String(resolution.status || invoice.reviewResolutionStatus || invoice.invoiceReviewStatus || "").trim().toLowerCase();
+  return invoice.reviewConfirmedCorrect === true
+    || invoice.invoiceReviewConfirmedCorrect === true
+    || confirmedReviewResolutionStatuses.has(status);
+}
+
 export function invoiceHasBlockingReview(invoice = {}) {
+  if (invoiceReviewMarkedCorrect(invoice)) return false;
   const lines = invoice.lines || invoice.items || [];
   return hasBlockingReviewReasons(invoice.invoiceReviewReasons || [])
     || lines.some(invoiceLineHasBlockingReview);
 }
 
 export function getBlockingInvoiceIssues(invoice = {}) {
+  if (invoiceReviewMarkedCorrect(invoice)) return [];
   const lines = invoice.lines || invoice.items || [];
   return [
     ...(invoice.invoiceReviewReasons || []).map((reason) => ({ reason, scope: "invoice" })),
@@ -103,6 +114,7 @@ export function getBlockingInvoiceIssues(invoice = {}) {
 }
 
 export function getWarningInvoiceIssues(invoice = {}) {
+  if (invoiceReviewMarkedCorrect(invoice)) return [];
   const lines = invoice.lines || invoice.items || [];
   return [
     ...(invoice.invoiceReviewReasons || []).map((reason) => ({ reason, scope: "invoice" })),
@@ -116,6 +128,16 @@ export function canConfirmInvoice(invoice = {}) {
 
 function addReason(reasons, reason) {
   if (reason && !reasons.includes(reason)) reasons.push(reason);
+}
+
+function clearValidatedReviewState(line = {}) {
+  return {
+    ...line,
+    needsReview: false,
+    reviewReasons: [],
+    reviewSeverity: "none",
+    hasBlockingReview: false,
+  };
 }
 
 function isNonReceivedLine(line = {}) {
@@ -397,7 +419,12 @@ export function validateInvoiceExtraction({
   if (reconciliation.subtotalMismatch) addReason(invoiceReviewReasons, "invoice_subtotal_mismatch");
   if (reconciliation.totalMismatch) addReason(invoiceReviewReasons, "invoice_total_mismatch");
 
-  const invoiceHasBlockers = hasBlockingReviewReasons(invoiceReviewReasons) || validatedLines.some((line) => line.hasBlockingReview);
+  const reviewMarkedCorrect = invoiceReviewMarkedCorrect(invoice);
+  const finalInvoiceReviewReasons = reviewMarkedCorrect ? [] : invoiceReviewReasons;
+  const finalValidatedLines = reviewMarkedCorrect ? validatedLines.map(clearValidatedReviewState) : validatedLines;
+  const invoiceHasBlockers = !reviewMarkedCorrect && (
+    hasBlockingReviewReasons(finalInvoiceReviewReasons) || finalValidatedLines.some((line) => line.hasBlockingReview)
+  );
   return {
     ...invoice,
     documentType: signedDocumentType,
@@ -407,11 +434,11 @@ export function validateInvoiceExtraction({
     additionalCharges: reconciliation.additionalCharges,
     inferredAdditionalCharges: reconciliation.inferredAdditionalCharges,
     reconciliation,
-    lines: validatedLines,
-    invoiceNeedsReview: invoiceReviewReasons.length > 0 || validatedLines.some((line) => line.needsReview),
-    invoiceReviewSeverity: highestReviewSeverity(invoiceReviewReasons),
+    lines: finalValidatedLines,
+    invoiceNeedsReview: !reviewMarkedCorrect && (finalInvoiceReviewReasons.length > 0 || finalValidatedLines.some((line) => line.needsReview)),
+    invoiceReviewSeverity: reviewMarkedCorrect ? "none" : highestReviewSeverity(finalInvoiceReviewReasons),
     invoiceHasBlockingReview: invoiceHasBlockers,
-    invoiceReviewReasons,
+    invoiceReviewReasons: finalInvoiceReviewReasons,
   };
 }
 

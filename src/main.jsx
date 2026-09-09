@@ -69,6 +69,7 @@ import { supplierFormatFromLine } from "./domain/productPackaging.js";
 import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.js";
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
+import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
 import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
@@ -650,8 +651,8 @@ const pagePermissionDefinitions = [
 
 const demoAuthUser = {
   id: "demo-owner",
-  email: "demo@marginflow.app",
-  user_metadata: { full_name: "Demo Owner" },
+  email: "marketing-demo@marginflow.invalid",
+  user_metadata: { full_name: "Marketing Demo" },
 };
 
 const demoAuthMembership = {
@@ -660,8 +661,8 @@ const demoAuthMembership = {
   location_id: "demo-location",
   role_label: "Owner",
   status: "active",
-  companies: { name: "Reading Room Demo", trading_name: "Reading Room Demo" },
-  locations: { name: "Demo Location" },
+  companies: { name: "Linden & Hearth Demo", trading_name: "Linden & Hearth Demo" },
+  locations: { name: "Marketing Demo Workspace" },
 };
 
 function pagePermissionsForLevel(level = "full") {
@@ -2042,6 +2043,106 @@ function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.
     fallback_model_required: "Fallback model review was required",
   };
   return labels[reason] || reason.replace(/_/g, " ");
+}
+
+function invoiceReviewIssueText(issue = {}, documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
+  const linePrefix = issue.scope === "line" && issue.productName ? `${issue.productName}: ` : "";
+  return `${linePrefix}${reviewReasonText(issue.reason, documentType)}`;
+}
+
+function invoiceReviewReasonsFromValidation(validation = {}) {
+  return [...new Set([
+    ...(validation.invoiceReviewReasons || []),
+    ...((validation.lines || validation.items || []).flatMap((line) => line.reviewReasons || [])),
+  ])];
+}
+
+function invoiceLineWithClearedReview(line = {}) {
+  return {
+    ...line,
+    needsReview: false,
+    hasBlockingReview: false,
+    reviewSeverity: "none",
+    reviewReasons: [],
+  };
+}
+
+function invoiceWithClearedReviewConfirmation(invoice = {}) {
+  if (!invoice.reviewResolution && !invoice.invoiceReviewResolution && !invoice.reviewConfirmedCorrect && !invoice.invoiceReviewConfirmedCorrect) return invoice;
+  return {
+    ...invoice,
+    reviewResolution: null,
+    invoiceReviewResolution: null,
+    reviewResolutionStatus: "",
+    invoiceReviewStatus: "",
+    reviewConfirmedCorrect: false,
+    invoiceReviewConfirmedCorrect: false,
+  };
+}
+
+function invoiceWithValidationReviewState(invoice = {}, validation = {}) {
+  const validatedLines = validation.lines || validation.items || [];
+  const validatedById = new Map(validatedLines.map((line) => [line.id, line]));
+  const items = (invoice.items || []).map((item, index) => {
+    const validated = validatedById.get(item.id) || validatedLines[index] || {};
+    return {
+      ...item,
+      needsReview: Boolean(validated.needsReview),
+      hasBlockingReview: Boolean(validated.hasBlockingReview),
+      reviewSeverity: validated.reviewSeverity || "none",
+      reviewReasons: validated.reviewReasons || [],
+      priceDeviation: validated.priceDeviation || item.priceDeviation || null,
+    };
+  });
+  return {
+    ...invoice,
+    invoiceNeedsReview: Boolean(validation.invoiceNeedsReview),
+    invoiceHasBlockingReview: Boolean(validation.invoiceHasBlockingReview),
+    invoiceReviewSeverity: validation.invoiceReviewSeverity || "none",
+    invoiceReviewReasons: validation.invoiceReviewReasons || [],
+    items,
+    lines: items,
+  };
+}
+
+function invoiceMarkedAsCorrect(invoice = {}, validation = {}, userLabel = "") {
+  const documentType = documentTypeFor(invoice);
+  const documentNumber = documentNumberFor(invoice);
+  const resolvedAt = new Date().toISOString();
+  const resolvedReasons = invoiceReviewReasonsFromValidation(validation);
+  const items = (invoice.items || []).map(invoiceLineWithClearedReview);
+  const reviewResolution = {
+    status: "confirmed_correct",
+    outcome: "invoice_correct",
+    resolvedAt,
+    resolvedBy: userLabel || "user",
+    resolvedReasons,
+  };
+  return {
+    ...invoice,
+    status: "Approved",
+    invoiceNeedsReview: false,
+    invoiceHasBlockingReview: false,
+    invoiceReviewSeverity: "none",
+    invoiceReviewReasons: [],
+    reviewConfirmedCorrect: true,
+    invoiceReviewConfirmedCorrect: true,
+    reviewResolution,
+    invoiceReviewResolution: reviewResolution,
+    auditEvents: [
+      ...(invoice.auditEvents || []),
+      {
+        id: uid(),
+        event: "invoice_review_marked_correct",
+        documentType,
+        documentNumber,
+        resolvedReasons,
+        createdAt: resolvedAt,
+      },
+    ],
+    items,
+    lines: items,
+  };
 }
 
 function InvoiceFinancialSummary({ invoice = {}, currency = "GBP" }) {
@@ -4231,35 +4332,561 @@ function normalizeLabourData(data = {}) {
 }
 
 function createDemoData() {
+  const amount = (value) => Number(numberValue(value).toFixed(2));
+  const demoId = (prefix, value) => `demo-${prefix}-${String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+  const departmentSettings = [
+    { id: "demo-dept-kitchen", name: "Kitchen Made", type: "Food", targetGp: 74, active: true },
+    { id: "demo-dept-bought-in", name: "Bought In", type: "Bought In", targetGp: 68, active: true },
+    { id: "demo-dept-bar", name: "Bar", type: "Bar", targetGp: 79, active: true },
+    { id: "demo-dept-non-food", name: "Non-food", type: "Non-food", targetGp: 0, active: true },
+  ];
+  const departmentNames = departmentSettings.map((department) => department.name);
+  const suppliers = [
+    { id: "demo-supplier-produce", name: "Harbour & Field Produce", category: "Produce", deliveryDays: ["Monday", "Thursday"] },
+    { id: "demo-supplier-dairy", name: "North Star Dairy Co.", category: "Dry / Chilled", deliveryDays: ["Tuesday"] },
+    { id: "demo-supplier-bakery", name: "Meadowline Bakery", category: "Bakery", deliveryDays: ["Wednesday", "Friday"] },
+    { id: "demo-supplier-butcher", name: "Stonebridge Butchers", category: "Meat", deliveryDays: ["Tuesday", "Friday"] },
+    { id: "demo-supplier-seafood", name: "Blue Kelp Seafood", category: "Fish / Seafood", deliveryDays: ["Thursday"] },
+    { id: "demo-supplier-drinks", name: "Bright Cellar Drinks", category: "Drinks", deliveryDays: ["Wednesday", "Friday"] },
+    { id: "demo-supplier-non-food", name: "Clearway Catering Supplies", category: "Cleaning / Non-food", deliveryDays: ["Tuesday"] },
+    { id: "demo-supplier-patisserie", name: "Sweet Hearth Patisserie", category: "Bakery", deliveryDays: ["Sunday"] },
+  ].map((supplier) => ({ ...supplier, contact: "", email: "", phone: "", active: true }));
+  const supplierById = Object.fromEntries(suppliers.map((supplier) => [supplier.id, supplier]));
+  const products = [
+    ["tomatoes", "Vine tomatoes", "demo-supplier-produce", "6kg case", 18.4, "Kitchen Made", ["tomato case", "vine toms"]],
+    ["carrots", "Heritage carrots", "demo-supplier-produce", "5kg sack", 14.5, "Kitchen Made", ["rainbow carrots"]],
+    ["baby-leaf", "Baby leaf salad", "demo-supplier-produce", "1kg bag", 7.8, "Kitchen Made", ["mixed leaf"]],
+    ["wild-mushrooms", "Wild mushrooms", "demo-supplier-produce", "1kg tray", 15.6, "Kitchen Made", ["seasonal mushrooms"]],
+    ["fine-herbs", "Fine herb bunch", "demo-supplier-produce", "bunch", 4.2, "Kitchen Made", ["soft herbs"]],
+    ["cream", "Double cream", "demo-supplier-dairy", "2l", 6.4, "Kitchen Made", ["cream 2l"]],
+    ["butter", "Salted butter", "demo-supplier-dairy", "250g", 2.35, "Kitchen Made", ["butter block"]],
+    ["cheddar", "Farmhouse cheddar", "demo-supplier-dairy", "2kg block", 19.5, "Kitchen Made", ["mature cheddar"]],
+    ["eggs", "Free range eggs", "demo-supplier-dairy", "180 each", 46, "Kitchen Made", ["eggs case"]],
+    ["beef-brisket", "Beef brisket", "demo-supplier-butcher", "kg", 10.8, "Kitchen Made", ["brisket"]],
+    ["chicken-thigh", "Chicken thigh", "demo-supplier-butcher", "kg", 6.9, "Kitchen Made", ["boneless thigh"]],
+    ["streaky-bacon", "Smoked streaky bacon", "demo-supplier-butcher", "kg", 8.7, "Kitchen Made", ["bacon"]],
+    ["hake", "Hake fillet", "demo-supplier-seafood", "kg", 16.5, "Kitchen Made", ["white fish"]],
+    ["mussels", "Rope-grown mussels", "demo-supplier-seafood", "kg", 4.8, "Kitchen Made", ["mussels"]],
+    ["sourdough", "Sourdough loaf", "demo-supplier-bakery", "each", 2.4, "Bought In", ["sourdough"]],
+    ["croissant", "Butter croissant", "demo-supplier-bakery", "each", 1.15, "Bought In", ["croissant"]],
+    ["brownie", "Chocolate brownie tray", "demo-supplier-bakery", "tray", 14.5, "Bought In", ["brownie slab"]],
+    ["brioche", "Brioche bun", "demo-supplier-bakery", "each", 0.55, "Bought In", ["burger bun"]],
+    ["lemon-tart", "Lemon tart", "demo-supplier-patisserie", "each", 2.3, "Bought In", ["citrus tart"]],
+    ["almond-cake", "Almond cake slice", "demo-supplier-patisserie", "each", 1.9, "Bought In", ["almond slice"]],
+    ["lager", "House lager keg", "demo-supplier-drinks", "30l", 89, "Bar", ["lager keg"]],
+    ["pale-ale", "Pale ale case", "demo-supplier-drinks", "24 x 330ml", 37.2, "Bar", ["pale ale"]],
+    ["cola", "Organic cola", "demo-supplier-drinks", "24 x 200ml", 18.6, "Bar", ["cola bottle"]],
+    ["apple-juice", "Pressed apple juice", "demo-supplier-drinks", "12 x 1l", 23.4, "Bar", ["apple juice"]],
+    ["red-wine", "House red wine", "demo-supplier-drinks", "6 x 750ml", 58, "Bar", ["red wine case"]],
+    ["napkins", "Compostable napkins", "demo-supplier-non-food", "1000", 24.8, "Non-food", ["napkins"]],
+    ["blue-roll", "Blue roll", "demo-supplier-non-food", "6 pack", 17.5, "Non-food", ["paper roll"]],
+    ["rinse-aid", "Glasswash rinse aid", "demo-supplier-non-food", "5l", 13.2, "Non-food", ["rinse aid"]],
+  ].map(([id, name, supplierId, packSize, unitCost, department, aliases]) => ({
+    id: demoId("product", id),
+    name,
+    supplier: supplierById[supplierId].name,
+    supplierId,
+    packSize,
+    quantity: 1,
+    unitCost,
+    department,
+    aliases,
+    active: true,
+    supplierPrices: [{ supplier: supplierById[supplierId].name, price: unitCost, date: "2026-08-01" }],
+    priceHistory: [{ date: "2026-08-01", supplier: supplierById[supplierId].name, price: unitCost }],
+  }));
+  const productById = Object.fromEntries(products.map((product) => [product.id.replace("demo-product-", ""), product]));
+  const lineForProduct = (documentId, productKey, quantity, overrides = {}) => {
+    const product = productById[productKey];
+    const unitCost = amount(overrides.unitCost ?? product.unitCost);
+    const lineTotalValue = amount(quantity * unitCost);
+    const department = overrides.department || product.department;
+    return {
+      id: demoId("line", `${documentId}-${productKey}`),
+      productId: product.id,
+      matchedProductId: product.id,
+      matchedProductName: product.name,
+      productName: product.name,
+      rawDescription: overrides.rawDescription || product.name,
+      packSize: product.packSize,
+      quantity,
+      unitCost,
+      lineTotal: lineTotalValue,
+      supplier: product.supplier,
+      department,
+      departmentMode: "Single",
+      departmentSplits: [],
+      status: "Received",
+      lineStatus: "Received",
+      productResolution: PRODUCT_RESOLUTION_MODES.EXACT_MATCH,
+      productMatchSource: "exact_name_match",
+      productMatchConfidence: overrides.productMatchConfidence ?? 0.98,
+      matchStatus: "Matched product",
+      source: overrides.source || "Demo seed",
+      needsReview: Boolean(overrides.needsReview),
+      reviewReasons: overrides.reviewReasons || [],
+    };
+  };
+  const reviewOnlyLine = (documentId, productName, supplierName, quantity, unitCost, department) => ({
+    id: demoId("line", `${documentId}-${productName}`),
+    productName,
+    rawDescription: productName,
+    packSize: "tray",
+    quantity,
+    unitCost,
+    lineTotal: amount(quantity * unitCost),
+    supplier: supplierName,
+    department,
+    departmentMode: "Single",
+    departmentSplits: [],
+    status: "Received",
+    lineStatus: "Received",
+    productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+    productMatchSource: "no_product_match",
+    productMatchConfidence: 0.18,
+    matchStatus: "No product match found",
+    source: "OpenAI",
+    needsReview: true,
+    reviewReasons: ["no_confirmed_product_match"],
+    suggestedProducts: [productById["fine-herbs"], productById["baby-leaf"]].filter(Boolean),
+  });
+  const invoice = (documentId, number, supplierId, date, specs, options = {}) => {
+    const documentType = options.documentType || PURCHASING_DOCUMENT_TYPES.INVOICE;
+    const supplier = supplierById[supplierId].name;
+    const items = specs.map((spec) => Array.isArray(spec)
+      ? lineForProduct(documentId, spec[0], spec[1], spec[2] || {})
+      : spec);
+    const subtotal = amount(items.reduce((sum, item) => sum + lineTotal(item), 0));
+    const total = amount(subtotal + numberValue(options.additionalCharges, 0));
+    return {
+      id: demoId("invoice", documentId),
+      documentType,
+      document_type: documentType,
+      invoiceNumber: number,
+      documentNumber: number,
+      document_number: number,
+      supplier,
+      supplierId,
+      date,
+      status: options.status || "Approved",
+      currency: "GBP",
+      items,
+      subtotalBeforeDiscount: subtotal,
+      invoiceSubtotal: subtotal,
+      sourceInvoiceSubtotal: subtotal,
+      invoiceTotal: total,
+      sourceInvoiceTotal: total,
+      finalInvoiceTotal: total,
+      absoluteNetTotal: total,
+      total,
+      vatTotal: amount(total * 0.2),
+      additionalCharges: numberValue(options.additionalCharges, 0),
+      creditReason: options.creditReason || "",
+      inventoryEffect: options.inventoryEffect || "",
+      syncStatus: "demo",
+      source: "Marketing demo seed",
+      invoiceReviewReasons: options.invoiceReviewReasons || [],
+      invoiceNeedsReview: Boolean(options.invoiceReviewReasons?.length || items.some((item) => item.needsReview)),
+    };
+  };
+  const invoices = [
+    invoice("bakery-0801", "LH-BAK-0801", "demo-supplier-bakery", "2026-08-01", [["sourdough", 80], ["croissant", 90], ["brownie", 8], ["brioche", 40]]),
+    invoice("drinks-0801", "LH-DRK-0801", "demo-supplier-drinks", "2026-08-01", [["lager", 3], ["pale-ale", 4], ["cola", 3], ["red-wine", 2]]),
+    invoice("patisserie-0802", "LH-PAT-0802", "demo-supplier-patisserie", "2026-08-02", [["lemon-tart", 80], ["almond-cake", 50]]),
+    invoice("produce-0803", "LH-PRO-0803", "demo-supplier-produce", "2026-08-03", [["tomatoes", 10], ["carrots", 12], ["baby-leaf", 30], ["wild-mushrooms", 15], ["fine-herbs", 17]]),
+    invoice("dairy-0804", "LH-DAI-0804", "demo-supplier-dairy", "2026-08-04", [["cream", 20], ["butter", 35], ["cheddar", 7], ["eggs", 2]]),
+    invoice("bakery-0805", "LH-BAK-0805", "demo-supplier-bakery", "2026-08-05", [["sourdough", 100], ["croissant", 100], ["brownie", 10]]),
+    invoice("nonfood-0805", "LH-CAT-0805", "demo-supplier-non-food", "2026-08-05", [["napkins", 4], ["blue-roll", 3], ["rinse-aid", 2]]),
+    invoice("produce-0806", "LH-PRO-0806", "demo-supplier-produce", "2026-08-06", [["tomatoes", 12], ["carrots", 16], ["baby-leaf", 34], ["wild-mushrooms", 17], ["fine-herbs", 19]]),
+    invoice("seafood-0806", "LH-SEA-0806", "demo-supplier-seafood", "2026-08-06", [["hake", 30], ["mussels", 28]]),
+    invoice("butcher-0807", "LH-MEA-0807", "demo-supplier-butcher", "2026-08-07", [["beef-brisket", 75], ["chicken-thigh", 45], ["streaky-bacon", 10]]),
+    invoice("bakery-0808", "LH-BAK-0808", "demo-supplier-bakery", "2026-08-08", [["sourdough", 120], ["croissant", 110], ["brownie", 12], ["brioche", 50]]),
+    invoice("drinks-0808", "LH-DRK-0808", "demo-supplier-drinks", "2026-08-08", [["lager", 5], ["pale-ale", 6], ["cola", 4], ["apple-juice", 3], ["red-wine", 4]]),
+    invoice("patisserie-0809", "LH-PAT-0809", "demo-supplier-patisserie", "2026-08-09", [["lemon-tart", 90], ["almond-cake", 45]]),
+    invoice("produce-0810", "LH-PRO-0810", "demo-supplier-produce", "2026-08-10", [["tomatoes", 14], ["carrots", 18], ["baby-leaf", 40], ["wild-mushrooms", 20], ["fine-herbs", 25]]),
+    invoice("dairy-0811", "LH-DAI-0811", "demo-supplier-dairy", "2026-08-11", [["cream", 22], ["butter", 40], ["cheddar", 8], ["eggs", 2]]),
+    invoice("nonfood-0811", "LH-CAT-0811", "demo-supplier-non-food", "2026-08-11", [["napkins", 5], ["blue-roll", 4], ["rinse-aid", 1]]),
+    invoice("bakery-0812", "LH-BAK-0812", "demo-supplier-bakery", "2026-08-12", [["sourdough", 130], ["croissant", 120], ["brownie", 13], ["brioche", 60]]),
+    invoice("drinks-0812", "LH-DRK-0812", "demo-supplier-drinks", "2026-08-12", [["lager", 3], ["pale-ale", 5], ["cola", 4], ["apple-juice", 4], ["red-wine", 3]]),
+    invoice("credit-0812", "LH-CN-0812", "demo-supplier-non-food", "2026-08-12", [["blue-roll", 2]], { documentType: PURCHASING_DOCUMENT_TYPES.CREDIT_NOTE, creditReason: CREDIT_REASONS.DAMAGED_GOODS, inventoryEffect: INVENTORY_EFFECTS.FINANCIAL_ONLY, status: "Approved" }),
+    invoice("produce-0813", "LH-PRO-0813", "demo-supplier-produce", "2026-08-13", [["tomatoes", 16], ["carrots", 20], ["baby-leaf", 42], ["wild-mushrooms", 24], ["fine-herbs", 26], reviewOnlyLine("produce-0813", "Micro herb garnish", supplierById["demo-supplier-produce"].name, 4, 8.75, "Kitchen Made")], { status: "Needs review" }),
+    invoice("seafood-0813", "LH-SEA-0813", "demo-supplier-seafood", "2026-08-13", [["hake", 36], ["mussels", 32]]),
+    invoice("bakery-0814", "LH-BAK-0814", "demo-supplier-bakery", "2026-08-14", [["sourdough", 145], ["croissant", 125], ["brownie", 14], ["brioche", 70]]),
+    invoice("butcher-0814", "LH-MEA-0814", "demo-supplier-butcher", "2026-08-14", [["beef-brisket", 88], ["chicken-thigh", 55], ["streaky-bacon", 15]]),
+    invoice("drinks-0814", "LH-DRK-0814", "demo-supplier-drinks", "2026-08-14", [["lager", 5], ["pale-ale", 7], ["cola", 5], ["apple-juice", 5], ["red-wine", 5]]),
+  ];
+  const salesTemplate = [
+    ["2026-08-01", "Sat", 3100, 720, 1180],
+    ["2026-08-02", "Sun", 2100, 540, 820],
+    ["2026-08-03", "Mon", 1600, 420, 610],
+    ["2026-08-04", "Tue", 1750, 450, 650],
+    ["2026-08-05", "Wed", 2050, 510, 760],
+    ["2026-08-06", "Thu", 2380, 620, 920],
+    ["2026-08-07", "Fri", 3550, 780, 1350],
+    ["2026-08-08", "Sat", 4100, 860, 1690],
+    ["2026-08-09", "Sun", 2650, 580, 980],
+    ["2026-08-10", "Mon", 1850, 480, 700],
+    ["2026-08-11", "Tue", 1980, 500, 760],
+    ["2026-08-12", "Wed", 2300, 540, 890],
+    ["2026-08-13", "Thu", 2480, 600, 940],
+    ["2026-08-14", "Fri", 3900, 820, 1480],
+  ];
+  const sales = normalizeSalesRows(salesTemplate.map(([date, day, kitchen, boughtIn, bar]) => {
+    const total = amount(kitchen + boughtIn + bar);
+    const departments = {
+      "Kitchen Made": { netSales: kitchen, grossSales: amount(kitchen * 1.2) },
+      "Bought In": { netSales: boughtIn, grossSales: amount(boughtIn * 1.2) },
+      Bar: { netSales: bar, grossSales: amount(bar * 1.2) },
+      "Non-food": { netSales: 0, grossSales: 0 },
+    };
+    return {
+      id: demoId("sales", date),
+      day,
+      date,
+      department: "Total",
+      grossSales: amount(total * 1.2),
+      sales: total,
+      netSales: total,
+      vatRate: 20,
+      serviceCharge: amount(total * 0.08),
+      departments,
+    };
+  }));
+  const stockLine = (productKey, quantity) => {
+    const product = productById[productKey];
+    return {
+      id: demoId("stock-line", productKey),
+      matchedProductId: product.id,
+      productName: product.name,
+      unit: product.packSize,
+      packSize: product.packSize,
+      quantity,
+      unitCost: product.unitCost,
+      department: product.department,
+      stockValue: amount(quantity * product.unitCost),
+    };
+  };
+  const stocktake = (id, department, openingStockValue, productCounts) => {
+    const lines = productCounts.map(([productKey, quantity]) => stockLine(productKey, quantity));
+    const totalValue = amount(lines.reduce((sum, line) => sum + line.stockValue, 0));
+    return {
+      id: demoId("stocktake", id),
+      date: "2026-08-14",
+      stocktakeType: "closing",
+      department,
+      openingStockMode: "Manual",
+      manualOpeningType: "Manual Total Value",
+      manualOpeningValue: openingStockValue,
+      openingStockValue,
+      openingLines: [],
+      lines,
+      totalValue,
+      status: "Saved",
+    };
+  };
+  const stocktakes = normalizeStocktakes([
+    stocktake("kitchen-0814", "Kitchen Made", 4050, [["tomatoes", 22], ["carrots", 22], ["baby-leaf", 35], ["wild-mushrooms", 22], ["fine-herbs", 16], ["cream", 24], ["butter", 55], ["cheddar", 16], ["eggs", 5], ["beef-brisket", 80], ["chicken-thigh", 70], ["streaky-bacon", 25], ["hake", 34], ["mussels", 30]]),
+    stocktake("bought-in-0814", "Bought In", 980, [["sourdough", 110], ["croissant", 140], ["brownie", 18], ["brioche", 140], ["lemon-tart", 90], ["almond-cake", 70]]),
+    stocktake("bar-0814", "Bar", 2400, [["lager", 12], ["pale-ale", 14], ["cola", 10], ["apple-juice", 12], ["red-wine", 12]]),
+    stocktake("non-food-0814", "Non-food", 470, [["napkins", 8], ["blue-roll", 7], ["rinse-aid", 5]]),
+  ]);
+  const wasteItems = [
+    ["2026-08-04", "Kitchen Made", "Baby leaf salad", 8, 7.8, "Spoiled", "Wilted before lunch setup"],
+    ["2026-08-06", "Kitchen Made", "Hake fillet", 4, 16.5, "Kitchen mistake", "Trim over-portioning"],
+    ["2026-08-08", "Bought In", "Butter croissant", 24, 1.15, "Spoiled", "Display hold time exceeded"],
+    ["2026-08-09", "Bar", "House lager keg", 0.5, 89, "FOH mistake", "Line clean loss"],
+    ["2026-08-10", "Kitchen Made", "Salted butter", 6, 2.35, "Overproduction", "Prep surplus"],
+    ["2026-08-11", "Bought In", "Lemon tart", 12, 2.3, "Expired", "Short dated pastry"],
+    ["2026-08-13", "Kitchen Made", "Beef brisket", 8, 10.8, "Overproduction", "Unsold special"],
+    ["2026-08-14", "Bar", "Pressed apple juice", 3, 23.4, "Damaged", "Case split on delivery"],
+  ].map(([date, department, productName, quantity, unitCost, reason, notes]) => ({
+    id: demoId("waste", `${date}-${productName}`),
+    date,
+    department,
+    productName,
+    quantity,
+    unitCost,
+    reason,
+    notes,
+    cost: amount(quantity * unitCost),
+  }));
+  const recipeIngredient = (id, productKey, quantity, unit = "") => {
+    const product = productById[productKey];
+    return {
+      id: demoId("ingredient", id),
+      productId: product.id,
+      productName: product.name,
+      supplier: product.supplier,
+      quantity,
+      unit: unit || product.packSize,
+      unitCost: product.unitCost,
+      lineCost: amount(quantity * product.unitCost),
+    };
+  };
+  const recipe = (id, name, yieldQuantity, yieldUnit, ingredients, notes = "") => {
+    const batchCost = amount(ingredients.reduce((sum, ingredient) => sum + ingredient.lineCost, 0));
+    return {
+      id: demoId("recipe", id),
+      name,
+      yieldQuantity,
+      yieldUnit,
+      notes,
+      method: "",
+      ingredients,
+      batchCost,
+      unitCost: amount(batchCost / yieldQuantity),
+      status: "Active",
+    };
+  };
+  const recipes = [
+    recipe("tomato-whipped-cheddar", "Tomato and whipped cheddar base", 10, "portions", [
+      recipeIngredient("tomato-whipped-cheddar-tomatoes", "tomatoes", 1.5),
+      recipeIngredient("tomato-whipped-cheddar-cheddar", "cheddar", 0.35),
+      recipeIngredient("tomato-whipped-cheddar-herbs", "fine-herbs", 2),
+    ]),
+    recipe("mushroom-ragout", "Wild mushroom ragout", 12, "portions", [
+      recipeIngredient("mushroom-ragout-mushrooms", "wild-mushrooms", 3),
+      recipeIngredient("mushroom-ragout-cream", "cream", 2),
+      recipeIngredient("mushroom-ragout-butter", "butter", 8),
+    ]),
+    recipe("brisket-filling", "Slow brisket filling", 14, "portions", [
+      recipeIngredient("brisket-filling-beef", "beef-brisket", 7),
+      recipeIngredient("brisket-filling-carrots", "carrots", 1.2),
+      recipeIngredient("brisket-filling-herbs", "fine-herbs", 3),
+    ]),
+    recipe("hake-garnish", "Hake garnish set", 10, "portions", [
+      recipeIngredient("hake-garnish-hake", "hake", 4),
+      recipeIngredient("hake-garnish-leaf", "baby-leaf", 2),
+      recipeIngredient("hake-garnish-butter", "butter", 6),
+    ]),
+  ];
+  const menuDish = (id, name, sellingPrice, recipeKeys, manualCost = 0, status = "Active", targetGp = 74) => ({
+    id: demoId("dish", id),
+    name,
+    sellingPrice,
+    recipeIds: recipeKeys.map((key) => demoId("recipe", key)),
+    ingredients: [],
+    manualCost,
+    targetGp,
+    status,
+  });
+  const menus = [{
+    id: "demo-menu-late-summer",
+    name: "Late Summer All-Day Menu",
+    season: "Late Summer",
+    startDate: "2026-08-01",
+    endDate: "2026-09-30",
+    targetGp: 74,
+    status: "Active",
+    subcategories: [
+      {
+        id: "demo-menu-breakfast",
+        name: "Breakfast",
+        targetGp: 72,
+        dishes: [
+          menuDish("mushrooms-toast", "Wild mushrooms on sourdough", 13.5, ["mushroom-ragout"], 1.1, "Active", 72),
+          menuDish("brisket-bun", "Brisket breakfast bun", 14.75, ["brisket-filling"], 0.85, "Active", 72),
+        ],
+      },
+      {
+        id: "demo-menu-lunch",
+        name: "Lunch",
+        targetGp: 74,
+        dishes: [
+          menuDish("tomato-plate", "Tomato, leaf and cheddar plate", 12.5, ["tomato-whipped-cheddar"], 0.75, "Active", 74),
+          menuDish("hake-main", "Roast hake, leaves and butter sauce", 24, ["hake-garnish"], 1.4, "Active", 74),
+          menuDish("slow-brisket-plate", "Slow brisket, carrots and jus", 22, ["brisket-filling"], 1.25, "Draft", 74),
+        ],
+      },
+      {
+        id: "demo-menu-counter",
+        name: "Counter",
+        targetGp: 68,
+        dishes: [
+          menuDish("lemon-tart", "Lemon tart", 6.25, [], productById["lemon-tart"].unitCost, "Active", 68),
+          menuDish("brownie", "Chocolate brownie", 4.95, [], 1.45, "Active", 68),
+        ],
+      },
+    ],
+  }];
+  const supplierDeliverySchedules = suppliers.map((supplier) => ({
+    id: demoId("schedule", supplier.id),
+    supplierId: supplier.id,
+    supplierName: supplier.name,
+    deliveryDays: supplier.deliveryDays,
+    scheduleMode: "manual",
+    defaultExpected: true,
+  }));
+  const labourDepartments = [
+    { id: "demo-lab-kitchen", name: "BOH", basis: "foodSales", targetPercent: 28 },
+    { id: "demo-lab-floor", name: "FOH", basis: "totalSales", targetPercent: 16 },
+    { id: "demo-lab-bar", name: "Bar", basis: "totalSales", targetPercent: 7 },
+    { id: "demo-lab-management", name: "Management", basis: "totalSales", targetPercent: 8 },
+  ];
+  const employeeSeed = [
+    ["kitchen-lead", "Kitchen Lead", "demo-lab-kitchen", 18.5],
+    ["sous-chef", "Sous Chef", "demo-lab-kitchen", 16.75],
+    ["prep-cook", "Prep Cook", "demo-lab-kitchen", 13.2],
+    ["kp-shift", "KP Shift", "demo-lab-kitchen", 12.1],
+    ["floor-lead", "Floor Lead", "demo-lab-floor", 15.2],
+    ["server-one", "Server 1", "demo-lab-floor", 12.5],
+    ["server-two", "Server 2", "demo-lab-floor", 12.5],
+    ["runner", "Runner", "demo-lab-floor", 11.8],
+    ["bar-lead", "Bar Lead", "demo-lab-bar", 15.4],
+    ["bartender", "Bartender", "demo-lab-bar", 12.9],
+    ["general-manager", "General Manager", "demo-lab-management", 19.5],
+  ];
+  const labourEmployees = employeeSeed.map(([id, name, departmentId, rate]) => ({
+    id: demoId("employee", id),
+    name,
+    departmentId,
+    payType: "hourly",
+    employmentType: "Hourly",
+    rate,
+    hourlyRate: rate,
+    annualSalary: 0,
+    contractedHours: 0,
+    manualAverageWeeklyHours: 0,
+    startDate: "2026-07-01",
+    status: "active",
+    holidayType: "zero-hours",
+    holidayEntitlementDays: 28,
+    serviceChargePoints: ["demo-lab-kitchen", "demo-lab-floor", "demo-lab-bar"].includes(departmentId) ? 1 : 0,
+    excludeFromServiceCharge: departmentId === "demo-lab-management",
+  }));
+  const employeeById = Object.fromEntries(labourEmployees.map((employee) => [employee.id, employee]));
+  const departmentById = Object.fromEntries(labourDepartments.map((department) => [department.id, department]));
+  const labourRows = [
+    ["2026-08-10", "kitchen-lead", 8], ["2026-08-10", "sous-chef", 7.5], ["2026-08-10", "prep-cook", 6], ["2026-08-10", "floor-lead", 8], ["2026-08-10", "server-one", 7], ["2026-08-10", "bar-lead", 7],
+    ["2026-08-11", "kitchen-lead", 8], ["2026-08-11", "sous-chef", 8], ["2026-08-11", "kp-shift", 5.5], ["2026-08-11", "floor-lead", 8], ["2026-08-11", "server-two", 7], ["2026-08-11", "bartender", 6],
+    ["2026-08-12", "kitchen-lead", 8.5], ["2026-08-12", "sous-chef", 8], ["2026-08-12", "prep-cook", 6], ["2026-08-12", "floor-lead", 8], ["2026-08-12", "server-one", 7.5], ["2026-08-12", "bar-lead", 7.5],
+    ["2026-08-13", "kitchen-lead", 8.5], ["2026-08-13", "sous-chef", 8], ["2026-08-13", "kp-shift", 6], ["2026-08-13", "floor-lead", 8], ["2026-08-13", "server-two", 7.5], ["2026-08-13", "bartender", 7],
+    ["2026-08-14", "kitchen-lead", 10], ["2026-08-14", "sous-chef", 10], ["2026-08-14", "prep-cook", 8], ["2026-08-14", "floor-lead", 9], ["2026-08-14", "server-one", 8], ["2026-08-14", "server-two", 8], ["2026-08-14", "bar-lead", 9], ["2026-08-14", "bartender", 8], ["2026-08-14", "general-manager", 8],
+  ].map(([date, employeeKey, hours]) => {
+    const employee = employeeById[demoId("employee", employeeKey)];
+    const department = departmentById[employee.departmentId];
+    return {
+      id: demoId("labour", `${date}-${employeeKey}`),
+      source: "marketing-demo",
+      date,
+      dateTo: date,
+      employeeId: employee.id,
+      employeeName: employee.name,
+      departmentId: department.id,
+      departmentName: department.name,
+      hours,
+      wages: amount(hours * employee.rate),
+      serviceCharge: 0,
+      tronc: 0,
+      rate: employee.rate,
+      payType: "hourly",
+      serviceChargePoints: employee.serviceChargePoints,
+      serviceChargeHours: amount(hours * employee.serviceChargePoints),
+    };
+  });
+  const invoiceReviewDraftItems = [
+    lineForProduct("ai-review", "baby-leaf", 18, { source: "OpenAI", productMatchConfidence: 0.97 }),
+    lineForProduct("ai-review", "wild-mushrooms", 9, { source: "OpenAI", unitCost: 17.85, needsReview: true, reviewReasons: ["price_deviation"], productMatchConfidence: 0.91 }),
+    lineForProduct("ai-review", "fine-herbs", 12, { source: "OpenAI", productMatchConfidence: 0.95 }),
+    reviewOnlyLine("ai-review", "Micro coriander tray", supplierById["demo-supplier-produce"].name, 6, 8.75, "Kitchen Made"),
+  ];
+  const draftSubtotal = amount(invoiceReviewDraftItems.reduce((sum, item) => sum + lineTotal(item), 0));
+  const invoiceReviewDraft = {
+    ...emptyInvoiceDraft(),
+    supplier: supplierById["demo-supplier-produce"].name,
+    date: "2026-08-14",
+    invoiceNumber: "LH-AI-1042",
+    documentNumber: "LH-AI-1042",
+    document_number: "LH-AI-1042",
+    invoiceText: "Fictional demo invoice text for Harbour & Field Produce. No real supplier data.",
+    items: invoiceReviewDraftItems,
+    invoiceSubtotal: draftSubtotal,
+    sourceInvoiceSubtotal: draftSubtotal,
+    invoiceTotal: amount(draftSubtotal + 12.5),
+    sourceInvoiceTotal: amount(draftSubtotal + 12.5),
+    finalInvoiceTotal: amount(draftSubtotal + 12.5),
+    vatTotal: amount((draftSubtotal + 12.5) * 0.2),
+    additionalCharges: 12.5,
+    additionalChargesDescription: "Fictional delivery charge",
+    status: "AI extracted 4 invoice line(s). Please review before approving.",
+    currency: "GBP",
+  };
   return {
     activeDepartment: "All departments",
-    departmentSettings: cloneData(defaultDepartmentSettings),
-    products: cloneData(initialProducts),
-    suppliers: cloneData(initialSuppliers),
-    supplierDeliverySchedules: [],
-    invoices: cloneData(initialInvoices),
+    departmentSettings,
+    products,
+    suppliers,
+    supplierDeliverySchedules,
+    invoices,
     invoiceDayStatusOverrides: [],
     supplierProductMappings: [],
     invoiceLineCorrections: [],
-    sales: normalizeSalesRows(cloneData(initialSales)),
-    stocktakes: normalizeStocktakes(cloneData(initialStocktakes)),
-    wasteItems: cloneData(initialWaste),
+    sales,
+    stocktakes,
+    wasteItems,
     creditNotes: [],
-    recipes: cloneData(initialRecipes),
-    menus: cloneData(initialMenus),
+    recipes,
+    menus,
+    invoiceReviewDraft,
     companySettings: {
       ...cloneData(defaultCompanySettings),
-      companyName: "Reading Room Demo",
-      tradingName: "Reading Room Demo",
-      email: "demo@marginflow.app",
+      appMode: "Pro Edition: AI optional",
+      companyName: "Linden & Hearth Demo",
+      tradingName: "Linden & Hearth Demo",
+      address: "24 Demo Lane, London",
+      postcode: "DE1 0MO",
+      country: "United Kingdom",
+      vatNumber: "GB000000000",
+      email: "",
+      phone: "",
+      website: "https://demo.marginflow.invalid",
     },
-    financialSettings: cloneData(defaultFinancialSettings),
-    labourSettings: cloneData(defaultLabourSettings),
-    menuSettings: cloneData(defaultMenuSettings),
-    invoiceSettings: cloneData(defaultInvoiceSettings),
+    financialSettings: {
+      ...cloneData(defaultFinancialSettings),
+      targetGp: 74,
+      defaultVat: 20,
+      gpCalculationBase: "Net Sales",
+    },
+    labourSettings: {
+      ...cloneData(defaultLabourSettings),
+      targetLabourPercent: 31,
+    },
+    menuSettings: {
+      ...cloneData(defaultMenuSettings),
+      defaultMenuTargetGp: 74,
+    },
+    invoiceSettings: {
+      ...cloneData(defaultInvoiceSettings),
+      defaultInvoiceDepartment: "Kitchen Made",
+      autoCreateProductsAfterApproval: false,
+    },
     aiSettings: cloneData(defaultAiSettings),
-    labourData: normalizeLabourData(createInitialLabourData()),
+    labourData: normalizeLabourData({
+      departments: labourDepartments,
+      employees: labourEmployees,
+      sales: [],
+      labour: labourRows,
+      holidays: [],
+      rateHistory: labourEmployees.map((employee) => ({
+        id: demoId("rate", employee.id),
+        employeeId: employee.id,
+        employeeName: employee.name,
+        effectiveDate: "2026-07-01",
+        rate: employee.rate,
+        source: "Marketing demo",
+      })),
+      foodCategories: ["Breakfast", "Lunch", "Counter", "Bar"],
+    }),
   };
+}
+
+function appPageFromUrl(fallback = "dashboard") {
+  const page = currentSearchParams().get("page") || currentSearchParams().get("view") || fallback;
+  return navItems.some((item) => item.id === page) ? page : fallback;
+}
+
+function demoCaptureModeFromUrl() {
+  return currentSearchParams().get("capture") || "";
 }
 
 function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
@@ -4595,6 +5222,7 @@ function parseLabourCsv(text, fallbackDate = today()) {
 }
 function App({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
+  const demoCaptureMode = demoMode ? demoCaptureModeFromUrl() : "";
   const effectiveAuthUser = demoMode ? demoAuthUser : authUser;
   const effectiveAuthMembership = demoMode ? demoAuthMembership : authMembership;
   const cloudScope = useMemo(() => cloudScopeForMembership(effectiveAuthMembership), [effectiveAuthMembership?.company_id, effectiveAuthMembership?.location_id]);
@@ -4612,7 +5240,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
   const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
-  const [active, setActive] = useState("dashboard");
+  const [active, setActive] = useState(() => appPageFromUrl("dashboard"));
   const [analysisRunId, setAnalysisRunId] = useState(0);
   const [pathname, setPathname] = useState(currentPathname);
   const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
@@ -4654,7 +5282,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
   const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
-  const [draft, setDraft] = useState(() => emptyInvoiceDraft());
+  const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
   const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
   const [salesInputRequest, setSalesInputRequest] = useState(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
@@ -4776,7 +5404,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setDateRangeState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
     setLabourDateRangeState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
     setLabourDataState(next.labourData);
-    setDraft(emptyInvoiceDraft());
+    setDraft(demoCaptureMode === "invoice-review" && next.invoiceReviewDraft ? next.invoiceReviewDraft : emptyInvoiceDraft());
     setDeleteConfirmation(null);
   };
 
@@ -5835,6 +6463,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
         )}
         <Invoices
           isActive={active === "invoices"}
+          demoCaptureMode={demoCaptureMode}
           uploadRequest={invoiceUploadRequest}
           aiSettings={aiSettings}
           creditNotes={creditNotes}
@@ -5868,15 +6497,31 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
         />
         {active === "invoiceControl" && (
           <InvoiceControlCentre
+            aiSettings={aiSettings}
+            companyId={cloudScope.companyId}
+            departmentSettings={departmentSettings}
             departmentNames={allowedDepartmentNames}
+            financialSettings={financialSettings}
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
+            invoiceSettings={invoiceSettings}
             invoices={operationalInvoices}
+            locationId={cloudScope.locationId || ""}
             onAddInvoice={prepareInvoiceUploadFromControl}
             onWeekRangeChange={setInvoiceControlWeekRange}
+            persistInvoiceDocument={persistInvoiceDocument}
+            persistInvoiceLearning={persistConfirmedLearning}
             permissions={permissionsByPage.invoiceControl}
+            products={products}
             sales={sales}
+            setCreditNotes={setCreditNotes}
             setInvoiceDayStatusOverrides={setInvoiceDayStatusOverrides}
+            setInvoiceLineCorrections={setInvoiceLineCorrections}
+            setInvoices={setInvoices}
+            setProducts={setProducts}
+            setSupplierProductMappings={setSupplierProductMappings}
+            setSuppliers={setSuppliers}
             setSupplierDeliverySchedules={setSupplierDeliverySchedules}
+            supplierProductMappings={supplierProductMappings}
             supplierDeliverySchedules={supplierDeliverySchedules}
             suppliers={suppliers}
           />
@@ -6127,22 +6772,18 @@ function supplierOverrideFor(supplier, date, overrides = []) {
   return overrides.find((override) => (override.supplierId === supplier.id || sameSupplier(override.supplierName, supplier.name)) && override.date === date);
 }
 
-function invoiceForSupplierDate(supplier, date, invoices = []) {
-  const matches = invoices
-    .filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && invoice.date === date)
-    .sort((a, b) => String(b.invoiceNumber || "").localeCompare(String(a.invoiceNumber || ""), undefined, { numeric: true }));
-  return matches[0] || null;
-}
-
 function supplierAverageInvoiceAmount(supplier, invoices = []) {
   const rows = invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && isInvoiceDocument(documentTypeFor(invoice))).slice(0, 12);
   return rows.length ? rows.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0) / rows.length : 0;
 }
 
 function invoiceControlCellState({ date, invoices, overrides, schedule, supplier }) {
-  const invoice = invoiceForSupplierDate(supplier, date, invoices);
-  if (invoice) {
-    return { state: "received", label: "Received", invoice, total: invoiceTotal(invoice) };
+  const invoiceGroup = invoiceGroupForSupplierDate(supplier, date, invoices, { totalForInvoice: invoiceTotal });
+  if (invoiceGroup.invoiceCount) {
+    const label = invoiceGroup.invoiceCount === 1
+      ? documentTypeBadgeLabel(documentTypeFor(invoiceGroup.invoice))
+      : `${invoiceGroup.invoiceCount} INVOICES`;
+    return { state: "received", label, ...invoiceGroup };
   }
   const override = supplierOverrideFor(supplier, date, overrides);
   if (override?.statusOverride === "not_ordered") return { state: "not_ordered", label: "Not Ordered", override };
@@ -6162,7 +6803,7 @@ function departmentPurchaseTotalForDate(invoices, date, selectedDepartment) {
 function invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows = [], scope = "Visible suppliers" }) {
   return weekDates.map((date) => {
     const visibleCells = trackerRows.flatMap((row) => row.cells || []).filter((cell) => cell.date === date);
-    const visibleInvoices = visibleCells.map((cell) => cell.invoice).filter(Boolean);
+    const visibleInvoices = visibleCells.flatMap((cell) => cell.invoices?.length ? cell.invoices : [cell.invoice].filter(Boolean));
     const relevantInvoices = scope === "Visible suppliers" && trackerRows.length
       ? [...new Map(visibleInvoices.map((invoice) => [invoice.id || `${invoice.supplier}-${invoice.invoiceNumber}-${invoice.date}`, invoice])).values()]
       : invoices.filter((invoice) => invoice.date === date);
@@ -6563,6 +7204,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState }) {
 
 function Invoices({
   aiSettings,
+  demoCaptureMode = "",
   isActive = true,
   departmentNames,
   draft,
@@ -6601,7 +7243,7 @@ function Invoices({
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [uploadModalOpen, setUploadModalOpen] = useState(() => demoCaptureMode === "invoice-review");
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
@@ -7508,6 +8150,10 @@ function Invoices({
     if (uploadRequest?.id) setUploadModalOpen(true);
   }, [uploadRequest?.id]);
 
+  useEffect(() => {
+    if (demoCaptureMode === "invoice-review" && isActive) setUploadModalOpen(true);
+  }, [demoCaptureMode, isActive]);
+
   return (
     <div className={`page-grid invoices-page${isActive ? "" : " page-component-hidden"}`}>
       <div className="invoice-list-metrics metric-grid">
@@ -7651,6 +8297,7 @@ function Invoices({
               { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
               { key: "syncStatus", label: "Cloud", render: (_, row) => {
                 const syncStatus = row.syncStatus || "legacy_local";
+                if (syncStatus === "demo") return <Badge tone="gray">Demo data</Badge>;
                 if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
                   return (
                     <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
@@ -8151,15 +8798,31 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
 }
 
 function InvoiceControlCentre({
+  aiSettings = defaultAiSettings,
+  companyId = "",
+  departmentSettings = [],
   departmentNames,
+  financialSettings = defaultFinancialSettings,
   invoiceDayStatusOverrides,
+  invoiceSettings = defaultInvoiceSettings,
   invoices,
+  locationId = "",
   onAddInvoice,
   onWeekRangeChange,
+  persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
+  persistInvoiceLearning = async () => ({ persisted: [], skipped: [] }),
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoiceControl"),
+  products = [],
   sales,
+  setCreditNotes = () => {},
   setInvoiceDayStatusOverrides,
+  setInvoiceLineCorrections = () => {},
+  setInvoices = () => {},
+  setProducts = () => {},
+  setSupplierProductMappings = () => {},
+  setSuppliers = () => {},
   setSupplierDeliverySchedules,
+  supplierProductMappings = [],
   supplierDeliverySchedules,
   suppliers,
 }) {
@@ -8170,6 +8833,11 @@ function InvoiceControlCentre({
   const [summaryMode, setSummaryMode] = useState("Purchases + GP");
   const [selectedCell, setSelectedCell] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
+  const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  const [reviewDetailDraft, setReviewDetailDraft] = useState(null);
+  const [reviewDetailStatus, setReviewDetailStatus] = useState("");
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewSaving, setReviewSaving] = useState(false);
   const weekDates = mondaySundayWeekDates(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
   useEffect(() => {
@@ -8177,6 +8845,7 @@ function InvoiceControlCentre({
   }, [onWeekRangeChange, weekRange.end, weekRange.start]);
   const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
+  const productPriceHistory = useMemo(() => products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))), [products]);
 
   const rows = activeSuppliers.map((supplier) => {
     const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
@@ -8190,7 +8859,7 @@ function InvoiceControlCentre({
       schedule,
       cells,
       weeklyTotal: cells.reduce((sum, cell) => sum + numberValue(cell.total, 0), 0),
-      hasWeeklyInvoiceValue: cells.some((cell) => Boolean(cell.invoice)),
+      hasWeeklyInvoiceValue: cells.some((cell) => numberValue(cell.invoiceCount, 0) > 0),
       missingCount: cells.filter((cell) => cell.state === "missing").length,
     };
   }).filter((row) => {
@@ -8217,7 +8886,42 @@ function InvoiceControlCentre({
   const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
   const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
   const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
-  const reviewDocuments = weeklyDocuments.filter((invoice) => invoiceHasBlockingReview(validateInvoiceExtraction({ invoice, lines: invoice.items || [] })));
+  const reviewDocumentRows = weeklyDocuments
+    .map((invoice) => {
+      const documentType = documentTypeFor(invoice);
+      const validation = validateInvoiceExtraction({ invoice, lines: invoice.items || [], historicalPrices: productPriceHistory });
+      const blockingIssues = getBlockingInvoiceIssues(validation);
+      const warningIssues = getWarningInvoiceIssues(validation);
+      const primaryIssue = blockingIssues[0] || warningIssues[0] || {};
+      return {
+        id: invoice.id,
+        invoice,
+        validation,
+        number: documentNumberFor(invoice) || "-",
+        supplier: invoice.supplier || "-",
+        issue: primaryIssue.reason ? invoiceReviewIssueText(primaryIssue, documentType) : "Review required",
+        issueCount: blockingIssues.length + warningIssues.length,
+        date: invoice.date,
+        total: invoiceTotal(invoice),
+        lines: (invoice.items || []).length,
+        status: "review",
+      };
+    })
+    .filter((row) => invoiceHasBlockingReview(row.validation));
+  const reviewDocuments = reviewDocumentRows.map((row) => row.invoice);
+  const reviewDetailValidation = useMemo(() => reviewDetailDraft ? validateInvoiceExtraction({
+    invoice: {
+      ...reviewDetailDraft,
+      invoiceDate: reviewDetailDraft.date,
+      documentNumber: documentNumberFor(reviewDetailDraft),
+      document_number: documentNumberFor(reviewDetailDraft),
+      invoiceNumber: documentNumberFor(reviewDetailDraft),
+    },
+    lines: reviewDetailDraft.items || [],
+    historicalPrices: productPriceHistory,
+  }) : null, [productPriceHistory, reviewDetailDraft]);
+  const reviewDetailBlockingIssues = reviewDetailValidation ? getBlockingInvoiceIssues(reviewDetailValidation) : [];
+  const reviewDetailWarningIssues = reviewDetailValidation ? getWarningInvoiceIssues(reviewDetailValidation) : [];
 
   const markOverride = (supplier, date, statusOverride) => {
     if (!permissions.canEdit) return;
@@ -8226,11 +8930,310 @@ function InvoiceControlCentre({
   };
 
   const openCell = (cell) => {
+    if (cell.state === "received" && numberValue(cell.invoiceCount, 0) > 1) {
+      setSelectedCell(cell);
+      return;
+    }
     if (cell.state === "received" && cell.invoice) {
       setViewInvoice(cell.invoice);
       return;
     }
     setSelectedCell(cell);
+  };
+
+  const openReviewModal = () => {
+    setReviewModalOpen(true);
+    setReviewDetailDraft(null);
+    setReviewDetailStatus("");
+  };
+
+  const closeReviewModal = () => {
+    setReviewModalOpen(false);
+    setReviewDetailDraft(null);
+    setReviewDetailStatus("");
+  };
+
+  const openReviewDetail = (invoice) => {
+    const documentType = documentTypeFor(invoice);
+    const documentNumber = documentNumberFor(invoice);
+    setReviewDetailStatus("");
+    setReviewDetailDraft({
+      ...invoiceWithClearedReviewConfirmation(invoice),
+      documentType,
+      document_type: documentType,
+      documentNumber,
+      document_number: documentNumber,
+      invoiceNumber: documentNumber || invoice.invoiceNumber,
+      items: (invoice.items || invoice.lines || []).map((item) => normalizeInvoiceLineForEditor({ ...item, id: item.id || uid() }, departmentNames)),
+    });
+  };
+
+  const updateReviewInvoice = (field, value) => {
+    setReviewDetailDraft((current) => {
+      if (!current) return current;
+      const base = invoiceWithClearedReviewConfirmation(current);
+      if (field === "documentType") {
+        const documentType = normalizeDocumentType(value);
+        const creditReason = normalizeCreditReason(base.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT);
+        return {
+          ...base,
+          documentType,
+          document_type: documentType,
+          creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+          inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(base.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason)) : "",
+          items: normalizeInvoiceItemsForDocument(base.items || [], documentType),
+        };
+      }
+      if (field === "documentNumber" || field === "invoiceNumber") {
+        return { ...base, documentNumber: value, document_number: value, invoiceNumber: value };
+      }
+      if (field === "creditReason") {
+        const creditReason = normalizeCreditReason(value);
+        return { ...base, creditReason, credit_reason: creditReason, inventoryEffect: defaultInventoryEffectForCreditReason(creditReason), inventory_effect: defaultInventoryEffectForCreditReason(creditReason) };
+      }
+      if (field === "inventoryEffect") {
+        const inventoryEffect = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
+        return { ...base, inventoryEffect, inventory_effect: inventoryEffect };
+      }
+      if (field !== "supplier") return { ...base, [field]: value };
+      return {
+        ...base,
+        supplier: value,
+        items: propagateInvoiceSupplierToLines(base.items || [], value, base.supplier),
+      };
+    });
+  };
+
+  const updateReviewLine = (id, field, value) => {
+    setReviewDetailDraft((current) => {
+      if (!current) return current;
+      const base = invoiceWithClearedReviewConfirmation(current);
+      const documentType = normalizeDocumentType(base.documentType || base.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      return {
+        ...base,
+        items: (base.items || []).map((item) => {
+          if (item.id !== id) return item;
+          const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
+          return isCreditNoteDocument(documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, documentType), departmentNames) : updated;
+        }),
+      };
+    });
+  };
+
+  const setReviewDepartmentMode = (id, mode) => {
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    } : current);
+  };
+
+  const updateReviewSplit = (id, splitIndex, field, value) => {
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
+    } : current);
+  };
+
+  const addReviewSplit = (id) => {
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
+    } : current);
+  };
+
+  const removeReviewSplit = (id, splitIndex) => {
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    } : current);
+  };
+
+  const addReviewLine = () => {
+    const supplier = reviewDetailDraft?.supplier || activeSuppliers[0]?.name || "Unknown Supplier";
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: [
+        ...(current.items || []),
+        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made"),
+      ],
+    } : current);
+  };
+
+  const applyExistingProductToReviewLine = (id, productId) => {
+    const product = products.find((candidate) => candidate.id === productId);
+    if (!product) return;
+    setReviewDetailDraft((current) => {
+      if (!current) return current;
+      const base = invoiceWithClearedReviewConfirmation(current);
+      return {
+        ...base,
+        items: (base.items || []).map((item) => {
+          if (item.id !== id) return item;
+          const assignment = departmentAssignmentForResolvedLine({
+            line: item,
+            product,
+            departmentNames,
+            fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+          });
+          return normalizeInvoiceLineForEditor({
+            ...lineWithExistingProductResolution(item, product),
+            forgetLearnedRule: false,
+            packSize: item.packSize || product.packSize || "",
+            supplier: item.supplier || product.supplier || base.supplier,
+            department: assignment.department,
+            departmentId: assignment.departmentId || item.departmentId || "",
+            departmentMode: assignment.departmentMode,
+            departmentSplits: assignment.departmentSplits,
+          }, departmentNames);
+        }),
+      };
+    });
+    setReviewDetailStatus(`Matched to ${productDisplayName(product)}.`);
+  };
+
+  const createProductFromReviewLine = (id, { allowSimilarDuplicate = false } = {}) => {
+    if (!permissions.canAdd) return;
+    const line = reviewDetailDraft?.items?.find((item) => item.id === id);
+    if (!line?.productName?.trim()) return;
+    const duplicateCandidates = createNewProductConflictCandidates({
+      products,
+      line,
+      supplierMappings: supplierProductMappings,
+      supplier: line.supplier || reviewDetailDraft?.supplier || "",
+      supplierId: line.supplierId || canonicalSupplierForName(suppliers, line.supplier || reviewDetailDraft?.supplier)?.id || "",
+      organisationId: companyId,
+    });
+    if (duplicateCandidates.length && (!allowSimilarDuplicate || hasBlockingCreateNewProductConflict(duplicateCandidates))) {
+      setReviewDetailDraft((current) => current ? {
+        ...invoiceWithClearedReviewConfirmation(current),
+        items: (current.items || []).map((item) => item.id === id ? lineWithCreateNewProductDuplicateReview(item, duplicateCandidates) : item),
+      } : current);
+      setReviewDetailStatus(hasBlockingCreateNewProductConflict(duplicateCandidates)
+        ? `Existing product found: ${duplicateCandidates[0].name}. Use the existing product before saving.`
+        : `Possible existing product found: ${duplicateCandidates[0].name}. Choose it or create a new product anyway.`);
+      return;
+    }
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? lineWithCreateNewProductResolution(item) : item),
+    } : current);
+    setReviewDetailStatus(`New product will be created when this ${purchasingDocumentNoun(documentTypeFor(reviewDetailDraft || {}))} is saved.`);
+  };
+
+  const resetReviewProductResolution = (id) => {
+    setReviewDetailDraft((current) => current ? {
+      ...invoiceWithClearedReviewConfirmation(current),
+      items: (current.items || []).map((item) => item.id === id ? lineWithResetProductResolution(item) : item),
+    } : current);
+    setReviewDetailStatus("Choose an existing product or create a new one.");
+  };
+
+  const commitReviewInvoice = async ({ markCorrect = false } = {}) => {
+    if (!permissions.canEdit || !reviewDetailDraft || reviewSaving) return;
+    setReviewSaving(true);
+    setReviewDetailStatus("");
+    try {
+      const supplierRecord = canonicalSupplierForName(suppliers, reviewDetailDraft.supplier || reviewDetailDraft.items?.[0]?.supplier);
+      const supplier = supplierRecord?.name || reviewDetailDraft.supplier || reviewDetailDraft.items?.[0]?.supplier || "Unknown Supplier";
+      const documentType = normalizeDocumentType(reviewDetailDraft.documentType || reviewDetailDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      const documentNumber = documentNumberFor(reviewDetailDraft);
+      const normalizedItems = (reviewDetailDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+      const validation = validateInvoiceLinesForApproval(normalizedItems, {
+        documentType,
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) {
+        setReviewDetailStatus(validation.errors[0] || `Review ${purchasingDocumentNoun(documentType)} lines before saving.`);
+        return;
+      }
+      if (normalizedItems.some((item) => !splitIsValid(item))) {
+        setReviewDetailStatus("Department split must total 100% before saving.");
+        return;
+      }
+      const explicitResolution = markCorrect ? { items: normalizedItems, createdProducts: [], conflicts: [] } : resolveExplicitNewProductLines({
+        products,
+        items: normalizedItems,
+        supplierMappings: supplierProductMappings,
+        supplier,
+        supplierId: supplierRecord?.id || "",
+        organisationId: companyId,
+        idFactory: uid,
+        createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
+          supplier,
+          invoiceDate: reviewDetailDraft.date || today(),
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment,
+          departmentNames,
+        }),
+      });
+      if (explicitResolution.conflicts.length) {
+        setReviewDetailDraft((current) => current ? {
+          ...current,
+          items: (current.items || []).map((item) => explicitResolution.items.find((resolved) => resolved.id === item.id) || item),
+        } : current);
+        setReviewDetailStatus("Exact product or supplier-code duplicate found. Choose the existing product before saving.");
+        return;
+      }
+      const prepared = prepareApprovedInvoice({
+        ...reviewDetailDraft,
+        supplier,
+        documentType,
+        document_type: documentType,
+        documentNumber,
+        document_number: documentNumber,
+        invoiceNumber: documentNumber,
+        creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(reviewDetailDraft.creditReason) : "",
+        inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(reviewDetailDraft.inventoryEffect, defaultInventoryEffectForCreditReason(reviewDetailDraft.creditReason)) : "",
+        status: "Approved",
+        items: explicitResolution.items,
+      });
+      const currentReview = validateInvoiceExtraction({ invoice: prepared, lines: prepared.items, historicalPrices: productPriceHistory });
+      if (!markCorrect && invoiceHasBlockingReview(currentReview)) {
+        setReviewDetailDraft(invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(prepared), currentReview));
+        setReviewDetailStatus("Resolve the required corrections, or use Invoice is correct if this is a false positive.");
+        return;
+      }
+      const invoiceForPersistence = markCorrect
+        ? invoiceMarkedAsCorrect(prepared, currentReview)
+        : invoiceWithValidationReviewState(invoiceWithClearedReviewConfirmation(prepared), currentReview);
+      const productsForLearning = [
+        ...products,
+        ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
+      ];
+      const persistence = await persistInvoiceDocument(invoiceForPersistence);
+      if (persistence.cancelled) return;
+      const savedInvoice = persistence.invoice;
+      setInvoices((current) => upsertInvoiceInCollection(current, savedInvoice));
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
+      setSuppliers((current) => ensureSupplierList(current, supplier));
+      setProducts((current) => {
+        const withCreatedProducts = [
+          ...current,
+          ...explicitResolution.createdProducts.filter((product) => !current.some((existing) => existing.id === product.id)),
+        ];
+        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice);
+      });
+      const learningResult = learnSupplierProductMappings({
+        mappings: supplierProductMappings,
+        invoice: savedInvoice,
+        products: productsForLearning,
+        companyId,
+        locationId,
+        supplierId: supplierRecord?.id || "",
+        supplierName: supplier,
+        departments: departmentSettings,
+        storageTarget: companyId ? "relational+snapshot" : "snapshot",
+      });
+      setSupplierProductMappings(learningResult.mappings);
+      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
+      await persistInvoiceLearning(learningResult.learned);
+      setReviewDetailDraft(null);
+      setReviewDetailStatus(markCorrect ? "Invoice marked as correct." : "Invoice review saved.");
+    } catch (error) {
+      setReviewDetailStatus(error.message || "Could not save this invoice review.");
+    } finally {
+      setReviewSaving(false);
+    }
   };
 
   const applySuggestedSchedule = (supplier, suggestedDays) => {
@@ -8255,6 +9258,44 @@ function InvoiceControlCentre({
     setWeekStart((current) => shiftMondayWeek(current, direction));
   };
 
+  const reviewTableRows = reviewDocumentRows.map(({ id, number, supplier, issue, issueCount, date, total, lines, status }) => ({
+    id,
+    number,
+    supplier,
+    issue,
+    issueCount: `${issueCount} issue${issueCount === 1 ? "" : "s"}`,
+    date,
+    total,
+    lines,
+    status,
+  }));
+  const reviewDetailDocumentType = reviewDetailDraft ? normalizeDocumentType(reviewDetailDraft.documentType || reviewDetailDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
+  const reviewDetailDocumentNumber = reviewDetailDraft ? documentNumberFor(reviewDetailDraft) : "";
+  const reviewDetailStatusTone = /could not|failed|must|choose|duplicate|found|required|resolve|before saving/i.test(reviewDetailStatus) ? "warn" : "success";
+  const attentionTitle = reviewDocuments.length && missingCells.length
+    ? `${reviewDocuments.length} invoice${reviewDocuments.length === 1 ? "" : "s"} need review and ${missingCells.length} invoice day${missingCells.length === 1 ? "" : "s"} require attention`
+    : reviewDocuments.length
+      ? `${reviewDocuments.length} invoice${reviewDocuments.length === 1 ? "" : "s"} need review`
+      : missingCells.length
+        ? `${missingCells.length} invoice day${missingCells.length === 1 ? "" : "s"} require attention`
+        : "Invoice delivery status is ready to review";
+  const attentionBody = reviewDocuments.length
+    ? "Open the review list to correct conflicts or confirm false positives."
+    : missingCells.length
+      ? "Review missing supplier deliveries to keep your data accurate."
+      : "Review this week's supplier delivery schedule and any invoice exceptions.";
+  const selectedCellInvoices = selectedCell ? (selectedCell.invoices?.length ? selectedCell.invoices : [selectedCell.invoice].filter(Boolean)) : [];
+  const selectedCellInvoiceRows = selectedCellInvoices.map((invoice, index) => ({
+    id: invoice.id || `${invoice.supplier}-${documentNumberFor(invoice)}-${invoice.date}-${index}`,
+    invoice,
+    number: documentNumberFor(invoice) || "-",
+    type: documentTypeLabel(documentTypeFor(invoice)),
+    total: invoiceTotal(invoice),
+    lines: (invoice.items || []).length,
+    status: invoice.status || "-",
+  }));
+  const selectedCellHasInvoices = selectedCellInvoiceRows.length > 0;
+
   return (
     <div className="page-grid invoice-control-page">
       <details className="invoice-control-filters">
@@ -8275,34 +9316,127 @@ function InvoiceControlCentre({
         </Panel>
       </details>
 
-      <div className="invoice-status warn attention-summary invoice-control-attention">
-        <strong>{missingCells.length ? `${missingCells.length} invoice day${missingCells.length === 1 ? "" : "s"} require attention` : "Invoice delivery status is ready to review"}</strong>
-        <span>{missingCells.length ? "Review missing supplier deliveries to keep your data accurate." : "Review this week's supplier delivery schedule and any invoice exceptions."}</span>
-      </div>
+      {reviewDocuments.length ? (
+        <button className="invoice-status warn attention-summary invoice-control-attention clickable" onClick={openReviewModal} type="button">
+          <strong>{attentionTitle}</strong>
+          <span>{attentionBody}</span>
+          <small>Open reviews</small>
+        </button>
+      ) : (
+        <div className="invoice-status warn attention-summary invoice-control-attention">
+          <strong>{attentionTitle}</strong>
+          <span>{attentionBody}</span>
+        </div>
+      )}
 
-      <Panel className="invoice-review-panel" title="Invoices needing review">
-        {reviewDocuments.length ? (
-          <DataTable
-            columns={[
-              { key: "number", label: "Invoice #" },
-              { key: "supplier", label: "Supplier" },
-              { key: "issue", label: "Issue" },
-              { key: "date", label: "Invoice date", render: formatRangeDate },
-              { key: "total", label: "Amount", render: money },
-              { key: "status", label: "Status", render: () => <Badge tone="amber">Review conflict</Badge> },
-            ]}
-            rows={reviewDocuments.map((invoice) => ({
-              id: invoice.id,
-              number: documentNumberFor(invoice) || "-",
-              supplier: invoice.supplier || "-",
-              issue: getBlockingInvoiceIssues(validateInvoiceExtraction({ invoice, lines: invoice.items || [] }))[0]?.message || "Review required",
-              date: invoice.date,
-              total: invoiceTotal(invoice),
-              status: "review",
-            }))}
-          />
-        ) : <EmptyState />}
-      </Panel>
+      <AppModal
+        className="invoice-review-modal"
+        footer={reviewDetailDraft ? (
+          <>
+            <button className="ghost" disabled={reviewSaving} onClick={() => setReviewDetailDraft(null)} type="button"><ChevronLeft size={16} />Back to reviews</button>
+            {permissions.canEdit && <button className="ghost review-correct-action" disabled={reviewSaving} onClick={() => commitReviewInvoice({ markCorrect: true })} type="button"><Check size={16} />Invoice is correct</button>}
+            {permissions.canEdit && <button disabled={reviewSaving} onClick={() => commitReviewInvoice()} type="button"><Save size={16} />{reviewSaving ? "Saving..." : "Save changes"}</button>}
+          </>
+        ) : (
+          <button onClick={closeReviewModal} type="button">Close</button>
+        )}
+        onClose={closeReviewModal}
+        open={reviewModalOpen}
+        title={reviewDetailDraft ? `${documentTypeLabel(reviewDetailDocumentType)} ${reviewDetailDocumentNumber || ""}` : "Invoices needing review"}
+        wide
+      >
+        {reviewDetailDraft ? (
+          <div className="modal-stack invoice-review-detail">
+            <button className="ghost invoice-review-back" disabled={reviewSaving} onClick={() => setReviewDetailDraft(null)} type="button"><ChevronLeft size={16} />Back to review list</button>
+            {reviewDetailStatus && <div className={`invoice-status ${reviewDetailStatusTone}`}>{reviewDetailStatus}</div>}
+            <div className="form-grid six">
+              <SupplierSelector id="supplier-list-invoice-control-review" suppliers={suppliers} value={reviewDetailDraft.supplier || ""} onChange={(value) => updateReviewInvoice("supplier", value)} />
+              <label>Document type<select value={reviewDetailDocumentType} onChange={(event) => updateReviewInvoice("documentType", event.target.value)}>
+                {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Document number<input value={reviewDetailDocumentNumber} onChange={(event) => updateReviewInvoice("documentNumber", event.target.value)} /></label>
+              <label>Date<input type="date" value={reviewDetailDraft.date || today()} onChange={(event) => updateReviewInvoice("date", event.target.value)} /></label>
+              <Field label="Signed total" readOnly value={money(invoiceTotal(reviewDetailDraft))} />
+            </div>
+            {isCreditNoteDocument(reviewDetailDocumentType) && (
+              <div className="credit-note-summary compact">
+                <div><Badge tone="amber">{documentTypeBadgeLabel(reviewDetailDocumentType)}</Badge><strong>{reviewDetailDocumentNumber || "Document number needed"}</strong></div>
+                <div className="form-grid four compact-form">
+                  <label>Credit reason<select value={normalizeCreditReason(reviewDetailDraft.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => updateReviewInvoice("creditReason", event.target.value)}>
+                    {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Credit treatment<select value={normalizeInventoryEffect(reviewDetailDraft.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => updateReviewInvoice("inventoryEffect", event.target.value)}>
+                    {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Original invoice number<input value={reviewDetailDraft.originalInvoiceNumber || ""} onChange={(event) => setReviewDetailDraft((current) => ({ ...invoiceWithClearedReviewConfirmation(current), originalInvoiceNumber: event.target.value, original_invoice_number: event.target.value }))} /></label>
+                </div>
+              </div>
+            )}
+            <InvoiceFinancialSummary invoice={{ ...reviewDetailValidation, documentNumber: reviewDetailDocumentNumber }} currency={reviewDetailDraft.currency || financialSettings.currency || "GBP"} />
+            {reviewDetailBlockingIssues.length > 0 && (
+              <div className="invoice-status error review-issue-list">
+                <strong>Required corrections</strong>
+                {[...new Set(reviewDetailBlockingIssues.map((issue) => invoiceReviewIssueText(issue, reviewDetailDocumentType)))].map((message) => <span key={message}>{message}</span>)}
+              </div>
+            )}
+            {reviewDetailWarningIssues.length > 0 && (
+              <div className="invoice-status warn review-issue-list">
+                <strong>Warnings</strong>
+                {[...new Set(reviewDetailWarningIssues.map((issue) => invoiceReviewIssueText(issue, reviewDetailDocumentType)))].map((message) => <span key={message}>{message}</span>)}
+              </div>
+            )}
+            <InvoiceLineEditor
+              addSplit={addReviewSplit}
+              applyExistingProduct={applyExistingProductToReviewLine}
+              createProductFromLine={permissions.canAdd ? createProductFromReviewLine : null}
+              departmentNames={departmentNames}
+              documentType={reviewDetailDocumentType}
+              items={reviewDetailDraft.items || []}
+              products={products}
+              removeLine={(id) => setReviewDetailDraft((current) => current ? ({ ...invoiceWithClearedReviewConfirmation(current), items: (current.items || []).filter((line) => line.id !== id) }) : current)}
+              removeSplit={removeReviewSplit}
+              resetProductResolution={resetReviewProductResolution}
+              setDepartmentMode={setReviewDepartmentMode}
+              updateLine={updateReviewLine}
+              updateSplit={updateReviewSplit}
+              wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+            />
+            {permissions.canAdd && (
+              <div className="button-row left tight panel-inline-actions">
+                <button className="ghost" onClick={addReviewLine} type="button"><Plus size={16} />Add line</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="modal-stack invoice-review-list">
+            <div className="invoice-review-modal-summary">
+              <div><span>Week</span><strong>{formatRangeDate(weekRange.start)} - {formatRangeDate(weekRange.end)}</strong></div>
+              <div><span>Needs review</span><strong>{reviewDocumentRows.length}</strong></div>
+            </div>
+            {reviewDetailStatus && <div className={`invoice-status ${reviewDetailStatusTone}`}>{reviewDetailStatus}</div>}
+            {reviewDocumentRows.length ? (
+              <DataTable
+                columns={[
+                  { key: "number", label: "Invoice #" },
+                  { key: "supplier", label: "Supplier" },
+                  { key: "issue", label: "Issue" },
+                  { key: "issueCount", label: "Issues" },
+                  { key: "date", label: "Invoice date", render: formatRangeDate },
+                  { key: "total", label: "Amount", render: money },
+                  { key: "status", label: "Status", render: () => <Badge tone="amber">Open review</Badge> },
+                ]}
+                onRowClick={(row) => {
+                  const target = reviewDocumentRows.find((item) => item.id === row.id);
+                  if (target) openReviewDetail(target.invoice);
+                }}
+                query={reviewQuery}
+                onQueryChange={setReviewQuery}
+                rows={reviewTableRows}
+              />
+            ) : <EmptyState />}
+          </div>
+        )}
+      </AppModal>
 
       <details className="more-metrics invoice-control-more-metrics">
         <summary>More weekly metrics</summary>
@@ -8458,7 +9592,12 @@ function InvoiceControlCentre({
       {selectedCell && (
         <AppModal
           className="invoice-control-status-modal"
-          footer={(
+          footer={selectedCellHasInvoices ? (
+            <>
+              <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
+              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoice</PrimaryAction>}
+            </>
+          ) : (
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
               {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
@@ -8472,7 +9611,31 @@ function InvoiceControlCentre({
         >
           <div className="modal-stack">
             <Badge tone={selectedCell.state === "missing" ? "amber" : selectedCell.state === "expected" ? "amber" : selectedCell.state === "not_ordered" ? "gray" : "green"}>{selectedCell.label}</Badge>
-            <p className="helper-text">Quick actions update this supplier/day only. Upload Invoice opens the invoice workflow with supplier and date prepared.</p>
+            {selectedCellHasInvoices ? (
+              <>
+                <div className="invoice-review-modal-summary">
+                  <div><span>Documents</span><strong>{selectedCellInvoiceRows.length}</strong></div>
+                  <div><span>Day total</span><strong>{money(selectedCell.total)}</strong></div>
+                </div>
+                <DataTable
+                  columns={[
+                    { key: "number", label: "Document #" },
+                    { key: "type", label: "Type", render: (value, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row.invoice)) ? "amber" : "green"}>{value}</Badge> },
+                    { key: "total", label: "Signed total", render: money },
+                    { key: "lines", label: "Lines" },
+                    { key: "status", label: "Status" },
+                  ]}
+                  onRowClick={(row) => {
+                    if (!row.invoice) return;
+                    setSelectedCell(null);
+                    setViewInvoice(row.invoice);
+                  }}
+                  rows={selectedCellInvoiceRows}
+                />
+              </>
+            ) : (
+              <p className="helper-text">Quick actions update this supplier/day only. Upload Invoice opens the invoice workflow with supplier and date prepared.</p>
+            )}
           </div>
         </AppModal>
       )}
@@ -8516,7 +9679,7 @@ function InvoiceControlCell({ cell, onClick }) {
   return (
     <td>
       <button className={`invoice-control-cell ${cell.state}`} onClick={onClick} type="button">
-        <strong>{cell.invoice ? documentTypeBadgeLabel(documentTypeFor(cell.invoice)) : cell.label}</strong>
+        <strong>{cell.label}</strong>
         {cell.invoice ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
       </button>
     </td>
@@ -13221,7 +14384,7 @@ function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
   );
 }
 
-function DataTable({ columns, rows, onEdit, onDelete, toolbarAction, query: controlledQuery, onQueryChange }) {
+function DataTable({ columns, rows, onEdit, onDelete, onRowClick, toolbarAction, query: controlledQuery, onQueryChange }) {
   const [uncontrolledQuery, setUncontrolledQuery] = useState("");
   const query = controlledQuery ?? uncontrolledQuery;
   const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
@@ -13254,11 +14417,22 @@ function DataTable({ columns, rows, onEdit, onDelete, toolbarAction, query: cont
           </thead>
           <tbody>
             {filtered.map((row) => (
-              <tr key={row.id}>
+              <tr
+                className={onRowClick ? "clickable-table-row" : ""}
+                key={row.id}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                onKeyDown={onRowClick ? (event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  onRowClick(row);
+                } : undefined}
+                role={onRowClick ? "button" : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+              >
                 {columns.map((column) => <td key={column.key}>{column.render ? column.render(row[column.key], row) : row[column.key]}</td>)}
                 {(onEdit || onDelete) && (
                   <td>
-                    <div className="row-actions">
+                    <div className="row-actions" onClick={onRowClick ? (event) => event.stopPropagation() : undefined}>
                       {onEdit && <button className="icon" onClick={() => onEdit(row)} type="button"><Edit3 size={15} /></button>}
                       {onDelete && <button className="icon danger" onClick={() => onDelete(row.id)} type="button"><Trash2 size={15} /></button>}
                     </div>
