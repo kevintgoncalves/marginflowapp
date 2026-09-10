@@ -3,8 +3,11 @@ import test from "node:test";
 import {
   normalizeInvoiceCollectionForRuntime,
   normalizeInvoiceForRuntime,
+  normalizeProductCollectionForRuntime,
+  normalizeProductForRuntime,
   runtimeInvoiceLineCount,
 } from "./invoiceRuntimeSafety.js";
+import { correctionHistoryForInvoice, learnSupplierProductMappings } from "./invoiceLearning.js";
 
 test("runtime invoice normalization recovers lines from relational and legacy shapes", () => {
   const normalized = normalizeInvoiceForRuntime({
@@ -45,4 +48,37 @@ test("runtime invoice normalization makes partial persisted rows safe to render"
 test("runtime invoice collections reject invalid container and row values", () => {
   assert.deepEqual(normalizeInvoiceCollectionForRuntime({ invoices: [] }), []);
   assert.deepEqual(normalizeInvoiceCollectionForRuntime([null, "bad", { id: "good", items: [] }]).map((row) => row.id), ["good"]);
+});
+
+test("runtime product normalization repairs legacy history containers before invoice save", () => {
+  const normalized = normalizeProductForRuntime({
+    id: "product-a",
+    product_name: "Apples",
+    aliases: "Red apples",
+    priceHistory: null,
+    supplierPrices: { supplier: "TG Fruits" },
+    supplierFormats: "legacy",
+  });
+
+  assert.equal(normalized.name, "Apples");
+  assert.deepEqual(normalized.aliases, ["Red apples"]);
+  assert.deepEqual(normalized.priceHistory, []);
+  assert.deepEqual(normalized.supplierPrices, []);
+  assert.deepEqual(normalized.supplierFormats, []);
+  assert.deepEqual(normalizeProductCollectionForRuntime([null, normalized]).map((product) => product.id), ["product-a"]);
+});
+
+test("invoice learning tolerates malformed legacy mapping and correction containers", () => {
+  const invoice = {
+    id: "invoice-a",
+    supplier: "TG Fruits",
+    items: [{ id: "line-a", matchedProductId: "product-a", productName: "Apples", supplierProductCode: "A1" }],
+  };
+
+  const learning = learnSupplierProductMappings({ mappings: {}, products: null, invoice });
+  const corrections = correctionHistoryForInvoice({ existingCorrections: {}, invoice });
+
+  assert.equal(Array.isArray(learning.mappings), true);
+  assert.equal(learning.mappings.length, 1);
+  assert.deepEqual(corrections, []);
 });

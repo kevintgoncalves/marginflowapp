@@ -66,6 +66,36 @@ export function normalizeInvoiceCollectionForRuntime(invoices = []) {
   return invoices.map(normalizeInvoiceForRuntime).filter(Boolean);
 }
 
+function recordArray(value) {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+export function normalizeProductForRuntime(product = {}) {
+  if (!isRecord(product)) return null;
+  const name = readableText(product.name ?? product.productName ?? product.product_name, "Unnamed product");
+  const aliases = Array.isArray(product.aliases)
+    ? product.aliases.map((alias) => readableText(alias)).filter(Boolean)
+    : (readableText(product.aliases) ? [readableText(product.aliases)] : []);
+  return {
+    ...product,
+    name,
+    productName: readableText(product.productName ?? product.product_name, name),
+    supplier: readableText(product.supplier),
+    packSize: readableText(product.packSize ?? product.pack_size),
+    department: readableText(product.department),
+    aliases,
+    priceHistory: recordArray(product.priceHistory),
+    supplierPrices: recordArray(product.supplierPrices),
+    supplierFormats: recordArray(product.supplierFormats),
+    departmentSplits: recordArray(product.departmentSplits),
+  };
+}
+
+export function normalizeProductCollectionForRuntime(products = []) {
+  if (!Array.isArray(products)) return [];
+  return products.map(normalizeProductForRuntime).filter(Boolean);
+}
+
 export function runtimeInvoiceLineCount(invoice = {}) {
   if (Array.isArray(invoice.items)) return invoice.items.length;
   if (Array.isArray(invoice.lines)) return invoice.lines.length;

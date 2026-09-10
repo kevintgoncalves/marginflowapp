@@ -70,6 +70,7 @@ import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
 import {
   normalizeInvoiceCollectionForRuntime,
+  normalizeProductCollectionForRuntime,
   runtimeInvoiceLineCount,
 } from "./domain/invoiceRuntimeSafety.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
@@ -3120,27 +3121,30 @@ function supplierExists(suppliers, name) {
 }
 
 function ensureSupplierList(suppliers, name) {
-  if (!name.trim() || supplierExists(suppliers, name)) return suppliers;
-  const canonical = canonicalSupplierForName(suppliers, name);
-  if (canonical) return suppliers;
-  const likelyDuplicate = findSupplierDuplicateCandidates(suppliers, name, { includeDeleted: true })[0];
-  if (likelyDuplicate && likelyDuplicate.similarity >= 0.82) return suppliers;
-  return [...suppliers, { id: uid(), name: name.trim(), category: "", contact: "", email: "", phone: "", active: true }];
+  const currentSuppliers = Array.isArray(suppliers) ? suppliers : [];
+  const supplierName = String(name || "").trim();
+  if (!supplierName || supplierExists(currentSuppliers, supplierName)) return currentSuppliers;
+  const canonical = canonicalSupplierForName(currentSuppliers, supplierName);
+  if (canonical) return currentSuppliers;
+  const likelyDuplicate = findSupplierDuplicateCandidates(currentSuppliers, supplierName, { includeDeleted: true })[0];
+  if (likelyDuplicate && likelyDuplicate.similarity >= 0.82) return currentSuppliers;
+  return [...currentSuppliers, { id: uid(), name: supplierName, category: "", contact: "", email: "", phone: "", active: true }];
 }
 
 function removeInvoiceProductHistory(products, invoiceId) {
-  if (!invoiceId) return products;
-  return products.map((product) => {
-    const priceHistory = (product.priceHistory || []).filter((entry) => entry.invoiceId !== invoiceId);
-    const supplierPrices = (product.supplierPrices || []).filter((entry) => entry.invoiceId !== invoiceId);
-    const supplierFormats = (product.supplierFormats || []).filter((entry) => entry.invoiceId !== invoiceId);
+  const currentProducts = normalizeProductCollectionForRuntime(products);
+  if (!invoiceId) return currentProducts;
+  return currentProducts.map((product) => {
+    const priceHistory = product.priceHistory.filter((entry) => entry.invoiceId !== invoiceId);
+    const supplierPrices = product.supplierPrices.filter((entry) => entry.invoiceId !== invoiceId);
+    const supplierFormats = product.supplierFormats.filter((entry) => entry.invoiceId !== invoiceId);
     return { ...product, priceHistory, supplierPrices, supplierFormats };
   });
 }
 
 function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
-  if (isCreditNoteDocument(documentTypeFor(invoiceContext))) return products;
-  const next = Array.isArray(products) ? [...products] : [];
+  const next = normalizeProductCollectionForRuntime(products);
+  if (isCreditNoteDocument(documentTypeFor(invoiceContext))) return next;
   const invoiceItems = Array.isArray(items) ? items : [];
 
   invoiceItems.filter(isReceivedInvoiceLine).forEach((item) => {
@@ -3182,20 +3186,21 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       lineId: item.id,
     };
 
-    const aliases = new Set([...(next[index].aliases || [])]);
+    const aliases = new Set(next[index].aliases);
+    const existingProductName = String(next[index].name || next[index].productName || "");
     const rawDescription = item.rawDescription || item.originalExtraction?.rawDescription || "";
-    if (rawDescription && rawDescription.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(rawDescription);
-    if (item.productName && item.productName.toLowerCase() !== next[index].name.toLowerCase()) aliases.add(item.productName);
+    if (rawDescription && rawDescription.toLowerCase() !== existingProductName.toLowerCase()) aliases.add(rawDescription);
+    if (item.productName && item.productName.toLowerCase() !== existingProductName.toLowerCase()) aliases.add(item.productName);
     const supplierPrices = [
-      ...(next[index].supplierPrices || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      ...next[index].supplierPrices.filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
       supplierEntry,
     ];
     const priceHistory = [
-      ...(next[index].priceHistory || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      ...next[index].priceHistory.filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
       historyEntry,
     ];
     const supplierFormats = [
-      ...(next[index].supplierFormats || []).filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
+      ...next[index].supplierFormats.filter((entry) => !(entry.invoiceId === invoiceContext.id && entry.lineId === item.id)),
       { ...supplierFormat, source: "Invoice", invoiceId: invoiceContext.id, lineId: item.id },
     ];
     next[index] = {
@@ -3218,6 +3223,13 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
   });
 
   return next;
+}
+
+function productPriceHistoryRows(products = []) {
+  return (Array.isArray(products) ? products : []).flatMap((product) => (
+    (Array.isArray(product?.priceHistory) ? product.priceHistory : [])
+      .map((entry) => ({ ...entry, productId: product.id }))
+  ));
 }
 
 function explicitProductFromInvoiceLine(line, productId, { supplier = "", invoiceDate = today(), fallbackDepartment = "Kitchen Made", departmentNames = defaultDepartments } = {}) {
@@ -3424,7 +3436,8 @@ function supplierIssueSummary(creditNotes, supplierName) {
 }
 
 function syncCreditNotesForInvoice(current, invoice) {
-  const existingForInvoice = current.filter((note) => note.invoiceId === invoice.id);
+  const currentNotes = Array.isArray(current) ? current : [];
+  const existingForInvoice = currentNotes.filter((note) => note.invoiceId === invoice.id);
   const generated = creditNotesForInvoice(invoice).map((note) => {
     const existing = existingForInvoice.find((candidate) => candidate.lineId === note.lineId);
     if (!existing) return note;
@@ -3435,7 +3448,7 @@ function syncCreditNotesForInvoice(current, invoice) {
       notes: existing.notes,
     };
   });
-  return [...current.filter((note) => note.invoiceId !== invoice.id), ...generated];
+  return [...currentNotes.filter((note) => note.invoiceId !== invoice.id), ...generated];
 }
 
 function combinedSupplierIssues(creditNotes = [], invoices = []) {
@@ -5570,7 +5583,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     }
   });
   const [departmentOpen, setDepartmentOpen] = useState(false);
-  const [products, setProductsState] = useState(() => demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts));
+  const [products, setProductsState] = useState(() => normalizeProductCollectionForRuntime(
+    demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts),
+  ));
   const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
   const [supplierDeliverySchedules, setSupplierDeliverySchedulesState] = useState(() => demoInitialData?.supplierDeliverySchedules || safeReadLocalStorageArray("marginflow.supplierDeliverySchedules", []));
   const [supplierProductMappings, setSupplierProductMappingsState] = useState(() => demoInitialData?.supplierProductMappings || safeReadLocalStorageArray("marginflow.supplierProductMappings", []));
@@ -5641,7 +5656,14 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setSalesState(normalized);
     syncRelationalSalesChange(current, normalized);
   };
-  const setProducts = demoMode ? makeStateUpdater(setProductsState) : makeStateUpdater(setProductsState, "marginflow.products");
+  const setProducts = (value) => {
+    setProductsState((current) => {
+      const nextValue = typeof value === "function" ? value(current) : value;
+      const next = normalizeProductCollectionForRuntime(nextValue);
+      if (!demoMode && !readOnly) saveLocalStorage("marginflow.products", next);
+      return next;
+    });
+  };
   const setSuppliers = demoMode ? makeStateUpdater(setSuppliersState) : makeStateUpdater(setSuppliersState, "marginflow.suppliers");
   const setSupplierDeliverySchedules = demoMode ? makeStateUpdater(setSupplierDeliverySchedulesState) : makeStateUpdater(setSupplierDeliverySchedulesState, "marginflow.supplierDeliverySchedules");
   const setSupplierProductMappings = demoMode ? makeStateUpdater(setSupplierProductMappingsState) : makeStateUpdater(setSupplierProductMappingsState, "marginflow.supplierProductMappings");
@@ -5806,7 +5828,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setSupplierDeliverySchedulesState(snapshot.supplierDeliverySchedules);
     setSupplierProductMappingsState(snapshot.supplierProductMappings || []);
     setInvoiceLineCorrectionsState(snapshot.invoiceLineCorrections || []);
-    setProductsState(snapshot.products);
+    setProductsState(normalizeProductCollectionForRuntime(snapshot.products));
     setInvoicesState(normalizeInvoiceCollectionForRuntime(snapshot.invoices));
     setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
     setCreditNotesState(snapshot.creditNotes);
@@ -6615,7 +6637,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           invoiceReviewReasons: draft.invoiceReviewReasons || [],
         },
         lines: draft.items,
-        historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
+        historicalPrices: productPriceHistoryRows(products),
       });
       const invoiceBlockers = (approvalReview.invoiceReviewReasons || []).filter((reason) => reviewReasonSeverity(reason) === "error");
       if (invoiceBlockers.length) {
@@ -7733,7 +7755,7 @@ function Invoices({
   ));
   const approvedInvoiceTotal = approvedDocuments.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
   const reviewDocumentCount = invoices.filter((invoice) => invoiceHasBlockingReview(validateInvoiceExtraction({ invoice, lines: invoice.items || [] }))).length;
-  const invoiceProductPriceHistory = useMemo(() => products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))), [products]);
+  const invoiceProductPriceHistory = useMemo(() => productPriceHistoryRows(products), [products]);
   const draftValidationState = useMemo(() => validateInvoiceExtraction({
     invoice: {
       supplier: draft.supplier || draft.items[0]?.supplier,
@@ -8430,7 +8452,7 @@ function Invoices({
           inventory_effect: inventoryEffect,
         },
         lines: items,
-        historicalPrices: products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))),
+        historicalPrices: productPriceHistoryRows(products),
       });
 
       setDraft((current) => ({
@@ -10464,7 +10486,7 @@ function InvoiceControlCentre({
   }, [onWeekRangeChange, weekRange.end, weekRange.start]);
   const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
-  const productPriceHistory = useMemo(() => products.flatMap((product) => (product.priceHistory || []).map((entry) => ({ ...entry, productId: product.id }))), [products]);
+  const productPriceHistory = useMemo(() => productPriceHistoryRows(products), [products]);
 
   const rows = activeSuppliers.map((supplier) => {
     const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);

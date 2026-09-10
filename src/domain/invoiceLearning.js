@@ -99,11 +99,13 @@ export function learnSupplierProductMappings({
 } = {}) {
   const supplier = supplierName || invoice.supplier || "";
   const resolvedSupplierId = supplierId || invoice.supplierId || invoice.supplier_id || "";
-  const next = mappings.map((mapping) => ({ ...mapping }));
+  const next = (Array.isArray(mappings) ? mappings : []).map((mapping) => ({ ...mapping }));
+  const invoiceLines = Array.isArray(invoice.items) ? invoice.items : (Array.isArray(invoice.lines) ? invoice.lines : []);
+  const availableProducts = Array.isArray(products) ? products : [];
   const learned = [];
   if (!supplier) return { mappings: next, learned };
 
-  (invoice.items || invoice.lines || []).forEach((line) => {
+  invoiceLines.forEach((line) => {
     const productId = line.matchedProductId || line.productId || "";
     if (!productId || line.forgetLearnedRule || line.matchStatus === "Manual invoice") return;
     const key = mappingKeyForLine({ companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier, line });
@@ -114,7 +116,7 @@ export function learnSupplierProductMappings({
     const unit = normalizeHeader(line.unitOfMeasure || line.unit || "");
     const packSize = normalizeHeader(line.packSize || "");
     const allocation = lineAllocation(line, departments);
-    const product = products.find((candidate) => candidate.id === productId) || {};
+    const product = availableProducts.find((candidate) => candidate.id === productId) || {};
     const existingIndex = next.findIndex((mapping) => mapping.mappingKey === key || (
       sameScope(mapping, { companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier })
       && (code
@@ -236,9 +238,11 @@ export function correctionHistoryForInvoice({
   invoice = {},
   now = new Date().toISOString(),
 } = {}) {
-  const existingKeys = new Set(existingCorrections.map((correction) => correction.correctionKey));
-  const corrections = [...existingCorrections];
-  (invoice.items || invoice.lines || []).forEach((line) => {
+  const currentCorrections = Array.isArray(existingCorrections) ? existingCorrections : [];
+  const invoiceLines = Array.isArray(invoice.items) ? invoice.items : (Array.isArray(invoice.lines) ? invoice.lines : []);
+  const existingKeys = new Set(currentCorrections.map((correction) => correction.correctionKey));
+  const corrections = [...currentCorrections];
+  invoiceLines.forEach((line) => {
     const original = line.originalExtraction || line.sourceMetadata?.originalExtraction || {};
     if (!Object.keys(original).length) return;
     correctionFields.forEach((field) => {
