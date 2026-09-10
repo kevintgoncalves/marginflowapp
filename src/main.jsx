@@ -68,6 +68,10 @@ import {
 import { supplierFormatFromLine } from "./domain/productPackaging.js";
 import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.js";
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
+import {
+  normalizeInvoiceCollectionForRuntime,
+  runtimeInvoiceLineCount,
+} from "./domain/invoiceRuntimeSafety.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
 import {
@@ -3136,9 +3140,10 @@ function removeInvoiceProductHistory(products, invoiceId) {
 
 function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { items }) {
   if (isCreditNoteDocument(documentTypeFor(invoiceContext))) return products;
-  const next = [...products];
+  const next = Array.isArray(products) ? [...products] : [];
+  const invoiceItems = Array.isArray(items) ? items : [];
 
-  items.filter(isReceivedInvoiceLine).forEach((item) => {
+  invoiceItems.filter(isReceivedInvoiceLine).forEach((item) => {
     const productId = item.matchedProductId || item.productId || "";
     if (!productId) return;
     const quantity = numberValue(item.quantity, 1);
@@ -5570,7 +5575,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [supplierDeliverySchedules, setSupplierDeliverySchedulesState] = useState(() => demoInitialData?.supplierDeliverySchedules || safeReadLocalStorageArray("marginflow.supplierDeliverySchedules", []));
   const [supplierProductMappings, setSupplierProductMappingsState] = useState(() => demoInitialData?.supplierProductMappings || safeReadLocalStorageArray("marginflow.supplierProductMappings", []));
   const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
-  const [invoices, setInvoicesState] = useState(() => demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices));
+  const [invoices, setInvoicesState] = useState(() => normalizeInvoiceCollectionForRuntime(
+    demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices),
+  ));
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || []);
   const salesRef = useRef(sales);
@@ -5639,7 +5646,14 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const setSupplierDeliverySchedules = demoMode ? makeStateUpdater(setSupplierDeliverySchedulesState) : makeStateUpdater(setSupplierDeliverySchedulesState, "marginflow.supplierDeliverySchedules");
   const setSupplierProductMappings = demoMode ? makeStateUpdater(setSupplierProductMappingsState) : makeStateUpdater(setSupplierProductMappingsState, "marginflow.supplierProductMappings");
   const setInvoiceLineCorrections = demoMode ? makeStateUpdater(setInvoiceLineCorrectionsState) : makeStateUpdater(setInvoiceLineCorrectionsState, "marginflow.invoiceLineCorrections");
-  const setInvoices = demoMode ? makeStateUpdater(setInvoicesState) : makeStateUpdater(setInvoicesState, "marginflow.invoices");
+  const setInvoices = (value) => {
+    setInvoicesState((current) => {
+      const nextValue = typeof value === "function" ? value(current) : value;
+      const next = normalizeInvoiceCollectionForRuntime(nextValue);
+      if (!demoMode && !readOnly) saveLocalStorage("marginflow.invoices", next);
+      return next;
+    });
+  };
   const setInvoiceDayStatusOverrides = demoMode ? makeStateUpdater(setInvoiceDayStatusOverridesState) : makeStateUpdater(setInvoiceDayStatusOverridesState, "marginflow.invoiceDayStatusOverrides");
   const setStocktakes = demoMode ? makeStateUpdater(setStocktakesState) : makeStateUpdater(setStocktakesState, "marginflow.stocktakes");
   const setWasteItems = demoMode ? makeStateUpdater(setWasteItemsState) : makeStateUpdater(setWasteItemsState, "marginflow.waste");
@@ -5793,7 +5807,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setSupplierProductMappingsState(snapshot.supplierProductMappings || []);
     setInvoiceLineCorrectionsState(snapshot.invoiceLineCorrections || []);
     setProductsState(snapshot.products);
-    setInvoicesState(snapshot.invoices);
+    setInvoicesState(normalizeInvoiceCollectionForRuntime(snapshot.invoices));
     setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
     setCreditNotesState(snapshot.creditNotes);
     salesRef.current = snapshot.sales;
@@ -6714,6 +6728,15 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistConfirmedLearning(learningResult.learned);
       setDraft(emptyInvoiceDraft());
+    } catch (error) {
+      const message = error?.message || "Unexpected invoice save error.";
+      console.error("Invoice approval could not finish", error);
+      setDraft((current) => ({
+        ...current,
+        status: `MarginFlow kept the invoice data, but could not finish saving. Please try Save again. ${message}`,
+      }));
+      setCloudStatus("error");
+      setCloudError(`Invoice save could not finish: ${message}`);
     } finally {
       invoiceApprovalRef.current = false;
       setInvoiceApprovalBusy(false);
@@ -7636,6 +7659,7 @@ function Invoices({
   const [editDraft, setEditDraft] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualMode, setManualMode] = useState("Simple Mode");
+  const [manualSaveStatus, setManualSaveStatus] = useState("");
   const [approvedDocumentFilter, setApprovedDocumentFilter] = useState("All");
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
@@ -9287,82 +9311,89 @@ function Invoices({
 
   const saveManualInvoice = async () => {
     if (!permissions.canAdd && !permissions.canApprove) return;
-    const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
-    const supplier = supplierRecord?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
-    const date = manualDraft.date || today();
-    const documentType = normalizeDocumentType(manualDraft.documentType || PURCHASING_DOCUMENT_TYPES.INVOICE);
-    const documentNumber = (manualDraft.documentNumber || manualDraft.invoiceNumber || "").trim();
-    let items = [];
+    setManualSaveStatus("");
+    try {
+      const supplierRecord = canonicalSupplierForName(suppliers, manualDraft.supplier);
+      const supplier = supplierRecord?.name || manualDraft.supplier?.trim() || "Unknown Supplier";
+      const date = manualDraft.date || today();
+      const documentType = normalizeDocumentType(manualDraft.documentType || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      const documentNumber = (manualDraft.documentNumber || manualDraft.invoiceNumber || "").trim();
+      let items = [];
 
-    if (manualMode === "Simple Mode") {
-      const total = Math.abs(numberValue(manualDraft.total, 0));
-      if (total <= 0) return;
-      items = [{
-        id: uid(),
-        productName: isCreditNoteDocument(documentType) ? "Manual credit note total" : "Manual invoice total",
-        packSize: "",
-        quantity: 1,
-        unitCost: total,
-        discountAmount: 0,
-        discountPercent: 0,
-        supplier,
-        department: manualDraft.department || defaultManualDepartment,
-        status: "Received",
-        lineStatus: "Received",
-        matchStatus: "Manual invoice",
-        matchConfidence: 1,
-      }];
-    } else {
-      items = manualDraft.items
-        .filter((item) => item.productName?.trim() && invoiceEditorNetLineTotal(item) > 0)
-        .map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
-      if (!items.length) return;
-    }
+      if (manualMode === "Simple Mode") {
+        const total = Math.abs(numberValue(manualDraft.total, 0));
+        if (total <= 0) return;
+        items = [{
+          id: uid(),
+          productName: isCreditNoteDocument(documentType) ? "Manual credit note total" : "Manual invoice total",
+          packSize: "",
+          quantity: 1,
+          unitCost: total,
+          discountAmount: 0,
+          discountPercent: 0,
+          supplier,
+          department: manualDraft.department || defaultManualDepartment,
+          status: "Received",
+          lineStatus: "Received",
+          matchStatus: "Manual invoice",
+          matchConfidence: 1,
+        }];
+      } else {
+        items = manualDraft.items
+          .filter((item) => item.productName?.trim() && invoiceEditorNetLineTotal(item) > 0)
+          .map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
+        if (!items.length) return;
+      }
 
-    items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
-    const validation = validateInvoiceLinesForApproval(items, {
-      documentType,
-      splitValidator: splitIsValid,
-      netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
-    });
-    if (!validation.valid) return;
-    if (items.some((item) => !splitIsValid(item))) return;
-
-    const invoice = prepareApprovedInvoice({
-      id: uid(),
-      supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
-      documentType,
-      document_type: documentType,
-      documentNumber,
-      document_number: documentNumber,
-      invoiceNumber: documentNumber,
-      supplier,
-      date,
-      status: "Approved",
-      source: isCreditNoteDocument(documentType) ? "Manual credit note" : "Manual invoice",
-      discountAmount: numberValue(manualDraft.invoiceDiscountAmount, 0),
-      discountPercent: numberValue(manualDraft.invoiceDiscountPercent, 0),
-      creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(manualDraft.creditReason) : "",
-      inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(manualDraft.inventoryEffect, defaultInventoryEffectForCreditReason(manualDraft.creditReason)) : "",
-      currency: financialSettings.currency || "GBP",
-      auditEvents: isCreditNoteDocument(documentType) ? [{
-        id: uid(),
-        event: "credit_note_created",
+      items = items.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDraft.department || defaultManualDepartment, documentType));
+      const validation = validateInvoiceLinesForApproval(items, {
         documentType,
-        documentNumber,
-        createdAt: new Date().toISOString(),
-      }] : [],
-      items,
-    });
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) return;
+      if (items.some((item) => !splitIsValid(item))) return;
 
-    const persistence = await persistInvoiceDocument(invoice);
-    if (persistence.cancelled) return;
-    const savedInvoice = persistence.invoice;
-    setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
-    setSuppliers((current) => ensureSupplierList(current, supplier));
-    setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, date, savedInvoice));
-    await learnFromCommittedInvoice(savedInvoice);
-    setManualOpen(false);
+      const invoice = prepareApprovedInvoice({
+        id: uid(),
+        supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
+        documentType,
+        document_type: documentType,
+        documentNumber,
+        document_number: documentNumber,
+        invoiceNumber: documentNumber,
+        supplier,
+        date,
+        status: "Approved",
+        source: isCreditNoteDocument(documentType) ? "Manual credit note" : "Manual invoice",
+        discountAmount: numberValue(manualDraft.invoiceDiscountAmount, 0),
+        discountPercent: numberValue(manualDraft.invoiceDiscountPercent, 0),
+        creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(manualDraft.creditReason) : "",
+        inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(manualDraft.inventoryEffect, defaultInventoryEffectForCreditReason(manualDraft.creditReason)) : "",
+        currency: financialSettings.currency || "GBP",
+        auditEvents: isCreditNoteDocument(documentType) ? [{
+          id: uid(),
+          event: "credit_note_created",
+          documentType,
+          documentNumber,
+          createdAt: new Date().toISOString(),
+        }] : [],
+        items,
+      });
+
+      const persistence = await persistInvoiceDocument(invoice);
+      if (persistence.cancelled) return;
+      const savedInvoice = persistence.invoice;
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
+      setSuppliers((current) => ensureSupplierList(current, supplier));
+      setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, date, savedInvoice));
+      await learnFromCommittedInvoice(savedInvoice);
+      setManualOpen(false);
+    } catch (error) {
+      const message = error?.message || "Unexpected invoice save error.";
+      console.error("Manual invoice save could not finish", error);
+      setManualSaveStatus(`MarginFlow kept the document open because saving could not finish. ${message}`);
+    }
   };
 
   const openEditInvoice = (invoice) => {
@@ -9876,7 +9907,7 @@ function Invoices({
               { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
               { key: "supplier", label: "Supplier" },
               { key: "date", label: "Date" },
-              { key: "items", label: "Lines", render: (items) => items.length },
+              { key: "items", label: "Lines", render: (_items, row) => runtimeInvoiceLineCount(row) },
               { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
               { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
               { key: "syncStatus", label: "Cloud", render: (_, row) => {
@@ -10028,6 +10059,7 @@ function Invoices({
         )}
       >
         <div className="modal-stack">
+          {manualSaveStatus && <div className="invoice-status error">{manualSaveStatus}</div>}
           <div className="mode-tabs">
             {['Simple Mode', 'Complete Mode'].map((mode) => (
               <button className={manualMode === mode ? 'active' : ''} key={mode} onClick={() => setManualMode(mode)} type="button">{mode}</button>
@@ -12090,7 +12122,7 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
                 { key: "documentType", label: "Type", render: (_, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row)) ? "amber" : "green"}>{documentTypeBadgeLabel(documentTypeFor(row))}</Badge> },
                 { key: "invoiceNumber", label: "Document number", render: (_, row) => documentNumberFor(row) },
                 { key: "date", label: "Date" },
-                { key: "items", label: "Lines", render: (items) => items.length },
+                { key: "items", label: "Lines", render: (_items, row) => runtimeInvoiceLineCount(row) },
                 { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
                 { key: "issueCount", label: "Issues", render: (value) => value > 0 ? <Badge tone="amber">{value}</Badge> : <Badge tone="green">0</Badge> },
               ]}
@@ -16568,7 +16600,49 @@ function departmentForProduct(name = "", departmentNames = defaultDepartments, f
   return pick(fallback);
 }
 
+class MarginFlowErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("MarginFlow render error", error, info);
+    try {
+      sessionStorage.setItem("marginflow.lastRenderError", JSON.stringify({
+        message: error?.message || "Unknown display error",
+        componentStack: info?.componentStack || "",
+        recordedAt: new Date().toISOString(),
+      }));
+    } catch {
+      // Diagnostics are optional; the recovery screen must always remain available.
+    }
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="app-recovery-screen">
+        <img alt="MarginFlow" src={marginflowLogo} />
+        <div className="app-recovery-content">
+          <span>Display recovery</span>
+          <h1>MarginFlow protected your saved work</h1>
+          <p>An invoice caused an unexpected display error. Your invoices have not been deleted.</p>
+          <div className="button-row left">
+            <button onClick={() => this.setState({ error: null })} type="button">Try again</button>
+            <button className="ghost" onClick={() => window.location.reload()} type="button"><RefreshCw size={16} />Reload MarginFlow</button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+}
+
 const rootElement = document.getElementById("root");
 const root = rootElement._marginFlowRoot || createRoot(rootElement);
 rootElement._marginFlowRoot = root;
-root.render(<AuthGate />);
+root.render(<MarginFlowErrorBoundary><AuthGate /></MarginFlowErrorBoundary>);

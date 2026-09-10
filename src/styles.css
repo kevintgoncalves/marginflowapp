@@ -7284,3 +7284,52 @@ button.icon {
     margin-right: 0;
   }
 }
+
+.app-recovery-screen {
+  min-height: 100vh;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 26px;
+  padding: clamp(28px, 7vw, 96px);
+  background: #f8f8f6;
+  color: #181a1d;
+}
+
+.app-recovery-screen > img {
+  width: min(220px, 55vw);
+  height: auto;
+}
+
+.app-recovery-content {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 12px;
+  padding-top: 22px;
+  border-top: 3px solid #d79a2b;
+}
+
+.app-recovery-content > span {
+  color: #8a5a09;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.app-recovery-content h1,
+.app-recovery-content p {
+  margin: 0;
+}
+
+.app-recovery-content h1 {
+  max-width: 560px;
+  font-size: clamp(28px, 5vw, 44px);
+  line-height: 1.08;
+}
+
+.app-recovery-content p {
+  max-width: 540px;
+  color: #5f646b;
+  font-size: 16px;
+  line-height: 1.55;
+}
