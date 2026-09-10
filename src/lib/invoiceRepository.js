@@ -180,11 +180,17 @@ export async function persistInvoiceWithLocalFallback({
   expectedRevision = null,
 } = {}) {
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
+  const attemptedAt = now();
+  const syncAttemptCount = Number(invoice.syncAttemptCount || 0) + 1;
   const pending = {
     ...canonicalInvoice,
     syncStatus: client && validScope(scope) ? "pending_sync" : "local_only",
     syncError: "",
-    pendingSince: invoice.pendingSince || now(),
+    pendingSince: invoice.pendingSince || attemptedAt,
+    lastSyncAttemptAt: attemptedAt,
+    nextSyncAttemptAt: "",
+    syncAttemptCount,
+    syncRetryBlocked: false,
   };
   storeLocal(pending);
   if (!client || !validScope(scope)) return { invoice: pending, persisted: false, error: null };
@@ -198,18 +204,33 @@ export async function persistInvoiceWithLocalFallback({
       relationalId: result?.invoice_id || pending.id,
       syncRevision: Number(result?.sync_revision || pending.syncRevision || 1),
       persistenceSource: "relational",
+      nextSyncAttemptAt: "",
+      syncRetryBlocked: false,
     };
     storeLocal(synced);
     return { invoice: synced, persisted: true, result, error: null };
   } catch (error) {
+    const errorMessage = error.message || "Relational invoice save failed.";
+    const retryBlocked = /possible_invoice_duplicate|invoice_(?:identity|revision)_conflict|invoice_update_confirmation_required|multiple_equivalent_invoice_candidates/i.test(errorMessage);
+    const attemptedAtMs = Date.parse(attemptedAt);
+    const retryDelayMs = Math.min(5 * 60 * 1000, 30 * 1000 * (2 ** Math.max(0, syncAttemptCount - 1)));
     const failed = {
       ...pending,
       syncStatus: "sync_failed",
-      syncError: error.message || "Relational invoice save failed.",
+      syncError: errorMessage,
+      nextSyncAttemptAt: retryBlocked ? "" : new Date((Number.isFinite(attemptedAtMs) ? attemptedAtMs : Date.now()) + retryDelayMs).toISOString(),
+      syncRetryBlocked: retryBlocked,
     };
     storeLocal(failed);
     return { invoice: failed, persisted: false, error };
   }
+}
+
+export function invoiceCanRetrySyncAutomatically(invoice = {}, { at = Date.now(), maxAttempts = 3 } = {}) {
+  if (!["sync_failed", "local_only"].includes(invoice.syncStatus)) return false;
+  if (invoice.syncRetryBlocked || Number(invoice.syncAttemptCount || 0) >= maxAttempts) return false;
+  const retryAt = Date.parse(invoice.nextSyncAttemptAt || "");
+  return !Number.isFinite(retryAt) || retryAt <= Number(at);
 }
 
 export async function loadLegacyInvoiceArchive(client, scope = {}) {

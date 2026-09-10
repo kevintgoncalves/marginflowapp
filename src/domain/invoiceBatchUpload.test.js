@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BATCH_INVOICE_ITEM_STATUSES,
+  batchItemStatusAfterPersistence,
   batchItemStatusForInvoice,
   createInvoiceBatch,
   hydrateInvoiceBatch,
@@ -199,4 +200,30 @@ test("hydrate preserves completed results and marks interrupted work for retry",
   assert.equal(summary.ready, 1);
   assert.equal(summary.failed, 1);
   assert.equal(restored.stage, "review");
+});
+
+test("batch keeps a cloud sync failure visible and retryable", () => {
+  const invoice = { id: "tg-830571", supplier: "TG Fruits", documentNumber: "830571" };
+  const result = batchItemStatusAfterPersistence({
+    invoice: { ...invoice, syncStatus: "sync_failed" },
+    persisted: false,
+    error: new Error("statement timeout"),
+  });
+
+  assert.equal(result.status, BATCH_INVOICE_ITEM_STATUSES.FAILED);
+  assert.equal(result.failureStage, "sync");
+  assert.equal(result.invoice.id, invoice.id);
+  assert.match(result.error, /statement timeout/);
+});
+
+test("batch only marks an invoice imported after persistence succeeds", () => {
+  const result = batchItemStatusAfterPersistence({
+    invoice: { id: "tg-830571", syncStatus: "synced" },
+    persisted: true,
+    error: null,
+  }, { now: () => "2026-09-10T10:30:00.000Z" });
+
+  assert.equal(result.status, BATCH_INVOICE_ITEM_STATUSES.IMPORTED);
+  assert.equal(result.failureStage, "");
+  assert.equal(result.importedAt, "2026-09-10T10:30:00.000Z");
 });

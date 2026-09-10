@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ensureInvoicePersistenceIds,
   importMissingRecoveryInvoices,
+  invoiceCanRetrySyncAutomatically,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   persistRelationalInvoice,
@@ -89,8 +90,27 @@ test("statement timeout leaves the invoice locally recoverable as failed sync", 
   assert.equal(states[0].syncStatus, "pending_sync");
   assert.equal(states.at(-1).syncStatus, "sync_failed");
   assert.match(states.at(-1).syncError, /statement timeout/);
+  assert.equal(states.at(-1).syncAttemptCount, 1);
+  assert.equal(states.at(-1).nextSyncAttemptAt, "2026-08-07T12:00:30.000Z");
+  assert.equal(invoiceCanRetrySyncAutomatically(states.at(-1), { at: Date.parse("2026-08-07T12:00:29Z") }), false);
+  assert.equal(invoiceCanRetrySyncAutomatically(states.at(-1), { at: Date.parse("2026-08-07T12:00:30Z") }), true);
   assert.equal(result.persisted, false);
   assert.equal(states.at(-1).items[0].productName, "Apples");
+});
+
+test("duplicate conflicts remain local but are not retried automatically", async () => {
+  const states = [];
+  const client = { async rpc() { return { data: null, error: new Error("possible_invoice_duplicate:cloud-id") }; } };
+  await persistInvoiceWithLocalFallback({
+    client,
+    invoice: sampleInvoice,
+    scope: { companyId },
+    storeLocal: (invoice) => states.push(invoice),
+    now: () => "2026-08-07T12:00:00Z",
+  });
+  assert.equal(states.at(-1).syncStatus, "sync_failed");
+  assert.equal(states.at(-1).syncRetryBlocked, true);
+  assert.equal(invoiceCanRetrySyncAutomatically(states.at(-1), { at: Date.parse("2026-08-08T12:00:00Z") }), false);
 });
 
 test("retry remains idempotent because it reuses the invoice and line UUIDs", async () => {

@@ -72,6 +72,7 @@ import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
 import {
   BATCH_INVOICE_ITEM_STATUSES,
+  batchItemStatusAfterPersistence,
   batchItemStatusForInvoice,
   createInvoiceBatch,
   hydrateInvoiceBatch,
@@ -96,6 +97,7 @@ import {
   relationalOperationalInvoiceCollection,
 } from "./domain/emergencyRecovery.js";
 import {
+  invoiceCanRetrySyncAutomatically,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   replaceInvoiceInCollection,
@@ -5536,6 +5538,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const cloudFingerprintsRef = useRef({});
   const invoiceApprovalRef = useRef(false);
   const invoiceRefreshRef = useRef(false);
+  const invoiceAutoRetryRef = useRef(new Set());
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
@@ -6256,6 +6259,70 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     return { ...result, sourceInvoiceId };
   };
 
+  useEffect(() => {
+    if (!cloudEnabled || readOnly || !cloudReadyRef.current) return undefined;
+    const retryCandidates = operationalInvoices
+      .filter((invoice) => invoiceCanRetrySyncAutomatically(invoice))
+      .filter((invoice) => {
+        const token = `${invoice.id || invoice.relationalId || "invoice"}:${invoice.syncAttemptCount || 0}:${invoice.syncError || ""}`;
+        return !invoiceAutoRetryRef.current.has(token);
+      })
+      .slice(0, 5);
+    if (!retryCandidates.length) return undefined;
+    retryCandidates.forEach((invoice) => {
+      const token = `${invoice.id || invoice.relationalId || "invoice"}:${invoice.syncAttemptCount || 0}:${invoice.syncError || ""}`;
+      invoiceAutoRetryRef.current.add(token);
+    });
+
+    let cancelled = false;
+    const retryPendingInvoices = async () => {
+      const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+      let freshInvoices = await loadRelationalInvoices(supabase, scope);
+      for (const invoice of retryCandidates) {
+        if (cancelled) return;
+        const assessment = assessPurchasingDocumentDuplicate(freshInvoices, invoice, { companyId: scope.companyId });
+        if (assessment.kind === "same_document") {
+          setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, assessment.existing));
+          continue;
+        }
+        if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
+          setInvoices((current) => current.map((candidate) => candidate.id === invoice.id ? {
+            ...candidate,
+            syncStatus: "sync_failed",
+            syncRetryBlocked: true,
+            syncError: "A cloud invoice with this supplier and document number needs duplicate review.",
+          } : candidate));
+          continue;
+        }
+        const result = await persistInvoiceWithLocalFallback({
+          client: supabase,
+          invoice,
+          scope,
+          storeLocal: (storedInvoice) => setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, storedInvoice)),
+        });
+        if (result.persisted) freshInvoices = [result.invoice, ...freshInvoices];
+        if (result.error) {
+          setCloudStatus("error");
+          setCloudError(`${result.error.message || "Invoice sync failed"} The invoice remains saved on this device.`);
+        }
+      }
+    };
+
+    retryPendingInvoices().catch((error) => {
+      retryCandidates.forEach((invoice) => {
+        const token = `${invoice.id || invoice.relationalId || "invoice"}:${invoice.syncAttemptCount || 0}:${invoice.syncError || ""}`;
+        invoiceAutoRetryRef.current.delete(token);
+      });
+      if (!cancelled) {
+        setCloudStatus("error");
+        setCloudError(error.message || "Could not retry pending invoice sync.");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cloudEnabled, cloudLoadAttempt, operationalInvoices, readOnly]);
+
   const compareDeviceWithCloud = async () => {
     if (!cloudEnabled) {
       return {
@@ -6574,6 +6641,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       }
       const invoice = prepareApprovedInvoice({
         id: invoiceId,
+        supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
         documentType,
         document_type: documentType,
         documentNumber,
@@ -7586,6 +7654,7 @@ function Invoices({
   const setInvoiceBatch = (updater) => {
     setInvoiceBatchState((current) => {
       const next = typeof updater === "function" ? updater(current) : updater;
+      if (next === current) return current;
       return next ? withDerivedInvoiceBatchStage(next) : null;
     });
   };
@@ -7729,6 +7798,25 @@ function Invoices({
       return recovered.length ? [...recovered, ...(current || [])] : current;
     });
   }, [batchImportRecoveryKey, companyId, invoiceBatch, invoices.length, locationId, setInvoices]);
+
+  useEffect(() => {
+    setInvoiceBatch((current) => {
+      if (!current) return current;
+      let changed = false;
+      const items = (current.items || []).map((item) => {
+        if (item.status !== BATCH_INVOICE_ITEM_STATUSES.FAILED || item.failureStage !== "sync" || !item.invoice) return item;
+        const syncedInvoice = invoices.find((invoice) => {
+          if (invoice.syncStatus !== "synced") return false;
+          if (invoice.id === item.invoice.id || invoice.relationalId === item.invoice.id) return true;
+          return assessPurchasingDocumentDuplicate([invoice], item.invoice, { companyId }).kind === "same_document";
+        });
+        if (!syncedInvoice) return item;
+        changed = true;
+        return { ...item, ...batchItemStatusAfterPersistence({ invoice: syncedInvoice, persisted: true, error: null }) };
+      });
+      return changed ? { ...current, items } : current;
+    });
+  }, [companyId, invoices]);
 
   const resetUploadDraft = () => {
     setDraft(emptyInvoiceDraft());
@@ -8961,6 +9049,7 @@ function Invoices({
     const prepared = prepareApprovedInvoice({
       ...sourceInvoice,
       supplier,
+      supplierId: supplierRecord?.relationalId || supplierRecord?.id || sourceInvoice.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -9029,18 +9118,17 @@ function Invoices({
       setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
-      updateBatchItem(item.id, {
-        status: BATCH_INVOICE_ITEM_STATUSES.IMPORTED,
-        statusLabel: "Imported",
-        invoice: savedInvoice,
-        importedAt: new Date().toISOString(),
-        error: "",
-      });
+      const persistenceStatus = batchItemStatusAfterPersistence(persistence);
+      updateBatchItem(item.id, persistenceStatus);
+      if (persistenceStatus.status === BATCH_INVOICE_ITEM_STATUSES.FAILED) {
+        return { imported: false, failed: true, syncFailed: true };
+      }
       return { imported: true };
     } catch (error) {
       updateBatchItem(item.id, {
         status: BATCH_INVOICE_ITEM_STATUSES.FAILED,
         statusLabel: "Failed",
+        failureStage: item.failureStage || "import",
         error: error.message || "Could not import this invoice.",
       });
       return { imported: false, failed: true };
@@ -9131,12 +9219,37 @@ function Invoices({
     }
   };
 
-  const retryFailedBatchInvoices = () => {
+  const retryBatchItem = async (item) => {
+    if (item?.failureStage !== "sync" || !item.invoice) {
+      processInvoiceBatchItems(invoiceBatch.id, [item]);
+      return;
+    }
+    setBatchImporting(true);
+    setBatchStatus(`Retrying cloud sync for ${documentNumberFor(item.invoice) || "this invoice"}...`);
+    try {
+      const result = await importBatchItem(item);
+      setBatchStatus(result.imported ? "Invoice synced to the cloud." : "Cloud sync still needs attention. The invoice remains safe on this device.");
+    } finally {
+      setBatchImporting(false);
+    }
+  };
+
+  const retryFailedBatchInvoices = async () => {
     if (!invoiceBatch || currentBatchSummary.processing || currentBatchSummary.importing) return;
     const failedItems = (invoiceBatch.items || []).filter((item) => item.status === BATCH_INVOICE_ITEM_STATUSES.FAILED);
     if (!failedItems.length) return;
     setBatchStatus(`Retrying ${failedItems.length} failed invoice${failedItems.length === 1 ? "" : "s"}...`);
-    processInvoiceBatchItems(invoiceBatch.id, failedItems);
+    const syncFailures = failedItems.filter((item) => item.failureStage === "sync" && item.invoice);
+    const processingFailures = failedItems.filter((item) => item.failureStage !== "sync" || !item.invoice);
+    if (syncFailures.length) {
+      setBatchImporting(true);
+      try {
+        for (const item of syncFailures) await importBatchItem(item);
+      } finally {
+        setBatchImporting(false);
+      }
+    }
+    if (processingFailures.length) processInvoiceBatchItems(invoiceBatch.id, processingFailures);
   };
 
   const reviewFirstFlaggedBatchInvoice = () => {
@@ -9209,6 +9322,7 @@ function Invoices({
 
     const invoice = prepareApprovedInvoice({
       id: uid(),
+      supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -9347,6 +9461,7 @@ function Invoices({
     const cleaned = prepareApprovedInvoice({
       ...editDraft,
       supplier,
+      supplierId: supplierRecord?.relationalId || supplierRecord?.id || editDraft.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -9695,7 +9810,7 @@ function Invoices({
                   <small>{selectedBatchItem.error || "This invoice has not been processed yet."}</small>
                 </div>
                 <div className="button-row left tight">
-                  {selectedBatchItem.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost" onClick={() => processInvoiceBatchItems(invoiceBatch.id, [selectedBatchItem])} type="button"><RefreshCw size={16} />Retry this invoice</button>}
+                  {selectedBatchItem.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost" onClick={() => retryBatchItem(selectedBatchItem)} type="button"><RefreshCw size={16} />Retry this invoice</button>}
                   <button className="ghost" onClick={() => skipBatchItem(selectedBatchItem.id)} type="button">Skip</button>
                 </div>
               </div>
@@ -9733,7 +9848,7 @@ function Invoices({
                       <span className="batch-row-actions">
                         <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); setBatchReviewItemId(row.id); }} type="button">Review</button>
                         {item?.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE && <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); skipBatchItem(row.id); }} type="button">Skip</button>}
-                        {item?.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); processInvoiceBatchItems(invoiceBatch.id, [item]); }} type="button">Retry</button>}
+                        {item?.status === BATCH_INVOICE_ITEM_STATUSES.FAILED && <button className="ghost mini-button" onClick={(event) => { event.stopPropagation(); retryBatchItem(item); }} type="button">Retry</button>}
                       </span>
                     );
                   } },
@@ -10611,6 +10726,7 @@ function InvoiceControlCentre({
     const invoiceForReview = {
       ...invoice,
       supplier,
+      supplierId: supplierRecord?.relationalId || supplierRecord?.id || invoice.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -10694,6 +10810,7 @@ function InvoiceControlCentre({
       const prepared = prepareApprovedInvoice({
         ...reviewDetailDraft,
         supplier,
+        supplierId: supplierRecord?.relationalId || supplierRecord?.id || reviewDetailDraft.supplierId || "",
         documentType,
         document_type: documentType,
         documentNumber,

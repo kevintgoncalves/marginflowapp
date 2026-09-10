@@ -222,8 +222,20 @@ export function purchasingDocumentsMateriallyEquivalent(left = {}, right = {}) {
   return JSON.stringify(purchasingDocumentBusinessShape(left)) === JSON.stringify(purchasingDocumentBusinessShape(right));
 }
 
+function hasRelationalPersistence(document = {}) {
+  const persistenceSource = String(document.persistenceSource || document.persistence_source || "");
+  return persistenceSource === "relational"
+    || persistenceSource.startsWith("relational+")
+    || Boolean(document.relationalId || document.relational_id);
+}
+
+function isOperationalDuplicateCandidate(document = {}) {
+  return hasRelationalPersistence(document)
+    || ["pending_sync", "sync_failed", "local_only"].includes(document.syncStatus);
+}
+
 export function assessPurchasingDocumentDuplicate(documents = [], document = {}, { companyId = "" } = {}) {
-  const sameId = document.id ? documents.find((candidate) => candidate.id === document.id && candidate.persistenceSource === "relational") : null;
+  const sameId = document.id ? documents.find((candidate) => candidate.id === document.id && hasRelationalPersistence(candidate)) : null;
   if (sameId) {
     return {
       kind: purchasingDocumentsMateriallyEquivalent(sameId, document) ? "same_document" : "same_uuid_changed",
@@ -238,7 +250,8 @@ export function assessPurchasingDocumentDuplicate(documents = [], document = {},
     const supplier = String(document.supplierId || document.supplier_id || document.supplier || "").trim().toLowerCase();
     const date = String(document.date || document.invoiceDate || document.invoice_date || "").slice(0, 10);
     candidates = documents.filter((candidate) => (
-      candidate.persistenceSource === "relational"
+      candidate.id !== document.id
+      && isOperationalDuplicateCandidate(candidate)
       && String(candidate.supplierId || candidate.supplier_id || candidate.supplier || "").trim().toLowerCase() === supplier
       && documentTypeFor(candidate) === documentTypeFor(document)
       && String(candidate.date || candidate.invoiceDate || candidate.invoice_date || "").slice(0, 10) === date
@@ -252,7 +265,7 @@ export function assessPurchasingDocumentDuplicate(documents = [], document = {},
       documentType: documentTypeFor(document),
       documentNumber,
     });
-    candidates = documents.filter((candidate) => candidate.persistenceSource === "relational" && duplicateDocumentKey({
+    candidates = documents.filter((candidate) => candidate.id !== document.id && isOperationalDuplicateCandidate(candidate) && duplicateDocumentKey({
       companyId,
       supplierId: candidate.supplierId || candidate.supplier_id || "",
       supplier: candidate.supplier || "",

@@ -138,6 +138,35 @@ test("equivalent re-upload resolves to the existing relational invoice", () => {
   assert.equal(assessment.existing.id, "existing");
 });
 
+test("equivalent re-upload is also blocked while the first copy is waiting for cloud sync", () => {
+  const pending = {
+    id: "pending-copy",
+    syncStatus: "sync_failed",
+    supplier: "TG Fruits",
+    documentType: "invoice",
+    documentNumber: "830571",
+    date: "2026-09-10",
+    sourceInvoiceTotal: 279.98,
+    items: [{ productName: "BEETROOT", quantity: 5, unitCost: 1.1, lineTotal: 5.5 }],
+  };
+  const assessment = assessPurchasingDocumentDuplicate([pending], { ...pending, id: "new-upload", syncStatus: undefined });
+  assert.equal(assessment.kind, "same_document");
+  assert.equal(assessment.existing.id, "pending-copy");
+});
+
+test("retrying the same pending invoice does not detect itself as a duplicate", () => {
+  const pending = {
+    id: "pending-copy",
+    syncStatus: "sync_failed",
+    supplier: "TG Fruits",
+    documentType: "invoice",
+    documentNumber: "830571",
+    date: "2026-09-10",
+    items: [{ productName: "BEETROOT", quantity: 5, unitCost: 1.1, lineTotal: 5.5 }],
+  };
+  assert.equal(assessPurchasingDocumentDuplicate([pending], pending).kind, "none");
+});
+
 test("same strong number with different content requires an explicit duplicate choice", () => {
   const existing = {
     id: "existing",

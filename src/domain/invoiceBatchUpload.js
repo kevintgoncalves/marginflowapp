@@ -404,6 +404,28 @@ export function batchItemStatusForInvoice(invoice = {}, validation = {}, { exist
   };
 }
 
+export function batchItemStatusAfterPersistence(persistence = {}, { now = () => new Date().toISOString() } = {}) {
+  const invoice = persistence.invoice || null;
+  if (!persistence.persisted && persistence.error) {
+    return {
+      status: BATCH_INVOICE_ITEM_STATUSES.FAILED,
+      statusLabel: "Sync failed",
+      failureStage: "sync",
+      invoice,
+      importedAt: "",
+      error: `Saved on this device, but cloud sync failed: ${persistence.error.message || "Unknown sync error"}`,
+    };
+  }
+  return {
+    status: BATCH_INVOICE_ITEM_STATUSES.IMPORTED,
+    statusLabel: "Imported",
+    failureStage: "",
+    invoice,
+    importedAt: now(),
+    error: "",
+  };
+}
+
 export function invoiceBatchSummary(batch = {}) {
   const items = batch.items || [];
   const count = (status) => items.filter((item) => item.status === status).length;
