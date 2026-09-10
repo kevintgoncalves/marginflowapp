@@ -6306,6 +6306,44 @@ button.icon {
   font-size: 15px;
   line-height: 1.25;
 }
+.read-only-field {
+  border-color: var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+.read-only-field span {
+  color: var(--muted);
+}
+.read-only-field strong {
+  color: var(--text);
+}
+.invoice-control-document-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.invoice-control-document-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.invoice-control-document-detail > .form-grid {
+  align-items: end;
+}
+.invoice-review-table thead th {
+  background: #f8f7f4;
+  box-shadow: 0 1px 0 var(--border-subtle);
+}
+.invoice-review-table th:first-child,
+.invoice-review-table td:first-child {
+  background: #ffffff;
+  box-shadow: 1px 0 0 var(--border-subtle);
+}
+.invoice-review-table thead th:first-child {
+  background: #f8f7f4;
+}
+.review-needed-row td,
+.review-needed-row td:first-child {
+  background: #fff9ed;
+}
 .invoice-review-modal .table-wrap {
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
@@ -7418,6 +7456,10 @@ button.icon {
 @media (max-width: 720px) {
   .invoice-review-modal .modal-footer {
     align-items: stretch;
+  }
+
+  .invoice-control-document-summary {
+    grid-template-columns: 1fr;
   }
 
   .invoice-review-modal .modal-footer > button {

@@ -10726,6 +10726,35 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
   );
 }
 
+function invoiceForControlEditor(invoice = {}, departmentNames = defaultDepartments) {
+  const documentType = documentTypeFor(invoice);
+  const documentNumber = documentNumberFor(invoice);
+  return {
+    ...invoice,
+    documentType,
+    document_type: documentType,
+    documentNumber,
+    document_number: documentNumber,
+    invoiceNumber: documentNumber || invoice.invoiceNumber,
+    items: (invoice.items || invoice.lines || []).map((item) => normalizeInvoiceLineForEditor({ ...item, id: item.id || uid() }, departmentNames)),
+  };
+}
+
+function invoiceDepartmentSummary(invoice = {}, departmentNames = defaultDepartments) {
+  const names = new Set();
+  (invoice.items || invoice.lines || []).forEach((item) => {
+    if (lineUsesSplitDepartmentMode(item, { departmentNames })) {
+      normalizedDepartmentSplits(item, departmentNames).forEach((split) => {
+        if (split.department) names.add(canonicalDepartmentName(split.department, split.department));
+      });
+      return;
+    }
+    const department = canonicalDepartmentName(item.department, item.department || "");
+    if (department) names.add(department);
+  });
+  return [...names].filter(Boolean).join(", ") || "No department set";
+}
+
 function InvoiceControlCentre({
   aiSettings = defaultAiSettings,
   companyId = "",
@@ -10762,6 +10791,8 @@ function InvoiceControlCentre({
   const [summaryMode, setSummaryMode] = useState("Purchases + GP");
   const [selectedCell, setSelectedCell] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
+  const [viewInvoiceStatus, setViewInvoiceStatus] = useState("");
+  const [viewInvoiceSaving, setViewInvoiceSaving] = useState(false);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
   const [reviewDetailDraft, setReviewDetailDraft] = useState(null);
   const [reviewDetailStatus, setReviewDetailStatus] = useState("");
@@ -10870,13 +10901,25 @@ function InvoiceControlCentre({
     setSelectedCell(null);
   };
 
+  const openControlInvoice = (invoice) => {
+    if (!invoice) return;
+    setViewInvoiceStatus("");
+    setViewInvoice(invoiceForControlEditor(invoice, departmentNames));
+  };
+
+  const closeControlInvoice = () => {
+    if (viewInvoiceSaving) return;
+    setViewInvoice(null);
+    setViewInvoiceStatus("");
+  };
+
   const openCell = (cell) => {
     if (cell.state === "received" && numberValue(cell.invoiceCount, 0) > 1) {
       setSelectedCell(cell);
       return;
     }
     if (cell.state === "received" && cell.invoice) {
-      setViewInvoice(cell.invoice);
+      openControlInvoice(cell.invoice);
       return;
     }
     setSelectedCell(cell);
@@ -11252,6 +11295,184 @@ function InvoiceControlCentre({
     }
   };
 
+  const updateControlInvoice = (field, value) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => {
+      if (!current) return current;
+      if (field === "documentType") {
+        const documentType = normalizeDocumentType(value);
+        const creditReason = normalizeCreditReason(current.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT);
+        return {
+          ...current,
+          documentType,
+          document_type: documentType,
+          creditReason: isCreditNoteDocument(documentType) ? creditReason : "",
+          credit_reason: isCreditNoteDocument(documentType) ? creditReason : "",
+          inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(current.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason)) : "",
+          inventory_effect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(current.inventoryEffect, defaultInventoryEffectForCreditReason(creditReason)) : "",
+          items: normalizeInvoiceItemsForDocument(current.items || [], documentType),
+        };
+      }
+      if (field === "documentNumber" || field === "invoiceNumber") {
+        return { ...current, documentNumber: value, document_number: value, invoiceNumber: value };
+      }
+      if (field === "creditReason") {
+        const creditReason = normalizeCreditReason(value);
+        return { ...current, creditReason, credit_reason: creditReason, inventoryEffect: defaultInventoryEffectForCreditReason(creditReason), inventory_effect: defaultInventoryEffectForCreditReason(creditReason) };
+      }
+      if (field === "inventoryEffect") {
+        const inventoryEffect = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
+        return { ...current, inventoryEffect, inventory_effect: inventoryEffect };
+      }
+      if (field !== "supplier") return { ...current, [field]: value };
+      return {
+        ...current,
+        supplier: value,
+        items: propagateInvoiceSupplierToLines(current.items || [], value, current.supplier),
+      };
+    });
+  };
+
+  const updateControlLine = (id, field, value) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => {
+      if (!current) return current;
+      const documentType = normalizeDocumentType(current.documentType || current.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      return {
+        ...current,
+        items: (current.items || []).map((item) => {
+          if (item.id !== id) return item;
+          const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
+          return isCreditNoteDocument(documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, documentType), departmentNames) : updated;
+        }),
+      };
+    });
+  };
+
+  const setControlDepartmentMode = (id, mode) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    } : current);
+  };
+
+  const updateControlSplit = (id, splitIndex, field, value) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
+    } : current);
+  };
+
+  const addControlSplit = (id) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
+    } : current);
+  };
+
+  const removeControlSplit = (id, splitIndex) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
+    } : current);
+  };
+
+  const addControlLine = () => {
+    const supplier = viewInvoice?.supplier || activeSuppliers[0]?.name || "Unknown Supplier";
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: [
+        ...(current.items || []),
+        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made"),
+      ],
+    } : current);
+  };
+
+  const removeControlLine = (id) => {
+    setViewInvoiceStatus("");
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).filter((line) => line.id !== id),
+    } : current);
+  };
+
+  const saveControlInvoice = async () => {
+    if (!permissions.canEdit || !viewInvoice || viewInvoiceSaving) return;
+    setViewInvoiceSaving(true);
+    setViewInvoiceStatus("");
+    try {
+      const supplierRecord = canonicalSupplierForName(suppliers, viewInvoice.supplier || viewInvoice.items?.[0]?.supplier);
+      const supplier = supplierRecord?.name || viewInvoice.supplier || viewInvoice.items?.[0]?.supplier || "Unknown Supplier";
+      const documentType = normalizeDocumentType(viewInvoice.documentType || viewInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
+      const documentNumber = documentNumberFor(viewInvoice);
+      const items = (viewInvoice.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+      const validation = validateInvoiceLinesForApproval(items, {
+        documentType,
+        splitValidator: splitIsValid,
+        netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
+      });
+      if (!validation.valid) {
+        setViewInvoiceStatus(validation.errors[0] || `Review ${purchasingDocumentNoun(documentType)} lines before saving.`);
+        return;
+      }
+      if (items.some((item) => !splitIsValid(item))) {
+        setViewInvoiceStatus("Department split must total 100% before saving.");
+        return;
+      }
+      const cleaned = prepareApprovedInvoice({
+        ...viewInvoice,
+        supplier,
+        supplierId: supplierRecord?.relationalId || supplierRecord?.id || viewInvoice.supplierId || "",
+        documentType,
+        document_type: documentType,
+        documentNumber,
+        document_number: documentNumber,
+        invoiceNumber: documentNumber,
+        creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(viewInvoice.creditReason) : "",
+        credit_reason: isCreditNoteDocument(documentType) ? normalizeCreditReason(viewInvoice.creditReason) : "",
+        inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(viewInvoice.inventoryEffect, defaultInventoryEffectForCreditReason(viewInvoice.creditReason)) : "",
+        inventory_effect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(viewInvoice.inventoryEffect, defaultInventoryEffectForCreditReason(viewInvoice.creditReason)) : "",
+        status: viewInvoice.status || "Approved",
+        items,
+      });
+      const persistence = await persistInvoiceDocument(cleaned, { forceUpdate: true });
+      if (persistence.cancelled) {
+        setViewInvoiceStatus("Save cancelled. The invoice was not changed.");
+        return;
+      }
+      const savedInvoice = persistence.invoice || cleaned;
+      setInvoices((current) => replaceInvoiceInCollection(current, persistence.sourceInvoiceId || viewInvoice.id, savedInvoice));
+      setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
+      setSuppliers((current) => ensureSupplierList(current, supplier));
+      setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice));
+      const learningResult = learnSupplierProductMappings({
+        mappings: supplierProductMappings,
+        invoice: savedInvoice,
+        products,
+        companyId,
+        locationId,
+        supplierId: supplierRecord?.id || "",
+        supplierName: supplier,
+        departments: departmentSettings,
+        storageTarget: companyId ? "relational+snapshot" : "snapshot",
+      });
+      setSupplierProductMappings(learningResult.mappings);
+      setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
+      await persistInvoiceLearning(learningResult.learned);
+      setViewInvoice(invoiceForControlEditor(savedInvoice, departmentNames));
+      setViewInvoiceStatus(persistence.error ? "Invoice saved on this device. Cloud sync will retry." : "Invoice saved.");
+    } catch (error) {
+      setViewInvoiceStatus(error.message || "Could not save this invoice.");
+    } finally {
+      setViewInvoiceSaving(false);
+    }
+  };
+
   const applySuggestedSchedule = (supplier, suggestedDays) => {
     if (!permissions.canEdit) return;
     setSupplierDeliverySchedules((current) => upsertSupplierSchedule(current, supplier, {
@@ -11328,6 +11549,11 @@ function InvoiceControlCentre({
     status: invoice.status || "-",
   }));
   const selectedCellHasInvoices = selectedCellInvoiceRows.length > 0;
+  const viewInvoiceDocumentType = viewInvoice ? normalizeDocumentType(viewInvoice.documentType || viewInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
+  const viewInvoiceDocumentNumber = viewInvoice ? documentNumberFor(viewInvoice) : "";
+  const viewInvoiceStatusTone = /could not|failed|must|choose|duplicate|found|required|resolve|before saving|cancelled/i.test(viewInvoiceStatus) ? "warn" : "success";
+  const viewInvoiceDepartmentText = viewInvoice ? invoiceDepartmentSummary(viewInvoice, departmentNames) : "";
+  const viewInvoiceSourceText = viewInvoice?.source || viewInvoice?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
 
   return (
     <div className="page-grid invoice-control-page">
@@ -11712,7 +11938,7 @@ function InvoiceControlCentre({
                   onRowClick={(row) => {
                     if (!row.invoice) return;
                     setSelectedCell(null);
-                    setViewInvoice(row.invoice);
+                    openControlInvoice(row.invoice);
                   }}
                   rows={selectedCellInvoiceRows}
                 />
@@ -11726,29 +11952,75 @@ function InvoiceControlCentre({
 
       {viewInvoice && (
         <AppModal
-          footer={<button onClick={() => setViewInvoice(null)} type="button">Close</button>}
-          onClose={() => setViewInvoice(null)}
+          className="invoice-control-document-modal invoice-review-modal"
+          footer={(
+            <>
+              <button className="ghost" disabled={viewInvoiceSaving} onClick={closeControlInvoice} type="button">Close</button>
+              {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={saveControlInvoice} type="button"><Save size={16} />{viewInvoiceSaving ? "Saving..." : "Save changes"}</button>}
+            </>
+          )}
+          onClose={closeControlInvoice}
           open={Boolean(viewInvoice)}
-          title={`${documentTypeLabel(documentTypeFor(viewInvoice))} ${documentNumberFor(viewInvoice) || ""}`}
+          title={`${documentTypeLabel(viewInvoiceDocumentType)} ${viewInvoiceDocumentNumber || ""}`}
           wide
         >
-          <div className="modal-stack">
+          <div className="modal-stack invoice-control-document-detail">
+            {viewInvoiceStatus && <div className={`invoice-status ${viewInvoiceStatusTone}`}>{viewInvoiceStatus}</div>}
             <div className="form-grid six">
-              <div className="read-only-field"><span>Supplier</span><strong>{viewInvoice.supplier}</strong></div>
-              <div className="read-only-field"><span>Date</span><strong>{formatRangeDate(viewInvoice.date)}</strong></div>
-              <div className="read-only-field"><span>Signed total</span><strong>{money(invoiceTotal(viewInvoice))}</strong></div>
-              {isCreditNoteDocument(documentTypeFor(viewInvoice)) && <div className="read-only-field"><span>Treatment</span><strong>{inventoryEffectLabel(viewInvoice.inventoryEffect || viewInvoice.inventory_effect)}</strong></div>}
+              <SupplierSelector id="supplier-list-invoice-control-document" suppliers={suppliers} value={viewInvoice.supplier || ""} onChange={(value) => updateControlInvoice("supplier", value)} />
+              <label>Document type<select value={viewInvoiceDocumentType} onChange={(event) => updateControlInvoice("documentType", event.target.value)}>
+                {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select></label>
+              <label>Document number<input value={viewInvoiceDocumentNumber} onChange={(event) => updateControlInvoice("documentNumber", event.target.value)} /></label>
+              <label>Date<input type="date" value={viewInvoice.date || today()} onChange={(event) => updateControlInvoice("date", event.target.value)} /></label>
+              <Field label="Signed total" readOnly value={money(invoiceTotal(viewInvoice))} />
             </div>
-            <DataTable
-              columns={[
-                { key: "productName", label: "Product" },
-                { key: "packSize", label: "Pack" },
-                { key: "quantity", label: "Qty" },
-                { key: "unitCost", label: isCreditNoteDocument(documentTypeFor(viewInvoice)) ? "Unit credit" : "Unit cost", render: money },
-                { key: "netLineTotal", label: isCreditNoteDocument(documentTypeFor(viewInvoice)) ? "Line credit" : "Net", render: (_, row) => money(signedLineTotal(row, viewInvoice)) },
-              ]}
-              rows={(viewInvoice.items || []).map((item) => ({ ...item, id: item.id || `${item.productName}-${item.packSize}` }))}
-            />
+            <div className="invoice-review-modal-summary invoice-control-document-summary">
+              <div><span>Department(s)</span><strong>{viewInvoiceDepartmentText}</strong></div>
+              <div><span>Lines</span><strong>{(viewInvoice.items || []).length}</strong></div>
+              <div><span>Source</span><strong>{viewInvoiceSourceText}</strong></div>
+            </div>
+            {isCreditNoteDocument(viewInvoiceDocumentType) && (
+              <div className="credit-note-summary compact">
+                <div><Badge tone="amber">{documentTypeBadgeLabel(viewInvoiceDocumentType)}</Badge><strong>{viewInvoiceDocumentNumber || "Document number needed"}</strong></div>
+                <div className="form-grid four compact-form">
+                  <label>Credit reason<select value={normalizeCreditReason(viewInvoice.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => updateControlInvoice("creditReason", event.target.value)}>
+                    {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Credit treatment<select value={normalizeInventoryEffect(viewInvoice.inventoryEffect, INVENTORY_EFFECTS.FINANCIAL_ONLY)} onChange={(event) => updateControlInvoice("inventoryEffect", event.target.value)}>
+                    {inventoryEffectOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select></label>
+                  <label>Original invoice number<input value={viewInvoice.originalInvoiceNumber || ""} onChange={(event) => setViewInvoice((current) => ({ ...current, originalInvoiceNumber: event.target.value, original_invoice_number: event.target.value }))} /></label>
+                </div>
+              </div>
+            )}
+            {(viewInvoice.items || []).length ? (
+              <>
+                <div className="invoice-review-lines-heading">
+                  <strong>Invoice lines</strong>
+                  {permissions.canEdit && <button className="ghost" onClick={addControlLine} type="button"><Plus size={16} />Add line</button>}
+                </div>
+                <InvoiceLineEditor
+                  addSplit={addControlSplit}
+                  departmentNames={departmentNames}
+                  documentType={viewInvoiceDocumentType}
+                  items={viewInvoice.items || []}
+                  products={products}
+                  removeLine={removeControlLine}
+                  removeSplit={removeControlSplit}
+                  setDepartmentMode={setControlDepartmentMode}
+                  updateLine={updateControlLine}
+                  updateSplit={updateControlSplit}
+                  wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+                />
+              </>
+            ) : (
+              <div className="invoice-review-empty-lines">
+                <strong>No invoice lines were saved</strong>
+                <span>Add at least one line to assign this document to a department and include it correctly in GP.</span>
+                {permissions.canEdit && <button onClick={addControlLine} type="button"><Plus size={16} />Add first line</button>}
+              </div>
+            )}
           </div>
         </AppModal>
       )}
