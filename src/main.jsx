@@ -7968,6 +7968,7 @@ function Invoices({
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
+  const [editSaveStatus, setEditSaveStatus] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
   const [manualMode, setManualMode] = useState("Simple Mode");
   const [manualSaveStatus, setManualSaveStatus] = useState("");
@@ -9711,16 +9712,14 @@ function Invoices({
 
   const openEditInvoice = (invoice) => {
     if (!permissions.canEdit) return;
-    setEditDraft({
-      ...invoice,
-      documentType: documentTypeFor(invoice),
-      documentNumber: documentNumberFor(invoice),
-      items: (invoice.items || []).map((item) => ({ ...item, id: item.id || uid() })),
-    });
+    setEditSaveStatus("");
+    setEditDraft(invoiceForControlEditor(invoice, departmentNames));
   };
 
   const updateEditInvoice = (field, value) => {
+    setEditSaveStatus("");
     setEditDraft((current) => {
+      if (!current) return current;
       if (field === "documentType") {
         const documentType = normalizeDocumentType(value);
         const creditReason = normalizeCreditReason(current.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT);
@@ -9736,6 +9735,24 @@ function Invoices({
       if (field === "documentNumber" || field === "invoiceNumber") {
         return { ...current, documentNumber: value, document_number: value, invoiceNumber: value };
       }
+      if (field === "manualDepartment") {
+        return { ...current, manualDepartment: value, department: value };
+      }
+      if (field === "manualTotal") {
+        const total = Math.abs(numberValue(value, 0));
+        return {
+          ...current,
+          manualTotal: value,
+          total,
+          totalAmount: total,
+          total_amount: total,
+          invoiceTotal: total,
+          sourceInvoiceTotal: total,
+          finalInvoiceTotal: total,
+          absoluteNetTotal: total,
+          absolute_net_total: total,
+        };
+      }
       if (field !== "supplier") return { ...current, [field]: value };
       return {
         ...current,
@@ -9746,6 +9763,7 @@ function Invoices({
   };
 
   const updateEditLine = (id, field, value) => {
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: (current.items || []).map((item) => {
@@ -9757,6 +9775,7 @@ function Invoices({
   };
 
   const setEditDepartmentMode = (id, mode) => {
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: (current.items || []).map((item) => item.id === id ? setInvoiceLineDepartmentMode(item, mode, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
@@ -9764,6 +9783,7 @@ function Invoices({
   };
 
   const updateEditSplit = (id, splitIndex, field, value) => {
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: (current.items || []).map((item) => item.id === id ? updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames) : item),
@@ -9771,6 +9791,7 @@ function Invoices({
   };
 
   const addEditSplit = (id) => {
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: (current.items || []).map((item) => item.id === id ? addInvoiceLineSplit(item, departmentNames) : item),
@@ -9778,6 +9799,7 @@ function Invoices({
   };
 
   const removeEditSplit = (id, splitIndex) => {
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: (current.items || []).map((item) => item.id === id ? removeInvoiceLineSplit(item, splitIndex, departmentNames, invoiceSettings.defaultInvoiceDepartment) : item),
@@ -9786,11 +9808,21 @@ function Invoices({
 
   const addEditLine = () => {
     const supplier = editDraft?.supplier || visibleSuppliers[0]?.name || "Unknown Supplier";
+    const department = documentHeaderDepartment(editDraft, departmentNames) || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+    setEditSaveStatus("");
     setEditDraft((current) => ({
       ...current,
       items: [
         ...(current.items || []),
-        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment),
+        (current.items || []).length
+          ? emptyInvoiceLine(supplier, department)
+          : {
+            ...emptyInvoiceLine(supplier, department),
+            productName: isCreditNoteDocument(editDraftDocumentType) ? "Manual credit note total" : "Manual invoice total",
+            unitCost: storedDocumentTotalValue(current),
+            lineTotal: storedDocumentTotalValue(current),
+            matchStatus: isCreditNoteDocument(editDraftDocumentType) ? "Manual credit note" : "Manual invoice",
+          },
       ],
     }));
   };
@@ -9798,18 +9830,47 @@ function Invoices({
   const saveEditInvoice = async () => {
     if (!permissions.canEdit) return;
     if (!editDraft) return;
+    setEditSaveStatus("");
     const supplierRecord = canonicalSupplierForName(suppliers, editDraft.supplier || editDraft.items?.[0]?.supplier);
     const supplier = supplierRecord?.name || editDraft.supplier || editDraft.items?.[0]?.supplier || "Unknown Supplier";
     const documentType = normalizeDocumentType(editDraft.documentType || editDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
     const documentNumber = documentNumberFor(editDraft);
-    const items = (editDraft.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+    const headerOnly = !(editDraft.items || []).length;
+    const manualDepartment = documentHeaderDepartment(editDraft, departmentNames);
+    const manualTotal = storedDocumentTotalValue(editDraft);
+    if (headerOnly && !manualDepartment) {
+      setEditSaveStatus("Choose a department before saving this manual invoice.");
+      return;
+    }
+    if (headerOnly && manualTotal <= 0) {
+      setEditSaveStatus("Enter a total before saving this manual invoice.");
+      return;
+    }
+    const sourceItems = headerOnly
+      ? [{
+        ...emptyInvoiceLine(supplier, manualDepartment),
+        productName: isCreditNoteDocument(documentType) ? "Manual credit note total" : "Manual invoice total",
+        quantity: 1,
+        unitCost: manualTotal,
+        lineTotal: manualTotal,
+        matchStatus: isCreditNoteDocument(documentType) ? "Manual credit note" : "Manual invoice",
+        productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+      }]
+      : editDraft.items || [];
+    const items = sourceItems.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDepartment || invoiceSettings.defaultInvoiceDepartment, documentType));
     const validation = validateInvoiceLinesForApproval(items, {
       documentType,
       splitValidator: splitIsValid,
       netTotalForLine: (line) => invoiceEditorNetLineTotal(line),
     });
-    if (!validation.valid) return;
-    if (items.some((item) => !splitIsValid(item))) return;
+    if (!validation.valid) {
+      setEditSaveStatus(validation.errors[0] || "Review invoice lines before saving.");
+      return;
+    }
+    if (items.some((item) => !splitIsValid(item))) {
+      setEditSaveStatus("Department split must total 100% before saving.");
+      return;
+    }
     const cleaned = prepareApprovedInvoice({
       ...editDraft,
       supplier,
@@ -9821,6 +9882,11 @@ function Invoices({
       invoiceNumber: documentNumber,
       creditReason: isCreditNoteDocument(documentType) ? normalizeCreditReason(editDraft.creditReason) : "",
       inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(editDraft.inventoryEffect, defaultInventoryEffectForCreditReason(editDraft.creditReason)) : "",
+      department: manualDepartment || editDraft.department || items[0]?.department || "",
+      manualDepartment: manualDepartment || editDraft.manualDepartment || "",
+      sourceInvoiceTotal: headerOnly ? manualTotal : editDraft.sourceInvoiceTotal,
+      invoiceTotal: headerOnly ? manualTotal : editDraft.invoiceTotal,
+      total: headerOnly ? manualTotal : editDraft.total,
       status: editDraft.status || "Approved",
       items,
     });
@@ -9888,6 +9954,13 @@ function Invoices({
       error: item.error || "",
     };
   });
+  const editDraftDocumentType = editDraft ? normalizeDocumentType(editDraft.documentType || editDraft.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
+  const editDraftDocumentNumber = editDraft ? documentNumberFor(editDraft) : "";
+  const editDraftHasLines = Boolean(editDraft?.items?.length);
+  const editDraftManualDepartment = editDraft ? documentHeaderDepartment(editDraft, departmentNames) : "";
+  const editDraftManualTotal = editDraft ? storedDocumentTotalValue(editDraft) : 0;
+  const editDraftDepartmentText = editDraft ? invoiceDepartmentSummary(editDraft, departmentNames) : "";
+  const editDraftSourceText = editDraft?.source || editDraft?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
 
   useEffect(() => {
     if (uploadRequest?.id) setUploadModalOpen(true);
@@ -10318,18 +10391,34 @@ function Invoices({
       >
         {editDraft && (
           <div className="modal-stack">
+            {editSaveStatus && <div className="invoice-status warn">{editSaveStatus}</div>}
             <div className="form-grid six">
               <SupplierSelector id="supplier-list-edit" suppliers={suppliers} value={editDraft.supplier || ""} onChange={(value) => updateEditInvoice("supplier", value)} />
-              <label>Document type<select value={normalizeDocumentType(editDraft.documentType || editDraft.document_type)} onChange={(event) => updateEditInvoice("documentType", event.target.value)}>
+              <label>Document type<select value={editDraftDocumentType} onChange={(event) => updateEditInvoice("documentType", event.target.value)}>
                 {purchasingDocumentTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select></label>
-              <label>Document number<input value={documentNumberFor(editDraft)} onChange={(event) => updateEditInvoice("documentNumber", event.target.value)} /></label>
+              <label>Document number<input value={editDraftDocumentNumber} onChange={(event) => updateEditInvoice("documentNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={editDraft.date || today()} onChange={(event) => updateEditInvoice("date", event.target.value)} /></label>
-              <Field label="Signed total" readOnly value={money(invoiceTotal(editDraft))} />
+              {!editDraftHasLines && (
+                <label>Department<select value={editDraftManualDepartment} onChange={(event) => updateEditInvoice("manualDepartment", event.target.value)}>
+                  <option value="">Select department</option>
+                  {departmentNames.map((dept) => <option key={dept}>{dept}</option>)}
+                </select></label>
+              )}
+              {editDraftHasLines ? (
+                <Field label="Signed total" readOnly value={money(invoiceTotal(editDraft))} />
+              ) : (
+                <label>Total<input min="0" step="0.01" type="number" value={editDraftManualTotal} onChange={(event) => updateEditInvoice("manualTotal", event.target.value)} /></label>
+              )}
             </div>
-            {isCreditNoteDocument(editDraft.documentType || editDraft.document_type) && (
+            <div className="invoice-review-modal-summary invoice-control-document-summary">
+              <div><span>Department(s)</span><strong>{editDraftDepartmentText}</strong></div>
+              <div><span>Lines</span><strong>{(editDraft.items || []).length}</strong></div>
+              <div><span>Source</span><strong>{editDraftSourceText}</strong></div>
+            </div>
+            {isCreditNoteDocument(editDraftDocumentType) && (
               <div className="credit-note-summary compact">
-                <div><Badge tone="amber">{documentTypeBadgeLabel(editDraft.documentType)}</Badge><strong>{documentNumberFor(editDraft)}</strong></div>
+                <div><Badge tone="amber">{documentTypeBadgeLabel(editDraftDocumentType)}</Badge><strong>{editDraftDocumentNumber}</strong></div>
                 <div className="form-grid four compact-form">
                   <label>Credit reason<select value={normalizeCreditReason(editDraft.creditReason || CREDIT_REASONS.PRICE_ADJUSTMENT)} onChange={(event) => setEditDraft((current) => ({ ...current, creditReason: normalizeCreditReason(event.target.value), inventoryEffect: defaultInventoryEffectForCreditReason(event.target.value) }))}>
                     {creditReasonOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -10341,20 +10430,30 @@ function Invoices({
                 </div>
               </div>
             )}
-            <InvoiceLineEditor
-              addSplit={addEditSplit}
-              documentType={normalizeDocumentType(editDraft.documentType || editDraft.document_type)}
-              departmentNames={departmentNames}
-              items={editDraft.items || []}
-              products={products}
-              removeLine={(id) => setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== id) }))}
-              removeSplit={removeEditSplit}
-              setDepartmentMode={setEditDepartmentMode}
-              updateLine={updateEditLine}
-              updateSplit={updateEditSplit}
-              wrapClassName="table-wrap modal-table invoice-review-table-wrap"
-            />
-            <div className="button-row left tight"><button className="ghost" onClick={addEditLine} type="button"><Plus size={16} />Add line</button></div>
+            {editDraftHasLines ? (
+              <>
+                <InvoiceLineEditor
+                  addSplit={addEditSplit}
+                  documentType={editDraftDocumentType}
+                  departmentNames={departmentNames}
+                  items={editDraft.items || []}
+                  products={products}
+                  removeLine={(id) => { setEditSaveStatus(""); setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== id) })); }}
+                  removeSplit={removeEditSplit}
+                  setDepartmentMode={setEditDepartmentMode}
+                  updateLine={updateEditLine}
+                  updateSplit={updateEditSplit}
+                  wrapClassName="table-wrap modal-table invoice-review-table-wrap"
+                />
+                <div className="button-row left tight"><button className="ghost" onClick={addEditLine} type="button"><Plus size={16} />Add line</button></div>
+              </>
+            ) : (
+              <div className="invoice-review-empty-lines">
+                <strong>Simple manual invoice</strong>
+                <span>Use the department and total fields above, or add product lines if this invoice needs more detail.</span>
+                {permissions.canEdit && <button onClick={addEditLine} type="button"><Plus size={16} />Add detailed line</button>}
+              </div>
+            )}
           </div>
         )}
       </AppModal>
@@ -10726,9 +10825,47 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
   );
 }
 
+function storedDocumentTotalValue(invoice = {}) {
+  const candidates = [
+    invoice.absoluteNetTotal,
+    invoice.absolute_net_total,
+    invoice.finalInvoiceTotal,
+    invoice.sourceInvoiceTotal,
+    invoice.invoiceTotal,
+    invoice.totalAmount,
+    invoice.total_amount,
+    invoice.total,
+  ];
+  const calculated = Math.abs(invoiceTotal(invoice));
+  const numericCandidates = candidates
+    .filter((value) => value !== undefined && value !== null && value !== "")
+    .map((value) => Math.abs(numberValue(value, 0)));
+  const stored = numericCandidates.find((value) => value > 0.001)
+    ?? (calculated > 0.001 ? calculated : numericCandidates[0])
+    ?? 0;
+  return Number(stored.toFixed(2));
+}
+
+function documentHeaderDepartment(invoice = {}, departmentNames = defaultDepartments) {
+  const candidates = [
+    invoice.manualDepartment,
+    invoice.department,
+    invoice.departmentName,
+    invoice.department_name,
+    invoice.defaultDepartment,
+    invoice.default_department,
+  ];
+  const matched = candidates
+    .map((value) => canonicalDepartmentName(value, ""))
+    .find((department) => departmentNames.includes(department));
+  return matched || "";
+}
+
 function invoiceForControlEditor(invoice = {}, departmentNames = defaultDepartments) {
   const documentType = documentTypeFor(invoice);
   const documentNumber = documentNumberFor(invoice);
+  const manualDepartment = documentHeaderDepartment(invoice, departmentNames);
+  const manualTotal = storedDocumentTotalValue(invoice);
   return {
     ...invoice,
     documentType,
@@ -10736,12 +10873,17 @@ function invoiceForControlEditor(invoice = {}, departmentNames = defaultDepartme
     documentNumber,
     document_number: documentNumber,
     invoiceNumber: documentNumber || invoice.invoiceNumber,
+    department: manualDepartment || invoice.department || "",
+    manualDepartment,
+    manualTotal,
     items: (invoice.items || invoice.lines || []).map((item) => normalizeInvoiceLineForEditor({ ...item, id: item.id || uid() }, departmentNames)),
   };
 }
 
 function invoiceDepartmentSummary(invoice = {}, departmentNames = defaultDepartments) {
   const names = new Set();
+  const headerDepartment = documentHeaderDepartment(invoice, departmentNames);
+  if (headerDepartment) names.add(headerDepartment);
   (invoice.items || invoice.lines || []).forEach((item) => {
     if (lineUsesSplitDepartmentMode(item, { departmentNames })) {
       normalizedDepartmentSplits(item, departmentNames).forEach((split) => {
@@ -11324,6 +11466,24 @@ function InvoiceControlCentre({
         const inventoryEffect = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
         return { ...current, inventoryEffect, inventory_effect: inventoryEffect };
       }
+      if (field === "manualDepartment") {
+        return { ...current, manualDepartment: value, department: value };
+      }
+      if (field === "manualTotal") {
+        const total = Math.abs(numberValue(value, 0));
+        return {
+          ...current,
+          manualTotal: value,
+          total,
+          totalAmount: total,
+          total_amount: total,
+          invoiceTotal: total,
+          sourceInvoiceTotal: total,
+          finalInvoiceTotal: total,
+          absoluteNetTotal: total,
+          absolute_net_total: total,
+        };
+      }
       if (field !== "supplier") return { ...current, [field]: value };
       return {
         ...current,
@@ -11383,12 +11543,21 @@ function InvoiceControlCentre({
 
   const addControlLine = () => {
     const supplier = viewInvoice?.supplier || activeSuppliers[0]?.name || "Unknown Supplier";
+    const department = documentHeaderDepartment(viewInvoice, departmentNames) || invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
     setViewInvoiceStatus("");
     setViewInvoice((current) => current ? {
       ...current,
       items: [
         ...(current.items || []),
-        emptyInvoiceLine(supplier, invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made"),
+        (current.items || []).length
+          ? emptyInvoiceLine(supplier, department)
+          : {
+            ...emptyInvoiceLine(supplier, department),
+            productName: isCreditNoteDocument(viewInvoiceDocumentType) ? "Manual credit note total" : "Manual invoice total",
+            unitCost: storedDocumentTotalValue(current),
+            lineTotal: storedDocumentTotalValue(current),
+            matchStatus: isCreditNoteDocument(viewInvoiceDocumentType) ? "Manual credit note" : "Manual invoice",
+          },
       ],
     } : current);
   };
@@ -11410,7 +11579,29 @@ function InvoiceControlCentre({
       const supplier = supplierRecord?.name || viewInvoice.supplier || viewInvoice.items?.[0]?.supplier || "Unknown Supplier";
       const documentType = normalizeDocumentType(viewInvoice.documentType || viewInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE);
       const documentNumber = documentNumberFor(viewInvoice);
-      const items = (viewInvoice.items || []).map((item) => normalizeInvoiceLineForSave(item, supplier, invoiceSettings.defaultInvoiceDepartment, documentType));
+      const headerOnly = !(viewInvoice.items || []).length;
+      const manualDepartment = documentHeaderDepartment(viewInvoice, departmentNames);
+      const manualTotal = storedDocumentTotalValue(viewInvoice);
+      if (headerOnly && !manualDepartment) {
+        setViewInvoiceStatus("Choose a department before saving this manual invoice.");
+        return;
+      }
+      if (headerOnly && manualTotal <= 0) {
+        setViewInvoiceStatus("Enter a total before saving this manual invoice.");
+        return;
+      }
+      const sourceItems = headerOnly
+        ? [{
+          ...emptyInvoiceLine(supplier, manualDepartment),
+          productName: isCreditNoteDocument(documentType) ? "Manual credit note total" : "Manual invoice total",
+          quantity: 1,
+          unitCost: manualTotal,
+          lineTotal: manualTotal,
+          matchStatus: isCreditNoteDocument(documentType) ? "Manual credit note" : "Manual invoice",
+          productResolution: PRODUCT_RESOLUTION_MODES.UNRESOLVED,
+        }]
+        : viewInvoice.items || [];
+      const items = sourceItems.map((item) => normalizeInvoiceLineForSave(item, supplier, manualDepartment || invoiceSettings.defaultInvoiceDepartment, documentType));
       const validation = validateInvoiceLinesForApproval(items, {
         documentType,
         splitValidator: splitIsValid,
@@ -11437,6 +11628,11 @@ function InvoiceControlCentre({
         credit_reason: isCreditNoteDocument(documentType) ? normalizeCreditReason(viewInvoice.creditReason) : "",
         inventoryEffect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(viewInvoice.inventoryEffect, defaultInventoryEffectForCreditReason(viewInvoice.creditReason)) : "",
         inventory_effect: isCreditNoteDocument(documentType) ? normalizeInventoryEffect(viewInvoice.inventoryEffect, defaultInventoryEffectForCreditReason(viewInvoice.creditReason)) : "",
+        department: manualDepartment || viewInvoice.department || items[0]?.department || "",
+        manualDepartment: manualDepartment || viewInvoice.manualDepartment || "",
+        sourceInvoiceTotal: headerOnly ? manualTotal : viewInvoice.sourceInvoiceTotal,
+        invoiceTotal: headerOnly ? manualTotal : viewInvoice.invoiceTotal,
+        total: headerOnly ? manualTotal : viewInvoice.total,
         status: viewInvoice.status || "Approved",
         items,
       });
@@ -11554,6 +11750,9 @@ function InvoiceControlCentre({
   const viewInvoiceStatusTone = /could not|failed|must|choose|duplicate|found|required|resolve|before saving|cancelled/i.test(viewInvoiceStatus) ? "warn" : "success";
   const viewInvoiceDepartmentText = viewInvoice ? invoiceDepartmentSummary(viewInvoice, departmentNames) : "";
   const viewInvoiceSourceText = viewInvoice?.source || viewInvoice?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
+  const viewInvoiceHasLines = Boolean(viewInvoice?.items?.length);
+  const viewInvoiceManualDepartment = viewInvoice ? documentHeaderDepartment(viewInvoice, departmentNames) : "";
+  const viewInvoiceManualTotal = viewInvoice ? storedDocumentTotalValue(viewInvoice) : 0;
 
   return (
     <div className="page-grid invoice-control-page">
@@ -11973,7 +12172,17 @@ function InvoiceControlCentre({
               </select></label>
               <label>Document number<input value={viewInvoiceDocumentNumber} onChange={(event) => updateControlInvoice("documentNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={viewInvoice.date || today()} onChange={(event) => updateControlInvoice("date", event.target.value)} /></label>
-              <Field label="Signed total" readOnly value={money(invoiceTotal(viewInvoice))} />
+              {!viewInvoiceHasLines && (
+                <label>Department<select value={viewInvoiceManualDepartment} onChange={(event) => updateControlInvoice("manualDepartment", event.target.value)}>
+                  <option value="">Select department</option>
+                  {departmentNames.map((dept) => <option key={dept}>{dept}</option>)}
+                </select></label>
+              )}
+              {viewInvoiceHasLines ? (
+                <Field label="Signed total" readOnly value={money(invoiceTotal(viewInvoice))} />
+              ) : (
+                <label>Total<input min="0" step="0.01" type="number" value={viewInvoiceManualTotal} onChange={(event) => updateControlInvoice("manualTotal", event.target.value)} /></label>
+              )}
             </div>
             <div className="invoice-review-modal-summary invoice-control-document-summary">
               <div><span>Department(s)</span><strong>{viewInvoiceDepartmentText}</strong></div>
@@ -12016,9 +12225,9 @@ function InvoiceControlCentre({
               </>
             ) : (
               <div className="invoice-review-empty-lines">
-                <strong>No invoice lines were saved</strong>
-                <span>Add at least one line to assign this document to a department and include it correctly in GP.</span>
-                {permissions.canEdit && <button onClick={addControlLine} type="button"><Plus size={16} />Add first line</button>}
+                <strong>Simple manual invoice</strong>
+                <span>Use the department and total fields above, or add product lines if this invoice needs more detail.</span>
+                {permissions.canEdit && <button onClick={addControlLine} type="button"><Plus size={16} />Add detailed line</button>}
               </div>
             )}
           </div>
