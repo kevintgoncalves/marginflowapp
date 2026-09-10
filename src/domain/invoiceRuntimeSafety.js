@@ -14,19 +14,58 @@ function readableText(value, fallback = "") {
 
 function runtimeInvoiceLine(line = {}) {
   if (!isRecord(line)) return null;
-  const departmentSplits = Array.isArray(line.departmentSplits)
+  const departmentSplits = (Array.isArray(line.departmentSplits)
     ? line.departmentSplits
-    : (Array.isArray(line.department_splits) ? line.department_splits : []);
+    : (Array.isArray(line.department_splits) ? line.department_splits : []))
+    .filter(isRecord)
+    .map((split) => ({
+      ...split,
+      id: readableText(split.id),
+      department: readableText(split.department),
+      departmentId: readableText(split.departmentId ?? split.department_id),
+    }));
+  const suggestedProducts = recordArray(line.suggestedProducts).map((product) => ({
+    ...product,
+    id: readableText(product.id),
+    name: readableText(product.name ?? product.productName ?? product.product_name, "Unnamed product"),
+  }));
+  const duplicateProductCandidates = recordArray(line.duplicateProductCandidates).map((product) => ({
+    ...product,
+    id: readableText(product.id),
+    name: readableText(product.name ?? product.productName ?? product.product_name, "Unnamed product"),
+  }));
+  const automaticProductMatch = isRecord(line.automaticProductMatch) ? {
+    ...line.automaticProductMatch,
+    productId: readableText(line.automaticProductMatch.productId ?? line.automaticProductMatch.matchedProductId),
+    productName: readableText(line.automaticProductMatch.productName ?? line.automaticProductMatch.matchedProductName),
+  } : null;
   return {
     ...line,
+    id: readableText(line.id),
     productName: readableText(line.productName ?? line.product_name ?? line.rawDescription),
+    rawDescription: readableText(line.rawDescription ?? line.raw_description ?? line.productName),
     supplier: readableText(line.supplier),
+    supplierId: readableText(line.supplierId ?? line.supplier_id),
+    supplierProductCode: readableText(line.supplierProductCode ?? line.supplier_product_code),
     packSize: readableText(line.packSize ?? line.pack_size),
     department: readableText(line.department),
+    departmentId: readableText(line.departmentId ?? line.department_id),
     status: readableText(line.status, "Received"),
-    reviewReasons: Array.isArray(line.reviewReasons) ? line.reviewReasons : [],
-    suggestedProducts: Array.isArray(line.suggestedProducts) ? line.suggestedProducts : [],
-    departmentSplits: departmentSplits.filter(isRecord),
+    lineStatus: readableText(line.lineStatus ?? line.line_status, readableText(line.status, "Received")),
+    matchedProductId: readableText(line.matchedProductId ?? line.matched_product_id),
+    matchedProductName: readableText(line.matchedProductName ?? line.matched_product_name),
+    suggestedProductId: readableText(line.suggestedProductId ?? line.suggested_product_id),
+    suggestedProductName: readableText(line.suggestedProductName ?? line.suggested_product_name),
+    productResolution: readableText(line.productResolution ?? line.product_resolution),
+    productMatchSource: readableText(line.productMatchSource ?? line.product_match_source),
+    matchStatus: readableText(line.matchStatus ?? line.match_status),
+    allocationSource: readableText(line.allocationSource ?? line.allocation_source),
+    learnedMappingId: readableText(line.learnedMappingId ?? line.learned_mapping_id),
+    reviewReasons: Array.isArray(line.reviewReasons) ? line.reviewReasons.map((reason) => readableText(reason)).filter(Boolean) : [],
+    suggestedProducts,
+    duplicateProductCandidates,
+    automaticProductMatch,
+    departmentSplits,
   };
 }
 
@@ -53,7 +92,7 @@ export function normalizeInvoiceForRuntime(invoice = {}) {
     syncStatus: readableText(invoice.syncStatus ?? invoice.sync_status),
     syncError: readableText(invoice.syncError ?? invoice.sync_error),
     currency: readableText(invoice.currency, "GBP"),
-    invoiceReviewReasons: Array.isArray(invoice.invoiceReviewReasons) ? invoice.invoiceReviewReasons : [],
+    invoiceReviewReasons: Array.isArray(invoice.invoiceReviewReasons) ? invoice.invoiceReviewReasons.map((reason) => readableText(reason)).filter(Boolean) : [],
     auditEvents: Array.isArray(invoice.auditEvents) ? invoice.auditEvents : [],
     inventoryMovements: Array.isArray(invoice.inventoryMovements) ? invoice.inventoryMovements : [],
     items,

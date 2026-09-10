@@ -1,4 +1,5 @@
 import { invoiceHasBlockingReview } from "./invoiceValidation.js";
+import { normalizeInvoiceForRuntime } from "./invoiceRuntimeSafety.js";
 import {
   assessPurchasingDocumentDuplicate,
   documentNumberFor,
@@ -498,18 +499,59 @@ export function serializeInvoiceBatch(batch = null) {
 
 export function hydrateInvoiceBatch(stored = null, { now = () => new Date().toISOString() } = {}) {
   if (!stored || typeof stored !== "object") return null;
-  const items = Array.isArray(stored.items) ? stored.items.map((item) => {
-    if (item.status === BATCH_INVOICE_ITEM_STATUSES.PROCESSING || item.status === BATCH_INVOICE_ITEM_STATUSES.IMPORTING) {
+  const knownStatuses = new Set(Object.values(BATCH_INVOICE_ITEM_STATUSES));
+  const safeText = (value = "") => (typeof value === "string" || typeof value === "number" ? String(value) : "");
+  const safeTextArray = (value = []) => (Array.isArray(value) ? value.map(safeText).filter(Boolean) : []);
+  const items = Array.isArray(stored.items) ? stored.items.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const sourceFileName = safeText(item.sourceFileName) || `Uploaded file ${index + 1}`;
+    const status = knownStatuses.has(item.status) ? item.status : BATCH_INVOICE_ITEM_STATUSES.FAILED;
+    const sourceSignature = item.signature && typeof item.signature === "object" && !Array.isArray(item.signature) ? item.signature : {};
+    const normalizedItem = {
+      ...item,
+      id: safeText(item.id) || `batch-item-${index + 1}`,
+      documentId: safeText(item.documentId) || safeText(item.id) || `batch-document-${index + 1}`,
+      sourceFileName,
+      sourceFileNames: safeTextArray(item.sourceFileNames).length ? safeTextArray(item.sourceFileNames) : [sourceFileName],
+      pageLabels: safeTextArray(item.pageLabels),
+      pageCount: Math.max(1, Number(item.pageCount) || 1),
+      signature: {
+        ...sourceSignature,
+        supplier: safeText(sourceSignature.supplier),
+        supplierKey: safeText(sourceSignature.supplierKey),
+        documentNumber: safeText(sourceSignature.documentNumber),
+        documentNumberKey: safeText(sourceSignature.documentNumberKey),
+        invoiceDate: safeText(sourceSignature.invoiceDate),
+        documentType: safeText(sourceSignature.documentType),
+        structureFingerprint: safeText(sourceSignature.structureFingerprint),
+      },
+      status,
+      statusLabel: safeText(item.statusLabel) || (status === BATCH_INVOICE_ITEM_STATUSES.FAILED ? "Retry needed" : "Queued"),
+      error: safeText(item.error),
+      invoice: item.invoice ? normalizeInvoiceForRuntime(item.invoice) : null,
+      duplicate: item.duplicate && typeof item.duplicate === "object" && !Array.isArray(item.duplicate)
+        ? {
+          ...item.duplicate,
+          existing: item.duplicate.existing ? normalizeInvoiceForRuntime(item.duplicate.existing) : null,
+        }
+        : null,
+    };
+    if (status === BATCH_INVOICE_ITEM_STATUSES.PROCESSING || status === BATCH_INVOICE_ITEM_STATUSES.IMPORTING) {
       return {
-        ...item,
+        ...normalizedItem,
         status: BATCH_INVOICE_ITEM_STATUSES.FAILED,
         statusLabel: "Retry needed",
         error: "Processing was interrupted before this document finished.",
       };
     }
-    return item;
-  }) : [];
-  return withDerivedInvoiceBatchStage({ ...stored, items }, { now });
+    return normalizedItem;
+  }).filter(Boolean) : [];
+  return withDerivedInvoiceBatchStage({
+    ...stored,
+    id: safeText(stored.id) || `invoice-batch-${now()}`,
+    concurrency: Math.max(1, Math.min(10, Number(stored.concurrency) || 5)),
+    items,
+  }, { now });
 }
 
 export async function runInvoiceBatchQueue(items = [], worker, { concurrency = 5, onItemUpdate = () => {} } = {}) {

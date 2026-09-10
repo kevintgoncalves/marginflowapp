@@ -3780,6 +3780,16 @@ function safeReadLocalStorageArray(key, fallback) {
   }
 }
 
+const displayRecoveryModeKey = "marginflow.displayRecoveryMode";
+
+function displayRecoveryModeEnabled() {
+  try {
+    return sessionStorage.getItem(displayRecoveryModeKey) === "true";
+  } catch {
+    return false;
+  }
+}
+
 const invoiceAutoBackupIndexKey = "marginflow.invoices.autoBackups";
 const maxInvoiceAutoBackups = 8;
 
@@ -5545,6 +5555,7 @@ function parseLabourCsv(text, fallbackDate = today()) {
 }
 function App({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
+  const displayRecoveryMode = !demoMode && displayRecoveryModeEnabled();
   const demoCaptureMode = demoMode ? demoCaptureModeFromUrl() : "";
   const effectiveAuthUser = demoMode ? demoAuthUser : authUser;
   const effectiveAuthMembership = demoMode ? demoAuthMembership : authMembership;
@@ -6794,9 +6805,18 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     );
   }
 
+  const leaveDisplayRecoveryMode = () => {
+    try {
+      sessionStorage.removeItem(displayRecoveryModeKey);
+    } catch {
+      // The page reload still gives the repaired runtime another clean start.
+    }
+    window.location.reload();
+  };
+
   const topbarAction = readOnly ? null : active === "dashboard"
     ? <PrimaryAction className="page-primary-action" onClick={() => setSalesInputRequest({ id: uid() })}>Input Sales</PrimaryAction>
-    : active === "invoices" && permissionsByPage.invoices?.canImport
+    : active === "invoices" && permissionsByPage.invoices?.canImport && !displayRecoveryMode
       ? <PrimaryAction className="page-primary-action" onClick={() => prepareInvoiceUploadFromControl("", today())}>Upload Invoices</PrimaryAction>
       : active === "ai"
         ? <button className="page-primary-action" onClick={() => setAnalysisRunId((current) => current + 1)} type="button">Run analysis</button>
@@ -6853,6 +6873,15 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
 
       <main className="workspace">
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
+        {displayRecoveryMode && (
+          <div className="display-recovery-banner">
+            <div>
+              <strong>MarginFlow opened safely</strong>
+              <span>Your invoices and cloud data are still here. The previous batch is temporarily hidden while its saved review data is repaired.</span>
+            </div>
+            <button onClick={leaveDisplayRecoveryMode} type="button"><RefreshCw size={16} />Restore repaired batch</button>
+          </div>
+        )}
         <header className="topbar">
           <div>
             <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
@@ -6905,6 +6934,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
         )}
         <Invoices
           isActive={active === "invoices"}
+          recoveryMode={displayRecoveryMode}
           demoCaptureMode={demoCaptureMode}
           uploadRequest={invoiceUploadRequest}
           aiSettings={aiSettings}
@@ -7651,6 +7681,7 @@ function Invoices({
   departmentNames,
   draft,
   invoiceApprovalBusy = false,
+  recoveryMode = false,
   setDraft,
   invoiceSettings,
   financialSettings = defaultFinancialSettings,
@@ -7696,6 +7727,7 @@ function Invoices({
   const batchImportRecoveryAttemptRef = useRef("");
   const batchStorageKey = `marginflow.invoiceBatch.${companyId || "local"}.${locationId || "all"}`;
   const readStoredInvoiceBatch = () => {
+    if (recoveryMode) return null;
     try {
       const stored = JSON.parse(localStorage.getItem(batchStorageKey) || "null");
       return hydrateInvoiceBatch(stored);
@@ -7807,13 +7839,14 @@ function Invoices({
 
   useEffect(() => {
     invoiceBatchRef.current = invoiceBatch;
+    if (recoveryMode) return;
     try {
       if (invoiceBatch) localStorage.setItem(batchStorageKey, JSON.stringify(serializeInvoiceBatch(invoiceBatch)));
       else localStorage.removeItem(batchStorageKey);
     } catch {
       // A large batch can exceed local browser storage. The in-memory queue still remains usable for the current session.
     }
-  }, [batchStorageKey, invoiceBatch]);
+  }, [batchStorageKey, invoiceBatch, recoveryMode]);
 
   useEffect(() => {
     if (!batchImportRecoveryKey || !invoiceBatch?.id) return;
@@ -16645,19 +16678,33 @@ class MarginFlowErrorBoundary extends React.Component {
     }
   }
 
+  openDisplayRecovery = () => {
+    try {
+      sessionStorage.setItem(displayRecoveryModeKey, "true");
+    } catch {
+      // Reloading still retries with the runtime normalizers already applied.
+    }
+    window.location.reload();
+  };
+
   render() {
     if (!this.state.error) return this.props.children;
+    const errorMessage = String(this.state.error?.message || "Unknown display error");
     return (
       <main className="app-recovery-screen">
         <img alt="MarginFlow" src={marginflowLogo} />
         <div className="app-recovery-content">
           <span>Display recovery</span>
           <h1>MarginFlow protected your saved work</h1>
-          <p>An invoice caused an unexpected display error. Your invoices have not been deleted.</p>
+          <p>A saved review item caused an unexpected display error. Your invoices and batch have not been deleted.</p>
           <div className="button-row left">
-            <button onClick={() => this.setState({ error: null })} type="button">Try again</button>
+            <button onClick={this.openDisplayRecovery} type="button">Open MarginFlow safely</button>
             <button className="ghost" onClick={() => window.location.reload()} type="button"><RefreshCw size={16} />Reload MarginFlow</button>
           </div>
+          <details className="app-recovery-details">
+            <summary>Error details</summary>
+            <code>{errorMessage}</code>
+          </details>
         </div>
       </main>
     );

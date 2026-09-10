@@ -202,6 +202,42 @@ test("hydrate preserves completed results and marks interrupted work for retry",
   assert.equal(restored.stage, "review");
 });
 
+test("hydrate repairs legacy batch invoice values before the review screen renders", () => {
+  const restored = hydrateInvoiceBatch({
+    id: "legacy-batch",
+    items: [
+      null,
+      {
+        id: 830571,
+        documentId: 830571,
+        status: BATCH_INVOICE_ITEM_STATUSES.IMPORTED,
+        sourceFileName: { name: "bad source" },
+        sourceFileNames: ["tg-830571.pdf", null, { name: "bad source" }],
+        pageLabels: ["tg-830571.pdf page 1/1", { label: "bad page" }],
+        signature: { supplier: { name: "bad supplier" }, documentNumber: 830571 },
+        invoice: {
+          supplier: { name: "TG Fruits" },
+          document_number: 830571,
+          invoice_date: "2026-09-10",
+          lines: [{ product_name: "Apples", reviewReasons: null }],
+        },
+      },
+    ],
+  }, { now: () => "2026-09-10T15:30:00.000Z" });
+
+  assert.equal(restored.items.length, 1);
+  assert.equal(restored.items[0].id, "830571");
+  assert.equal(restored.items[0].sourceFileName, "Uploaded file 2");
+  assert.deepEqual(restored.items[0].sourceFileNames, ["tg-830571.pdf"]);
+  assert.deepEqual(restored.items[0].pageLabels, ["tg-830571.pdf page 1/1"]);
+  assert.equal(restored.items[0].signature.supplier, "");
+  assert.equal(restored.items[0].signature.documentNumber, "830571");
+  assert.equal(restored.items[0].invoice.supplier, "TG Fruits");
+  assert.equal(restored.items[0].invoice.documentNumber, "830571");
+  assert.equal(restored.items[0].invoice.items[0].productName, "Apples");
+  assert.deepEqual(restored.items[0].invoice.items[0].reviewReasons, []);
+});
+
 test("batch keeps a cloud sync failure visible and retryable", () => {
   const invoice = { id: "tg-830571", supplier: "TG Fruits", documentNumber: "830571" };
   const result = batchItemStatusAfterPersistence({

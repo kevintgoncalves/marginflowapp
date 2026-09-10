@@ -15,7 +15,13 @@ test("runtime invoice normalization recovers lines from relational and legacy sh
     supplier: { name: "TG Fruits" },
     document_number: 830571,
     invoice_date: "2026-09-10",
-    lines: [{ product_name: "Apples", department_splits: [{ department: "Kitchen Made", percentage: 100 }] }],
+    lines: [{
+      product_name: "Apples",
+      matchedProductName: { name: "Matched apples" },
+      suggestedProducts: [{ id: 12, product_name: "Suggested apples" }],
+      reviewReasons: [{ value: "price_deviation" }],
+      department_splits: [{ department: "Kitchen Made", department_id: 42, percentage: 100 }],
+    }],
   });
 
   assert.equal(normalized.supplier, "TG Fruits");
@@ -23,7 +29,11 @@ test("runtime invoice normalization recovers lines from relational and legacy sh
   assert.equal(normalized.date, "2026-09-10");
   assert.equal(normalized.items.length, 1);
   assert.equal(normalized.items[0].productName, "Apples");
+  assert.equal(normalized.items[0].matchedProductName, "Matched apples");
+  assert.equal(normalized.items[0].suggestedProducts[0].name, "Suggested apples");
+  assert.deepEqual(normalized.items[0].reviewReasons, ["price_deviation"]);
   assert.equal(normalized.items[0].departmentSplits.length, 1);
+  assert.equal(normalized.items[0].departmentSplits[0].departmentId, "42");
   assert.equal(normalized.lines, normalized.items);
 });
 

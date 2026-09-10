@@ -7333,3 +7333,62 @@ button.icon {
   font-size: 16px;
   line-height: 1.55;
 }
+
+.app-recovery-details {
+  width: min(620px, 100%);
+  margin-top: 6px;
+  color: #5f646b;
+  font-size: 13px;
+}
+
+.app-recovery-details summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.app-recovery-details code {
+  display: block;
+  margin-top: 10px;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  border: 1px solid #dddcd7;
+  background: #fff;
+  color: #7e2d25;
+  white-space: normal;
+}
+
+.display-recovery-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 22px;
+  border-bottom: 1px solid #e5c46f;
+  background: #fff7df;
+  color: #5f450b;
+}
+
+.display-recovery-banner > div {
+  display: grid;
+  gap: 2px;
+}
+
+.display-recovery-banner strong,
+.display-recovery-banner span {
+  display: block;
+}
+
+.display-recovery-banner span {
+  font-size: 12px;
+}
+
+.display-recovery-banner button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  .display-recovery-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
