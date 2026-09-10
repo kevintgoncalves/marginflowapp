@@ -5,6 +5,7 @@ import {
   ensureInvoicePersistenceIds,
   importMissingRecoveryInvoices,
   invoiceCanRetrySyncAutomatically,
+  isCanonicalUuid,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   persistRelationalInvoice,
@@ -44,7 +45,9 @@ test("confirmed invoice persistence sends the full document to one atomic RPC", 
   const result = await persistRelationalInvoice(client, sampleInvoice, { companyId });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, "persist_invoice_document_v3");
-  assert.equal(calls[0].payload.p_invoice.items[0].id, lineId);
+  assert.equal(isCanonicalUuid(calls[0].payload.p_invoice.items[0].id), true);
+  assert.notEqual(calls[0].payload.p_invoice.items[0].id, lineId);
+  assert.equal(calls[0].payload.p_invoice.persistenceIdsCanonical, true);
   assert.equal(calls[0].payload.p_duplicate_action, null);
   assert.equal(result.line_count, 1);
 });
@@ -121,6 +124,49 @@ test("retry remains idempotent because it reuses the invoice and line UUIDs", as
   assert.equal(calls.length, 2);
   assert.equal(calls[0].p_invoice.id, calls[1].p_invoice.id);
   assert.equal(calls[0].p_invoice.items[0].id, calls[1].p_invoice.items[0].id);
+});
+
+test("transient line and split UUIDs are namespaced to their invoice before persistence", async () => {
+  const reusedSplitId = "44444444-4444-4444-8444-444444444444";
+  const withReusedIds = (id, documentNumber) => ({
+    ...sampleInvoice,
+    id,
+    documentNumber,
+    invoiceNumber: documentNumber,
+    items: [{
+      ...sampleInvoice.items[0],
+      departmentMode: "Split",
+      departmentSplits: [{ id: reusedSplitId, department: "Kitchen", percentage: 100 }],
+    }],
+  });
+  const first = await ensureInvoicePersistenceIds(withReusedIds(invoiceId, "TG-830113"), { companyId });
+  const second = await ensureInvoicePersistenceIds(withReusedIds("66666666-6666-4666-8666-666666666666", "TG-829605"), { companyId });
+
+  assert.notEqual(first.items[0].id, lineId);
+  assert.notEqual(first.items[0].departmentSplits[0].id, reusedSplitId);
+  assert.notEqual(first.items[0].id, second.items[0].id);
+  assert.notEqual(first.items[0].departmentSplits[0].id, second.items[0].departmentSplits[0].id);
+  assert.equal(first.persistenceIdsCanonical, true);
+});
+
+test("canonical retry and relational edit preserve their persisted child identifiers", async () => {
+  const splitId = "44444444-4444-4444-8444-444444444444";
+  const first = await ensureInvoicePersistenceIds({
+    ...sampleInvoice,
+    items: [{ ...sampleInvoice.items[0], departmentSplits: [{ id: splitId, department: "Kitchen", percentage: 100 }] }],
+  }, { companyId });
+  const retry = await ensureInvoicePersistenceIds({ ...first, syncStatus: "sync_failed" }, { companyId });
+  const relationalEdit = await ensureInvoicePersistenceIds({
+    ...sampleInvoice,
+    persistenceSource: "relational",
+    relationalId: invoiceId,
+    items: [{ ...sampleInvoice.items[0], departmentSplits: [{ id: splitId, department: "Kitchen", percentage: 100 }] }],
+  }, { companyId });
+
+  assert.equal(retry.items[0].id, first.items[0].id);
+  assert.equal(retry.items[0].departmentSplits[0].id, first.items[0].departmentSplits[0].id);
+  assert.equal(relationalEdit.items[0].id, lineId);
+  assert.equal(relationalEdit.items[0].departmentSplits[0].id, splitId);
 });
 
 test("legacy invoice rows and splits receive stable deterministic UUIDs before the local pending save", async () => {
@@ -261,4 +307,13 @@ test("recovery migration is non-destructive and defines transactional invoice an
   assert.match(migration, /invoice_revision_conflict/);
   assert.match(migration, /set active = false/);
   assert.doesNotMatch(migration, /\b(truncate|drop table|delete from)\b/i);
+});
+
+test("batch sync resilience migration extends invoice persistence timeouts without touching business data", () => {
+  const migration = readFileSync(new URL("../../supabase/migrations/20260910123000_invoice_batch_sync_resilience.sql", import.meta.url), "utf8");
+  assert.match(migration, /persist_invoice_document_v3\(uuid, uuid, jsonb, text, uuid, bigint\).*statement_timeout = ''60s''/is);
+  assert.match(migration, /persist_invoice_document_v2_legacy\(uuid, uuid, jsonb\).*statement_timeout = ''60s''/is);
+  assert.match(migration, /persist_invoice_document_v2\(uuid, uuid, jsonb\).*statement_timeout = ''60s''/is);
+  assert.doesNotMatch(migration, /\b(truncate|drop table|delete from)\b/i);
+  assert.doesNotMatch(migration, /\b(?:insert into|update)\s+public\.(?:invoices|invoice_lines|invoice_line_department_splits)\b/i);
 });

@@ -28,14 +28,17 @@ export async function ensureInvoicePersistenceIds(invoice = {}, scope = {}) {
     invoice.date || invoice.invoiceDate || invoice.invoice_date || "undated",
   ].join("|");
   const invoiceId = uuidPattern.test(invoice.id || "") ? invoice.id : await deterministicRecoveryUuid(`invoice|${identitySeed}|${invoice.id || ""}`);
+  const preserveChildIds = invoice.persistenceIdsCanonical === true
+    || Boolean(invoice.relationalId || invoice.relational_id)
+    || String(invoice.persistenceSource || "").startsWith("relational");
   const items = [];
   for (const [lineIndex, line] of (invoice.items || invoice.lines || []).entries()) {
-    const lineId = uuidPattern.test(line.id || "")
+    const lineId = preserveChildIds && uuidPattern.test(line.id || "")
       ? line.id
       : await deterministicRecoveryUuid(`line|${invoiceId}|${lineIndex}|${line.id || ""}|${line.productName || line.product_name || ""}`);
     const departmentSplits = [];
     for (const [splitIndex, split] of (line.departmentSplits || line.department_splits || []).entries()) {
-      const splitId = uuidPattern.test(split.id || "")
+      const splitId = preserveChildIds && uuidPattern.test(split.id || "")
         ? split.id
         : await deterministicRecoveryUuid(`split|${lineId}|${splitIndex}|${split.id || ""}|${split.departmentId || split.department_id || split.department || ""}`);
       departmentSplits.push({ ...split, id: splitId });
@@ -47,6 +50,7 @@ export async function ensureInvoicePersistenceIds(invoice = {}, scope = {}) {
     id: invoiceId,
     companyId: scope.companyId || invoice.companyId || invoice.company_id || "",
     locationId: scope.locationId || invoice.locationId || invoice.location_id || "",
+    persistenceIdsCanonical: true,
     items,
   }, items);
 }
