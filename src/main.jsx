@@ -8,8 +8,10 @@ import {
   AlertTriangle,
   ArrowDownUp,
   Boxes,
+  CalendarDays,
   ChefHat,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Combine,
@@ -268,7 +270,7 @@ const emptyInvoiceDraft = () => ({
 const defaultDepartments = ["Kitchen Made", "Bought In", "Bar", "Non-food"];
 const departmentTypes = ["Food", "Bar", "Bought In", "Non-food", "Excluded"];
 const departmentContextPages = ["dashboard", "stocktake", "waste", "gp"];
-const rangePresets = ["Today", "Yesterday", "Specific Date", "This Week", "Last Week", "This Month", "Last Month", "This Year", "Custom Range"];
+const rangePresets = ["Today", "Yesterday", "This week", "Last week", "This month", "Last month", "Custom"];
 const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const weekdayShortLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const supplierCategoryTaxonomy = ["Dry / Chilled", "Produce", "Bakery", "Meat", "Fish / Seafood", "Drinks", "Cleaning / Non-food", "Other"];
@@ -3655,10 +3657,19 @@ function wasteForDepartment(wasteItems, selectedDepartment) {
     .reduce((sum, item) => sum + wasteCost(item), 0);
 }
 
-function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
+function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings, labourData = null) {
   const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
   const filteredWaste = wasteItems.filter((item) => dateInRange(item.date, dateRange));
+  const departmentSalesRows = salesRows.filter((row) => Math.abs(salesGrossForRow(row, selectedDepartment)) > 0.01 || Math.abs(salesNetForRow(row, selectedDepartment)) > 0.01);
+  const departmentInvoices = selectedDepartment === "All departments"
+    ? filteredInvoices
+    : filteredInvoices.filter((invoice) => (invoice.items || []).some((item) => Math.abs(lineTotalForDepartment(item, selectedDepartment, invoice)) > 0.01));
+  const departmentInvoiceItems = filteredInvoices.flatMap((invoice) => (
+    (invoice.items || []).filter((item) => selectedDepartment === "All departments" || Math.abs(lineTotalForDepartment(item, selectedDepartment, invoice)) > 0.01)
+  ));
+  const departmentWaste = filteredWaste.filter((item) => departmentMatches(item.department, selectedDepartment));
+  const labourSummary = labourSummaryForPeriod(labourData, dateRange, selectedDepartment);
   const netSales = salesForDepartment(salesRows, selectedDepartment, "Net Sales");
   const salesTotal = netSales;
   const grossSales = grossSalesForDepartment(salesRows, selectedDepartment);
@@ -3667,7 +3678,8 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
   const openingStock = openingStockValue(stocktakes, selectedDepartment, departmentNames, dateRange);
   const closingStock = latestStocktakeValue(stocktakes, selectedDepartment, departmentNames, dateRange);
-  const waste = wasteForDepartment(filteredWaste, selectedDepartment);
+  const waste = departmentWaste.reduce((sum, item) => sum + wasteCost(item), 0);
+  const labour = numberValue(labourSummary.wages, 0);
   const stocktakeCost = openingStock + purchases - closingStock;
   const realCostIncludingWaste = stocktakeCost + waste;
 
@@ -3687,20 +3699,25 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
     realGp: salesTotal ? ((salesTotal - realCostIncludingWaste) / salesTotal) * 100 : 0,
     waste,
     wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
+    labour,
+    labourHours: numberValue(labourSummary.hours, 0),
+    labourPercent: salesTotal ? (labour / salesTotal) * 100 : 0,
+    labourRecords: labourSummary.rows || [],
     stockVariance: closingStock - openingStock,
-    salesRows,
-    wasteRecords: filteredWaste,
-    invoiceItems: filteredInvoices.flatMap((invoice) => invoice.items || []),
-    invoices: filteredInvoices,
+    salesRows: departmentSalesRows,
+    wasteRecords: departmentWaste,
+    invoiceItems: departmentInvoiceItems,
+    invoices: departmentInvoices,
+    invoiceCount: departmentInvoices.length,
   };
 }
 
-function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings) {
-  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
+function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings, labourData = null) {
+  const base = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings, labourData);
   const days = dateRangeDays(dateRange);
   const dailyRows = days.map((date) => {
     const period = { start: date, end: date };
-    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames, financialSettings);
+    const row = metricsForPeriod(invoices, sales, department, stocktakes, wasteItems, period, departmentNames, financialSettings, labourData);
     return {
       id: date,
       date,
@@ -3711,6 +3728,7 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
       salesBase: row.sales,
       purchases: row.purchases,
       waste: row.waste,
+      labour: row.labour,
       invoiceGp: row.invoiceGp,
       stocktakeGp: row.stocktakeGp,
       realGp: row.realGp,
@@ -3718,7 +3736,7 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
     };
   });
   const departmentRows = departmentNames.map((name) => {
-    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames, financialSettings);
+    const row = metricsForPeriod(invoices, sales, name, stocktakes, wasteItems, dateRange, departmentNames, financialSettings, labourData);
     return {
       id: name,
       department: name,
@@ -3727,6 +3745,7 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
       salesBase: row.sales,
       purchases: row.purchases,
       waste: row.waste,
+      labour: row.labour,
       gp: row.invoiceGp,
       targetGp: 0,
       variance: row.invoiceGp,
@@ -4187,46 +4206,83 @@ function startOfWeek(date, weekStartsOn = "Monday") {
   return next;
 }
 
-function resolveDateRange(range, weekStartsOn = "Monday") {
-  if (range.preset === "Custom Range" || range.preset === "Custom range") return { start: range.startDate, end: range.endDate };
-  if (range.preset === "Specific Date" || range.preset === "Specific date") {
-    const date = range.specificDate || range.startDate || today();
-    return { start: date, end: date };
-  }
+function normalizeRangePreset(preset = "This month") {
+  const key = String(preset || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (key === "today") return "Today";
+  if (key === "yesterday") return "Yesterday";
+  if (key === "thisweek") return "This week";
+  if (key === "lastweek") return "Last week";
+  if (key === "thismonth") return "This month";
+  if (key === "lastmonth") return "Last month";
+  if (["custom", "customrange", "specificdate"].includes(key)) return "Custom";
+  return "This month";
+}
 
+function orderedDateRange(startDate, endDate) {
+  const start = startDate || endDate || today();
+  const end = endDate || start;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+function rangeForPreset(preset = "This month", weekStartsOn = "Monday") {
   const current = parseDate(today());
-  if (range.preset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
-  if (range.preset === "Yesterday") {
+  const normalizedPreset = normalizeRangePreset(preset);
+  if (normalizedPreset === "Today") return { start: toIsoDate(current), end: toIsoDate(current) };
+  if (normalizedPreset === "Yesterday") {
     const yesterday = addDays(current, -1);
     return { start: toIsoDate(yesterday), end: toIsoDate(yesterday) };
   }
-
-  if (range.preset === "This Week" || range.preset === "This week") {
+  if (normalizedPreset === "This week") {
     const start = startOfWeek(current, weekStartsOn);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
-
-  if (range.preset === "Last Week" || range.preset === "Last week") {
+  if (normalizedPreset === "Last week") {
     const thisStart = startOfWeek(current, weekStartsOn);
     const start = addDays(thisStart, -7);
     return { start: toIsoDate(start), end: toIsoDate(addDays(start, 6)) };
   }
-
-  if (range.preset === "This Month" || range.preset === "This month") {
-    const start = new Date(current.getFullYear(), current.getMonth(), 1);
-    const end = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+  if (normalizedPreset === "Last month") {
+    const start = new Date(current.getFullYear(), current.getMonth() - 1, 1);
+    const end = new Date(current.getFullYear(), current.getMonth(), 0);
     return { start: toIsoDate(start), end: toIsoDate(end) };
   }
+  if (normalizedPreset === "Custom") return { start: today(), end: today() };
 
-  if (range.preset === "This Year" || range.preset === "This year") {
-    const start = new Date(current.getFullYear(), 0, 1);
-    const end = new Date(current.getFullYear(), 11, 31);
-    return { start: toIsoDate(start), end: toIsoDate(end) };
-  }
-
-  const start = new Date(current.getFullYear(), current.getMonth() - 1, 1);
-  const end = new Date(current.getFullYear(), current.getMonth(), 0);
+  const start = new Date(current.getFullYear(), current.getMonth(), 1);
+  const end = new Date(current.getFullYear(), current.getMonth() + 1, 0);
   return { start: toIsoDate(start), end: toIsoDate(end) };
+}
+
+function dateRangeStateForPreset(preset = "This month", weekStartsOn = "Monday") {
+  const normalizedPreset = normalizeRangePreset(preset);
+  const range = rangeForPreset(normalizedPreset, weekStartsOn);
+  return { preset: normalizedPreset, startDate: range.start, endDate: range.end, specificDate: range.start };
+}
+
+function normalizeDateRangeState(rangeState = {}, weekStartsOn = "Monday") {
+  const sourcePreset = String(rangeState?.preset || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (sourcePreset === "specificdate") {
+    const date = rangeState.specificDate || rangeState.startDate || today();
+    return { preset: "Custom", startDate: date, endDate: date, specificDate: date };
+  }
+
+  const preset = normalizeRangePreset(rangeState?.preset);
+  if (preset === "Custom") {
+    const range = orderedDateRange(rangeState.startDate || rangeState.specificDate, rangeState.endDate || rangeState.specificDate);
+    return { preset, startDate: range.start, endDate: range.end, specificDate: range.start };
+  }
+
+  if (rangeState.startDate && rangeState.endDate) {
+    const range = orderedDateRange(rangeState.startDate, rangeState.endDate);
+    return { preset, startDate: range.start, endDate: range.end, specificDate: range.start };
+  }
+
+  return dateRangeStateForPreset(preset, weekStartsOn);
+}
+
+function resolveDateRange(range, weekStartsOn = "Monday") {
+  const normalized = normalizeDateRangeState(range, weekStartsOn);
+  return { start: normalized.startDate, end: normalized.endDate };
 }
 
 function dateRangeDays(range) {
@@ -4294,8 +4350,9 @@ function salesAmountForRow(row = {}, selectedDepartment = "All departments", amo
       ? numberValue(values.grossSales, numberValue(values.netSales, 0))
       : numberValue(values.netSales, numberValue(values.sales, 0));
   }
-  if (row.department && row.department !== selectedDepartment) return 0;
-  return rowFallback;
+  const rowDepartment = row.department ? canonicalDepartmentName(row.department, row.department) : "";
+  if (rowDepartment && rowDepartment === selectedDepartment) return rowFallback;
+  return 0;
 }
 
 function salesNetForRow(row, selectedDepartment = "All departments") {
@@ -4402,13 +4459,69 @@ function formatRangeDate(date) {
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(parseDate(date));
 }
 
-function rangeLabel(rangeState, range) {
-  return `${rangeState.preset}: ${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
+function formatRangeDateWithYear(date) {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(parseDate(date));
+}
+
+function rangeDatesLabel(range) {
+  if (!range?.start || !range?.end) return formatRangeDateWithYear(today());
+  if (range.start === range.end) return formatRangeDateWithYear(range.start);
+  const start = parseDate(range.start);
+  const end = parseDate(range.end);
+  const startOptions = start.getFullYear() === end.getFullYear()
+    ? { day: "numeric", month: "short" }
+    : { day: "numeric", month: "short", year: "numeric" };
+  const startLabel = new Intl.DateTimeFormat("en-GB", startOptions).format(start);
+  return `${startLabel} - ${formatRangeDateWithYear(range.end)}`;
+}
+
+function dateRangesMatch(left, right) {
+  return left?.start === right?.start && left?.end === right?.end;
+}
+
+function rangePresetUnit(preset = "This month") {
+  const normalizedPreset = normalizeRangePreset(preset);
+  if (normalizedPreset.includes("week")) return "week";
+  if (normalizedPreset.includes("month")) return "month";
+  if (normalizedPreset === "Custom") return "custom";
+  return "day";
+}
+
+function rangeDisplayPreset(rangeState, range, weekStartsOn = "Monday") {
+  const preset = normalizeRangePreset(rangeState?.preset);
+  if (preset === "Custom") return "Custom";
+  if (dateRangesMatch(range, rangeForPreset(preset, weekStartsOn))) return preset;
+  const unit = rangePresetUnit(preset);
+  if (unit === "week") return "Week";
+  if (unit === "month") return "Month";
+  return "Day";
+}
+
+function rangeLabel(rangeState, range, weekStartsOn = "Monday") {
+  return `${rangeDisplayPreset(rangeState, range, weekStartsOn)}: ${rangeDatesLabel(range)}`;
+}
+
+function shiftedMonthRange(range, direction) {
+  const currentStart = parseDate(range.start);
+  const start = new Date(currentStart.getFullYear(), currentStart.getMonth() + direction, 1);
+  const end = new Date(currentStart.getFullYear(), currentStart.getMonth() + direction + 1, 0);
+  return { start: toIsoDate(start), end: toIsoDate(end) };
+}
+
+function shiftDateRangeState(rangeState, direction, weekStartsOn = "Monday") {
+  const normalized = normalizeDateRangeState(rangeState, weekStartsOn);
+  const range = resolveDateRange(normalized, weekStartsOn);
+  const unit = rangePresetUnit(normalized.preset);
+  const shifted = unit === "month"
+    ? shiftedMonthRange(range, direction)
+    : shiftRangeByDays(range, direction * (unit === "week" ? 7 : dateRangeLength(range)));
+  return { ...normalized, startDate: shifted.start, endDate: shifted.end, specificDate: shifted.start };
 }
 
 function contextualPageSubtitle(active, {
   dateRange,
   dateRangeState,
+  department = "All departments",
   invoices = [],
   products = [],
   suppliers = [],
@@ -4420,7 +4533,7 @@ function contextualPageSubtitle(active, {
   const period = `${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`;
   const month = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" }).format(parseDate(dateRange.start));
   const activeSupplierCount = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false).length;
-  if (active === "dashboard") return `${dateRangeState.preset === "This Month" ? "All departments" : "Current view"} - ${month}`;
+  if (active === "dashboard") return `${department} - ${rangeDatesLabel(dateRange)}`;
   if (active === "invoices") return `${invoices.length} invoice${invoices.length === 1 ? "" : "s"} - ${month}`;
   if (active === "invoiceControl") {
     const week = invoiceControlWeekRange ? `${formatRangeDate(invoiceControlWeekRange.start)} - ${formatRangeDate(invoiceControlWeekRange.end)}` : "";
@@ -5248,7 +5361,7 @@ function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
     menuSettings: { ...defaultMenuSettings, ...read(byKey.menuSettings, defaultMenuSettings) },
     invoiceSettings: { ...defaultInvoiceSettings, ...read(byKey.invoiceSettings, defaultInvoiceSettings) },
     aiSettings: { ...defaultAiSettings, ...read(byKey.aiSettings, defaultAiSettings) },
-    departmentSelection: read(byKey.departmentSelection, "Kitchen Made") || "Kitchen Made",
+    departmentSelection: read(byKey.departmentSelection, "All departments") || "All departments",
   };
 }
 
@@ -5306,6 +5419,24 @@ function labourTotals(data, rows) {
     wages: labourBasePayForRows(data, rows),
     serviceCharge: labourSum(rows, "serviceCharge"),
   };
+}
+
+function labourRowMatchesDashboardDepartment(data, row, selectedDepartment = "All departments") {
+  const selected = canonicalDepartmentName(selectedDepartment, "All departments");
+  if (selected === "All departments") return true;
+  const departmentName = labourDepartmentName(data, row.departmentId, row.departmentName);
+  if (departmentMatches(departmentName, selected)) return true;
+  const key = normalizeHeader(departmentName);
+  if (selected === "Kitchen Made") return ["boh", "kp", "backofhouse", "kitchen"].includes(key);
+  if (selected === "Bar") return key.includes("bar");
+  return false;
+}
+
+function labourSummaryForPeriod(labourData, dateRange, selectedDepartment = "All departments") {
+  if (!labourData || !dateRange?.start || !dateRange?.end) return { hours: 0, wages: 0, serviceCharge: 0, rows: [] };
+  const data = normalizeLabourData(labourData);
+  const rows = labourRowsInRange(data, dateRange).filter((row) => labourRowMatchesDashboardDepartment(data, row, selectedDepartment));
+  return { ...labourTotals(data, rows), rows };
 }
 
 function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) {
@@ -5587,13 +5718,14 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [department, setDepartmentState] = useState(() => {
     if (demoInitialData) return demoInitialData.activeDepartment;
     try {
-      const stored = localStorage.getItem("marginflow.department") || "Kitchen Made";
+      const stored = localStorage.getItem("marginflow.department") || "All departments";
       return stored;
     } catch {
-      return "Kitchen Made";
+      return "All departments";
     }
   });
   const [departmentOpen, setDepartmentOpen] = useState(false);
+  const [dashboardPeriodOpen, setDashboardPeriodOpen] = useState(false);
   const [products, setProductsState] = useState(() => normalizeProductCollectionForRuntime(
     demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts),
   ));
@@ -5618,8 +5750,12 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [menuSettings, setMenuSettingsState] = useState(() => demoInitialData?.menuSettings || safeReadLocalStorage("marginflow.menuSettings", defaultMenuSettings));
   const [invoiceSettings, setInvoiceSettingsState] = useState(() => demoInitialData?.invoiceSettings || safeReadLocalStorage("marginflow.invoiceSettings", defaultInvoiceSettings));
   const [aiSettings, setAiSettingsState] = useState(() => demoInitialData?.aiSettings || safeReadLocalStorage("marginflow.aiSettings", defaultAiSettings));
-  const [dateRangeState, setDateRangeState] = useState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
-  const [labourDateRangeState, setLabourDateRangeState] = useState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
+  const [dateRangeState, setDateRangeStateState] = useState(() => {
+    const fallback = dateRangeStateForPreset("This month", financialSettings.weekStartsOn);
+    const stored = demoMode ? fallback : safeReadLocalStorage("marginflow.dashboardDateRange", fallback);
+    return normalizeDateRangeState(demoInitialData?.dateRangeState || stored, financialSettings.weekStartsOn);
+  });
+  const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This week", financialSettings.weekStartsOn));
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
   const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
   const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
@@ -5723,6 +5859,14 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setDepartmentSettingsState(value);
     if (!demoMode && !readOnly) saveLocalStorage("marginflow.departmentSettings", value);
   };
+  const setDateRangeState = (value) => {
+    setDateRangeStateState((current) => {
+      const nextValue = typeof value === "function" ? value(current) : value;
+      const next = normalizeDateRangeState(nextValue, financialSettings.weekStartsOn);
+      if (!demoMode && !readOnly) saveLocalStorage("marginflow.dashboardDateRange", next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     salesRef.current = sales;
@@ -5734,6 +5878,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setDepartmentSettingsState(next.departmentSettings);
     setDepartmentState(next.activeDepartment);
     setDepartmentOpen(false);
+    setDashboardPeriodOpen(false);
     setProductsState(next.products);
     setSuppliersState(next.suppliers);
     setSupplierDeliverySchedulesState(next.supplierDeliverySchedules);
@@ -5754,8 +5899,8 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setMenuSettingsState(next.menuSettings);
     setInvoiceSettingsState(next.invoiceSettings);
     setAiSettingsState(next.aiSettings);
-    setDateRangeState({ preset: "This Month", startDate: "2026-06-01", endDate: today() });
-    setLabourDateRangeState({ preset: "This Week", startDate: "2026-06-01", endDate: today() });
+    setDateRangeState(dateRangeStateForPreset("This month", next.financialSettings.weekStartsOn));
+    setLabourDateRangeState(dateRangeStateForPreset("This week", next.financialSettings.weekStartsOn));
     setLabourDataState(next.labourData);
     setDraft(demoCaptureMode === "invoice-review" && next.invoiceReviewDraft ? next.invoiceReviewDraft : emptyInvoiceDraft());
     setDeleteConfirmation(null);
@@ -5773,17 +5918,19 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     if (!allowedDepartmentNames.length) return ["All departments"];
     return allowedDepartmentNames.length === departmentNames.length ? ["All departments", ...allowedDepartmentNames] : allowedDepartmentNames;
   }, [allowedDepartmentNames, departmentNames]);
+  const effectiveDepartment = visibleDepartmentOptions.includes(department) ? department : (visibleDepartmentOptions[0] || "All departments");
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const operationalInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
-  const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings), [operationalInvoices, sales, department, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]);
+  const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData), [operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData]);
   const supplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, legacyInvoiceArchive]);
-  const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, department, legacyInvoiceArchive]);
-  const gpTarget = targetForDepartment(departmentSettings, department, financialSettings.targetGp);
+  const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive]);
+  const gpTarget = targetForDepartment(departmentSettings, effectiveDepartment, financialSettings.targetGp);
   const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
   const pageSubtitle = useMemo(() => contextualPageSubtitle(active, {
     dateRange,
     dateRangeState,
+    department: effectiveDepartment,
     invoices: operationalInvoices,
     products,
     suppliers,
@@ -5791,12 +5938,12 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     wasteItems,
     recipes,
     invoiceControlWeekRange,
-  }), [active, dateRange, dateRangeState, invoiceControlWeekRange, operationalInvoices, products, recipes, suppliers, stocktakes, wasteItems]);
+  }), [active, dateRange, dateRangeState, effectiveDepartment, invoiceControlWeekRange, operationalInvoices, products, recipes, suppliers, stocktakes, wasteItems]);
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
   const permissionsByPage = useMemo(
-    () => Object.fromEntries(navItems.map((item) => [item.id, permissionsForPage(currentUser, item.id, departmentContextPages.includes(item.id) ? department : "")])),
-    [currentUser, department],
+    () => Object.fromEntries(navItems.map((item) => [item.id, permissionsForPage(currentUser, item.id, departmentContextPages.includes(item.id) ? effectiveDepartment : "")])),
+    [currentUser, effectiveDepartment],
   );
   const cloudSnapshot = useMemo(() => ({
     companySettings,
@@ -6161,6 +6308,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const setDepartment = (value) => {
     setDepartmentState(value);
     setDepartmentOpen(false);
+    setDashboardPeriodOpen(false);
     if (demoMode) return;
     try {
       localStorage.setItem("marginflow.department", value);
@@ -6832,7 +6980,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => setActive(item.id)} type="button">
+              <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => { setActive(item.id); setDepartmentOpen(false); setDashboardPeriodOpen(false); }} type="button">
                 <Icon size={18} />
                 <span>{item.label}</span>
               </button>
@@ -6840,9 +6988,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           })}
         </nav>
         <div className="sidebar-user-switcher">
-          <button className="sidebar-location" onClick={() => setDepartmentOpen((current) => !current)} type="button">
+          <button className="sidebar-location" onClick={() => { setDepartmentOpen((current) => !current); setDashboardPeriodOpen(false); }} type="button">
             <Store size={18} />
-            <span><strong>{department}</strong><small>Switch location</small></span>
+            <span><strong>{effectiveDepartment}</strong><small>Switch location</small></span>
           </button>
           <button aria-label="Collapse sidebar" className="sidebar-collapse" title="Collapse sidebar" type="button"><span aria-hidden="true">‹</span> Collapse</button>
           <button className="sidebar-signout" onClick={onSignOut} type="button"><LogOut size={17} /> <span>Sign out</span></button>
@@ -6890,18 +7038,34 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           {topbarAction}
         </header>
 
-        {hasDepartmentContext && (
+        {hasDepartmentContext && active === "dashboard" && (
+          <DashboardFilterBar
+            ActiveIcon={ActiveIcon}
+            dateRange={dateRange}
+            dateRangeOpen={dashboardPeriodOpen}
+            dateRangeState={dateRangeState}
+            department={effectiveDepartment}
+            departmentOpen={departmentOpen}
+            departmentOptions={visibleDepartmentOptions}
+            onDateRangeOpenChange={setDashboardPeriodOpen}
+            onDepartmentOpenChange={setDepartmentOpen}
+            setDateRangeState={setDateRangeState}
+            setDepartment={setDepartment}
+            weekStartsOn={financialSettings.weekStartsOn}
+          />
+        )}
+
+        {hasDepartmentContext && active !== "dashboard" && (
           <div className="view-context">
             <button className="view-title" onClick={() => setDepartmentOpen((current) => !current)} type="button">
               <ActiveIcon size={20} />
-              <span>Viewing {department}</span>
-              <span aria-hidden="true">▼</span>
+              <span>Viewing {effectiveDepartment}</span>
+              <ChevronDown size={14} />
             </button>
-            {active === "dashboard" && <span className="range-chip">{rangeLabel(dateRangeState, dateRange)}</span>}
             {departmentOpen && (
               <div className="department-menu">
                 {visibleDepartmentOptions.map((option) => (
-                  <button className={department === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
+                  <button className={effectiveDepartment === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
                     {option}
                   </button>
                 ))}
@@ -6915,7 +7079,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
             dateRange={dateRange}
             dateRangeState={dateRangeState}
             demoMode={demoMode}
-            department={department}
+            department={effectiveDepartment}
             departmentNames={allowedDepartmentNames}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
@@ -7023,7 +7187,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
             companyName={stocktakeCompanyName}
             companyScope={cloudScope}
             currency={financialSettings.currency || "GBP"}
-            department={department}
+            department={effectiveDepartment}
             departmentNames={allowedDepartmentNames}
             permissions={permissionsByPage.stocktake}
             products={products}
@@ -7036,13 +7200,13 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
         )}
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={department} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "waste" && <Waste department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
           isActive={active === "gp"}
           inputRequest={salesInputRequest}
             dateRange={dateRange}
             dateRangeState={dateRangeState}
-            department={department}
+            department={effectiveDepartment}
             departmentNames={allowedDepartmentNames}
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
@@ -7393,7 +7557,7 @@ function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn
   return { current: currentCustom, previous: previousCustom };
 }
 
-function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeState, dateRange, department, gpTarget }) {
+function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeState, dateRange, department, gpTarget, weekStartsOn = "Monday" }) {
   // Sales rows are hydrated from the relational Sales repository before reaching this view.
   const hasRelationalSalesEntries = (metrics.salesRows || []).length > 0;
   const hasSales = hasRelationalSalesEntries;
@@ -7411,7 +7575,7 @@ function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeStat
       <details className="more-metrics">
         <summary>More metrics</summary>
         <div className="metric-grid secondary-metrics">
-          <Metric empty={!hasSales} label="Gross Sales" value={moneyOrEmpty(metrics.grossSales, hasSales)} delta={rangeLabel(dateRangeState, dateRange)} />
+          <Metric empty={!hasSales} label="Gross Sales" value={moneyOrEmpty(metrics.grossSales, hasSales)} delta={rangeLabel(dateRangeState, dateRange, weekStartsOn)} />
           {!dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
           <Metric empty={!hasGp} label="Stocktake GP %" value={hasGp ? percent(metrics.stocktakeGp) : "–"} delta="Opening + purchases - closing" tone={hasGp ? (metrics.stocktakeGp >= gpTarget ? "good" : "warn") : "default"} />
           <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? `${percent(metrics.wastePercent)} of GP base` : "No waste logged yet"} tone={hasSales && hasWaste ? "warn" : "default"} />
@@ -7589,10 +7753,12 @@ function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState,
 
   return (
     <>
-      <Panel className="dashboard-range-panel" title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
-      </Panel>
-      <PerformanceSummaryCards dashboardMode={dashboardMode} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} />
+      {!dashboardMode && (
+        <Panel className="dashboard-range-panel" title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)}>
+          <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
+        </Panel>
+      )}
+      <PerformanceSummaryCards dashboardMode={dashboardMode} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />
       <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       {dashboardMode ? (
         <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
@@ -7602,17 +7768,109 @@ function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState,
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
-  const allDepartmentMetrics = useMemo(
-    () => calculateMetrics(invoices, sales, "All departments", stocktakes, wasteItems, dateRange, departmentNames, financialSettings),
-    [invoices, sales, stocktakes, wasteItems, dateRange, departmentNames, financialSettings]
+function DashboardFilterBar({
+  ActiveIcon = Home,
+  dateRange,
+  dateRangeOpen,
+  dateRangeState,
+  department,
+  departmentOpen,
+  departmentOptions,
+  onDateRangeOpenChange,
+  onDepartmentOpenChange,
+  setDateRangeState,
+  setDepartment,
+  weekStartsOn,
+}) {
+  const activePreset = normalizeRangePreset(dateRangeState.preset);
+  const selectPreset = (preset) => {
+    const normalizedPreset = normalizeRangePreset(preset);
+    if (normalizedPreset === "Custom") {
+      setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: dateRange.end, specificDate: dateRange.start });
+      onDateRangeOpenChange(true);
+      return;
+    }
+    setDateRangeState(dateRangeStateForPreset(normalizedPreset, weekStartsOn));
+    onDateRangeOpenChange(false);
+  };
+  const updateCustomDate = (field, value) => {
+    setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: field === "startDate" ? value : dateRange.start, endDate: field === "endDate" ? value : dateRange.end, specificDate: field === "startDate" ? value : dateRange.start });
+  };
+  const shiftPeriod = (direction) => setDateRangeState(shiftDateRangeState(dateRangeState, direction, weekStartsOn));
+  const presetIsActive = (preset) => {
+    const normalizedPreset = normalizeRangePreset(preset);
+    return activePreset === normalizedPreset && (
+      normalizedPreset === "Custom" || dateRangesMatch(dateRange, rangeForPreset(normalizedPreset, weekStartsOn))
+    );
+  };
+
+  return (
+    <div className="dashboard-filter-bar" aria-label="Dashboard filters">
+      <div className="dashboard-filter">
+        <button
+          aria-expanded={departmentOpen}
+          className="dashboard-filter-button"
+          onClick={() => { onDepartmentOpenChange((current) => !current); onDateRangeOpenChange(false); }}
+          type="button"
+        >
+          <ActiveIcon size={16} />
+          <span>{department}</span>
+          <ChevronDown size={14} />
+        </button>
+        {departmentOpen && (
+          <div className="dashboard-filter-menu dashboard-department-menu">
+            {departmentOptions.map((option) => (
+              <button className={department === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
+                {option}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="dashboard-period-control">
+        <button aria-label="Previous period" className="dashboard-period-nav" onClick={() => shiftPeriod(-1)} title="Previous period" type="button"><ChevronLeft size={16} /></button>
+        <div className="dashboard-filter">
+          <button
+            aria-expanded={dateRangeOpen}
+            className="dashboard-filter-button dashboard-period-button"
+            onClick={() => { onDateRangeOpenChange((current) => !current); onDepartmentOpenChange(false); }}
+            type="button"
+          >
+            <CalendarDays size={16} />
+            <span>{rangeLabel(dateRangeState, dateRange, weekStartsOn)}</span>
+            <ChevronDown size={14} />
+          </button>
+          {dateRangeOpen && (
+            <div className="dashboard-filter-menu dashboard-date-menu">
+              <div className="dashboard-date-presets">
+                {rangePresets.map((preset) => (
+                  <button className={presetIsActive(preset) ? "active" : ""} key={preset} onClick={() => selectPreset(preset)} type="button">
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              {activePreset === "Custom" && (
+                <div className="dashboard-custom-range">
+                  <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => updateCustomDate("startDate", value)} />
+                  <Field label="End date" type="date" value={dateRange.end} onChange={(value) => updateCustomDate("endDate", value)} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <button aria-label="Next period" className="dashboard-period-nav" onClick={() => shiftPeriod(1)} title="Next period" type="button"><ChevronRight size={16} /></button>
+      </div>
+    </div>
   );
-  const selectedHasGpBase = numberValue(metrics.netSales) > 0;
-  const shouldUseAllDepartments = department !== "All departments" && !selectedHasGpBase && numberValue(allDepartmentMetrics.netSales) > 0;
-  const dashboardDepartment = shouldUseAllDepartments ? "All departments" : department;
-  const dashboardMetrics = shouldUseAllDepartments ? allDepartmentMetrics : metrics;
-  const dashboardTarget = shouldUseAllDepartments ? numberValue(financialSettings.targetGp, gpTarget) : gpTarget;
-  const dashboardSupplierSpend = shouldUseAllDepartments ? supplierSpend : spendBySupplier(invoices, suppliers, dateRange, dashboardDepartment);
+}
+
+function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+  const dashboardDepartment = department;
+  const dashboardMetrics = metrics;
+  const dashboardTarget = gpTarget;
+  const dashboardSupplierSpend = supplierSpend;
+  const dashboardInsightCount = dashboardInsightsForMetrics(dashboardMetrics).length;
   const recentInvoices = [...dashboardMetrics.invoices]
     .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
     .filter((invoice) => dashboardDepartment === "All departments" || Math.abs(invoice.departmentTotal) > 0.01)
@@ -7620,11 +7878,6 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
 
   return (
     <div className="dashboard-page">
-      {shouldUseAllDepartments && (
-        <div className="notice-card">
-          Dashboard is showing all departments because {department} has no sales in this date range.
-        </div>
-      )}
       <div className="dashboard-content">
         <section className="dashboard-main-column">
           <PerformanceSections dashboardMode dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
@@ -7642,32 +7895,37 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
           </details>
         </section>
         <aside className="dashboard-rail" aria-label="Operational summary">
-          <div className="dashboard-rail-card warning"><span>Invoices</span><strong>{dashboardMetrics.invoices.length}</strong><small>This month</small><button onClick={() => onNavigate?.("invoices")} type="button">View invoices</button></div>
+          <div className="dashboard-rail-card warning"><span>Invoices</span><strong>{dashboardMetrics.invoiceCount ?? dashboardMetrics.invoices.length}</strong><small>Selected period</small><button onClick={() => onNavigate?.("invoices")} type="button">View invoices</button></div>
           <div className="dashboard-rail-card"><span>Waste</span><strong>{moneyOrEmpty(dashboardMetrics.waste, Boolean(dashboardMetrics.wasteRecords?.length))}</strong><small>{dashboardMetrics.netSales ? `${percent(dashboardMetrics.wastePercent)} of net sales` : "No sales baseline"}</small><button onClick={() => onNavigate?.("waste")} type="button">View waste</button></div>
-          <div className="dashboard-rail-card"><span>Labour</span><strong>–</strong><small>Available in Labour</small><button onClick={() => onNavigate?.("labour")} type="button">View labour</button></div>
-          <div className="dashboard-rail-card warning"><span>AI Insights</span><strong>3</strong><small>Insights to review</small><button onClick={() => onNavigate?.("ai")} type="button">View insights</button></div>
+          <div className="dashboard-rail-card"><span>Labour</span><strong>{moneyOrEmpty(dashboardMetrics.labour, Boolean(dashboardMetrics.labourRecords?.length))}</strong><small>{dashboardMetrics.labourRecords?.length ? `${numberValue(dashboardMetrics.labourHours).toFixed(1)} hours` : "No labour logged"}</small><button onClick={() => onNavigate?.("labour")} type="button">View labour</button></div>
+          <div className="dashboard-rail-card warning"><span>AI Insights</span><strong>{dashboardInsightCount}</strong><small>Current filters</small><button onClick={() => onNavigate?.("ai")} type="button">View insights</button></div>
         </aside>
       </div>
     </div>
   );
 }
 
-function DateRangeControls({ dateRangeState, setDateRangeState }) {
+function DateRangeControls({ dateRangeState, setDateRangeState, weekStartsOn = "Monday" }) {
+  const dateRange = resolveDateRange(dateRangeState, weekStartsOn);
+  const activePreset = normalizeRangePreset(dateRangeState.preset);
+  const selectPreset = (preset) => setDateRangeState(
+    normalizeRangePreset(preset) === "Custom"
+      ? { ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: dateRange.end, specificDate: dateRange.start }
+      : dateRangeStateForPreset(preset, weekStartsOn)
+  );
+
   return (
     <div className="form-grid six range-grid">
       <label>
         Range
-        <select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>
+        <select value={activePreset} onChange={(event) => selectPreset(event.target.value)}>
           {rangePresets.map((preset) => <option key={preset}>{preset}</option>)}
         </select>
       </label>
-      {(dateRangeState.preset === "Specific Date" || dateRangeState.preset === "Specific date") && (
-        <Field label="Date" type="date" value={dateRangeState.specificDate || dateRangeState.startDate || today()} onChange={(value) => setDateRangeState({ ...dateRangeState, specificDate: value, startDate: value, endDate: value })} />
-      )}
-      {(dateRangeState.preset === "Custom Range" || dateRangeState.preset === "Custom range") && (
+      {activePreset === "Custom" && (
         <>
-          <Field label="Start date" type="date" value={dateRangeState.startDate} onChange={(value) => setDateRangeState({ ...dateRangeState, startDate: value })} />
-          <Field label="End date" type="date" value={dateRangeState.endDate} onChange={(value) => setDateRangeState({ ...dateRangeState, endDate: value })} />
+          <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: value, endDate: dateRange.end, specificDate: value })} />
+          <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: value, specificDate: dateRange.start })} />
         </>
       )}
     </div>
@@ -13643,11 +13901,11 @@ function GpAnalysis({ dateRange, dateRangeState, demoMode = false, departmentNam
 
   return (
     <>
-      <Panel title="Sales date range" action={rangeLabel(dateRangeState, dateRange)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
+      <Panel title="Sales date range" action={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)}>
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
       </Panel>
       <div className="metric-grid compact">
-        <Metric label="Gross Sales" value={money(salesTotals.grossSales)} delta={rangeLabel(dateRangeState, dateRange)} />
+        <Metric label="Gross Sales" value={money(salesTotals.grossSales)} delta={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)} />
         <Metric label="Net Sales" value={money(salesTotals.netSales)} delta="Stored from POS/manual entry" />
         <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
         <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
@@ -13890,7 +14148,7 @@ function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmou
   );
 }
 
-function LabourPage({ dateRange, dateRangeState, labourData, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
+function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
   const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
@@ -14546,7 +14804,7 @@ function LabourPage({ dateRange, dateRangeState, labourData, permissions = permi
       <AppModal title="Import labour" open={labourControlOpen} onClose={() => setLabourControlOpen(false)} wide>
         <div className="modal-stack">
         <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} />
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
         <div className="button-row left labour-hub-actions">
           {permissions.canAdd && <PrimaryAction onClick={() => { setLabourControlOpen(false); openWeeklyInput(); }}>Input Labour</PrimaryAction>}
           <button className="ghost" onClick={() => { setLabourControlOpen(false); setActiveLabourModal("imports"); }} type="button">Staff Earnings</button>
@@ -15120,9 +15378,14 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
         <div className="modal-stack">
           <Panel title="Period and comparison" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
             <div className="form-grid six">
-              <label>Period<select value={dateRangeState.preset} onChange={(event) => setDateRangeState({ ...dateRangeState, preset: event.target.value })}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
-              <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: value, endDate: dateRange.end })} />
-              <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom Range", startDate: dateRange.start, endDate: value })} />
+              <label>Period<select value={normalizeRangePreset(dateRangeState.preset)} onChange={(event) => {
+                const preset = event.target.value;
+                setDateRangeState(normalizeRangePreset(preset) === "Custom"
+                  ? { ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: dateRange.end, specificDate: dateRange.start }
+                  : dateRangeStateForPreset(preset, weekStartsOn));
+              }}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
+              <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: value, endDate: dateRange.end, specificDate: value })} />
+              <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: value, specificDate: dateRange.start })} />
               <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
             </div>
           </Panel>
@@ -16619,12 +16882,55 @@ function InsightList({ metrics }) {
   );
 }
 
-function AiInsightsPage({ metrics, onNavigate, runId = 0 }) {
-  const insights = [
-    { id: "waste", tone: "warning", title: "Waste pressure", body: `Waste is ${percent(metrics.wastePercent)} of net sales, which is above your target.`, action: "Review waste records", page: "waste", age: "3h ago" },
-    { id: "menu", tone: "warning", title: "Menu item below target GP", body: "Review dishes that are below the current gross-profit target.", action: "Review menu costing", page: "menu", age: "1d ago" },
-    { id: "supplier", tone: "success", title: "Supplier price increase detected", body: "Review recent purchasing documents for changes in supplier costs.", action: "View supplier", page: "suppliers", age: "2d ago" },
+function dashboardInsightsForMetrics(metrics = {}) {
+  const hasSales = numberValue(metrics.netSales, 0) > 0;
+  const hasLabour = Boolean(metrics.labourRecords?.length);
+  return [
+    {
+      id: "waste",
+      tone: numberValue(metrics.wastePercent, 0) > 2 ? "warning" : "success",
+      title: "Waste pressure",
+      body: hasSales
+        ? `Waste is ${percent(metrics.wastePercent)} of net sales in the current filtered view.`
+        : "No sales baseline is available for the current filtered view.",
+      action: "Review waste records",
+      page: "waste",
+      age: "Current view",
+    },
+    {
+      id: "labour",
+      tone: hasLabour && numberValue(metrics.labourPercent, 0) > 32 ? "warning" : "success",
+      title: "Labour control",
+      body: hasLabour
+        ? `Labour is ${money(metrics.labour)} or ${percent(metrics.labourPercent)} of net sales in the selected period.`
+        : "No labour rows match the current dashboard filters.",
+      action: "View labour",
+      page: "labour",
+      age: "Current view",
+    },
+    {
+      id: "supplier",
+      tone: numberValue(metrics.purchases, 0) > 0 ? "warning" : "success",
+      title: "Supplier spend",
+      body: `Purchases total ${money(metrics.purchases)} for the selected department and period.`,
+      action: "View supplier",
+      page: "suppliers",
+      age: "Current view",
+    },
+    {
+      id: "menu",
+      tone: "warning",
+      title: "Menu item below target GP",
+      body: "Review dishes that are below the current gross-profit target.",
+      action: "Review menu costing",
+      page: "menu",
+      age: "Current view",
+    },
   ];
+}
+
+function AiInsightsPage({ metrics, onNavigate, runId = 0 }) {
+  const insights = dashboardInsightsForMetrics(metrics);
   return (
     <div className="ai-insights-page">
       {insights.map((insight) => (
