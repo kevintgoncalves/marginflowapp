@@ -116,6 +116,39 @@ test("duplicate conflicts remain local but are not retried automatically", async
   assert.equal(invoiceCanRetrySyncAutomatically(states.at(-1), { at: Date.parse("2026-08-08T12:00:00Z") }), false);
 });
 
+test("failed edit retry preserves the update target and revision until cloud persistence succeeds", async () => {
+  const calls = [];
+  let attempt = 0;
+  const client = { async rpc(name, payload) {
+    calls.push({ name, payload });
+    attempt += 1;
+    if (attempt === 1) return { data: null, error: new Error("Temporary cloud error") };
+    return { data: { invoice_id: invoiceId, sync_revision: 5, line_count: 1, split_count: 0 }, error: null };
+  } };
+  const first = await persistInvoiceWithLocalFallback({
+    client,
+    invoice: { ...sampleInvoice, date: "2026-09-18", persistenceSource: "relational", relationalId: invoiceId, syncRevision: 4 },
+    scope: { companyId },
+    duplicateAction: "update_existing",
+    existingInvoiceId: invoiceId,
+    expectedRevision: 4,
+  });
+  const retry = await persistInvoiceWithLocalFallback({ client, invoice: first.invoice, scope: { companyId } });
+
+  assert.equal(first.invoice.syncStatus, "sync_failed");
+  assert.deepEqual(first.invoice.syncRetryContext, {
+    duplicateAction: "update_existing",
+    existingInvoiceId: invoiceId,
+    expectedRevision: 4,
+  });
+  assert.equal(calls[0].payload.p_invoice.syncRetryContext, undefined);
+  assert.equal(calls[1].payload.p_duplicate_action, "update_existing");
+  assert.equal(calls[1].payload.p_existing_invoice_id, invoiceId);
+  assert.equal(calls[1].payload.p_expected_revision, 4);
+  assert.equal(retry.persisted, true);
+  assert.equal(retry.invoice.syncRetryContext, null);
+});
+
 test("retry remains idempotent because it reuses the invoice and line UUIDs", async () => {
   const calls = [];
   const client = { async rpc(name, payload) { calls.push(payload); return { data: { invoice_id: invoiceId, line_count: 1, split_count: 0, saved_at: "2026-08-07T12:01:00Z" }, error: null }; } };

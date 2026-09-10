@@ -148,10 +148,12 @@ export async function persistRelationalInvoice(client, invoice = {}, scope = {},
     throw new Error("Relational invoice persistence needs canonical company and invoice identifiers.");
   }
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
+  const invoicePayload = { ...canonicalInvoice };
+  delete invoicePayload.syncRetryContext;
   const { data, error } = await client.rpc("persist_invoice_document_v3", {
     p_company_id: scope.companyId,
     p_location_id: scope.locationId || null,
-    p_invoice: canonicalInvoice,
+    p_invoice: invoicePayload,
     p_duplicate_action: duplicateAction,
     p_existing_invoice_id: existingInvoiceId,
     p_expected_revision: expectedRevision,
@@ -184,6 +186,23 @@ export async function persistInvoiceWithLocalFallback({
   expectedRevision = null,
 } = {}) {
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
+  const storedRetryContext = invoice.syncRetryContext && typeof invoice.syncRetryContext === "object"
+    ? invoice.syncRetryContext
+    : {};
+  const resolvedDuplicateAction = duplicateAction || storedRetryContext.duplicateAction || null;
+  const resolvedExistingInvoiceId = existingInvoiceId || storedRetryContext.existingInvoiceId || null;
+  const hasStoredExpectedRevision = storedRetryContext.expectedRevision !== null
+    && storedRetryContext.expectedRevision !== undefined
+    && storedRetryContext.expectedRevision !== "";
+  const storedExpectedRevision = hasStoredExpectedRevision ? Number(storedRetryContext.expectedRevision) : Number.NaN;
+  const resolvedExpectedRevision = expectedRevision !== null && expectedRevision !== undefined
+    ? expectedRevision
+    : (Number.isFinite(storedExpectedRevision) ? storedExpectedRevision : null);
+  const syncRetryContext = resolvedDuplicateAction ? {
+    duplicateAction: resolvedDuplicateAction,
+    existingInvoiceId: resolvedExistingInvoiceId,
+    expectedRevision: resolvedExpectedRevision,
+  } : null;
   const attemptedAt = now();
   const syncAttemptCount = Number(invoice.syncAttemptCount || 0) + 1;
   const pending = {
@@ -195,11 +214,16 @@ export async function persistInvoiceWithLocalFallback({
     nextSyncAttemptAt: "",
     syncAttemptCount,
     syncRetryBlocked: false,
+    syncRetryContext,
   };
   storeLocal(pending);
   if (!client || !validScope(scope)) return { invoice: pending, persisted: false, error: null };
   try {
-    const result = await persistRelationalInvoice(client, pending, scope, { duplicateAction, existingInvoiceId, expectedRevision });
+    const result = await persistRelationalInvoice(client, pending, scope, {
+      duplicateAction: resolvedDuplicateAction,
+      existingInvoiceId: resolvedExistingInvoiceId,
+      expectedRevision: resolvedExpectedRevision,
+    });
     const synced = {
       ...result.invoice,
       syncStatus: "synced",
@@ -210,6 +234,7 @@ export async function persistInvoiceWithLocalFallback({
       persistenceSource: "relational",
       nextSyncAttemptAt: "",
       syncRetryBlocked: false,
+      syncRetryContext: null,
     };
     storeLocal(synced);
     return { invoice: synced, persisted: true, result, error: null };

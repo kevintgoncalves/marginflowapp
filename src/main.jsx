@@ -6280,25 +6280,33 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       let freshInvoices = await loadRelationalInvoices(supabase, scope);
       for (const invoice of retryCandidates) {
         if (cancelled) return;
-        const assessment = assessPurchasingDocumentDuplicate(freshInvoices, invoice, { companyId: scope.companyId });
-        if (assessment.kind === "same_document") {
-          setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, assessment.existing));
-          continue;
-        }
-        if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
-          setInvoices((current) => current.map((candidate) => candidate.id === invoice.id ? {
-            ...candidate,
-            syncStatus: "sync_failed",
-            syncRetryBlocked: true,
-            syncError: "A cloud invoice with this supplier and document number needs duplicate review.",
-          } : candidate));
-          continue;
+        const retryContext = invoice.syncRetryContext && typeof invoice.syncRetryContext === "object"
+          ? invoice.syncRetryContext
+          : null;
+        if (!retryContext?.duplicateAction) {
+          const assessment = assessPurchasingDocumentDuplicate(freshInvoices, invoice, { companyId: scope.companyId });
+          if (assessment.kind === "same_document") {
+            setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, assessment.existing));
+            continue;
+          }
+          if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
+            setInvoices((current) => current.map((candidate) => candidate.id === invoice.id ? {
+              ...candidate,
+              syncStatus: "sync_failed",
+              syncRetryBlocked: true,
+              syncError: "A cloud invoice with this supplier and document number needs duplicate review.",
+            } : candidate));
+            continue;
+          }
         }
         const result = await persistInvoiceWithLocalFallback({
           client: supabase,
           invoice,
           scope,
           storeLocal: (storedInvoice) => setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, storedInvoice)),
+          duplicateAction: retryContext?.duplicateAction || null,
+          existingInvoiceId: retryContext?.existingInvoiceId || null,
+          expectedRevision: retryContext?.expectedRevision ?? null,
         });
         if (result.persisted) freshInvoices = [result.invoice, ...freshInvoices];
         if (result.error) {

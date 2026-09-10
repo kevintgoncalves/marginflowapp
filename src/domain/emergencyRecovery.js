@@ -526,6 +526,32 @@ function invoiceMatchesOperationalScope(invoice = {}, companyId = "", locationId
   return invoiceCompanyId === companyId && (!locationId || invoiceLocationId === locationId);
 }
 
+function invoiceReferenceIds(invoice = {}) {
+  return new Set([
+    invoice.id,
+    invoice.relationalId,
+    invoice.relational_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+}
+
+function invoicesShareReference(left = {}, right = {}) {
+  const leftIds = invoiceReferenceIds(left);
+  return [...invoiceReferenceIds(right)].some((id) => leftIds.has(id));
+}
+
+function localOperationalVersionWins(localInvoice = {}, canonicalInvoice = {}) {
+  if (invoiceContentFingerprint(localInvoice) === invoiceContentFingerprint(canonicalInvoice)) return false;
+  const localMetrics = completenessMetrics(localInvoice);
+  const canonicalMetrics = completenessMetrics(canonicalInvoice);
+  const localStatus = String(localInvoice.syncStatus || "");
+  if (LOCAL_OPERATIONAL_INVOICE_STATUSES.has(localStatus)) {
+    return localMetrics.revision >= canonicalMetrics.revision;
+  }
+  if (localMetrics.revision > canonicalMetrics.revision) return true;
+  return localMetrics.revision === canonicalMetrics.revision
+    && localMetrics.timestamp > canonicalMetrics.timestamp;
+}
+
 export function relationalOperationalInvoiceCollection({
   localInvoices = [],
   relationalInvoices = [],
@@ -536,18 +562,31 @@ export function relationalOperationalInvoiceCollection({
   const canonicalInvoices = Array.isArray(relationalInvoices) ? relationalInvoices : [];
   if (readOnly) return canonicalInvoices;
 
-  const canonicalIds = new Set(canonicalInvoices.map(invoiceId).filter(Boolean));
   const canonicalIdentities = new Set(canonicalInvoices.map((invoice) => invoiceRecoveryIdentity(invoice).key));
-  const localOperationalInvoices = (Array.isArray(localInvoices) ? localInvoices : [])
+  const localOperationalCandidates = (Array.isArray(localInvoices) ? localInvoices : [])
     .filter(invoiceIsOperational)
-    .filter((invoice) => invoiceMatchesOperationalScope(invoice, companyId, locationId))
+    .filter((invoice) => invoiceMatchesOperationalScope(invoice, companyId, locationId));
+  const matchedLocalInvoices = new Set();
+  const reconciledCanonicalInvoices = canonicalInvoices.map((canonicalInvoice) => {
+    const matchingLocals = localOperationalCandidates.filter((localInvoice) => invoicesShareReference(localInvoice, canonicalInvoice));
+    matchingLocals.forEach((invoice) => matchedLocalInvoices.add(invoice));
+    const preferredLocal = matchingLocals
+      .filter((localInvoice) => localOperationalVersionWins(localInvoice, canonicalInvoice))
+      .sort((left, right) => {
+        const leftMetrics = completenessMetrics(left);
+        const rightMetrics = completenessMetrics(right);
+        return (rightMetrics.revision - leftMetrics.revision) || (rightMetrics.timestamp - leftMetrics.timestamp);
+      })[0];
+    return preferredLocal || canonicalInvoice;
+  });
+  const localOperationalInvoices = localOperationalCandidates
+    .filter((invoice) => !matchedLocalInvoices.has(invoice))
     .filter((invoice) => {
-      const id = invoiceId(invoice);
       const identity = invoiceRecoveryIdentity(invoice).key;
-      return (!id || !canonicalIds.has(id)) && !canonicalIdentities.has(identity);
+      return !canonicalIdentities.has(identity);
     });
 
-  return [...localOperationalInvoices, ...canonicalInvoices];
+  return [...localOperationalInvoices, ...reconciledCanonicalInvoices];
 }
 
 export function inspectEmergencyBackup(payload = {}) {

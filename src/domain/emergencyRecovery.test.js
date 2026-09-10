@@ -226,6 +226,60 @@ test("relational operational hydration preserves cached relational invoices miss
   assert.deepEqual(new Set(result.map((row) => row.documentNumber)), new Set(["A", "B"]));
 });
 
+test("relational refresh does not replace a pending date edit with the previous cloud version", () => {
+  const canonical = invoice("same-id", "A", 10, {
+    companyId: "company-a",
+    date: "2026-09-08",
+    syncRevision: 4,
+    persistenceSource: "relational",
+    syncStatus: "synced",
+  });
+  const pendingEdit = {
+    ...canonical,
+    date: "2026-09-18",
+    syncStatus: "sync_failed",
+    syncError: "Temporary cloud error",
+    syncRetryContext: { duplicateAction: "update_existing", existingInvoiceId: "same-id", expectedRevision: 4 },
+  };
+
+  const result = relationalOperationalInvoiceCollection({
+    localInvoices: [pendingEdit],
+    relationalInvoices: [canonical],
+    companyId: "company-a",
+  });
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].date, "2026-09-18");
+  assert.equal(result[0].syncStatus, "sync_failed");
+});
+
+test("stale relational refresh cannot overwrite a successfully saved newer invoice revision", () => {
+  const staleRefresh = invoice("same-id", "A", 10, {
+    companyId: "company-a",
+    date: "2026-09-08",
+    syncRevision: 4,
+    syncedAt: "2026-09-10T12:00:00Z",
+    persistenceSource: "relational",
+    syncStatus: "synced",
+  });
+  const savedEdit = {
+    ...staleRefresh,
+    date: "2026-09-18",
+    syncRevision: 5,
+    syncedAt: "2026-09-10T12:01:00Z",
+  };
+
+  const result = relationalOperationalInvoiceCollection({
+    localInvoices: [savedEdit],
+    relationalInvoices: [staleRefresh],
+    companyId: "company-a",
+  });
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].date, "2026-09-18");
+  assert.equal(result[0].syncRevision, 5);
+});
+
 test("backup inspection rejects unrelated or malformed JSON objects", () => {
   assert.equal(inspectEmergencyBackup({ hello: "world" }).valid, false);
   assert.equal(inspectEmergencyBackup({ businessData: { invoices: {} } }).valid, false);
