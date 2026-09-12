@@ -76,6 +76,7 @@ import {
   runtimeInvoiceLineCount,
 } from "./domain/invoiceRuntimeSafety.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
+import { confirmedInvoicesForScope, rememberConfirmedInvoice } from "./domain/confirmedInvoices.js";
 import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
 import {
   BATCH_INVOICE_ITEM_STATUSES,
@@ -3873,8 +3874,11 @@ function readInvoiceAutoBackups() {
 function saveLocalStorage(key, value) {
   try {
     saveSerializedLocalStorage(key, JSON.stringify(value));
+    return true;
   } catch {
-    // Local storage can be unavailable in private or embedded preview contexts.
+    // Never imply durability when the browser rejected the write.
+    queueMicrotask(() => window.dispatchEvent(new CustomEvent("marginflow-storage-error")));
+    return false;
   }
 }
 
@@ -5699,9 +5703,18 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const invoiceApprovalRef = useRef(false);
   const invoiceRefreshRef = useRef(false);
   const invoiceAutoRetryRef = useRef(new Set());
+  const invoiceCommitGenerationRef = useRef(0);
+  const [confirmedInvoices, setConfirmedInvoices] = useState([]);
+  const [confirmedInvoicesLoaded, setConfirmedInvoicesLoaded] = useState(false);
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
+  const [localStorageError, setLocalStorageError] = useState(false);
+  useEffect(() => {
+    const onStorageError = () => setLocalStorageError(true);
+    window.addEventListener("marginflow-storage-error", onStorageError);
+    return () => window.removeEventListener("marginflow-storage-error", onStorageError);
+  }, []);
   const [cloudLoadAttempt, setCloudLoadAttempt] = useState(0);
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
@@ -5816,6 +5829,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const setSupplierProductMappings = demoMode ? makeStateUpdater(setSupplierProductMappingsState) : makeStateUpdater(setSupplierProductMappingsState, "marginflow.supplierProductMappings");
   const setInvoiceLineCorrections = demoMode ? makeStateUpdater(setInvoiceLineCorrectionsState) : makeStateUpdater(setInvoiceLineCorrectionsState, "marginflow.invoiceLineCorrections");
   const setInvoices = (value) => {
+    invoiceCommitGenerationRef.current += 1;
     setInvoicesState((current) => {
       const nextValue = typeof value === "function" ? value(current) : value;
       const next = normalizeInvoiceCollectionForRuntime(nextValue);
@@ -5921,7 +5935,13 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const effectiveDepartment = visibleDepartmentOptions.includes(department) ? department : (visibleDepartmentOptions[0] || "All departments");
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
-  const operationalInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
+  const workingInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
+  const operationalInvoices = useMemo(() => demoMode ? invoices : confirmedInvoicesForScope(confirmedInvoices, cloudScope), [demoMode, invoices, confirmedInvoices, cloudScope]);
+  const pendingInvoiceCount = workingInvoices.filter((invoice) => invoice.syncStatus !== "synced").length;
+  const rememberCloudInvoice = (invoice) => {
+    invoiceCommitGenerationRef.current += 1;
+    setConfirmedInvoices((current) => rememberConfirmedInvoice(current, invoice));
+  };
   const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData), [operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData]);
   const supplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, legacyInvoiceArchive]);
   const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive]);
@@ -5971,11 +5991,15 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, supplierProductMappings, invoiceLineCorrections, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
   const applyCloudSnapshot = (snapshot) => {
+    if (Array.isArray(snapshot.confirmedInvoices)) {
+      setConfirmedInvoices(snapshot.confirmedInvoices);
+      setConfirmedInvoicesLoaded(true);
+    }
     if (!demoMode && !readOnly) {
       try {
         Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => saveSerializedLocalStorage(key, value, "cloud_snapshot"));
       } catch {
-        // The in-memory state remains usable when browser storage is unavailable.
+        setLocalStorageError(true);
       }
     }
     setCompanySettingsState(snapshot.companySettings);
@@ -6065,8 +6089,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       readOnly,
     });
     setLegacyInvoiceArchive([]);
-    if (!readOnly) saveLocalStorage("marginflow.invoices", operationalInvoices);
-    return { ...snapshot, invoices: operationalInvoices };
+    // Write only in applyCloudSnapshot, after its caller checks cancellation
+    // and that no new invoice work arrived while this read was in flight.
+    return { ...snapshot, invoices: operationalInvoices, confirmedInvoices: relationalInvoices };
   };
 
   const withRelationalSales = async (snapshot) => {
@@ -6182,6 +6207,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     cloudReadyRef.current = false;
     setCloudLoading(true);
     setCloudError("");
+    const loadGeneration = invoiceCommitGenerationRef.current;
     loadCloudState(cloudScope)
       .then(async (rows) => {
         if (cancelled) return;
@@ -6210,6 +6236,8 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
           const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
           const nextSnapshot = await withRelationalSales(invoiceSnapshot);
+          if (cancelled) return;
+          if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(nextSnapshot);
           if (cancelled) return;
           setCloudStatus("synced");
@@ -6219,6 +6247,8 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
           const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
           const firstSnapshot = await withRelationalSales(invoiceSnapshot);
+          if (cancelled) return;
+          if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(firstSnapshot);
           if (cancelled) return;
           setCloudStatus("synced");
@@ -6247,11 +6277,14 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       invoiceRefreshRef.current = true;
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+        const readGeneration = invoiceCommitGenerationRef.current;
         const [freshInvoices, freshSales] = await Promise.all([
           loadRelationalInvoices(supabase, scope),
           loadRelationalSales(supabase, scope),
         ]);
-        if (cancelled) return;
+        if (cancelled || readGeneration !== invoiceCommitGenerationRef.current) return;
+        setConfirmedInvoices(freshInvoices);
+        setConfirmedInvoicesLoaded(true);
         setInvoices((current) => relationalOperationalInvoiceCollection({
           localInvoices: current,
           relationalInvoices: freshInvoices,
@@ -6388,12 +6421,12 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
 
   const persistInvoiceDocument = async (invoice, { forceUpdate = false } = {}) => {
     const sourceInvoice = forceUpdate
-      ? operationalInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
+      ? workingInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
       : null;
     const sourceInvoiceId = sourceInvoice?.id || invoice.id || "";
     const assessment = forceUpdate && sourceInvoice
       ? { kind: "forced_update", existing: sourceInvoice }
-      : assessPurchasingDocumentDuplicate(operationalInvoices, invoice, { companyId: cloudScope.companyId });
+      : assessPurchasingDocumentDuplicate(workingInvoices, invoice, { companyId: cloudScope.companyId });
     let duplicateAction = null;
     let existingInvoiceId = null;
     let expectedRevision = null;
@@ -6446,8 +6479,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     });
     if (result.error) {
       setCloudStatus("error");
-      setCloudError(`${result.error.message || "Invoice sync failed"} The invoice is stored safely on this device.`);
+      setCloudError(`${result.error.message || "Invoice sync failed"} Cloud saving is not confirmed. Keep this page open and review pending invoices.`);
     } else if (result.persisted) {
+      rememberCloudInvoice(result.invoice);
       setCloudStatus("synced");
       setCloudError("");
     }
@@ -6456,7 +6490,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
 
   useEffect(() => {
     if (!cloudEnabled || readOnly || !cloudReadyRef.current) return undefined;
-    const retryCandidates = operationalInvoices
+    const retryCandidates = workingInvoices
       .filter((invoice) => invoiceCanRetrySyncAutomatically(invoice))
       .filter((invoice) => {
         const token = `${invoice.id || invoice.relationalId || "invoice"}:${invoice.syncAttemptCount || 0}:${invoice.syncError || ""}`;
@@ -6481,6 +6515,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
         if (!retryContext?.duplicateAction) {
           const assessment = assessPurchasingDocumentDuplicate(freshInvoices, invoice, { companyId: scope.companyId });
           if (assessment.kind === "same_document") {
+            rememberCloudInvoice(assessment.existing);
             setInvoices((current) => replaceInvoiceInCollection(current, invoice.id, assessment.existing));
             continue;
           }
@@ -6503,10 +6538,13 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           existingInvoiceId: retryContext?.existingInvoiceId || null,
           expectedRevision: retryContext?.expectedRevision ?? null,
         });
-        if (result.persisted) freshInvoices = [result.invoice, ...freshInvoices];
+        if (result.persisted) {
+          rememberCloudInvoice(result.invoice);
+          freshInvoices = upsertInvoiceInCollection(freshInvoices, result.invoice);
+        }
         if (result.error) {
           setCloudStatus("error");
-          setCloudError(`${result.error.message || "Invoice sync failed"} The invoice remains saved on this device.`);
+          setCloudError(`${result.error.message || "Invoice sync failed"} Cloud saving is not confirmed. Keep this page open and review pending invoices.`);
         }
       }
     };
@@ -6524,7 +6562,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     return () => {
       cancelled = true;
     };
-  }, [cloudEnabled, cloudLoadAttempt, operationalInvoices, readOnly]);
+  }, [cloudEnabled, cloudLoadAttempt, workingInvoices, readOnly]);
 
   const compareDeviceWithCloud = async () => {
     if (!cloudEnabled) {
@@ -7020,6 +7058,9 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       </aside>
 
       <main className="workspace">
+        {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes. Keep this page open. Confirm cloud saving or download an emergency backup from Settings before closing.</div>}
+        {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
+        {!demoMode && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoices.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
         {displayRecoveryMode && (
           <div className="display-recovery-banner">
@@ -7106,7 +7147,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
           draft={draft}
           invoiceApprovalBusy={invoiceApprovalBusy}
           setDraft={setDraft}
-          invoices={operationalInvoices}
+          invoices={workingInvoices}
           legacyInvoiceArchive={legacyInvoiceArchive}
           invoiceSettings={invoiceSettings}
           financialSettings={financialSettings}
@@ -11300,7 +11341,7 @@ function InvoiceControlCentre({
         const persistence = await persistCorrectReviewResolution(reviewDetailDraft, reviewDetailValidation);
         finishSelectedReview(
           reviewDetailDraft.id,
-          persistence.error ? "Invoice marked as correct and saved on this device. Cloud sync will retry." : "Invoice marked as correct."
+          persistence.error ? "Review changes are pending cloud confirmation. Keep this page open if a storage warning appears." : "Invoice marked as correct."
         );
         return;
       }
@@ -11428,7 +11469,7 @@ function InvoiceControlCentre({
       if (failures.length) {
         setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct. ${failures.length} could not be updated.`);
       } else if (localOnlyCount) {
-        setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct. ${localOnlyCount} saved on this device will retry cloud sync.`);
+        setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct. ${localOnlyCount} still await cloud confirmation.`);
       } else {
         setReviewDetailStatus(`${savedCount} invoice${savedCount === 1 ? "" : "s"} marked as correct.`);
       }
@@ -11661,7 +11702,7 @@ function InvoiceControlCentre({
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
       setViewInvoice(invoiceForControlEditor(savedInvoice, departmentNames));
-      setViewInvoiceStatus(persistence.error ? "Invoice saved on this device. Cloud sync will retry." : "Invoice saved.");
+      setViewInvoiceStatus(persistence.error ? "Invoice changes await cloud confirmation. Keep this page open if a storage warning appears." : "Invoice saved.");
     } catch (error) {
       setViewInvoiceStatus(error.message || "Could not save this invoice.");
     } finally {

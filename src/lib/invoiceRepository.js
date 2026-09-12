@@ -1,5 +1,6 @@
 import { compareInvoiceCollections } from "../domain/emergencyRecovery.js";
 import { withCanonicalInvoiceFinancials } from "../domain/invoiceFinancials.js";
+import { readAllPages } from "./paginatedRead.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -301,33 +302,37 @@ export async function loadLegacyInvoiceArchive(client, scope = {}) {
 
 export async function loadRelationalInvoices(client, scope = {}) {
   if (!client || !validScope(scope)) return [];
-  const scopedQuery = (table) => {
-    let query = client.from(table).select("*").eq("company_id", scope.companyId);
+  const scopedQuery = (table, head = false) => {
+    let query = client.from(table).select("*", { count: "exact", head }).eq("company_id", scope.companyId);
     if (scope.locationId) query = query.eq("location_id", scope.locationId);
     return query;
   };
-  const [invoiceResult, lineResult, splitResult] = await Promise.all([
-    scopedQuery("invoices").order("invoice_date", { ascending: false }),
-    scopedQuery("invoice_lines"),
-    scopedQuery("invoice_line_department_splits"),
+  const readTable = (table) => readAllPages((head = false) => scopedQuery(table, head), { label: table });
+  const invoiceRows = await readTable("invoices");
+  const [lineRows, splitRows] = await Promise.all([
+    readTable("invoice_lines"), readTable("invoice_line_department_splits"),
   ]);
-  if (invoiceResult.error) throw invoiceResult.error;
-  if (lineResult.error) throw lineResult.error;
-  if (splitResult.error) throw splitResult.error;
+  // The invoice RPC advances revision/updated_at with its children. Refuse a
+  // document assembled across different committed revisions.
+  const verifiedRows = await readTable("invoices");
+  const versions = (rows) => JSON.stringify(rows.map((row) => [row.id, row.sync_revision, row.updated_at]));
+  if (versions(invoiceRows) !== versions(verifiedRows)) {
+    throw new Error("Invoices changed during loading. Retry to read a consistent version; previous data has been retained.");
+  }
 
   const splitsByLineId = new Map();
-  (splitResult.data || []).forEach((split) => {
+  splitRows.forEach((split) => {
     const rows = splitsByLineId.get(split.invoice_line_id) || [];
     rows.push(split);
     splitsByLineId.set(split.invoice_line_id, rows);
   });
   const linesByInvoiceId = new Map();
-  (lineResult.data || []).forEach((line) => {
+  lineRows.forEach((line) => {
     const rows = linesByInvoiceId.get(line.invoice_id) || [];
     rows.push({ ...line, invoice_line_department_splits: splitsByLineId.get(line.id) || [] });
     linesByInvoiceId.set(line.invoice_id, rows);
   });
-  return (invoiceResult.data || []).map((invoice) => invoiceFromRelationalRow({
+  return invoiceRows.sort((a, b) => String(b.invoice_date || "").localeCompare(String(a.invoice_date || "")) || a.id.localeCompare(b.id)).map((invoice) => invoiceFromRelationalRow({
     ...invoice,
     invoice_lines: linesByInvoiceId.get(invoice.id) || [],
   }));

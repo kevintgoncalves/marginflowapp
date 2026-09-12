@@ -414,7 +414,7 @@ export function batchItemStatusAfterPersistence(persistence = {}, { now = () => 
       failureStage: "sync",
       invoice,
       importedAt: "",
-      error: `Saved on this device, but cloud sync failed: ${persistence.error.message || "Unknown sync error"}`,
+      error: `Cloud saving is not confirmed. Keep this page open if a storage warning appears. Sync error: ${persistence.error.message || "Unknown sync error"}`,
     };
   }
   return {

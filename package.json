@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test src/domain/*.test.js src/workforce/*.test.js",
+    "test": "node --test src/domain/*.test.js src/workforce/*.test.js scripts/*.test.mjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "safety:check": "node scripts/check-data-safety.mjs",
+    "prebuild": "npm run safety:check && npm test && node scripts/check-production-release.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",

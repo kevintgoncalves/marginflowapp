@@ -545,7 +545,9 @@ function localOperationalVersionWins(localInvoice = {}, canonicalInvoice = {}) {
   const canonicalMetrics = completenessMetrics(canonicalInvoice);
   const localStatus = String(localInvoice.syncStatus || "");
   if (LOCAL_OPERATIONAL_INVOICE_STATUSES.has(localStatus)) {
-    return localMetrics.revision >= canonicalMetrics.revision;
+    // This is the working/recovery collection, not the financial ledger.
+    // Even a stale pending edit contains user work and must not be discarded.
+    return true;
   }
   if (localMetrics.revision > canonicalMetrics.revision) return true;
   return localMetrics.revision === canonicalMetrics.revision
@@ -577,11 +579,17 @@ export function relationalOperationalInvoiceCollection({
         const rightMetrics = completenessMetrics(right);
         return (rightMetrics.revision - leftMetrics.revision) || (rightMetrics.timestamp - leftMetrics.timestamp);
       })[0];
+    if (preferredLocal && LOCAL_OPERATIONAL_INVOICE_STATUSES.has(preferredLocal.syncStatus)
+      && Number(preferredLocal.syncRevision || 0) < Number(canonicalInvoice.syncRevision || 0)) {
+      return { ...preferredLocal, syncStatus: "sync_failed", syncRetryBlocked: true,
+        syncError: "A newer cloud version exists. Your pending changes are preserved; review before saving." };
+    }
     return preferredLocal || canonicalInvoice;
   });
   const localOperationalInvoices = localOperationalCandidates
     .filter((invoice) => !matchedLocalInvoices.has(invoice))
     .filter((invoice) => {
+      if (LOCAL_OPERATIONAL_INVOICE_STATUSES.has(invoice.syncStatus)) return true;
       const identity = invoiceRecoveryIdentity(invoice).key;
       return !canonicalIdentities.has(identity);
     });

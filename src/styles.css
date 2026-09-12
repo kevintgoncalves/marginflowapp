@@ -7579,3 +7579,16 @@ button.icon {
     flex-direction: column;
   }
 }
+.invoice-safety-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  border: 1px solid var(--warning, #f59e0b);
+  border-radius: 10px;
+  color: var(--text, #e5edf7);
+  background: var(--card, #1e293b);
+}

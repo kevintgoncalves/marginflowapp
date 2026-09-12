@@ -248,12 +248,13 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
   const splits = [{ id: splitId, invoice_line_id: lineId, department_id: null, percentage: 100, amount: 8, metadata: { marginflow_snapshot: { department: "Kitchen" } } }];
   const selectCalls = [];
   const queryFor = (table) => ({
-    select(columns) { selectCalls.push({ table, columns }); return this; },
+    select(columns, options) { this.head = options.head; selectCalls.push({ table, columns }); return this; },
     eq() { return this; },
-    order() { return Promise.resolve({ data: invoices, error: null }); },
+    order() { return this; },
+    range() { return this; },
     then(resolve, reject) {
-      const data = table === "invoice_lines" ? lines : splits;
-      return Promise.resolve({ data, error: null }).then(resolve, reject);
+      const data = table === "invoices" ? invoices : table === "invoice_lines" ? lines : splits;
+      return Promise.resolve({ data: this.head ? null : data, count: data.length, error: null }).then(resolve, reject);
     },
   });
   const client = { from: queryFor };
@@ -270,7 +271,7 @@ test("TEST J: fresh device loads relational invoice rows with lines and splits",
     items: [{ ...sampleInvoice.items[0], departmentSplits: [{ id: splitId, department: "Kitchen", percentage: 100, amount: 8 }] }],
   };
   assert.equal(compareInvoiceCollections([originalWithSplit], loaded).counts.presentInBoth, 1);
-  assert.deepEqual(selectCalls, [
+  assert.deepEqual([...new Map(selectCalls.map((call) => [call.table, call])).values()], [
     { table: "invoices", columns: "*" },
     { table: "invoice_lines", columns: "*" },
     { table: "invoice_line_department_splits", columns: "*" },

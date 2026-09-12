@@ -34,13 +34,13 @@ export function canAdmin(context, permission) {
   return permissionSet(context).has(permission);
 }
 
-export function effectiveSubscriptionStatus(subscription = {}) {
-  if (subscription.status === 'trialing' && subscription.trial_ends_at && new Date(subscription.trial_ends_at).getTime() <= Date.now()) return 'expired';
+export function effectiveSubscriptionStatus(subscription = {}, now = new Date()) {
+  if (subscription.status === 'trialing' && subscription.trial_ends_at && new Date(subscription.trial_ends_at).getTime() <= new Date(now).getTime()) return 'expired';
   return subscription.effective_status || subscription.status || 'expired';
 }
 
 export function trialDisplay(subscription = {}, now = new Date()) {
-  const status = effectiveSubscriptionStatus(subscription);
+  const status = effectiveSubscriptionStatus(subscription, now);
   if (status !== 'trialing' || !subscription.trial_ends_at) return status === 'expired' ? 'Trial ended' : '';
   const end = new Date(subscription.trial_ends_at);
   const days = Math.max(0, Math.ceil((end.getTime() - new Date(now).getTime()) / 86400000));

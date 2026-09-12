@@ -1,4 +1,5 @@
 import { deterministicRecoveryUuid, isCanonicalUuid } from "./invoiceRepository.js";
+import { readAllPages } from "./paginatedRead.js";
 
 function validScope({ companyId = "", locationId = "" } = {}) {
   return isCanonicalUuid(companyId) && (!locationId || isCanonicalUuid(locationId));
@@ -101,35 +102,44 @@ export async function loadRelationalSalesDepartments(client, scope = {}) {
 
 export async function loadRelationalSales(client, scope = {}, { startDate = "", endDate = "" } = {}) {
   if (!client || !validScope(scope)) return [];
-  let query = client
+  const entryQuery = (head = false) => {
+    let query = client
     .from("sales_entries")
-    .select("id,company_id,location_id,sales_date,gross_sales,net_sales,vat_amount,service_charge,discounts,refunds,source,metadata,created_at,updated_at")
+    .select("id,company_id,location_id,sales_date,gross_sales,net_sales,vat_amount,service_charge,discounts,refunds,source,metadata,created_at,updated_at", { count: "exact", head })
     .eq("company_id", scope.companyId);
   if (scope.locationId) query = query.eq("location_id", scope.locationId);
   if (startDate) query = query.gte("sales_date", startDate);
   if (endDate) query = query.lte("sales_date", endDate);
-  const { data: entries, error } = await query.order("sales_date", { ascending: true });
-  if (error) throw error;
+    return query;
+  };
+  const entries = await readAllPages(entryQuery, { label: "sales entries" });
   if (!entries?.length) return [];
 
   const entryIds = entries.map((entry) => entry.id);
-  const [departments, lineResult] = await Promise.all([
-    loadRelationalSalesDepartments(client, scope),
-    client
-      .from("sales_department_lines")
-      .select("id,company_id,location_id,sales_entry_id,department_id,gross_sales,net_sales,vat_amount,service_charge,metadata,created_at,updated_at")
-      .eq("company_id", scope.companyId)
-      .in("sales_entry_id", entryIds),
-  ]);
-  if (lineResult.error) throw lineResult.error;
+  const departments = await loadRelationalSalesDepartments(client, scope);
+  const lines = [];
+  // Small ID groups keep URLs bounded even for years of sales history.
+  for (let offset = 0; offset < entryIds.length; offset += 100) {
+    const ids = entryIds.slice(offset, offset + 100);
+    lines.push(...await readAllPages((head = false) => {
+      let query = client.from("sales_department_lines")
+        .select("id,company_id,location_id,sales_entry_id,department_id,gross_sales,net_sales,vat_amount,service_charge,metadata,created_at,updated_at", { count: "exact", head })
+        .eq("company_id", scope.companyId).in("sales_entry_id", ids);
+      if (scope.locationId) query = query.eq("location_id", scope.locationId);
+      return query;
+    }, { label: "sales department lines" }));
+  }
+  const verifiedEntries = await readAllPages(entryQuery, { label: "sales entries" });
+  const versions = (rows) => JSON.stringify(rows.map((row) => [row.id, row.updated_at]));
+  if (versions(entries) !== versions(verifiedEntries)) throw new Error("Sales changed during loading. Retry the read; previous data has been retained.");
 
   const linesByEntryId = new Map();
-  (lineResult.data || []).forEach((line) => {
+  lines.forEach((line) => {
     const current = linesByEntryId.get(line.sales_entry_id) || [];
     current.push(line);
     linesByEntryId.set(line.sales_entry_id, current);
   });
-  return entries.map((entry) => relationalSalesEntryToAppRow(entry, linesByEntryId.get(entry.id) || [], departments.byId));
+  return entries.sort((a,b) => String(a.sales_date || "").localeCompare(String(b.sales_date || "")) || a.id.localeCompare(b.id)).map((entry) => relationalSalesEntryToAppRow(entry, linesByEntryId.get(entry.id) || [], departments.byId));
 }
 
 async function ensureSalesEntryId(sale = {}, scope = {}) {

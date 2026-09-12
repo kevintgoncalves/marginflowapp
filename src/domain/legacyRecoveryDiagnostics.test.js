@@ -128,13 +128,14 @@ async function diagnosticPreview(localInvoice, cloudInvoice) {
 }
 
 function readQuery(rows, operations, table) {
-  const result = { data: rows, error: null };
+  const result = { data: rows, count: rows.length, error: null };
   const query = {
     select() { operations.push(`select:${table}`); return query; },
     eq() { return query; },
     or() { return query; },
     is() { return query; },
-    order() { return Promise.resolve(result); },
+    order() { return query; },
+    range() { return query; },
     then(resolve, reject) { return Promise.resolve(result).then(resolve, reject); },
   };
   return query;
@@ -154,9 +155,9 @@ test("TEST A: diagnostic repository path performs SELECTs only and exports a res
   assert.equal(result.report.readOnly, true);
   assert.deepEqual(deviceSnapshot, before);
   assert.equal(operations.some((operation) => operation.startsWith("rpc:")), false);
-  assert.deepEqual(operations.filter((operation) => operation.startsWith("from:")), [
-    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:invoice_lines", "from:invoice_line_department_splits", "from:marginflow_recovery_resolutions", "from:supplier_product_mappings", "from:invoice_line_corrections", "from:marginflow_cloud_state", "from:invoices",
-  ]);
+  assert.deepEqual(new Set(operations.filter((operation) => operation.startsWith("from:"))), new Set([
+    "from:suppliers", "from:products", "from:departments", "from:invoices", "from:invoice_lines", "from:invoice_line_department_splits", "from:marginflow_recovery_resolutions", "from:supplier_product_mappings", "from:invoice_line_corrections", "from:marginflow_cloud_state",
+  ]));
 
   const source = readFileSync(new URL("../lib/legacyRecoveryDiagnosticRepository.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.(?:insert|upsert|update|delete|rpc)\s*\(|storeLocal|saveCloud|persist_invoice_document|recover_legacy_|save_cloud_state_module/i);

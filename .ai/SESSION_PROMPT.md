@@ -1,3 +1,5 @@
+> Data protection update: read `AGENTS.md` and `.ai/DATA_SAFETY.md` first. They supersede older local-first statements below. Production release needs verified data backups and restoration.
+
 # MarginFlow - Session Prompt
 
 ## Document Information
@@ -23,7 +25,7 @@ Copy and paste this prompt at the beginning of every new AI session before descr
 # Standard Session Prompt
 
 ```
-You are working on MarginFlow, a hospitality operations platform built with React 19, Vite, Supabase and the Anthropic API.
+You are working on MarginFlow, a hospitality operations platform built with React 19, Vite, Supabase and the OpenAI Responses API.
 
 Before we begin, please acknowledge the following context:
 
@@ -36,7 +38,7 @@ TECH STACK
 - CSS custom properties (dark theme, no Tailwind)
 - Lucide React (icons)
 - pdfjs-dist (PDF processing)
-- Anthropic API via Vercel serverless function (AI invoice reading)
+- OpenAI Responses API via Vercel serverless function (AI invoice reading)
 - All application logic currently lives in src/main.jsx
 
 PRINCIPLES YOU MUST FOLLOW
@@ -83,8 +85,7 @@ Please read and confirm you understand the module scope before proposing changes
 ```
 We are modifying the data model today.
 
-Current data is stored in localStorage with keys following the pattern marginflow.<module>.
-Supabase sync is optional and uses the marginflow_cloud_state table.
+Official invoices and sales are relational. Other modules still use revisioned cloud snapshots. Browser data is a working/recovery copy. Follow .ai/DATA_SAFETY.md and never substitute a snapshot for confirmed invoices.
 
 Do not introduce duplicate fields or create new entities for data that already exists elsewhere.
 Always check docs/02 Database/Relationships.md before proposing schema changes.
@@ -100,7 +101,7 @@ We are working on an AI-assisted feature today.
 The AI pipeline uses:
 - pdfjs-dist to extract text from PDFs
 - Vercel serverless function at api/read-invoice-ai.js
-- Anthropic Claude API (claude-sonnet model)
+- OpenAI Responses API (server-configured model)
 - Structured JSON output parsed by the frontend
 
 AI rules:

@@ -1,3 +1,5 @@
+> Data protection update: read `AGENTS.md` and `.ai/DATA_SAFETY.md` first. They supersede older local-first statements below. Production release needs verified data backups and restoration.
+
 # MarginFlow - Coding Rules
 
 ## Document Information
@@ -54,7 +56,7 @@ api/
   read-invoice-ai.js ← Vercel serverless function
 ```
 
-All new React components belong in `src/main.jsx` until a modularisation plan is documented and approved.
+Keep UI changes small. Data-safety logic may be extracted into tested modules under the approved phase-1 plan; do not perform a wholesale rewrite.
 
 Do not create new files in `src/` without a documented reason.
 
@@ -109,7 +111,7 @@ Always read and write using the helpers already defined in `main.jsx`. Do not ad
 
 Supabase is optional. Always check `isSupabaseConfigured()` before making Supabase calls.
 
-Never assume Supabase is available. The application must function in local-only mode.
+Handle Supabase unavailability explicitly. Retain pending work, but never present local-only invoices as confirmed financial records.
 
 ### IDs
 
@@ -157,7 +159,7 @@ See `docs/04 UI/Design System.md` for the full design token reference.
 # 9. AI and Serverless
 
 * The AI invoice function lives at `api/read-invoice-ai.js`.
-* The Anthropic API key is stored as an environment variable. Never hardcode API keys.
+* The OpenAI Responses API key is stored as an environment variable. Never hardcode API keys.
 * AI functions must always return structured responses. Parse and validate before use.
 * If AI extraction fails, the workflow must remain completable manually.
 

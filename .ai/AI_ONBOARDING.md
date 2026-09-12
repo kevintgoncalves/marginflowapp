@@ -1,3 +1,5 @@
+> Data protection update: read `AGENTS.md` and `.ai/DATA_SAFETY.md` first. They supersede older local-first statements below. Production release needs verified data backups and restoration.
+
 # MarginFlow — AI & Contributor Onboarding
 
 > Lê este documento antes de qualquer outro.
@@ -33,7 +35,7 @@ Substitui folhas de cálculo dispersas e sistemas desconectados por um único ec
 | Ícones | Lucide React |
 | Backend / Base de dados | Supabase (PostgreSQL) |
 | Auth | Supabase Auth |
-| PDF / OCR | pdfjs-dist + Anthropic API (Claude) |
+| PDF / OCR | pdfjs-dist + OpenAI Responses API (Claude) |
 | Deploy | Vercel |
 | Armazenamento local | localStorage (fallback quando Supabase não está configurado) |
 
@@ -166,7 +168,7 @@ waste_items         (id, date, product_id, qty, reason, ...)
 labour_data         (id, date, cost, hours, department, ...)
 ```
 
-**Estado actual:** os dados são guardados em `localStorage` com sincronização opcional para Supabase. As chaves de localStorage seguem o padrão `marginflow.<módulo>`.
+**Atualização de segurança (setembro de 2026):** faturas e vendas oficiais são relacionais. Outros módulos ainda usam snapshots cloud com revisões. As cópias locais servem trabalho pendente/recuperação. Ler `.ai/DATA_SAFETY.md`.
 
 ---
 
@@ -177,8 +179,8 @@ A funcionalidade de IA é um dos pontos centrais do produto:
 1. Utilizador faz upload de PDF/imagem de fatura
 2. `pdfjs-dist` extrai texto do PDF
 3. Texto é enviado para `api/read-invoice-ai.js` (Vercel serverless)
-4. Essa função chama a API da Anthropic (Claude) com um prompt estruturado
-5. Claude devolve JSON estruturado: fornecedor, número, data, linhas de fatura
+4. Essa função chama a API da OpenAI com um prompt estruturado
+5. A API devolve JSON estruturado: fornecedor, número, data, linhas de fatura
 6. O utilizador revê e aprova antes de qualquer dado ser guardado
 7. Produtos são matched contra o catálogo existente ou criados como novos
 
