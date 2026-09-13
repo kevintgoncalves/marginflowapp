@@ -53,7 +53,7 @@ function ConflictRow({ conflict, children }) {
   );
 }
 
-function InvoiceVersionPreview({ invoice = {}, title }) {
+export function InvoiceVersionPreview({ invoice = {}, title }) {
   const lines = invoice.items || invoice.lines || [];
   return (
     <div className="recovery-version-preview">

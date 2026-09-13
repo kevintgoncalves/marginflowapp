@@ -1,0 +1,31 @@
+project_id = "marginflow-safety-phase1-lab"
+[api]
+enabled = true
+port = 55431
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 77
+[db]
+port = 55432
+shadow_port = 55430
+major_version = 15
+[db.seed]
+enabled = false
+[studio]
+enabled = false
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:5187"
+additional_redirect_urls = ["http://127.0.0.1:5187"]
+enable_signup = true
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+[analytics]
+enabled = false
+
+[inbucket]
+enabled = true
+port = 55434
+smtp_port = 55435
+pop3_port = 55436

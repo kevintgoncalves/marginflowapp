@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createScopedStorage, createWorkspacePersistence } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createPortal } from "react-dom";
@@ -182,7 +183,7 @@ import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import LiveStocktakeEntry from "./components/stocktake/LiveStocktakeEntry.jsx";
 import StocktakeDownloadMenu from "./components/stocktake/StocktakeDownloadMenu.jsx";
 import StocktakeImportReview from "./components/stocktake/StocktakeImportReview.jsx";
-import FinalRecoveryPanel from "./components/FinalRecoveryPanel.jsx";
+import FinalRecoveryPanel, { InvoiceVersionPreview } from "./components/FinalRecoveryPanel.jsx";
 import {
   applySafeFinancialHeaderRepairs,
   loadFinalRecoveryWorkspace,
@@ -866,6 +867,9 @@ function AuthGate() {
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
   const [membership, setMembership] = useState(null);
+  const [membershipUserId, setMembershipUserId] = useState("");
+  const membershipRequestRef = useRef(0);
+  const sessionUserRef = useRef("");
   const [internalStaff, setInternalStaff] = useState(false);
   const [loadingMembership, setLoadingMembership] = useState(false);
   const [authError, setAuthError] = useState("");
@@ -881,10 +885,13 @@ function AuthGate() {
     supabase.auth.getSession().then(({ data, error }) => {
       if (!mounted) return;
       if (error) setAuthError(error.message);
+      sessionUserRef.current = data?.session?.user?.id || "";
       setSession(data?.session || null);
       setLoadingSession(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (sessionUserRef.current !== (nextSession?.user?.id || "")) membershipRequestRef.current += 1;
+      sessionUserRef.current = nextSession?.user?.id || "";
       setSession(nextSession);
       setAuthError("");
       setPasswordRecovery(event === "PASSWORD_RECOVERY");
@@ -896,6 +903,8 @@ function AuthGate() {
   }, [demoMode]);
 
   const refreshMembership = async (user = session?.user) => {
+    const request = ++membershipRequestRef.current;
+    const isCurrent = () => request === membershipRequestRef.current && user?.id === sessionUserRef.current;
     if (!user) {
       setMembership(null);
       setInternalStaff(false);
@@ -908,14 +917,18 @@ function AuthGate() {
         loadAuthMembership(user),
         loadInternalStaffStatus(),
       ]);
+      if (!isCurrent()) return;
+      setMembershipUserId(user.id);
       setMembership(nextMembership);
       setInternalStaff(nextInternalStaff);
     } catch (error) {
+      if (!isCurrent()) return;
+      setMembershipUserId(user.id);
       setAuthError(error.message || "Could not load your MarginFlow company.");
       setMembership(null);
       setInternalStaff(false);
     } finally {
-      setLoadingMembership(false);
+      if (isCurrent()) setLoadingMembership(false);
     }
   };
 
@@ -954,7 +967,7 @@ function AuthGate() {
   if (loadingSession) return <AuthLoading message="Checking Supabase session..." />;
   if (!session) return <AuthScreen initialError={authError} initialMode={initialAuthMode} />;
   if (passwordRecovery) return <UpdatePasswordScreen onSignOut={signOut} onUpdated={() => setPasswordRecovery(false)} />;
-  if (loadingMembership) return <AuthLoading message="Loading company access..." />;
+  if (loadingMembership || membershipUserId !== session.user.id) return <AuthLoading message="Loading company access..." />;
   if (internalStaff) {
     if (supportWorkspace) {
       return (
@@ -2795,7 +2808,7 @@ function defaultSalesCsvMapping(headers = []) {
   };
 }
 
-function loadSalesCsvTemplate(name, headers, temporary = false) {
+function loadSalesCsvTemplate(name, headers, temporary, localStorage) {
   if (temporary) return defaultSalesCsvMapping(headers);
   try {
     const stored = localStorage.getItem(salesCsvTemplateKey(name));
@@ -2805,7 +2818,7 @@ function loadSalesCsvTemplate(name, headers, temporary = false) {
   }
 }
 
-function saveSalesCsvTemplate(name, mapping) {
+function saveSalesCsvTemplate(name, mapping, localStorage) {
   try {
     localStorage.setItem(salesCsvTemplateKey(name), JSON.stringify(mapping));
   } catch {
@@ -3782,24 +3795,6 @@ function average(values) {
   return filtered.length ? filtered.reduce((sum, value) => sum + value, 0) / filtered.length : 0;
 }
 
-function safeReadLocalStorage(key, fallback) {
-  try {
-    const stored = localStorage.getItem(key);
-    return stored ? { ...fallback, ...JSON.parse(stored) } : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function safeReadLocalStorageArray(key, fallback) {
-  try {
-    const stored = localStorage.getItem(key);
-    return stored ? JSON.parse(stored) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 const displayRecoveryModeKey = "marginflow.displayRecoveryMode";
 
 function displayRecoveryModeEnabled() {
@@ -3810,101 +3805,7 @@ function displayRecoveryModeEnabled() {
   }
 }
 
-const invoiceAutoBackupIndexKey = "marginflow.invoices.autoBackups";
-const maxInvoiceAutoBackups = 8;
-
-function parseSerializedArray(value) {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveInvoiceDropSafetyBackup(key, nextSerialized, reason = "state_update") {
-  if (key !== "marginflow.invoices") return;
-  try {
-    const previousSerialized = localStorage.getItem(key);
-    if (!previousSerialized || previousSerialized === nextSerialized) return;
-    const previousRows = parseSerializedArray(previousSerialized);
-    const nextRows = parseSerializedArray(nextSerialized);
-    if (!previousRows || !nextRows) return;
-    if (!previousRows.length || nextRows.length >= previousRows.length) return;
-
-    const createdAt = new Date().toISOString();
-    const backupKey = `marginflow.invoices.autoBackup.${createdAt}`;
-    localStorage.setItem(backupKey, previousSerialized);
-
-    const existingIndex = parseSerializedArray(localStorage.getItem(invoiceAutoBackupIndexKey)) || [];
-    const entries = existingIndex
-      .map((entry) => (typeof entry === "string" ? { key: entry } : entry))
-      .filter((entry) => entry?.key && entry.key !== backupKey);
-    const nextIndex = [{
-      key: backupKey,
-      createdAt,
-      invoiceCount: previousRows.length,
-      nextInvoiceCount: nextRows.length,
-      reason,
-    }, ...entries];
-    nextIndex.slice(maxInvoiceAutoBackups).forEach((entry) => localStorage.removeItem(entry.key));
-    localStorage.setItem(invoiceAutoBackupIndexKey, JSON.stringify(nextIndex.slice(0, maxInvoiceAutoBackups)));
-  } catch {
-    // Best-effort safety net; the write below should still continue.
-  }
-}
-
-function saveSerializedLocalStorage(key, serializedValue, reason = "state_update") {
-  saveInvoiceDropSafetyBackup(key, serializedValue, reason);
-  localStorage.setItem(key, serializedValue);
-}
-
-function readInvoiceAutoBackups() {
-  try {
-    const index = parseSerializedArray(localStorage.getItem(invoiceAutoBackupIndexKey)) || [];
-    return index
-      .map((entry) => (typeof entry === "string" ? { key: entry } : entry))
-      .filter((entry) => entry?.key && localStorage.getItem(entry.key))
-      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
-  } catch {
-    return [];
-  }
-}
-
-function saveLocalStorage(key, value) {
-  try {
-    saveSerializedLocalStorage(key, JSON.stringify(value));
-    return true;
-  } catch {
-    // Never imply durability when the browser rejected the write.
-    queueMicrotask(() => window.dispatchEvent(new CustomEvent("marginflow-storage-error")));
-    return false;
-  }
-}
-
-function readMarginFlowLocalStorage() {
-  const data = {};
-  try {
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (key?.startsWith("marginflow.")) data[key] = localStorage.getItem(key);
-    }
-  } catch {
-    return data;
-  }
-  return data;
-}
-
-function buildFullBackupPayload() {
-  const localStorageData = readMarginFlowLocalStorage();
-  return {
-    app: "MarginFlow",
-    appVersion: "0.1.0",
-    exportedAt: new Date().toISOString(),
-    localStorage: localStorageData,
-    ...localStorageData,
-  };
-}
+const WorkspaceStorageContext = React.createContext(null);
 
 function storageFromCloudSnapshot(snapshot = {}) {
   return Object.fromEntries(cloudModuleDefinitions
@@ -4165,16 +4066,6 @@ function mergeMarginFlowStorage(currentStorage, importedStorage, useImportedSett
   });
 
   return { nextStorage, summary };
-}
-
-function storedStateUpdater(setState, key) {
-  return (value) => {
-    setState((current) => {
-      const next = typeof value === "function" ? value(current) : value;
-      saveLocalStorage(key, next);
-      return next;
-    });
-  };
 }
 
 function transientStateUpdater(setState) {
@@ -4766,8 +4657,12 @@ function createInitialLabourData() {
   };
 }
 
+function createEmptyLabourData() {
+  return { departments: [], employees: [], sales: [], labour: [], holidays: [], rateHistory: [], foodCategories: [] };
+}
+
 function normalizeLabourData(data = {}) {
-  const fallback = createInitialLabourData();
+  const fallback = createEmptyLabourData();
   return {
     ...fallback,
     ...data,
@@ -5339,7 +5234,7 @@ function demoCaptureModeFromUrl() {
   return currentSearchParams().get("capture") || "";
 }
 
-function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
+function cloudSnapshotFromStorage(storage = {}) {
   const read = (definition, fallback) => parseBackupValue(storage[definition.storageKey], fallback);
   const byKey = Object.fromEntries(cloudModuleDefinitions.map((definition) => [definition.key, definition]));
   return {
@@ -5347,21 +5242,21 @@ function cloudSnapshotFromStorage(storage = readMarginFlowLocalStorage()) {
     financialSettings: { ...defaultFinancialSettings, ...read(byKey.financialSettings, defaultFinancialSettings) },
     departmentSettings: Array.isArray(read(byKey.departmentSettings, defaultDepartmentSettings)) ? read(byKey.departmentSettings, defaultDepartmentSettings) : defaultDepartmentSettings,
     labourSettings: { ...defaultLabourSettings, ...read(byKey.labourSettings, defaultLabourSettings) },
-    suppliers: Array.isArray(read(byKey.suppliers, initialSuppliers)) ? read(byKey.suppliers, initialSuppliers) : initialSuppliers,
+    suppliers: Array.isArray(read(byKey.suppliers, [])) ? read(byKey.suppliers, []) : [],
     supplierDeliverySchedules: Array.isArray(read(byKey.supplierDeliverySchedules, [])) ? read(byKey.supplierDeliverySchedules, []) : [],
     supplierProductMappings: Array.isArray(read(byKey.supplierProductMappings, [])) ? read(byKey.supplierProductMappings, []) : [],
     invoiceLineCorrections: Array.isArray(read(byKey.invoiceLineCorrections, [])) ? read(byKey.invoiceLineCorrections, []) : [],
-    products: Array.isArray(read(byKey.products, initialProducts)) ? read(byKey.products, initialProducts) : initialProducts,
-    invoices: Array.isArray(read(byKey.invoices, initialInvoices)) ? read(byKey.invoices, initialInvoices) : initialInvoices,
+    products: Array.isArray(read(byKey.products, [])) ? read(byKey.products, []) : [],
+    invoices: Array.isArray(read(byKey.invoices, [])) ? read(byKey.invoices, []) : [],
     creditNotes: Array.isArray(read(byKey.creditNotes, [])) ? read(byKey.creditNotes, []) : [],
     invoiceDayStatusOverrides: Array.isArray(read(byKey.invoiceDayStatusOverrides, [])) ? read(byKey.invoiceDayStatusOverrides, []) : [],
     // Sales are relational/cloud-first; storage snapshots must not hydrate operational sales.
     sales: [],
-    labourData: normalizeLabourData(read(byKey.labourData, createInitialLabourData())),
-    recipes: Array.isArray(read(byKey.recipes, initialRecipes)) ? read(byKey.recipes, initialRecipes) : initialRecipes,
-    menus: Array.isArray(read(byKey.menus, initialMenus)) ? read(byKey.menus, initialMenus) : initialMenus,
-    stocktakes: normalizeStocktakes(Array.isArray(read(byKey.stocktakes, initialStocktakes)) ? read(byKey.stocktakes, initialStocktakes) : initialStocktakes),
-    wasteItems: Array.isArray(read(byKey.wasteItems, initialWaste)) ? read(byKey.wasteItems, initialWaste) : initialWaste,
+    labourData: normalizeLabourData(read(byKey.labourData, createEmptyLabourData())),
+    recipes: Array.isArray(read(byKey.recipes, [])) ? read(byKey.recipes, []) : [],
+    menus: Array.isArray(read(byKey.menus, [])) ? read(byKey.menus, []) : [],
+    stocktakes: normalizeStocktakes(Array.isArray(read(byKey.stocktakes, [])) ? read(byKey.stocktakes, []) : []),
+    wasteItems: Array.isArray(read(byKey.wasteItems, [])) ? read(byKey.wasteItems, []) : [],
     menuSettings: { ...defaultMenuSettings, ...read(byKey.menuSettings, defaultMenuSettings) },
     invoiceSettings: { ...defaultInvoiceSettings, ...read(byKey.invoiceSettings, defaultInvoiceSettings) },
     aiSettings: { ...defaultAiSettings, ...read(byKey.aiSettings, defaultAiSettings) },
@@ -5688,7 +5583,22 @@ function parseLabourCsv(text, fallbackDate = today()) {
     };
   }).filter((row) => row.date && row.employeeName && row.employeeName !== "Unknown employee" && row.hours);
 }
-function App({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
+function App(props) {
+  const userId = props.authUser?.id || "demo";
+  const companyId = props.authMembership?.company_id || "demo";
+  const locationId = props.authMembership?.location_id || "";
+  const persistence = useMemo(() => createWorkspacePersistence(
+    createScopedStorage(() => window.localStorage, { userId, companyId, locationId }),
+    () => queueMicrotask(() => window.dispatchEvent(new CustomEvent("marginflow-storage-error"))),
+  ), [userId, companyId, locationId]);
+  return <WorkspaceStorageContext.Provider value={persistence}>
+    <WorkspaceApp key={persistence.localStorage.prefix} {...props} />
+  </WorkspaceStorageContext.Provider>;
+}
+
+function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
+  const { localStorage, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
+    saveSerializedLocalStorage, readMarginFlowLocalStorage, storedStateUpdater } = React.useContext(WorkspaceStorageContext);
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
   const displayRecoveryMode = !demoMode && displayRecoveryModeEnabled();
   const demoCaptureMode = demoMode ? demoCaptureModeFromUrl() : "";
@@ -5740,23 +5650,23 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
   const [departmentOpen, setDepartmentOpen] = useState(false);
   const [dashboardPeriodOpen, setDashboardPeriodOpen] = useState(false);
   const [products, setProductsState] = useState(() => normalizeProductCollectionForRuntime(
-    demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", initialProducts),
+    demoInitialData?.products || safeReadLocalStorageArray("marginflow.products", []),
   ));
-  const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", initialSuppliers));
+  const [suppliers, setSuppliersState] = useState(() => demoInitialData?.suppliers || safeReadLocalStorageArray("marginflow.suppliers", []));
   const [supplierDeliverySchedules, setSupplierDeliverySchedulesState] = useState(() => demoInitialData?.supplierDeliverySchedules || safeReadLocalStorageArray("marginflow.supplierDeliverySchedules", []));
   const [supplierProductMappings, setSupplierProductMappingsState] = useState(() => demoInitialData?.supplierProductMappings || safeReadLocalStorageArray("marginflow.supplierProductMappings", []));
   const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
   const [invoices, setInvoicesState] = useState(() => normalizeInvoiceCollectionForRuntime(
-    demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", initialInvoices),
+    demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", []),
   ));
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || []);
   const salesRef = useRef(sales);
-  const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", initialStocktakes)));
-  const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", initialWaste));
+  const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", [])));
+  const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", []));
   const [creditNotes, setCreditNotesState] = useState(() => demoInitialData?.creditNotes || safeReadLocalStorageArray("marginflow.creditNotes", []));
-  const [recipes, setRecipesState] = useState(() => demoInitialData?.recipes || safeReadLocalStorageArray("marginflow.recipes", initialRecipes));
-  const [menus, setMenusState] = useState(() => demoInitialData?.menus || safeReadLocalStorageArray("marginflow.menus", initialMenus));
+  const [recipes, setRecipesState] = useState(() => demoInitialData?.recipes || safeReadLocalStorageArray("marginflow.recipes", []));
+  const [menus, setMenusState] = useState(() => demoInitialData?.menus || safeReadLocalStorageArray("marginflow.menus", []));
   const [companySettings, setCompanySettingsState] = useState(() => demoInitialData?.companySettings || safeReadLocalStorage("marginflow.companySettings", defaultCompanySettings));
   const [financialSettings, setFinancialSettingsState] = useState(() => demoInitialData?.financialSettings || ({ ...defaultFinancialSettings, ...safeReadLocalStorage("marginflow.financialSettings", defaultFinancialSettings) }));
   const [labourSettings, setLabourSettingsState] = useState(() => demoInitialData?.labourSettings || ({ ...defaultLabourSettings, ...safeReadLocalStorage("marginflow.labourSettings", defaultLabourSettings) }));
@@ -5769,7 +5679,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     return normalizeDateRangeState(demoInitialData?.dateRangeState || stored, financialSettings.weekStartsOn);
   });
   const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This week", financialSettings.weekStartsOn));
-  const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createInitialLabourData())));
+  const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createEmptyLabourData())));
   const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
   const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
   const [salesInputRequest, setSalesInputRequest] = useState(null);
@@ -6419,12 +6329,12 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
     setDuplicatePrompt(null);
   };
 
-  const persistInvoiceDocument = async (invoice, { forceUpdate = false } = {}) => {
+  const persistInvoiceDocument = async (invoice, { forceUpdate = false, retry = false } = {}) => {
     const sourceInvoice = forceUpdate
       ? workingInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
       : null;
     const sourceInvoiceId = sourceInvoice?.id || invoice.id || "";
-    const assessment = forceUpdate && sourceInvoice
+    const assessment = retry ? { kind: "retry_pending_operation" } : forceUpdate && sourceInvoice
       ? { kind: "forced_update", existing: sourceInvoice }
       : assessPurchasingDocumentDuplicate(workingInvoices, invoice, { companyId: cloudScope.companyId });
     let duplicateAction = null;
@@ -7058,6 +6968,7 @@ function App({ authMembership, authUser, demoMode = false, entitlementFeatureKey
       </aside>
 
       <main className="workspace">
+        {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes. Keep this page open. Confirm cloud saving or download an emergency backup from Settings before closing.</div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
         {!demoMode && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoices.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
@@ -8017,6 +7928,8 @@ function Invoices({
   const [cancelUploadOpen, setCancelUploadOpen] = useState(false);
   const [warningConfirmationOpen, setWarningConfirmationOpen] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
+
+  const { localStorage } = React.useContext(WorkspaceStorageContext);
   const [uploadModalOpen, setUploadModalOpen] = useState(() => demoCaptureMode === "invoice-review");
   const [batchReviewOpen, setBatchReviewOpen] = useState(false);
   const [batchReviewItemId, setBatchReviewItemId] = useState("");
@@ -10342,7 +10255,7 @@ function Invoices({
                 if (syncStatus === "demo") return <Badge tone="gray">Demo data</Badge>;
                 if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
                   return (
-                    <button className="match-hint" onClick={() => persistInvoiceDocument(row)} title={row.syncError || "Retry relational invoice sync"} type="button">
+                    <button className="match-hint" onClick={() => persistInvoiceDocument(row, { retry: true })} title={row.syncError || "Retry relational invoice sync"} type="button">
                       {syncStatus === "pending_sync" ? "Saving…" : "Sync failed — Retry"}
                     </button>
                   );
@@ -14162,6 +14075,8 @@ function Waste({ department, departmentNames, metrics, permissions = permissions
 }
 
 function SalesManager({ demoMode = false, financialSettings, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), requestDelete, sales, setSales }) {
+  const { localStorage } = React.useContext(WorkspaceStorageContext);
+
   const defaultVatRate = financialSettings.defaultVat;
   const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
   const [form, setForm] = useState(empty);
@@ -14232,7 +14147,7 @@ function SalesManager({ demoMode = false, financialSettings, departmentNames, pe
       return;
     }
     const headers = csvRowsRaw[0] || [];
-    const mapping = loadSalesCsvTemplate("Manual CSV", headers, demoMode);
+    const mapping = loadSalesCsvTemplate("Manual CSV", headers, demoMode, localStorage);
     const dataRows = csvRowsRaw.slice(1);
     const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
     setCsvWizard({
@@ -14283,7 +14198,7 @@ function SalesManager({ demoMode = false, financialSettings, departmentNames, pe
   const updateCsvTemplate = (templateName) => {
     setCsvWizard((current) => {
       if (!current) return current;
-      const mapping = loadSalesCsvTemplate(templateName, current.headers, demoMode);
+      const mapping = loadSalesCsvTemplate(templateName, current.headers, demoMode, localStorage);
       const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
       return { ...current, templateName, mapping, previewRows: preview.rows, errors: preview.errors };
     });
@@ -14296,7 +14211,7 @@ function SalesManager({ demoMode = false, financialSettings, departmentNames, pe
       setStatus("No valid sales rows yet. Check the column mapping.");
       return;
     }
-    if (csvWizard.saveTemplate && !demoMode) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping);
+    if (csvWizard.saveTemplate && !demoMode) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping, localStorage);
     setPendingImport(preview.validRows);
     setCsvWizard(null);
     const invalidCount = preview.rows.length - preview.validRows.length;
@@ -15989,6 +15904,8 @@ function SettingsPanel({
   showRecoveryTools = false,
   users = [],
 }) {
+
+  const { localStorage, readInvoiceAutoBackups, readMarginFlowLocalStorage, buildFullBackupPayload, saveSerializedLocalStorage } = React.useContext(WorkspaceStorageContext);
   const departmentEmpty = { name: "", type: "Food", targetGp: financialSettings.targetGp, active: true };
   const [departmentForm, setDepartmentForm] = useState(departmentEmpty);
   const [editingDepartmentId, setEditingDepartmentId] = useState("");
