@@ -1,3 +1,5 @@
+import {invoicePreviewAmount} from './domain/invoicePreview.js';
+import {archiveOriginals} from './lib/invoiceArchive.js';
 import InvoiceModal from "./components/InvoiceModal.jsx";
 import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
@@ -2459,7 +2461,7 @@ async function invoiceImagesFromFiles(files) {
 
 async function fallbackInvoiceSourcePageFromFile(file, index = 0, error = null) {
   return {
-    sourceFileId: invoiceUploadFileKey(file, index),
+    sourceFileId: `${index}:${invoiceUploadFileKey(file, index)}`,
     sourceFileName: file.name,
     sourceFileType: file.type || "application/octet-stream",
     pageNumber: 1,
@@ -2544,13 +2546,13 @@ async function sourcePagesFromInvoiceFiles(files) {
     if (isPdfInvoiceFile(file)) {
       try {
         const pages = await extractPdfPages(file);
-        sourcePages.push(...(pages.length ? pages : [await fallbackInvoiceSourcePageFromFile(file, index)]));
+        sourcePages.push(...(pages.length ? pages.map(page=>({...page,sourceFileId:`${index}:${invoiceUploadFileKey(file,index)}`})) : [await fallbackInvoiceSourcePageFromFile(file, index)]));
       } catch (error) {
         sourcePages.push(await fallbackInvoiceSourcePageFromFile(file, index, error));
       }
     } else if (isImageInvoiceFile(file)) {
       sourcePages.push({
-        sourceFileId: invoiceUploadFileKey(file, index),
+        sourceFileId: `${index}:${invoiceUploadFileKey(file, index)}`,
         sourceFileName: file.name,
         sourceFileType: file.type || "image",
         pageNumber: 1,
@@ -2560,7 +2562,7 @@ async function sourcePagesFromInvoiceFiles(files) {
       });
     } else if (canReadFileAsText(file)) {
       sourcePages.push({
-        sourceFileId: invoiceUploadFileKey(file, index),
+        sourceFileId: `${index}:${invoiceUploadFileKey(file, index)}`,
         sourceFileName: file.name,
         sourceFileType: file.type || "text/plain",
         pageNumber: 1,
@@ -2617,6 +2619,7 @@ function storageReadyInvoiceBatchDocument(document = {}) {
     pages: document.pages || [],
     invoiceText: document.invoiceText || "",
     files: document.files || [],
+    originalFiles: document.originalFiles || [],
     signature: document.signature || {},
   };
 }
@@ -6815,7 +6818,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistConfirmedLearning(learningResult.learned);
-      setDraft(emptyInvoiceDraft());
+      setDraft(current=>({...current,editingInvoiceId:savedInvoice.id}));
+      const archive = cloudEnabled && draft.files?.length ? await archiveOriginals(supabase,savedInvoice.id,cloudScope,draft.files) : null;
+      setDraft({...emptyInvoiceDraft(),status:archive ? `${persistence.persisted ? "Invoice confirmed." : "Invoice pending cloud confirmation."} ${archive.message}` : (persistence.error ? "Invoice pending cloud confirmation." : "Invoice confirmed.")});
     } catch (error) {
       const message = error?.message || "Unexpected invoice save error.";
       console.error("Invoice approval could not finish", error);
@@ -8229,6 +8234,7 @@ function Invoices({
     if (!uploadedFiles.length) return false;
     setDraft((current) => ({ ...current, status: `Preparing ${uploadedFiles.length} uploaded file(s) for batch review...` }));
     const documents = await prepareInvoiceBatchDocumentsFromFiles(uploadedFiles);
+    documents.forEach(document=>{const sourceIds=new Set((document.pages || []).map(page=>page.sourceFileId));document.originalFiles=uploadedFiles.filter((file,index)=>sourceIds.has(`${index}:${invoiceUploadFileKey(file,index)}`));});
     if (!documents.length) {
       setDraft((current) => ({ ...current, status: "Could not find readable invoice documents in those files." }));
       return false;
@@ -9395,7 +9401,11 @@ function Invoices({
       setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
+      const source = batchUploadDocumentsRef.current.get(item.documentId) || await loadInvoiceBatchDocument(invoiceBatchRef.current.id,item.documentId || item.id);
+      const archive = companyId && source?.originalFiles?.length ? await archiveOriginals(supabase,savedInvoice.id,{companyId,locationId},source.originalFiles) : null;
       const persistenceStatus = batchItemStatusAfterPersistence(persistence);
+      persistenceStatus.originalArchiveStatus=archive ? (archive.archived ? "Archived" : "Pending — retry in details") : "No original source";
+      if(archive && !archive.archived)persistenceStatus.error=archive.message;
       updateBatchItem(item.id, persistenceStatus);
       if (persistenceStatus.status === BATCH_INVOICE_ITEM_STATUSES.FAILED) {
         return { imported: false, failed: true, syncFailed: true };
@@ -9878,9 +9888,10 @@ function Invoices({
       supplier: invoice.supplier || item.signature?.supplier || "-",
       number: documentNumberFor(invoice) || item.signature?.documentNumber || "-",
       date: invoice.date || item.signature?.invoiceDate || "-",
-      total: item.invoice ? invoiceTotal(invoice) : 0,
+      total: item.invoice ? (item.status === BATCH_INVOICE_ITEM_STATUSES.IMPORTED ? invoiceTotal(invoice) : invoicePreviewAmount(invoice, row=>invoiceFinalTotal(normalizeBatchInvoiceForReview(row)))) : null,
       lines: item.invoice ? (item.invoice.items || []).length : "-",
       source: sourceLabel || item.sourceFileName || "-",
+      archive: item.originalArchiveStatus || (item.status === BATCH_INVOICE_ITEM_STATUSES.IMPORTED ? "Not verified" : "Pending import"),
       status: item.status,
       error: item.error || "",
     };
@@ -9891,7 +9902,7 @@ function Invoices({
   const editDraftManualDepartment = editDraft ? documentHeaderDepartment(editDraft, departmentNames) : "";
   const editDraftManualTotal = editDraft ? storedDocumentTotalValue(editDraft) : 0;
   const editDraftDepartmentText = editDraft ? invoiceDepartmentSummary(editDraft, departmentNames) : "";
-  const editDraftSourceText = editDraft?.source || editDraft?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
+  const editDraftSourceText = editDraft?.source || editDraft?.batchUploadSource?.sourceFileNames?.join(", ") || "Invoice record";
 
   useEffect(()=>{
     if(actionRequest?.id && permissions.canDelete){const target=invoices.find(row=>row.id===actionRequest.invoiceId);if(target)setDeleteTarget(target);}
@@ -10106,7 +10117,7 @@ function Invoices({
                   </select></label>
                   <label>Document number<input value={selectedBatchDocumentNumber} onChange={(event) => updateBatchReviewInvoice("documentNumber", event.target.value)} /></label>
                   <label>Date<input type="date" value={selectedBatchInvoice.date || today()} onChange={(event) => updateBatchReviewInvoice("date", event.target.value)} /></label>
-                  <Field label="Amount" readOnly value={money(invoiceTotal(selectedBatchInvoice))} />
+                  <Field label="Amount" readOnly value={invoicePreviewAmount(selectedBatchInvoice, row=>invoiceFinalTotal(normalizeBatchInvoiceForReview(row))) === null ? "Unknown" : money(invoicePreviewAmount(selectedBatchInvoice, row=>invoiceFinalTotal(normalizeBatchInvoiceForReview(row))))} />
                 </div>
                 {isCreditNoteDocument(selectedBatchDocumentType) && (
                   <div className="credit-note-summary compact">
@@ -10194,9 +10205,10 @@ function Invoices({
                   { key: "supplier", label: "Supplier" },
                   { key: "number", label: "Invoice #" },
                   { key: "date", label: "Invoice date", render: (value) => value && value !== "-" ? formatRangeDate(value) : "-" },
-                  { key: "total", label: "Total", render: (value, row) => row.lines === "-" ? "-" : money(value) },
+                  { key: "total", label: "Total", render: (value, row) => value === null ? "Unknown" : money(value) },
                   { key: "lines", label: "Lines" },
                   { key: "source", label: "Source" },
+                  { key: "archive", label: "Original archive" },
                   { key: "status", label: "Status", render: (value, row) => (
                     <span className="batch-status-cell">
                       {batchStatusBadge(value)}
@@ -10664,7 +10676,7 @@ function InvoiceLineEditor({
                 <td>
                   <div className="match-state-cell">
                     <Badge tone={matchTone}>{productMatchStatusText(item.productMatchSource || (item.matchedProductId ? "manual_selection" : "no_product_match"), item.productResolution)}</Badge>
-                    {existingSelected && <small className="line-note">{productMatchSourceText(item.productMatchSource)}</small>}
+                    {existingSelected && <small className="line-note">{item.productMatchSource && canonicalProductMatchSource(item.productMatchSource)!=="no_product_match" ? productMatchSourceText(item.productMatchSource) : "Existing product selected; match provenance unavailable"}</small>}
                     {["learned_mapping", "learned_split_rule"].includes(item.allocationSource) && <small className="line-note">Learned from previous invoice</small>}
                     {item.learnedMappingId && forgetLearnedRule && (
                       <button className="ghost mini-button" onClick={() => forgetLearnedRule(item.id)} type="button">Forget learned rule</button>
@@ -11713,9 +11725,9 @@ function InvoiceControlCentre({
   const selectedCellHasInvoices = selectedCellInvoiceRows.length > 0;
   const viewInvoiceDocumentType = viewInvoice ? normalizeDocumentType(viewInvoice.documentType || viewInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
   const viewInvoiceDocumentNumber = viewInvoice ? documentNumberFor(viewInvoice) : "";
-  const viewInvoiceStatusTone = /could not|failed|must|choose|duplicate|found|required|resolve|before saving|cancelled/i.test(viewInvoiceStatus) ? "warn" : "success";
+  const viewInvoiceStatusTone = /pending|await|not confirmed|could not|failed|must|choose|duplicate|found|required|resolve|before saving|cancelled/i.test(viewInvoiceStatus) ? "warn" : "success";
   const viewInvoiceDepartmentText = viewInvoice ? invoiceDepartmentSummary(viewInvoice, departmentNames) : "";
-  const viewInvoiceSourceText = viewInvoice?.source || viewInvoice?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
+  const viewInvoiceSourceText = viewInvoice?.source || viewInvoice?.batchUploadSource?.sourceFileNames?.join(", ") || "Invoice record";
   const viewInvoiceHasLines = Boolean(viewInvoice?.items?.length);
   const viewInvoiceManualDepartment = viewInvoice ? documentHeaderDepartment(viewInvoice, departmentNames) : "";
   const viewInvoiceManualTotal = viewInvoice ? storedDocumentTotalValue(viewInvoice) : 0;
@@ -12097,7 +12109,8 @@ function InvoiceControlCentre({
         >
           <div className="modal-stack invoice-control-document-detail">
             {(selectedCell || browserOpen) && <button className="ghost" onClick={closeControlInvoice} type="button">Back to document selection</button>}
-            <p className="invoice-status">{["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus)?"Pending / save failed — excluded from confirmed totals":(client?"Confirmed cloud version":"Demonstration document")}</p>
+            <p className="invoice-version-status">{["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus)?"Pending / save failed — excluded from confirmed totals":(client?"Confirmed cloud version":"Demonstration document")}</p>
+            {["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus) && <p className="invoice-version-status">Last cloud-confirmed amount: {invoices.find(row=>row.id===viewInvoice.id) ? money(invoiceTotal(invoices.find(row=>row.id===viewInvoice.id))) : "Not confirmed"} · Pending amount: {money(invoiceTotal(viewInvoice))}</p>}
             <InvoiceOriginals key={`${companyId}:${locationId}:${viewInvoice.id}`} client={client} invoice={viewInvoice} companyId={companyId} locationId={locationId} />
             {viewInvoiceStatus && <div className={`invoice-status ${viewInvoiceStatusTone}`}>{viewInvoiceStatus}</div>}
             <div className="form-grid six">

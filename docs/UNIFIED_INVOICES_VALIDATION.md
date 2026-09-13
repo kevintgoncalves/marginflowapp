@@ -1,8 +1,65 @@
+# Invoice Control Centre — lote, estados e originais
+
+Data: 2026-09-13. Branch `ui/unified-invoices`; base preservada `fe4ea0a`, árvore inicial limpa. Matriz abaixo é a atual para os cenários afetados; matrizes anteriores são histórico. Sem produção, push, merge, deploy ou restauro.
+
+## Matriz atual — correções sobre fe4ea0a
+
+| Cenário | Estado | Evidência |
+| --- | --- | --- |
+| Total Ready antes/depois de importar | PASS / IA SIMULADA | Dois documentos Ready exibiram £7 e £8 e conservaram os valores após importar. Causa: o `finalInvoiceTotal: 0` inicial do rascunho prevalecia indevidamente na apresentação. Agora usa os valores printed/calculated de `InvoiceFinancialSummary`; não altera fórmulas nem AI. |
+| Crédito, zero real e desconhecido | PASS automatizado | Crédito −£8, printedTotal=0 permanece zero, ausência de valores/linhas mostra Unknown. O placeholder finalInvoiceTotal=0 e calculatedTotal=0 sem evidência não são tratados como valor conhecido. |
+| Estado do lote | PASS | `Complete · 2 imported · Open review`; resultado consultável com £7/£8, Imported e Archived. Fontes e dados de recuperação conservados. |
+| Avisos e confirmado/pendente | PASS browser | Fundo claro e texto legível; pendente em aviso âmbar, sem verde de sucesso. Detalhes mostram £9 confirmados e £10 pendentes. Source = Invoice record. |
+| Matching nos detalhes | PASS browser | Matched product mantém-se quando existe produto selecionado; a descrição incompatível No confirmed existing product match foi substituída por indicação de seleção com proveniência ausente quando esse campo não está disponível. Nenhuma regra de matching foi alterada. |
+| Upload individual + arquivo | PASS / IA SIMULADA | UI-ARCHIVE-SINGLE confirmado; primeiro arquivo falhou no proxy, fonte local preservada. Após corrigir o cabeçalho CORS x-upsert do proxy fictício, Verify / retry arquivou os bytes e associação, sem nova fatura. Browser abriu o texto original. |
+| Lote + arquivo de originais | PASS / IA SIMULADA | UI-ARCHIVE-FIRST/SECOND e UI-ORIGINAL-FIRST/SECOND: uma fatura e um original por documento. Último lote mostrou Archived separado de Imported. |
+| Dois originais com mesmo nome | PASS | Dois `original.txt` com conteúdos distintos mantiveram identidades de fonte separadas. Nova sessão comparou os bytes corretos de cada fatura, nome original, MIME text/plain e tamanhos 81/82 bytes. Não foram reconstruídos documentos. |
+| Segunda sessão autorizada | PASS API | Novo login normal com a conta autorizada descarregou os bytes, comparados integralmente com os ficheiros enviados. Não usou service role. Segunda sessão em browser separado não foi repetida: validação da sessão foi via cliente API autenticado. |
+| Recusa entre empresas | PASS API | Conta da outra empresa não conseguiu descarregar os três novos originais ensaiados. |
+| Falha depois do objeto, antes da associação | PASS / falha SIMULADA | Serviço de arquivo recebeu falha simulada na inserção da associação. Retry concluiu-a; repetição não criou duplicado nem substituiu o objeto. Duas fontes distintas na mesma fatura ficaram como duas associações, exatamente como esperado. |
+| Objetos antigos do laboratório | PASS API após proposta | Eram existentes, mas faltava autorização de leitura autenticada. Após proposta local, os dois owners fictícios conseguiram lê-los. Não foram recopiados, apagados ou reconstruídos. |
+| Fatura antiga sem original | PASS browser | UI-FICTIONAL-SINGLE continua disponível, com original não arquivado e download desativado. Nenhuma recuperação global foi executada. |
+| Testes / safety / build | PASS | Validação final normal: 306 testes, 0 falhas/ignorados; safety:check confirmou 44 migrações intactas e nenhuma migração nova; guarda de release e Vite passaram. Aviso de chunks grandes permanece. Duas tentativas iniciais revelaram erro de sintaxe no novo teste e uso indevido de propriedade readonly de File; ambos corrigidos, sem enfraquecer testes. |
+| IA real, permissões completas e publicação | NÃO TESTADO / NÃO APROVADO | Não houve API paga. A proposta não foi aplicada em produção; testes não cobrem todos os papéis/localizações ou configuração de Storage real. |
+
+## Código pronto versus backend proposto
+
+Código: interpretação da pré-visualização do lote; estados reais e comparação confirmado/pendente; originais brutos individuais/lote; fila IndexedDB por utilizador/empresa/localização/fatura; nomes de ficheiro repetidos separados pela identidade da fonte; checksum e associação determinística; retry nos detalhes; coluna Original archive independente da gravação da fatura.
+
+Backend: `safety/proposals/invoice-original-archive.sql` e instruções `safety/proposals/INVOICE_ORIGINAL_ARCHIVE.md`. Aplicados **somente** ao contentor `supabase_db_marginflow-permissions-lab`, com ON_ERROR_STOP. Novo bucket privado e políticas limitadas; sem credenciais privilegiadas no frontend. Nenhuma migração histórica ou proposta anterior foi modificada.
+
+Fora do laboratório, o arquivo continua dependente da aplicação de permissões equivalentes revistas. Sem elas, a fatura é preservada e o arquivo fica pendente, com fonte local e retry. Não declarar esta versão pronta a publicar enquanto essa dependência e as limitações de permissões não forem tratadas. Não foram repetidos restauros ou auditorias gerais.
+
+## Preservação, evidências e limites
+
+Cópia privada de código: `.marginflow-code-backups/pre-archive-fe4ea0a.tar`, modo 0600, SHA-256 `225f04dfb6fd5c4375c1182843934194c67172c42499f1817586a6437213b0f5`. Não é backup da BD ou anexos. Stocks, vendas, faturas anteriores e pendente £10 foram conservados. Novas faturas e fontes são explicitamente fictícias.
+
+Laboratório reutilizado: `/private/tmp/marginflow-permissions-lab`, API 55631/proxy 55639/app 5191, todos loopback, sem .env de produção. IA simulada só na cópia Vite. Evidências: `archive-evidence.json`, `archive-same-name-evidence.json`; log de validação em `/private/tmp/invoice-archive-final-validation.log`. A entrega em Downloads contém apenas relatório, proposta, evidências sem credenciais e capturas das vistas alteradas.
+
+Se o arquivo falhar, o serviço mantém a fonte e confirma separadamente o estado da fatura. Se a gravação do IndexedDB falhar, exige manter a página aberta e o ficheiro externo: memória não sobrevive ao fecho. Não há eliminação automática de fontes após arquivo, nem política de backup/retention de produção implementada por esta etapa. Testes não cobrem quotas de grandes volumes, todos os tipos de ficheiro ou combinações de papéis personalizados. Os caminhos de PDF/imagem conservam o ficheiro bruto; o ensaio de bytes foi feito com texto fictício.
+
+A pré-visualização de crédito e zero/desconhecido foi testada automaticamente; no browser foi testado o lote £7/£8. Não confundir estes níveis de evidência.
+
+## Capturas atuais — só vistas alteradas
+
+- [Lote Ready com £7/£8](screenshots/invoice-archive/batch-ready.png)
+- [Lote Imported e originais Archived](screenshots/invoice-archive/batch-complete.png)
+- [Original aberto](screenshots/invoice-archive/original.png)
+- [Detalhe confirmado/pendente e matching](screenshots/invoice-archive/pending-details.png)
+
+## Reversão
+
+Preservar alterações posteriores e usar `git revert` do commit intitulado `Archive invoice originals safely and correct batch preview states`. Não resetar fe4ea0a nem restaurar base de dados para desfazer código. Os objetos, associações e fontes permanecem; fe4ea0a pode ler originais arquivados se as permissões forem mantidas, mas não oferece o novo retry. Rever separadamente qualquer reversão de permissões, sem apagar dados.
+
+---
+
+## Histórico das etapas anteriores
+
 # Invoice Control Centre — ajustes e validação focada
 
 Data: 2026-09-13. Branch `ui/unified-invoices`, trabalho iniciado em `e667d10` com árvore limpa. Este resultado substitui a matriz histórica abaixo apenas nos cenários repetidos nesta etapa.
 
-## Matriz atual — ajustes sobre e667d10
+## Histórico — matriz dos ajustes fe4ea0a
 
 | Cenário | Resultado | Evidência |
 | --- | --- | --- |

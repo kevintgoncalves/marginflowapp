@@ -271,6 +271,7 @@ function documentFromGroup(group = {}, index = 0, idFactory = () => `batch-docum
     pageLabels,
     pageCount: group.pages.length,
     pages: group.pages.map((page) => ({
+      sourceFileId: page.sourceFileId || "",
       sourceFileName: page.sourceFileName || "",
       pageNumber: page.pageNumber || 1,
       pageCount: page.pageCount || 1,
@@ -452,7 +453,7 @@ export function invoiceBatchSummary(batch = {}) {
     imported,
     skipped,
     completed,
-    progressLabel: items.length ? `Processing ${Math.min(completed, items.length)} / ${items.length}` : "No batch",
+    progressLabel: !items.length ? "No batch" : pending || processing || importing ? `Processing ${Math.min(completed, items.length)} / ${items.length}` : imported + skipped === items.length ? `Complete · ${imported} imported${skipped ? ` · ${skipped} skipped` : ""}` : `Review · ${ready} ready · ${failed + needsReview + possibleDuplicate} need attention`,
     canImportReady: ready > 0 && processing === 0 && importing === 0,
     canRetryFailed: failed > 0 && processing === 0 && importing === 0,
     hasOpenWork: pending > 0 || processing > 0 || ready > 0 || needsReview > 0 || possibleDuplicate > 0 || failed > 0 || importing > 0,

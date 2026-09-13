@@ -7718,3 +7718,7 @@ button.icon {
 .app-page-invoiceControl .topbar { margin-bottom:0; padding-bottom:10px; }
 
 .unified-invoices .cell-amount small { background:transparent; padding:0; color:inherit; }
+
+.unified-invoice-modal .invoice-version-status { padding:10px; background:#fff4dd; color:#654514; border:1px solid #d6bb89; border-radius:6px; }
+.unified-invoice-modal .invoice-status.info { background:#eaf2fa; color:#244766; border-color:#b7cee3; }
+.unified-invoice-modal .invoice-status.success { background:#eef3f7; color:#244766; }
