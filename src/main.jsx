@@ -39,7 +39,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { labourImportedSeed } from "./labourSeedData.js";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import {
   forgetRelationalSupplierProductMapping,
@@ -4594,70 +4593,6 @@ function labourRatio(value, total) {
   return total ? (numberValue(value, 0) / numberValue(total, 0)) * 100 : 0;
 }
 
-function createInitialLabourData() {
-  const departments = (labourImportedSeed.departments || []).map((department) => ({ ...department }));
-  const departmentIdForName = (name) => (departments.find((department) => labourSameText(department.name, name)) || departments[0])?.id || "";
-  const employees = (labourImportedSeed.employees || []).map((employee) => ({
-    id: stableLabourId("emp", employee.name),
-    name: employee.name,
-    departmentId: departmentIdForName(employee.departmentName),
-    payType: labourCanonicalPayType(employee),
-    employmentType: labourPayTypeLabel(employee),
-    rate: numberValue(employee.rate, 0),
-    annualSalary: labourIsSalaried(employee) ? labourAnnualSalary(employee) : numberValue(employee.annualSalary, 0),
-    contractedHours: numberValue(employee.contractedHours, 0),
-    manualAverageWeeklyHours: numberValue(employee.manualAverageWeeklyHours, 0),
-    startDate: employee.startDate || "",
-    status: employee.status || "left",
-    holidayType: employee.holidayType || "zero-hours",
-    holidayEntitlementDays: numberValue(employee.holidayEntitlementDays, 28),
-    serviceChargePoints: numberValue(employee.serviceChargePoints ?? employee.scPoints, 1),
-    excludeFromServiceCharge: Boolean(employee.excludeFromServiceCharge),
-  }));
-  const employeeByName = new Map(employees.map((employee) => [normalizeHeader(employee.name), employee]));
-  const labour = (labourImportedSeed.labour || []).map((row, index) => {
-    const employee = employeeByName.get(normalizeHeader(row.employeeName));
-    return {
-      id: stableLabourId("lab", `${row.date}-${row.employeeName}-${index}`),
-      source: "csv-shifts",
-      date: row.date,
-      dateTo: row.dateTo || row.date,
-      employeeId: employee?.id || "",
-      employeeName: row.employeeName,
-      departmentId: employee?.departmentId || departmentIdForName(row.departmentName),
-      departmentName: row.departmentName,
-      hours: numberValue(row.hours, 0),
-      wages: employee ? labourBasePayForHours(employee, row.hours) : 0,
-      serviceCharge: numberValue(row.serviceCharge, 0),
-      tronc: numberValue(row.tronc ?? row.serviceCharge, 0),
-      rate: labourEmployeeRate(employee),
-      payType: employee ? labourCanonicalPayType(employee) : "hourly",
-      serviceChargePoints: labourServiceChargePoints(employee),
-      serviceChargeHours: numberValue(row.hours, 0) * labourServiceChargePoints(employee),
-    };
-  });
-
-  return {
-    departments,
-    employees,
-    sales: (labourImportedSeed.sales || []).map((row) => ({
-      id: stableLabourId("sales", row.dateFrom),
-      source: "csv-items",
-      ...row,
-      bohServiceCharge: numberValue(row.serviceCharge, 0) * 0.4,
-      fohServiceCharge: numberValue(row.serviceCharge, 0) * 0.6,
-    })),
-    labour,
-    holidays: [],
-    rateHistory: (labourImportedSeed.rateHistory || []).map((row) => ({
-      id: stableLabourId("rate", `${row.employeeName}-${row.effectiveDate}-${row.rate}`),
-      ...row,
-      employeeId: employeeByName.get(normalizeHeader(row.employeeName))?.id || "",
-    })),
-    foodCategories: labourImportedSeed.foodCategories || [],
-  };
-}
-
 function createEmptyLabourData() {
   return { departments: [], employees: [], sales: [], labour: [], holidays: [], rateHistory: [], foodCategories: [] };
 }
@@ -5069,18 +5004,19 @@ function createDemoData() {
     { id: "demo-lab-bar", name: "Bar", basis: "totalSales", targetPercent: 7 },
     { id: "demo-lab-management", name: "Management", basis: "totalSales", targetPercent: 8 },
   ];
+  // Explicitly fictional demonstration staff; never hydrate authenticated workspaces from examples.
   const employeeSeed = [
-    ["kitchen-lead", "Kitchen Lead", "demo-lab-kitchen", 18.5],
-    ["sous-chef", "Sous Chef", "demo-lab-kitchen", 16.75],
-    ["prep-cook", "Prep Cook", "demo-lab-kitchen", 13.2],
-    ["kp-shift", "KP Shift", "demo-lab-kitchen", 12.1],
-    ["floor-lead", "Floor Lead", "demo-lab-floor", 15.2],
-    ["server-one", "Server 1", "demo-lab-floor", 12.5],
-    ["server-two", "Server 2", "demo-lab-floor", 12.5],
-    ["runner", "Runner", "demo-lab-floor", 11.8],
-    ["bar-lead", "Bar Lead", "demo-lab-bar", 15.4],
-    ["bartender", "Bartender", "demo-lab-bar", 12.9],
-    ["general-manager", "General Manager", "demo-lab-management", 19.5],
+    ["kitchen-lead", "Fictional Staff 01", "demo-lab-kitchen", 18.5],
+    ["sous-chef", "Fictional Staff 02", "demo-lab-kitchen", 16.75],
+    ["prep-cook", "Fictional Staff 03", "demo-lab-kitchen", 13.2],
+    ["kp-shift", "Fictional Staff 04", "demo-lab-kitchen", 12.1],
+    ["floor-lead", "Fictional Staff 05", "demo-lab-floor", 15.2],
+    ["server-one", "Fictional Staff 06", "demo-lab-floor", 12.5],
+    ["server-two", "Fictional Staff 07", "demo-lab-floor", 12.5],
+    ["runner", "Fictional Staff 08", "demo-lab-floor", 11.8],
+    ["bar-lead", "Fictional Staff 09", "demo-lab-bar", 15.4],
+    ["bartender", "Fictional Staff 10", "demo-lab-bar", 12.9],
+    ["general-manager", "Fictional Staff 11", "demo-lab-management", 19.5],
   ];
   const labourEmployees = employeeSeed.map(([id, name, departmentId, rate]) => ({
     id: demoId("employee", id),
@@ -15121,18 +15057,6 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
     setLabourImportKey((key) => key + 1);
   };
 
-  const resetLabourData = () => {
-    if (!permissions.canReset) return;
-    requestDelete({
-      title: "Reset Labour data",
-      message: "Replace Labour data with the imported Labour Cost seed data?",
-      onConfirm: () => {
-        saveData(createInitialLabourData());
-        setStatus("Labour data reset to imported seed data.");
-      },
-    });
-  };
-
   const weeklyPayableRows = weeklyModal ? weeklyModal.rows.filter((row) => row.include && numberValue(row.hours, 0) > 0) : [];
   const weeklyTotals = weeklyModal ? {
     hours: labourSum(weeklyPayableRows, "hours"),
@@ -15314,9 +15238,6 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
       {activeLabourModal === "imports" && (
         <AppModal title="Staff Earnings" open onClose={() => setActiveLabourModal(null)} wide footer={<button className="ghost" onClick={() => setActiveLabourModal(null)} type="button">Close</button>}>
           <div className="modal-stack">
-            {permissions.canReset && <div className="button-row left">
-              <button className="ghost danger" onClick={resetLabourData} type="button">Reset Labour seed</button>
-            </div>}
             <div className="form-grid six labour-filter-bar">
               <label>Period<select value={earningsFilters.period} onChange={(event) => setEarningsFilters({ ...earningsFilters, period: event.target.value })}><option value="week">Week</option><option value="month">Month</option><option value="year">Year</option><option value="custom">Custom dates</option></select></label>
               {earningsFilters.period === "week" && <Field label="Week start" type="date" value={earningsFilters.weekStart} onChange={(value) => setEarningsFilters({ ...earningsFilters, weekStart: value })} />}

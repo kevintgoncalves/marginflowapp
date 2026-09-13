@@ -1,5 +1,48 @@
 # Validação isolada — 13 setembro 2026
 
+## Estado atual único — 13 setembro 2026, base 1bd9e5e
+
+Esta matriz é a mesma nos dois relatórios e substitui todas as classificações antigas. **PASS é limitado ao âmbito indicado; não autoriza atualização em produção nem venda.** Evidência detalhada: [privacidade, permissões e browser](SAFETY_PRIVACY_PERMISSION_BROWSER.md). O conteúdo abaixo da marca «Histórico» fica preservado como registo de tentativas, não como lista de bloqueios atuais.
+
+| Verificação | Estado atual | Âmbito / limitação |
+| --- | --- | --- |
+| Dataset laboral no código/bundle anterior | **FAIL de privacidade potencial identificado** | Origem fictícia não comprovada; presente em Git e bundle, também carregado em demo. |
+| Remoção do dataset distribuído | **PASS** | Cópia privada íntegra; import, conversor e reset retirados; demo explicitamente fictício; zero correspondências verificadas no novo bundle. |
+| Exposição histórica / publicações anteriores | **NÃO TESTADO** | Histórico preservado; apurar distribuição e acessos com o responsável. Sem produção. |
+| Paginação >1.000 linhas, reload/login, falha de rede, troca de conta | **PASS no laboratório anterior** | Mantido o resultado aplicável; não repetido sem alteração relevante. Não certifica todo o dataset herdado como fictício. |
+| Pendentes antigos de ID/pertença verificáveis | **PASS browser + testes** | Exportação prévia, revisão/contexto/duplicados verificados; originais mantidos. |
+| Pendentes antigos sem prova de pertença | **PASS contenção; recuperação NÃO TESTADO** | Ocultos; falta prova externa e supervisor autorizado. |
+| Falha de armazenamento/cloud: exportar e reimportar | **PASS browser** | Linha £43 preservada, arquivo reaberto, staging autenticado, retry confirmado sem duplicado. Memória sem exportação/confirmação pode perder-se ao fechar. |
+| Edição simultânea em duas sessões | **PASS browser + API** | £31 confirmado; £32 recusado e conservado como pendente. |
+| Pendentes excluídos dos relatórios | **PASS browser** | £74 confirmado após recuperação, em vez de £75 incluindo conflito. |
+| Rollback e nova atualização com pendentes | **PASS com backport de privacidade** | f2caa5e sanitizado ↔ atual; IDs/revisão/contexto/linhas preservados. Código antigo sem backport não aprovado. |
+| Atualização com stocks/repartições preenchidos | **PASS browser + inventário** | Oito tabelas, incluindo 1.008 linhas, com contagens/fingerprints iguais; stock £24 e vendas £100/£120. |
+| Restauro integral DB + objetos + ACLs | **PASS local já concluído** | GraphQL/roles resolvidos; não foi repetido o restauro. Fonte histórica tem limites de proveniência e instalação. |
+| Login/anexos no browser restaurado | **PASS com harness** | Sessão normal, bytes legíveis e outra empresa recusada; falta fluxo de anexos integrado na UI do produto. |
+| Grants herdados e bypass de revisão | **FAIL da configuração de origem** | TRUNCATE latente e UPDATE REST direto sem incremento de revisão comprovados só em fixtures. |
+| Proposta mínima de permissões | **PASS nos caminhos ensaiados** | SQL separado, aplicado só no novo laboratório fictício; precisa de revisão de compatibilidade e restantes módulos. |
+| Instalação limpa | **NÃO APROVADA / NÃO TESTADO integralmente** | Falta baseline auditado, linhagem revista e execução de raiz sem exclusões/ajustes manuais. 44 migrações intactas. |
+| Testes / safety:check / build atuais | **PASS** | 295 testes, zero falhas/skips; 44 originais intactos; build passou com aviso de chunks grandes. |
+| Backups reais, retenção, PITR, RPO/RTO e lançamento | **NÃO TESTADO / não aprovado** | Nenhum acesso à produção; procedimentos locais não comprovam operação real. |
+
+### Bloqueios para atualizar a app existente
+
+Preparar e aprovar a operação de release com alvo verificado, backups recentes da DB **e bytes dos anexos**, restauro/reconciliação comprovados para esse alvo, responsáveis e rollback que preserve pendentes e escritas posteriores. Conservar a remoção do dataset também na versão de rollback. Rever o fecho dos caminhos de escrita que contornam revisão e a compatibilidade dos clientes antes de adotar a proposta SQL. Esta etapa conclui ensaios locais; não declara segura uma publicação sem esses requisitos operacionais.
+
+### Requisitos para vender a novos clientes
+
+Instalação limpa reproduzível continua não aprovada. Faltam revisão do baseline/grants e linhagem, auditoria completa de autorização por empresa/perfil e funções backend, validação de totais recebidos pelo servidor, durabilidade dos módulos por snapshot, fluxos de eliminação e anexos do produto, serviço de publicação/AI e operação de backups/recuperação. Apurar a exposição histórica potencial do dataset laboral antes de distribuir código/histórico. A proposta mínima testada não substitui essa auditoria.
+
+### Recuperações antigas dependentes de prova externa
+
+Faturas nunca confirmadas na cloud e dados sem pertença comprovada permanecem retidos e ocultos. É necessário um responsável legítimo e evidência externa que associe cada original à empresa/localização; o login e o scope escrito no JSON não bastam. Seguir [PENDING_RECOVERY_OPERATIONS.md](PENDING_RECOVERY_OPERATIONS.md), mantendo originais e custódia. Este requisito não autoriza importar dados na conta atual nem apagar arquivos ambíguos.
+
+### Procedimento vigente de recuperação
+
+Seguir [RESTORE_REPRODUCTION.md](../safety/lab/RESTORE_REPRODUCTION.md) para o ensaio Supabase local compatível: bootstrap de roles/extensões, roles/schema/data/histórico, ON_ERROR_STOP e transações com constraints/triggers ativos, reposição exata de ACLs/políticas, objetos Storage com atributos e comparação de IDs/valores/relações/bytes. Não usar a falha GraphQL histórica abaixo como bloqueio ainda aberto. Para serviço real, validar antes o procedimento suportado pelo fornecedor e capturar DB/objetos numa janela coerente, com manifesto, encriptação/retencão e RPO/RTO acordados. Nunca restaurar um ponto antigo sobre trabalho posterior como undo de código. Uma cópia de código não é backup da base nem dos anexos.
+
+## Histórico — resultados e instruções anteriores, não estado atual
+
 **Atualização desta etapa:** consultar a secção «Recuperação e atualização — continuação» no final. O restauro integral anteriormente falhado foi repetido num Supabase compatível; os resultados antigos abaixo são histórico, não o estado final.
 
 Estado: **não autorizado para publicação**. Branch `safety/phase-1`; base desta continuação `737f769`. Não houve push, merge, deploy, ligação à produção nem alteração de dados reais.
