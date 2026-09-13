@@ -1,8 +1,64 @@
+# Invoice Control Centre — ajustes e validação focada
+
+Data: 2026-09-13. Branch `ui/unified-invoices`, trabalho iniciado em `e667d10` com árvore limpa. Este resultado substitui a matriz histórica abaixo apenas nos cenários repetidos nesta etapa.
+
+## Matriz atual — ajustes sobre e667d10
+
+| Cenário | Resultado | Evidência |
+| --- | --- | --- |
+| Apresentação desktop/mobile | PASS | Espaçamento compacto; Add invoices principal e secundários claros; alturas uniformes; quantidade/valor confirmado; estados textuais; No Delivery Day discreto. Quatro fornecedores fictícios, documento único, vários, crédito, Missing, Expected, Not Ordered, revisão e pendente. |
+| Mobile e ordenação | PASS | Página 390px com scrollWidth 390px; grelha com indicação de deslizar e fornecedor sticky de 115px. Sort by substitui os cabeçalhos partidos; Amount ascending colocou o crédito −£5 primeiro. Open invoice / Open credit note sem número repetido. |
+| Rótulos | PASS | Amount, Cloud status, Filters, 1 supplier e aviso com contagem + Review invoices. |
+| Settings | PASS | Pesquisa espaçada. Ao alterar um dia: “Schedule changes await cloud confirmation.”; só depois: “Schedule changes confirmed in the cloud.”. A indicação compara o conteúdo atual com o fingerprint confirmado do módulo; não cria outro mecanismo de persistência. |
+| Upload individual | SIMULADO | Ficheiro recebido pelo seletor real; endpoint AI apenas local devolveu o contrato esperado. Revisão mostrou uma linha com matching existente e £7; confirmação criou UI-UPLOAD-SINGLE. |
+| Lote de dois ficheiros | SIMULADO | Dois ficheiros recebidos; extração simulada no contrato real; 2 ready, revisão do primeiro, importação final 2 imported / 0 duplicates / 0 failed, valores £7 e £8. Extração, matching e splits não foram reescritos. |
+| Integridade das importações | PASS | Leitura posterior das faturas relacionais: exatamente 1 registo para UI-UPLOAD-SINGLE, UI-BATCH-FIRST e UI-BATCH-SECOND. |
+| Célula vazia / rascunho | PASS | Upload iniciado em Fictional Supplier B, 08/09, abriu com fornecedor/data preparados. Ficheiro recebido; fechar e Add invoices novamente preservou o rascunho e ficheiro. Data final 13/09 veio da resposta AI simulada, seguindo o comportamento existente. |
+| Totais da lista do lote antes de importar | FAIL | Lista mostrou £0 para ambos os documentos Ready; detalhes mostraram £7 corretamente e importação final mostrou £7/£8. Não é aprovado como total de pré-visualização. Não foram alterados cálculos, hidratação ou persistência nesta tarefa. |
+| Pendente fora dos totais | PASS | Edição fictícia de £8 para £9 falhou e ficou pendente; ao restabelecer ligação o retry existente confirmou £9. Nova edição para £10 sob fail-write permaneceu pendente após reload; grelha continuou em £9 confirmados, semana £101. Capturas conservam este último estado. |
+| Original: existência vs autorização | PASS diagnóstico | Nos dois objetos já associados, leitura por administrador local teve sucesso, com o bucket e caminho exatos da associação. Leitura autenticada do próprio utilizador devolveu Object not found. Os bytes existem; a falha é de autorização, não ausência. Nenhum objeto precisou de ser substituído. |
+| Abertura/download autenticado do original | FAIL / bloqueado | O utilizador proprietário não consegue ler no laboratório atual. Resolver exige revisão da autorização Storage existente; nesta tarefa não se aplicam propostas SQL nem se alteram permissões. Não foi usado o administrador para simular sucesso do utilizador. |
+| Recusa noutra empresa | PASS, limitado | Ambas as tentativas autenticadas de ler objeto da outra empresa foram recusadas. Este resultado isolado não aprova a política: a leitura própria também falha. |
+| Original inexistente | PASS | Novo detalhe sem associação mostra indisponibilidade e download desativado. Captura details.png inclui esse estado. |
+| Upload guarda original cloud? | FAIL / lacuna confirmada | Os três uploads finais têm 0 linhas em invoice_files. O fluxo não chama Storage upload nem cria associação. O lote conserva fontes no mecanismo local/IndexedDB, o que não constitui arquivo cloud de originais. Não foi iniciada uma implementação extensa de armazenamento. |
+| IA real | NÃO TESTADO | Nenhuma API paga nem credencial de produção. O plugin mock só existe na cópia local; não entrou no código distribuído. |
+| Testes / safety / build | PASS | Uma execução de npm run build acionou a validação normal: safety:check, 300 testes (0 falhas/ignorados), guarda de publicação e Vite. 44 migrações intactas. Permanece o aviso de chunks grandes. |
+
+## Preservação e ambiente desta etapa
+
+Cópia privada de código antes de editar: `.marginflow-code-backups/pre-polish-e667d10.tar`, modo 0600, SHA-256 `2fab55676d4541db313c30e70b7816715396b098e7703916a01cda99892acea5`. Não é backup da base de dados. Commit e667d10 e ascendência preservados; nenhuma migração, proposta SQL, fórmula financeira, regra de extração/matching/splits, backend ou dado laboral alterado.
+
+Foi reutilizado exclusivamente `/private/tmp/marginflow-permissions-lab`, API 55631, proxy 55639 e app 5191 em loopback, com CSP local e sem .env de produção. Não houve restauro, auditoria adicional, reset ou eliminação. Foram acrescentados fornecedores fictícios por RPC com revisão, conservando os módulos anteriores em `pre-polish-suppliers.json`. A alteração do calendário de segunda-feira foi feita no browser e confirmada pelo mecanismo existente.
+
+A simulação AI reside em `mock-ai-plugin.mjs` no laboratório: interceta exclusivamente `/api/read-invoice-ai` na cópia Vite e devolve supplier, documentType, documentNumber, invoiceDate, netTotal, grossTotal, vatTotal e lines. Não efetua chamadas externas. O teste confirma a integração com resposta simulada, não qualidade, autenticação, custo ou desempenho da IA real.
+
+Evidências locais sem credenciais nos documentos entregues: `polish-import-evidence.json`, `polish-originals-evidence.json` e `/private/tmp/invoice-polish-validation.log`. A configuração privada e as credenciais do laboratório não são incluídas em Downloads nem no commit. O ensaio deixa a edição fictícia de £10 pendente de propósito; os originais, volumes e armazenamento local são preservados. Os serviços de teste são encerrados ao terminar.
+
+## Capturas atuais
+
+- [Grelha desktop](screenshots/invoice-polish/desktop-grid.png)
+- [Grelha mobile](screenshots/invoice-polish/mobile-grid.png)
+- [Seleção mobile com Sort by](screenshots/invoice-polish/mobile-documents.png)
+- [Settings](screenshots/invoice-polish/settings.png)
+- [Detalhes e gravação pendente](screenshots/invoice-polish/details.png)
+
+Entrega adicional numa pasta nova `MarginFlow-Invoice-Polish-*` em Downloads. As capturas anteriores permanecem intactas.
+
+## Limitações e reversão
+
+Não declarar o fluxo completo aprovado: faltam correção/validação do total provisório na lista de lote, autorização de leitura própria no Storage e arquivo cloud de originais. A IA real permanece não testada. As limitações de segurança anteriores continuam aplicáveis.
+
+Para reverter apenas estes ajustes, preservar trabalho posterior e executar `git revert` do commit intitulado `Polish unified invoice presentation and validate isolated uploads`. Não reverter e667d10, limpar armazenamento ou restaurar base de dados. Nenhum push, merge, deploy ou acesso à produção.
+
+---
+
+## Histórico preservado — etapa anterior
+
 # Unified Invoice Control Centre — validação local
 
 Data: 2026-09-13. Branch: `ui/unified-invoices`, baseada em `f66ecda` (`safety/phase-1`). Esta etapa reorganiza a interface; não aprova publicação nem substitui os relatórios de segurança anteriores.
 
-## Matriz atual
+## Histórico — matriz de e667d10
 
 | Cenário | Estado | Evidência / limite |
 | --- | --- | --- |

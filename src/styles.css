@@ -7672,14 +7672,49 @@ button.icon {
   .unified-invoice-modal .unified-document-list td:last-child { grid-column: 1/-1; font-weight: 700; }
   .unified-invoice-modal .unified-document-list td::before { display: block; color: #516376; font-size: 11px; font-weight: 500; margin-bottom: 4px; }
   .invoice-control-status-modal .unified-document-list td:nth-child(2)::before { content: 'Type'; }
-  .invoice-control-status-modal .unified-document-list td:nth-child(3)::before { content: 'Signed value'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(3)::before { content: 'Amount'; }
   .invoice-control-status-modal .unified-document-list td:nth-child(4)::before { content: 'Lines'; }
   .invoice-control-status-modal .unified-document-list td:nth-child(5)::before { content: 'Review'; }
-  .invoice-control-status-modal .unified-document-list td:nth-child(6)::before { content: 'Saving'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(6)::before { content: 'Cloud status'; }
   .invoice-query-modal .unified-document-list td:nth-child(2)::before { content: 'Supplier'; }
   .invoice-query-modal .unified-document-list td:nth-child(3)::before { content: 'Date'; }
   .invoice-query-modal .unified-document-list td:nth-child(4)::before { content: 'Type'; }
-  .invoice-query-modal .unified-document-list td:nth-child(5)::before { content: 'Signed value'; }
+  .invoice-query-modal .unified-document-list td:nth-child(5)::before { content: 'Amount'; }
   .invoice-query-modal .unified-document-list td:nth-child(6)::before { content: 'Review'; }
-  .invoice-query-modal .unified-document-list td:nth-child(7)::before { content: 'Saving'; }
+  .invoice-query-modal .unified-document-list td:nth-child(7)::before { content: 'Cloud status'; }
 }
+
+/* Invoice polish: presentation only. */
+.app-page-invoiceControl .workspace { row-gap: 12px; }
+.app-page-invoiceControl .page-header { margin-bottom: 0; padding-bottom: 12px; }
+.unified-invoices { gap: 10px; }
+.unified-invoice-actions > button:not(:first-child) { background: #f5f8fb; border: 1px solid #c9d5e1; color: #244766; }
+.unified-invoices .invoice-control-attention { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; margin:0; padding:10px 14px; }
+.unified-invoices .invoice-control-cell { height: 100px; min-height:100px; padding:8px; gap:4px; }
+.unified-invoices .invoice-control-cell .cell-amount { font-weight:750; font-size:14px; }
+.unified-invoices .cell-amount small { display:block; font-size:10px; font-weight:500; }
+.unified-invoices .invoice-control-cell.no_delivery { background:#fafbfc; border-color:#e7ecf1; font-size:11px; color:#647282; }
+.schedule-search { display:flex; flex-direction:column; gap:8px; margin:16px 0; }
+.schedule-sync-status { margin:0 0 12px; font-size:12px; color:#516376; }
+.invoice-mobile-sort { display:none !important; }
+@media(max-width:720px) {
+ .app-page-invoiceControl .workspace { padding-top:12px; gap:10px; }
+ .app-page-invoiceControl .workspace > header { padding-bottom:10px; margin-bottom:0; }
+ .unified-invoice-actions { gap:6px; }
+ .unified-invoice-actions button { padding:9px 11px; }
+ .unified-invoices .invoice-control-grid th:first-child { width:115px; }
+ .unified-invoices .invoice-control-grid .supplier-cell { min-width:115px; width:115px; max-width:115px; font-size:11px; }
+ .unified-invoices .invoice-control-grid-wrap::before { content:'Swipe to see all days →'; display:block; position:sticky; left:0; width:max-content; padding:6px 10px; color:#516376; font-size:11px; }
+ .unified-document-list .invoice-mobile-sort { display:flex !important; flex-direction:column; gap:4px; width:100%; }
+ .unified-document-list .table-toolbar { flex-wrap:wrap; gap:8px; padding:8px 0; }
+ .unified-invoice-modal .unified-document-list thead { display:none; }
+ .unified-invoice-modal .unified-document-list tbody tr { gap:0; padding:6px; margin-bottom:8px; }
+ .unified-invoice-modal .unified-document-list td { padding:5px; font-size:12px; }
+ .unified-invoice-modal .unified-document-list td:first-child { font-size:14px; }
+ .invoice-control-status-modal .unified-document-list td:nth-child(3) { font-size:16px; font-weight:750; }
+ .unified-invoice-modal .unified-document-list td::before { font-size:10px; margin-bottom:2px; }
+}
+
+.app-page-invoiceControl .topbar { margin-bottom:0; padding-bottom:10px; }
+
+.unified-invoices .cell-amount small { background:transparent; padding:0; color:inherit; }

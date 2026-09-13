@@ -4434,7 +4434,7 @@ function contextualPageSubtitle(active, {
   if (active === "invoices") return `${invoices.length} invoice${invoices.length === 1 ? "" : "s"} - ${month}`;
   if (active === "invoiceControl") {
     const week = invoiceControlWeekRange ? `${formatRangeDate(invoiceControlWeekRange.start)} - ${formatRangeDate(invoiceControlWeekRange.end)}` : "";
-    return `${activeSupplierCount} suppliers${week ? ` - Week ${week}` : ""}`;
+    return `${activeSupplierCount} supplier${activeSupplierCount === 1 ? "" : "s"}${week ? ` - Week ${week}` : ""}`;
   }
   if (active === "products") return `${products.length} product${products.length === 1 ? "" : "s"}`;
   if (active === "suppliers") return `${activeSupplierCount} active supplier${activeSupplierCount === 1 ? "" : "s"}`;
@@ -7048,6 +7048,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         />
         {active === "invoiceControl" && (
           <InvoiceControlCentre
+            workspaceSyncStatus={cloudStatus} workspaceSyncBusy={cloudLoading} confirmedScheduleFingerprint={cloudFingerprintsRef.current.supplierDeliverySchedules || ""}
             aiSettings={aiSettings}
             companyId={cloudScope.companyId}
             departmentSettings={departmentSettings}
@@ -10105,7 +10106,7 @@ function Invoices({
                   </select></label>
                   <label>Document number<input value={selectedBatchDocumentNumber} onChange={(event) => updateBatchReviewInvoice("documentNumber", event.target.value)} /></label>
                   <label>Date<input type="date" value={selectedBatchInvoice.date || today()} onChange={(event) => updateBatchReviewInvoice("date", event.target.value)} /></label>
-                  <Field label="Signed total" readOnly value={money(invoiceTotal(selectedBatchInvoice))} />
+                  <Field label="Amount" readOnly value={money(invoiceTotal(selectedBatchInvoice))} />
                 </div>
                 {isCreditNoteDocument(selectedBatchDocumentType) && (
                   <div className="credit-note-summary compact">
@@ -10229,7 +10230,7 @@ function Invoices({
               { key: "supplier", label: "Supplier" },
               { key: "date", label: "Date" },
               { key: "items", label: "Lines", render: (_items, row) => runtimeInvoiceLineCount(row) },
-              { key: "total", label: "Signed total", render: (_, row) => money(invoiceTotal(row)) },
+              { key: "total", label: "Amount", render: (_, row) => money(invoiceTotal(row)) },
               { key: "status", label: "Status", render: (value) => <Badge tone="green">{value}</Badge> },
               { key: "syncStatus", label: "Cloud", render: (_, row) => {
                 const syncStatus = row.syncStatus || "legacy_local";
@@ -10341,7 +10342,7 @@ function Invoices({
                 </select></label>
               )}
               {editDraftHasLines ? (
-                <Field label="Signed total" readOnly value={money(invoiceTotal(editDraft))} />
+                <Field label="Amount" readOnly value={money(invoiceTotal(editDraft))} />
               ) : (
                 <label>Total<input min="0" step="0.01" type="number" value={editDraftManualTotal} onChange={(event) => updateEditInvoice("manualTotal", event.target.value)} /></label>
               )}
@@ -10833,6 +10834,7 @@ function invoiceDepartmentSummary(invoice = {}, departmentNames = defaultDepartm
 }
 
 function InvoiceControlCentre({
+  workspaceSyncStatus = "local", workspaceSyncBusy = false, confirmedScheduleFingerprint = "",
   aiSettings = defaultAiSettings,
   companyId = "",
   departmentSettings = [],
@@ -11726,7 +11728,7 @@ function InvoiceControlCentre({
         <button onClick={()=>setSettingsOpen(true)} type="button">Settings</button>
       </div>
       <details className="invoice-control-filters">
-        <summary>View controls</summary>
+        <summary>Filters</summary>
         <Panel
           title="Invoice Control Centre"
           action={`${formatRangeDate(weekRange.start)} - ${formatRangeDate(weekRange.end)}`}
@@ -11745,9 +11747,8 @@ function InvoiceControlCentre({
 
       {reviewDocuments.length ? (
         <button className="invoice-status warn attention-summary invoice-control-attention clickable" onClick={openReviewModal} type="button">
-          <strong>{attentionTitle}</strong>
-          <span>{attentionBody}</span>
-          <small>Open reviews</small>
+          <strong>{reviewDocuments.length} invoice{reviewDocuments.length === 1 ? "" : "s"} need{reviewDocuments.length === 1 ? "s" : ""} review</strong>
+          <small>Review invoices</small>
         </button>
       ) : null}
       {pendingDocuments.length>0 && <button className="invoice-status warn invoice-control-attention" onClick={()=>{openBrowse();setBrowseStatus("Pending");}} type="button">{pendingDocuments.length} pending / failed save · Review and retry</button>}
@@ -11784,7 +11785,7 @@ function InvoiceControlCentre({
               </select></label>
               <label>Document number<input value={reviewDetailDocumentNumber} onChange={(event) => updateReviewInvoice("documentNumber", event.target.value)} /></label>
               <label>Date<input type="date" value={reviewDetailDraft.date || today()} onChange={(event) => updateReviewInvoice("date", event.target.value)} /></label>
-              <Field label="Signed total" readOnly value={money(invoiceTotal(reviewDetailDraft))} />
+              <Field label="Amount" readOnly value={money(invoiceTotal(reviewDetailDraft))} />
             </div>
             {isCreditNoteDocument(reviewDetailDocumentType) && (
               <div className="credit-note-summary compact">
@@ -11931,7 +11932,7 @@ function InvoiceControlCentre({
       </details>
 
       <Panel
-        action={`${rows.length} supplier(s)`}
+        action={`${rows.length} supplier${rows.length === 1 ? "" : "s"}`}
         centerAction={(
         <div className="week-navigation">
           <button aria-label="Previous week" className="icon small" onClick={() => shiftWeek(-1)} title="Previous week" type="button"><ChevronLeft size={16} /></button>
@@ -11975,7 +11976,8 @@ function InvoiceControlCentre({
 
       <InvoiceModal title="Invoice Control Centre settings" open={settingsOpen} onClose={()=>setSettingsOpen(false)} wide footer={<button onClick={()=>setSettingsOpen(false)} type="button">Close</button>}>
       <Panel title="Delivery schedules" action="Manual or suggested">
-        <label>Search suppliers<input value={scheduleQuery} onChange={event=>setScheduleQuery(event.target.value)} /></label>
+        <p className="schedule-sync-status" role="status">{workspaceSyncBusy ? "Workspace sync in progress…" : workspaceSyncStatus === "error" ? "Workspace sync failed. Changes are not confirmed in the cloud." : confirmedScheduleFingerprint === JSON.stringify(supplierDeliverySchedules) ? "Schedule changes confirmed in the cloud." : "Schedule changes await cloud confirmation."}</p>
+        <label className="schedule-search">Search suppliers<input value={scheduleQuery} onChange={event=>setScheduleQuery(event.target.value)} /></label>
         <div className="invoice-schedule-list">
           {scheduleRows.filter(row=>row.supplier.name.toLowerCase().includes(scheduleQuery.toLowerCase())).map((row) => (
             <div className="invoice-schedule-row" key={`schedule-${row.supplier.id}`}>
@@ -12033,15 +12035,15 @@ function InvoiceControlCentre({
                   <div><span>Documents</span><strong>{selectedCellInvoiceRows.length}</strong></div>
                   <div><span>Confirmed day total</span><strong>{money(invoiceGroupForSupplierDate(selectedCell.supplier,selectedCell.date,invoices,{totalForInvoice:invoiceTotal}).total)}</strong></div>
                 </div>
-                <div className="unified-document-list"><DataTable
+                <div className="unified-document-list"><DataTable mobileSort
                   columns={[
                     { key: "number", label: "Document #" },
                     { key: "type", label: "Type", render: (value, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row.invoice)) ? "amber" : "green"}>{value}</Badge> },
-                    { key: "total", label: "Signed total", render: money },
+                    { key: "total", label: "Amount", render: money },
                     { key: "lines", label: "Lines" },
                     { key: "status", label: "Review" },
-                    { key: "sync", label: "Saving" },
-                    { key: "open", label: "Details", render: (_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">Open {row.number}</button> },
+                    { key: "sync", label: "Cloud status" },
+                    { key: "open", label: "Details", sortable:false, render: (_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">{isCreditNoteDocument(documentTypeFor(row.invoice)) ? "Open credit note" : "Open invoice"}</button> },
                   ]}
                   onRowClick={(row) => {
                     if (!row.invoice) return;
@@ -12066,10 +12068,10 @@ function InvoiceControlCentre({
           <label>Status<select aria-label="Status" value={browseStatus} onChange={e=>setBrowseStatus(e.target.value)}>{["All","Confirmed","Pending","Review"].map(x=><option key={x}>{x}</option>)}</select></label>
         </div>
         {!recordsReady && <p role="alert">Cloud records are not verified. Retained documents and pending work are shown; absence is not confirmed.</p>}
-        <div className="unified-document-list"><DataTable query={browseQuery} onQueryChange={setBrowseQuery} columns={[
+        <div className="unified-document-list"><DataTable mobileSort query={browseQuery} onQueryChange={setBrowseQuery} columns={[
           {key:"number",label:"Document"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},
-          {key:"type",label:"Type"},{key:"total",label:"Signed value",render:money},{key:"review",label:"Review"},{key:"sync",label:"Saving"},
-          {key:"open",label:"Details",render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">Open {row.number}</button>}
+          {key:"type",label:"Type"},{key:"total",label:"Amount",render:money},{key:"review",label:"Review"},{key:"sync",label:"Cloud status"},
+          {key:"open",label:"Details",sortable:false,render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">{isCreditNoteDocument(documentTypeFor(row.invoice)) ? "Open credit note" : "Open invoice"}</button>}
         ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} /></div>
         {legacyInvoiceArchive.length>0 && <details><summary>Archived historical documents · {legacyInvoiceArchive.length} read-only</summary>
           <DataTable columns={[{key:"documentNumber",label:"Document number"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},{key:"sourceInvoiceTotal",label:"Total",render:money},{key:"archiveReason",label:"Archive reason"},{key:"financialHeaderReliable",label:"Supplier spend",render:value=>value?"Included":"Excluded"}]} rows={legacyInvoiceArchive}/>
@@ -12112,7 +12114,7 @@ function InvoiceControlCentre({
                 </select></label>
               )}
               {viewInvoiceHasLines ? (
-                <Field label="Signed total" readOnly value={money(invoiceTotal(viewInvoice))} />
+                <Field label="Amount" readOnly value={money(invoiceTotal(viewInvoice))} />
               ) : (
                 <label>Total<input min="0" step="0.01" type="number" value={viewInvoiceManualTotal} onChange={(event) => updateControlInvoice("manualTotal", event.target.value)} /></label>
               )}
@@ -12175,8 +12177,8 @@ function InvoiceControlCentre({
 
 function InvoiceControlCell({ cell, onClick }) {
   return <td><button className={`invoice-control-cell ${cell.state}`} aria-label={`${cell.supplier.name}, ${cell.date}: ${cell.label}${cell.pendingCount ? `, ${cell.pendingCount} pending` : ""}`} onClick={onClick} type="button">
-    <strong>{cell.label}</strong><span>{cell.invoiceCount ? `${cell.invoiceCount} confirmed · ${money(cell.total)}` : formatRangeDate(cell.date)}</span>
-    {cell.invoices?.some(invoice=>isCreditNoteDocument(documentTypeFor(invoice))) && <small className="credit-note-label">Credit note included</small>}
+    <strong>{cell.invoiceCount ? `${cell.invoiceCount} document${cell.invoiceCount === 1 ? "" : "s"}` : cell.label}</strong>{cell.invoiceCount > 0 && <span className="cell-amount">{money(cell.total)} <small>confirmed</small></span>}
+    {cell.invoices?.some(invoice=>isCreditNoteDocument(documentTypeFor(invoice))) && <small className="credit-note-label">Includes credit</small>}
     {cell.pendingCount>0 && <small>{cell.pendingCount} pending / failed</small>}
   </button></td>;
 }
@@ -16916,7 +16918,7 @@ function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
   );
 }
 
-function DataTable({ columns, rows, onEdit, onDelete, onRowClick, toolbarAction, query: controlledQuery, onQueryChange }) {
+function DataTable({ mobileSort = false, columns, rows, onEdit, onDelete, onRowClick, toolbarAction, query: controlledQuery, onQueryChange }) {
   const [uncontrolledQuery, setUncontrolledQuery] = useState("");
   const query = controlledQuery ?? uncontrolledQuery;
   const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
@@ -16936,6 +16938,7 @@ function DataTable({ columns, rows, onEdit, onDelete, onRowClick, toolbarAction,
       <div className="table-toolbar">
         <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => (onQueryChange || setUncontrolledQuery)(event.target.value)} /></label>
         {toolbarAction}
+        {mobileSort && <label className="invoice-mobile-sort">Sort by<select aria-label="Sort by" value={`${sort.key}:${sort.dir}`} onChange={event=>{const [key,dir]=event.target.value.split(":");setSort({key,dir});}}>{columns.filter(column=>column.sortable!==false).flatMap(column=>["asc","desc"].map(dir=><option key={`${column.key}:${dir}`} value={`${column.key}:${dir}`}>{column.label} · {dir === "asc" ? "ascending" : "descending"}</option>))}</select></label>}
       </div>
       <div className="table-wrap">
         <table>
