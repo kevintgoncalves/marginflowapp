@@ -7592,3 +7592,94 @@ button.icon {
   color: var(--text, #e5edf7);
   background: var(--card, #1e293b);
 }
+
+/* Unified invoice workspace. Deliberately scoped: other pages keep their styles. */
+.invoice-embedded > :not(.invoice-batch-resume) { display: none; }
+.invoice-embedded { gap: 0; }
+.invoice-batch-resume { justify-self: start; background: #fff4dd; color: #654514; border: 1px solid #d8b879; }
+.unified-invoices { min-width: 0; width: 100%; gap: 16px; }
+.unified-invoice-actions { display: flex; flex-wrap: wrap; gap: 10px; order: 0; }
+.unified-invoices .invoice-control-attention { min-height: 0; padding: 10px 14px; text-align: left; font-size: 13px; }
+.unified-invoices .invoice-control-filters { order: 2; }
+.unified-invoices .invoice-control-grid-wrap { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+.unified-invoices > .panel { min-width: 0; overflow: hidden; background: #fff; color: #172b40; }
+.unified-invoices .invoice-control-grid { min-width: 1080px; width: 100%; }
+.unified-invoices .invoice-control-grid th { color: #253b52; background: #f4f7fa; }
+.unified-invoices .invoice-control-grid th:first-child,
+.unified-invoices .invoice-control-grid .supplier-cell { position: sticky; left: 0; z-index: 1; background: #fff; min-width: 165px; }
+.unified-invoices .invoice-control-grid th small { display: block; color: #526579; }
+.unified-invoices .supplier-document-link { padding: 0; border: 0; background: transparent; text-align: left; color: #174e80; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.unified-invoices .invoice-control-cell { width: 100%; min-width: 108px; min-height: 76px; display: flex; flex-direction: column; gap: 5px; align-items: flex-start; padding: 10px; font-size: 12px; line-height: 1.4; border: 1px solid #d1dbe5; background: #f5f7f9; color: #33495d; }
+.unified-invoices .invoice-control-cell.received { background: #e9f5ef; color: #18533a; border-color: #b2d8c3; }
+.unified-invoices .invoice-control-cell.missing { background: #fff0ed; color: #8f2b20; border-color: #e5b4ac; }
+.unified-invoices .invoice-control-cell.expected { background: #fff6df; color: #70500e; border-color: #dec88e; }
+.unified-invoices .invoice-control-cell.not_ordered { background: #edf1f5; color: #41556a; border-color: #cbd5df; }
+.unified-invoices .invoice-control-cell.unverified { background: #f1edfc; color: #553584; }
+.unified-invoices .invoice-control-cell small { display: block; font-weight: 700; color: #7e4213; background: #fff1d7; border-radius: 3px; padding: 2px 4px; }
+.unified-invoices .invoice-control-cell:hover { box-shadow: inset 0 0 0 1px currentColor; }
+.unified-invoices .suggestion-pill { color: #28517b; background: #eaf2fb; }
+.unified-invoice-overlay[hidden] { display: none !important; }
+.unified-invoice-modal { background: #fff; color: #172b40; max-height: calc(100dvh - 32px); }
+.unified-invoice-modal .modal-body { overflow: auto; overscroll-behavior: contain; min-height: 0; }
+.unified-invoice-modal .modal-head, .unified-invoice-modal .modal-footer { flex-shrink: 0; background: #fff; color: #172b40; }
+.unified-invoice-modal .panel, .unified-invoice-modal .invoice-review-modal-summary > div { background: #f7f9fc; color: #172b40; }
+.unified-invoice-modal small, .unified-invoice-modal .helper-text, .unified-invoice-modal .invoice-review-modal-summary span { color: #516376; }
+.unified-invoice-modal .invoice-schedule-list { margin-top: 16px; }
+.unified-invoice-modal .invoice-schedule-row { background: #fff; color: #172b40; border-bottom: 1px solid #dde4ec; padding: 14px 0; }
+.unified-invoice-modal .weekday-toggle-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.unified-invoice-modal input, .unified-invoice-modal select { color: #172b40; background: #fff; border: 1px solid #bac8d6; }
+.unified-invoice-modal button { color: #21476b; background: #edf3f9; border-color: #b9ccdd; }
+.unified-invoice-modal .page-primary-action, .unified-invoices .page-primary-action { background: #174e80; color: #fff; border: 1px solid #174e80; }
+.unified-invoice-modal button:disabled, .unified-invoices button:disabled { opacity: .65; cursor: not-allowed; }
+.unified-invoices :focus-visible, .unified-invoice-modal :focus-visible { outline: 3px solid #126eb4; outline-offset: 3px; }
+.unified-query-filters { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin-bottom: 16px; }
+.unified-query-filters label { display: flex; flex-direction: column; gap: 5px; }
+.invoice-originals { padding: 12px; border: 1px solid #dae3ed; border-radius: 8px; }
+.invoice-originals p { margin: 0 0 8px; }
+.invoice-originals button { margin: 4px 8px 4px 0; }
+.invoice-originals img, .invoice-originals iframe { max-width: 100%; width: 100%; max-height: 60vh; object-fit: contain; }
+.invoice-originals iframe { height: 55vh; }
+.invoice-originals pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .app-page-invoiceControl .workspace { min-width: 0; overflow-x: clip; }
+  .unified-invoices .panel-head.with-centered-action { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+  .unified-invoices .panel-center-action { position: static; transform: none; }
+  .unified-invoices .invoice-control-grid .supplier-cell, .unified-invoices .invoice-control-grid th:first-child { min-width: 125px; max-width: 140px; white-space: normal; }
+  .unified-invoice-overlay { padding: 8px; }
+  .unified-invoice-modal { width: 100%; max-width: 100%; max-height: calc(100dvh - 16px); }
+  .unified-invoice-modal .modal-head, .unified-invoice-modal .modal-body, .unified-invoice-modal .modal-footer { padding: 14px; }
+  .unified-invoice-modal .modal-footer { flex-wrap: wrap; gap: 8px; }
+  .unified-invoice-modal .invoice-schedule-row { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+  .unified-query-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+.unified-invoices .invoice-control-grid { table-layout: fixed; min-width: 940px; }
+.unified-invoices .invoice-control-grid th:first-child { width: 150px; }
+.unified-invoices .invoice-control-grid th:last-child { width: 100px; }
+.unified-invoices .invoice-control-grid td { padding: 6px; }
+.unified-invoices .invoice-control-cell { min-width: 0; }
+.unified-invoices .invoice-control-cell .credit-note-label { background: #f0eafd; color: #593386; }
+@media (max-width: 720px) {
+  .unified-invoice-modal .unified-document-list .table-wrap { overflow-x: visible; }
+  .unified-invoice-modal .unified-document-list table,
+  .unified-invoice-modal .unified-document-list tbody { display: block; min-width: 0; width: 100%; }
+  .unified-invoice-modal .unified-document-list thead { display: block; padding-bottom: 10px; }
+  .unified-invoice-modal .unified-document-list thead tr { display: flex; flex-wrap: wrap; gap: 4px; }
+  .unified-invoice-modal .unified-document-list th { display: block; padding: 2px; border: 0; }
+  .unified-invoice-modal .unified-document-list th button { font-size: 11px; padding: 5px; }
+  .unified-invoice-modal .unified-document-list tbody tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); border: 1px solid #d7e1eb; border-radius: 8px; margin-bottom: 12px; padding: 8px; }
+  .unified-invoice-modal .unified-document-list td { display: block; padding: 7px; border: 0; white-space: normal; overflow-wrap: anywhere; }
+  .unified-invoice-modal .unified-document-list td:first-child,
+  .unified-invoice-modal .unified-document-list td:last-child { grid-column: 1/-1; font-weight: 700; }
+  .unified-invoice-modal .unified-document-list td::before { display: block; color: #516376; font-size: 11px; font-weight: 500; margin-bottom: 4px; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(2)::before { content: 'Type'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(3)::before { content: 'Signed value'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(4)::before { content: 'Lines'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(5)::before { content: 'Review'; }
+  .invoice-control-status-modal .unified-document-list td:nth-child(6)::before { content: 'Saving'; }
+  .invoice-query-modal .unified-document-list td:nth-child(2)::before { content: 'Supplier'; }
+  .invoice-query-modal .unified-document-list td:nth-child(3)::before { content: 'Date'; }
+  .invoice-query-modal .unified-document-list td:nth-child(4)::before { content: 'Type'; }
+  .invoice-query-modal .unified-document-list td:nth-child(5)::before { content: 'Signed value'; }
+  .invoice-query-modal .unified-document-list td:nth-child(6)::before { content: 'Review'; }
+  .invoice-query-modal .unified-document-list td:nth-child(7)::before { content: 'Saving'; }
+}

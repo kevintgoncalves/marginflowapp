@@ -59,3 +59,10 @@ export function invoiceGroupForSupplierDate(supplier, date, invoices = [], { tot
     total: dailyTotal,
   };
 }
+
+// Presentation collection only. Financial inputs remain the separate confirmed array.
+export function documentsForInvoiceBrowser(confirmed = [], working = []) {
+  const pending = working.filter(row => ['pending_sync', 'sync_failed', 'local_only'].includes(row.syncStatus));
+  const pendingIds = new Set(pending.map(row => row.id));
+  return [...confirmed.filter(row => !pendingIds.has(row.id)), ...pending];
+}

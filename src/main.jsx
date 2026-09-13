@@ -1,3 +1,5 @@
+import InvoiceModal from "./components/InvoiceModal.jsx";
+import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence } from "./lib/workspaceStorage.js";
@@ -78,7 +80,7 @@ import {
 } from "./domain/invoiceRuntimeSafety.js";
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { confirmedInvoicesForScope, rememberConfirmedInvoice } from "./domain/confirmedInvoices.js";
-import { invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
+import { documentsForInvoiceBrowser, invoicesForSupplierDate, invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
 import {
   BATCH_INVOICE_ITEM_STATUSES,
   batchItemStatusAfterPersistence,
@@ -5575,7 +5577,13 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
   const [legacyInvoiceArchive, setLegacyInvoiceArchive] = useState([]);
-  const [active, setActive] = useState(() => appPageFromUrl("dashboard"));
+  const [active, setActiveState] = useState(() => appPageFromUrl("dashboard") === "invoices" ? "invoiceControl" : appPageFromUrl("dashboard"));
+  const [invoiceActionRequest,setInvoiceActionRequest]=useState(null);
+  const [invoiceBrowseRequest, setInvoiceBrowseRequest] = useState(() => appPageFromUrl("dashboard") === "invoices" ? {id:"legacy"} : null);
+  const setActive = (page) => {
+    if(page === "invoices") { setInvoiceBrowseRequest({id:uid()}); setActiveState("invoiceControl"); }
+    else setActiveState(page);
+  };
   const [analysisRunId, setAnalysisRunId] = useState(0);
   const [pathname, setPathname] = useState(currentPathname);
   const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
@@ -5779,7 +5787,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const currentUser = useMemo(() => authUserToPermissionUser(effectiveAuthUser, effectiveAuthMembership, departmentSettings), [effectiveAuthUser, effectiveAuthMembership, departmentSettings]);
   const users = useMemo(() => [currentUser], [currentUser]);
   const visibleNavItems = useMemo(() => navItems.filter((item) => {
-    if (!userCanViewPage(currentUser, item.id)) return false;
+    if (item.id === "invoices") return false;
+    if (!(userCanViewPage(currentUser, item.id) || (item.id === "invoiceControl" && userCanViewPage(currentUser, "invoices")))) return false;
     if (!supportMode || item.id === "settings") return true;
     return entitlementFeatureKeys.includes(supportFeatureByPage[item.id]);
   }), [currentUser, entitlementFeatureKeys, supportMode]);
@@ -6306,7 +6315,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       }
     } else if (assessment.kind === "same_document") {
       const decision = await requestDuplicateDecision(assessment, invoice);
-      if (decision === "open_existing") setActive("invoices");
+      if (decision === "open_existing") { setActiveState("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId:assessment.existing?.id}); }
       return { invoice: assessment.existing, persisted: true, cancelled: true, decision };
     }
     if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
@@ -6823,6 +6832,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   };
 
   const prepareInvoiceUploadFromControl = (supplierName, date) => {
+    if (draft.items?.length || draft.files?.length || draft.invoiceText) { setInvoiceUploadRequest({id:uid()}); return; }
     setDraft((current) => ({
       ...current,
       supplier: supplierName,
@@ -6922,7 +6932,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
           <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
-        {!demoMode && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoices.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
+        {!demoMode && active !== "invoiceControl" && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoice Control Centre.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
         {displayRecoveryMode && (
           <div className="display-recovery-banner">
@@ -7000,10 +7010,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           />
         )}
         <Invoices
-          isActive={active === "invoices"}
+          isActive={active === "invoiceControl"}
+          embedded
           recoveryMode={displayRecoveryMode}
           demoCaptureMode={demoCaptureMode}
           uploadRequest={invoiceUploadRequest}
+          actionRequest={invoiceActionRequest}
           aiSettings={aiSettings}
           creditNotes={creditNotes}
           draft={draft}
@@ -7044,12 +7056,19 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
             invoiceSettings={invoiceSettings}
             invoices={operationalInvoices}
+            workingDocuments={invoices}
+            recordsReady={demoMode || (confirmedInvoicesLoaded && !cloudLoading && !cloudError)}
+            browseRequest={invoiceBrowseRequest}
+            legacyInvoiceArchive={legacyInvoiceArchive}
+            requestInvoiceDelete={invoice=>setInvoiceActionRequest({id:uid(),invoiceId:invoice.id})}
+            client={cloudEnabled ? supabase : null}
             locationId={cloudScope.locationId || ""}
             onAddInvoice={prepareInvoiceUploadFromControl}
             onWeekRangeChange={setInvoiceControlWeekRange}
             persistInvoiceDocument={persistInvoiceDocument}
             persistInvoiceLearning={persistConfirmedLearning}
-            permissions={permissionsByPage.invoiceControl}
+            permissions={{...Object.fromEntries(Object.keys(permissionsByPage.invoiceControl).map(key=>[key,permissionsByPage.invoiceControl[key] || permissionsByPage.invoices[key]])),canImport:permissionsByPage.invoices.canImport,canAdd:permissionsByPage.invoices.canAdd,canDelete:permissionsByPage.invoices.canDelete}}
+            schedulePermissions={permissionsByPage.invoiceControl}
             products={products}
             sales={sales}
             setCreditNotes={setCreditNotes}
@@ -7325,7 +7344,7 @@ function invoiceControlCellState({ date, invoices, overrides, schedule, supplier
   if (invoiceGroup.invoiceCount) {
     const label = invoiceGroup.invoiceCount === 1
       ? documentTypeBadgeLabel(documentTypeFor(invoiceGroup.invoice))
-      : `${invoiceGroup.invoiceCount} INVOICES`;
+      : `${invoiceGroup.invoiceCount} DOCUMENTS`;
     return { state: "received", label, ...invoiceGroup };
   }
   const override = supplierOverrideFor(supplier, date, overrides);
@@ -7842,6 +7861,7 @@ function DateRangeControls({ dateRangeState, setDateRangeState, weekStartsOn = "
 function Invoices({
   aiSettings,
   demoCaptureMode = "",
+  embedded = false,
   isActive = true,
   departmentNames,
   draft,
@@ -7871,6 +7891,7 @@ function Invoices({
   setCreditNotes,
   setInvoices,
   uploadRequest = null,
+  actionRequest = null,
 }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -9871,6 +9892,10 @@ function Invoices({
   const editDraftDepartmentText = editDraft ? invoiceDepartmentSummary(editDraft, departmentNames) : "";
   const editDraftSourceText = editDraft?.source || editDraft?.batchUploadSource?.sourceFileNames?.join(", ") || "Saved document";
 
+  useEffect(()=>{
+    if(actionRequest?.id && permissions.canDelete){const target=invoices.find(row=>row.id===actionRequest.invoiceId);if(target)setDeleteTarget(target);}
+  },[actionRequest?.id]);
+
   useEffect(() => {
     if (uploadRequest?.id) setUploadModalOpen(true);
   }, [uploadRequest?.id]);
@@ -9880,7 +9905,8 @@ function Invoices({
   }, [demoCaptureMode, isActive]);
 
   return (
-    <div className={`page-grid invoices-page${isActive ? "" : " page-component-hidden"}`}>
+    <div className={`page-grid invoices-page${embedded ? " invoice-embedded" : ""}${isActive ? "" : " page-component-hidden"}`}>
+      {embedded && invoiceBatch && <button className="invoice-batch-resume" onClick={()=>{setUploadModalOpen(false);setBatchReviewOpen(true);}} type="button">Batch work: {currentBatchSummary.progressLabel} · Open review</button>}
       <div className="invoice-list-metrics metric-grid">
         <Metric label="Total spend" value={money(approvedInvoiceTotal)} delta="All documents" />
         <Metric label="Invoices" value={approvedDocuments.length} delta="This month" />
@@ -9916,7 +9942,7 @@ function Invoices({
           </div>
         </Panel>
       )}
-      <AppModal
+      <InvoiceModal
         title="Upload invoices"
         open={uploadModalOpen}
         onClose={() => setUploadModalOpen(false)}
@@ -10037,9 +10063,9 @@ function Invoices({
         )}
         </Panel>
         </div>
-      </AppModal>
+      </InvoiceModal>
 
-      <AppModal
+      <InvoiceModal
         className="batch-review-modal"
         footer={selectedBatchItem ? (
           <>
@@ -10193,7 +10219,7 @@ function Invoices({
             </div>
           )
         ) : <EmptyState />}
-      </AppModal>
+      </InvoiceModal>
 
       <Panel className="invoice-overview-table" title="Approved purchasing documents">
           <DataTable
@@ -10247,7 +10273,7 @@ function Invoices({
         </Panel>
       )}
 
-      <AppModal
+      <InvoiceModal
         title={`Confirm ${purchasingDocumentNoun(draftDocumentType)} with warnings?`}
         open={warningConfirmationOpen}
         onClose={() => setWarningConfirmationOpen(false)}
@@ -10259,9 +10285,9 @@ function Invoices({
         )}
       >
         <p className="modal-copy">{warningReviewIssues.length} warning{warningReviewIssues.length === 1 ? "" : "s"} will remain on this document. These warnings do not necessarily mean the invoice is incorrect.</p>
-      </AppModal>
+      </InvoiceModal>
 
-      <AppModal
+      <InvoiceModal
         title="Cancel upload?"
         open={cancelUploadOpen}
         onClose={() => setCancelUploadOpen(false)}
@@ -10273,7 +10299,7 @@ function Invoices({
         )}
       >
         <p className="modal-copy">This will clear the uploaded file, extracted document lines and current review draft. Approved purchasing documents will not be deleted.</p>
-      </AppModal>
+      </InvoiceModal>
 
       <ConfirmDeleteModal
         open={Boolean(deleteTarget)}
@@ -10286,7 +10312,7 @@ function Invoices({
         dangerButtonClassName="danger-button"
       />
 
-      <AppModal
+      <InvoiceModal
         title="View / Edit invoice"
         open={Boolean(editDraft)}
         onClose={() => { setEditDraft(null); }}
@@ -10365,9 +10391,9 @@ function Invoices({
             )}
           </div>
         )}
-      </AppModal>
+      </InvoiceModal>
 
-      <AppModal
+      <InvoiceModal
         title="Add Manual Purchasing Document"
         open={manualOpen}
         onClose={() => setManualOpen(false)}
@@ -10448,7 +10474,7 @@ function Invoices({
             </>
           )}
         </div>
-      </AppModal>
+      </InvoiceModal>
     </div>
   );
 }
@@ -10815,12 +10841,19 @@ function InvoiceControlCentre({
   invoiceDayStatusOverrides,
   invoiceSettings = defaultInvoiceSettings,
   invoices,
+  workingDocuments = invoices,
+  recordsReady = true,
+  browseRequest = null,
+  legacyInvoiceArchive = [],
+  requestInvoiceDelete = () => {},
+  client = null,
   locationId = "",
   onAddInvoice,
   onWeekRangeChange,
   persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
   persistInvoiceLearning = async () => ({ persisted: [], skipped: [] }),
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoiceControl"),
+  schedulePermissions = permissions,
   products = [],
   sales,
   setCreditNotes = () => {},
@@ -10835,6 +10868,15 @@ function InvoiceControlCentre({
   supplierDeliverySchedules,
   suppliers,
 }) {
+  const [leaveAction,setLeaveAction]=useState(null);
+  const [settingsOpen,setSettingsOpen]=useState(false),[scheduleQuery,setScheduleQuery]=useState("");
+  const [browserOpen,setBrowserOpen]=useState(false),[browseSupplier,setBrowseSupplier]=useState(""),[browseQuery,setBrowseQuery]=useState("");
+  const [browseFrom,setBrowseFrom]=useState(""),[browseTo,setBrowseTo]=useState(""),[browseType,setBrowseType]=useState("All"),[browseStatus,setBrowseStatus]=useState("All");
+  const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null);
+  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");}},[browseRequest?.id]);
+  const pendingDocuments=workingDocuments.filter(row=>["pending_sync","sync_failed","local_only"].includes(row.syncStatus));
+  const browseDocuments=documentsForInvoiceBrowser(invoices,workingDocuments);
+  const openBrowse=(supplier="",range=null)=>{setBrowseSupplier(supplier);setBrowseFrom(range?.start||"");setBrowseTo(range?.end||"");setBrowserOpen(true);};
   const [weekStart, setWeekStart] = useState(mondayWeekStart(today()));
   const [statusFilter, setStatusFilter] = useState("All suppliers");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
@@ -10861,11 +10903,15 @@ function InvoiceControlCentre({
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
   const productPriceHistory = useMemo(() => productPriceHistoryRows(products), [products]);
 
-  const rows = activeSuppliers.map((supplier) => {
+  const scheduleRows = activeSuppliers.map((supplier) => {
     const schedule = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
     const cells = weekDates.map((date) => {
       const cell = invoiceControlCellState({ date, invoices, overrides: invoiceDayStatusOverrides, schedule, supplier });
-      return { ...cell, date, supplier, schedule };
+      const pending=invoicesForSupplierDate(supplier,date,pendingDocuments);
+      const pendingIds=new Set(pending.map(r=>r.id));
+      return { ...cell, date, supplier, schedule, pendingCount:pending.length,
+        documents:[...(cell.invoices||[]).filter(r=>!pendingIds.has(r.id)),...pending],
+        ...(recordsReady?{}:{state:"unverified",label:"Not verified"}) };
     });
     return {
       id: supplier.id,
@@ -10876,7 +10922,8 @@ function InvoiceControlCentre({
       hasWeeklyInvoiceValue: cells.some((cell) => numberValue(cell.invoiceCount, 0) > 0),
       missingCount: cells.filter((cell) => cell.state === "missing").length,
     };
-  }).filter((row) => {
+  });
+  const rows = scheduleRows.filter((row) => {
     const matchesCategory = categoryFilter === "All categories" || row.supplier.category === categoryFilter;
     if (!matchesCategory) return false;
     if (statusFilter === "Missing only") return row.cells.some((cell) => cell.state === "missing");
@@ -10900,7 +10947,7 @@ function InvoiceControlCentre({
   const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
   const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
   const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
-  const reviewDocumentRows = weeklyDocuments
+  const reviewDocumentRows = browseDocuments.filter(invoice=>dateInRange(invoice.date,weekRange))
     .map((invoice) => {
       const documentType = documentTypeFor(invoice);
       const validation = validateInvoiceExtraction({ invoice, lines: invoice.items || [], historicalPrices: productPriceHistory });
@@ -10947,7 +10994,7 @@ function InvoiceControlCentre({
   const reviewDetailWarningIssues = reviewDetailValidation ? getWarningInvoiceIssues(reviewDetailValidation) : [];
 
   const markOverride = (supplier, date, statusOverride) => {
-    if (!permissions.canEdit) return;
+    if (!schedulePermissions.canEdit || !recordsReady) return;
     setInvoiceDayStatusOverrides((current) => updateOverrideRows(current, supplier, date, statusOverride));
     setSelectedCell(null);
   };
@@ -10955,24 +11002,26 @@ function InvoiceControlCentre({
   const openControlInvoice = (invoice) => {
     if (!invoice) return;
     setViewInvoiceStatus("");
-    setViewInvoice(invoiceForControlEditor(invoice, departmentNames));
+    const draft=invoiceForControlEditor(invoice, departmentNames);
+    viewOriginalRef.current=JSON.stringify(draft);setViewInvoice(draft);
   };
+
+  const handledBrowseRequest=useRef(null);
+  useEffect(()=>{
+    if(!browseRequest?.invoiceId || handledBrowseRequest.current===browseRequest.id)return;
+    const target=browseDocuments.find(row=>row.id===browseRequest.invoiceId);
+    if(target){handledBrowseRequest.current=browseRequest.id;openControlInvoice(target);}
+  },[browseRequest,browseDocuments]);
 
   const closeControlInvoice = () => {
     if (viewInvoiceSaving) return;
+    if(viewOriginalRef.current!==JSON.stringify(viewInvoice)){setLeaveAction(()=>()=>{setViewInvoice(null);setViewInvoiceStatus("");});return;}
     setViewInvoice(null);
     setViewInvoiceStatus("");
   };
 
   const openCell = (cell) => {
-    if (cell.state === "received" && numberValue(cell.invoiceCount, 0) > 1) {
-      setSelectedCell(cell);
-      return;
-    }
-    if (cell.state === "received" && cell.invoice) {
-      openControlInvoice(cell.invoice);
-      return;
-    }
+    if(cell.documents.length===1){openControlInvoice(cell.documents[0]);return;}
     setSelectedCell(cell);
   };
 
@@ -10983,6 +11032,8 @@ function InvoiceControlCentre({
   };
 
   const closeReviewModal = () => {
+    if(reviewSaving)return;
+    if(reviewDetailDraft && reviewOriginalRef.current!==JSON.stringify(reviewDetailDraft)){setLeaveAction(()=>()=>{setReviewModalOpen(false);setReviewDetailDraft(null);});return;}
     setReviewModalOpen(false);
     setReviewDetailDraft(null);
     setReviewDetailStatus("");
@@ -10990,6 +11041,7 @@ function InvoiceControlCentre({
   };
 
   const openReviewDetail = (invoice) => {
+    reviewOriginalRef.current=null;
     const documentType = documentTypeFor(invoice);
     const documentNumber = documentNumberFor(invoice);
     setReviewDetailStatus("");
@@ -11004,6 +11056,7 @@ function InvoiceControlCentre({
     });
   };
 
+  useEffect(()=>{if(reviewDetailDraft && reviewOriginalRef.current===null)reviewOriginalRef.current=JSON.stringify(reviewDetailDraft);},[reviewDetailDraft]);
   const updateReviewInvoice = (field, value) => {
     setReviewDetailDraft((current) => {
       if (!current) return current;
@@ -11569,6 +11622,7 @@ function InvoiceControlCentre({
       setSupplierProductMappings(learningResult.mappings);
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
+      viewOriginalRef.current=JSON.stringify(invoiceForControlEditor(savedInvoice, departmentNames));
       setViewInvoice(invoiceForControlEditor(savedInvoice, departmentNames));
       setViewInvoiceStatus(persistence.error ? "Invoice changes await cloud confirmation. Keep this page open if a storage warning appears." : "Invoice saved.");
     } catch (error) {
@@ -11579,7 +11633,7 @@ function InvoiceControlCentre({
   };
 
   const applySuggestedSchedule = (supplier, suggestedDays) => {
-    if (!permissions.canEdit) return;
+    if (!schedulePermissions.canEdit) return;
     setSupplierDeliverySchedules((current) => upsertSupplierSchedule(current, supplier, {
       deliveryDays: suggestedDays,
       scheduleMode: "automatic",
@@ -11588,7 +11642,7 @@ function InvoiceControlCentre({
   };
 
   const updateScheduleDay = (supplier, day, checked) => {
-    if (!permissions.canEdit) return;
+    if (!schedulePermissions.canEdit) return;
     const current = supplierScheduleFor(supplier, supplierDeliverySchedules, invoices);
     const deliveryDays = checked
       ? [...new Set([...current.deliveryDays, day])]
@@ -11643,7 +11697,7 @@ function InvoiceControlCentre({
     : missingCells.length
       ? "Review missing supplier deliveries to keep your data accurate."
       : "Review this week's supplier delivery schedule and any invoice exceptions.";
-  const selectedCellInvoices = selectedCell ? (selectedCell.invoices?.length ? selectedCell.invoices : [selectedCell.invoice].filter(Boolean)) : [];
+  const selectedCellInvoices = selectedCell ? invoicesForSupplierDate(selectedCell.supplier,selectedCell.date,browseDocuments) : [];
   const selectedCellInvoiceRows = selectedCellInvoices.map((invoice, index) => ({
     id: invoice.id || `${invoice.supplier}-${documentNumberFor(invoice)}-${invoice.date}-${index}`,
     invoice,
@@ -11651,7 +11705,8 @@ function InvoiceControlCentre({
     type: documentTypeLabel(documentTypeFor(invoice)),
     total: invoiceTotal(invoice),
     lines: (invoice.items || []).length,
-    status: invoice.status || "-",
+    status: invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory})) ? "Review required" : invoice.status || "-",
+    sync: ["pending_sync","sync_failed","local_only"].includes(invoice.syncStatus) ? "Pending / save failed" : "Confirmed",
   }));
   const selectedCellHasInvoices = selectedCellInvoiceRows.length > 0;
   const viewInvoiceDocumentType = viewInvoice ? normalizeDocumentType(viewInvoice.documentType || viewInvoice.document_type || PURCHASING_DOCUMENT_TYPES.INVOICE) : PURCHASING_DOCUMENT_TYPES.INVOICE;
@@ -11664,7 +11719,12 @@ function InvoiceControlCentre({
   const viewInvoiceManualTotal = viewInvoice ? storedDocumentTotalValue(viewInvoice) : 0;
 
   return (
-    <div className="page-grid invoice-control-page">
+    <div className="page-grid invoice-control-page unified-invoices">
+      <div className="unified-invoice-actions" aria-label="Invoice Control Centre actions">
+        {(permissions.canImport || permissions.canAdd) && <PrimaryAction onClick={()=>onAddInvoice("",today())}>Add invoices</PrimaryAction>}
+        <button onClick={()=>openBrowse()} type="button">View invoices</button>
+        <button onClick={()=>setSettingsOpen(true)} type="button">Settings</button>
+      </div>
       <details className="invoice-control-filters">
         <summary>View controls</summary>
         <Panel
@@ -11689,18 +11749,14 @@ function InvoiceControlCentre({
           <span>{attentionBody}</span>
           <small>Open reviews</small>
         </button>
-      ) : (
-        <div className="invoice-status warn attention-summary invoice-control-attention">
-          <strong>{attentionTitle}</strong>
-          <span>{attentionBody}</span>
-        </div>
-      )}
+      ) : null}
+      {pendingDocuments.length>0 && <button className="invoice-status warn invoice-control-attention" onClick={()=>{openBrowse();setBrowseStatus("Pending");}} type="button">{pendingDocuments.length} pending / failed save · Review and retry</button>}
 
-      <AppModal
+      <InvoiceModal
         className="invoice-review-modal"
         footer={reviewDetailDraft ? (
           <>
-            <button className="ghost" disabled={reviewSaving} onClick={() => setReviewDetailDraft(null)} type="button"><ChevronLeft size={16} />Back to reviews</button>
+            <button className="ghost" disabled={reviewSaving} onClick={() => {if(reviewDetailDraft && reviewOriginalRef.current!==JSON.stringify(reviewDetailDraft)){setLeaveAction(()=>()=>setReviewDetailDraft(null));return;}setReviewDetailDraft(null);}} type="button"><ChevronLeft size={16} />Back to reviews</button>
             {permissions.canEdit && <button className="ghost review-correct-action" disabled={reviewSaving} onClick={() => commitReviewInvoice({ markCorrect: true })} type="button"><Check size={16} />Invoice is correct</button>}
             {permissions.canEdit && <button disabled={reviewSaving} onClick={() => commitReviewInvoice()} type="button"><Save size={16} />{reviewSaving ? "Saving..." : "Save changes"}</button>}
           </>
@@ -11713,13 +11769,13 @@ function InvoiceControlCentre({
           </>
         )}
         onClose={closeReviewModal}
-        open={reviewModalOpen}
+        open={reviewModalOpen && !reviewBulkConfirmOpen}
         title={reviewDetailDraft ? `${documentTypeLabel(reviewDetailDocumentType)} ${reviewDetailDocumentNumber || ""}` : "Invoices needing review"}
         wide
       >
         {reviewDetailDraft ? (
           <div className="modal-stack invoice-review-detail">
-            <button className="ghost invoice-review-back" disabled={reviewSaving} onClick={() => setReviewDetailDraft(null)} type="button"><ChevronLeft size={16} />Back to review list</button>
+            <button className="ghost invoice-review-back" disabled={reviewSaving} onClick={() => {if(reviewDetailDraft && reviewOriginalRef.current!==JSON.stringify(reviewDetailDraft)){setLeaveAction(()=>()=>setReviewDetailDraft(null));return;}setReviewDetailDraft(null);}} type="button"><ChevronLeft size={16} />Back to review list</button>
             {reviewDetailStatus && <div className={`invoice-status ${reviewDetailStatusTone}`}>{reviewDetailStatus}</div>}
             <div className="form-grid six">
               <SupplierSelector id="supplier-list-invoice-control-review" suppliers={suppliers} value={reviewDetailDraft.supplier || ""} onChange={(value) => updateReviewInvoice("supplier", value)} />
@@ -11840,9 +11896,9 @@ function InvoiceControlCentre({
             ) : <EmptyState />}
           </div>
         )}
-      </AppModal>
+      </InvoiceModal>
 
-      <AppModal
+      <InvoiceModal
         footer={(
           <>
             <button className="ghost" disabled={reviewBulkSaving} onClick={() => setReviewBulkConfirmOpen(false)} type="button">Cancel</button>
@@ -11854,7 +11910,7 @@ function InvoiceControlCentre({
         title={`Mark ${selectedReviewRows.length} invoice${selectedReviewRows.length === 1 ? "" : "s"} as correct?`}
       >
         <p className="modal-copy">This resolves the current review warnings for the selected invoices. Use this only when the invoice values are correct and the warnings are false positives.</p>
-      </AppModal>
+      </InvoiceModal>
 
       <details className="more-metrics invoice-control-more-metrics">
         <summary>More weekly metrics</summary>
@@ -11899,10 +11955,10 @@ function InvoiceControlCentre({
                 {rows.map((row) => (
                   <tr key={row.id || row.supplier.name}>
                     <td className="supplier-cell">
-                      <strong>{row.supplier.name}</strong>
+                      <button className="supplier-document-link" onClick={()=>openBrowse(row.supplier.name,weekRange)} type="button">{row.supplier.name}</button>
                       <small>{row.supplier.category || "Supplier"}</small>
                       {row.schedule.suggestedDeliveryDays?.length > 0 && !row.schedule.deliveryDays.length && (
-                        <button className="suggestion-pill" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
+                        <button disabled={!schedulePermissions.canEdit} className="suggestion-pill" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
                           Suggested: {row.schedule.suggestedDeliveryDays.join(", ")}
                         </button>
                       )}
@@ -11917,73 +11973,11 @@ function InvoiceControlCentre({
         ) : <EmptyState />}
       </Panel>
 
-      <div className="dashboard-layout secondary">
-        <Panel title="Missing invoices" action={`${missingCells.length} missing`}>
-          {missingCells.length ? (
-            <div className="missing-invoice-list">
-              {missingCells.map((cell) => {
-                const expectedAmount = supplierAverageInvoiceAmount(cell.supplier, invoices);
-                const overdue = Math.max(1, daysBetween(cell.date, today()) - 1);
-                return (
-                  <div className="missing-invoice-row" key={`${cell.supplier.id}-${cell.date}`}>
-                    <div>
-                      <strong>{cell.supplier.name}</strong>
-                      <span>{formatRangeDate(cell.date)} · {overdue} day(s) overdue · expected {money(expectedAmount)}</span>
-                    </div>
-                    <button onClick={() => onAddInvoice(cell.supplier.name, cell.date)} type="button">Upload invoice</button>
-                    <button className="ghost" onClick={() => markOverride(cell.supplier, cell.date, "not_ordered")} type="button">Mark not ordered</button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : <EmptyState />}
-        </Panel>
-        <Panel title="Daily summary" action={summaryScope}>
-          <div className="daily-summary-controls">
-            <p className="helper-text">Summary is calculated from {summaryScope === "Visible suppliers" ? "the suppliers currently visible in the tracker" : "all invoices in this week"}. Sales are included only where sales entries exist.</p>
-            <div className="form-grid six compact-form">
-              <label>Scope<select value={summaryScope} onChange={(event) => setSummaryScope(event.target.value)}>
-                <option>Visible suppliers</option>
-                <option>All suppliers</option>
-              </select></label>
-              <label>View<select value={summaryMode} onChange={(event) => setSummaryMode(event.target.value)}>
-                <option>Purchases + GP</option>
-                <option>Operations</option>
-              </select></label>
-            </div>
-          </div>
-          <div className="daily-summary-grid">
-            {dailySummaries.map((day) => (
-              <div className="daily-summary-card" key={day.date}>
-                <strong>{weekdayShortLabels[(parseDate(day.date).getDay() + 6) % 7]}</strong>
-                <span>{formatRangeDate(day.date)}</span>
-                {summaryMode === "Operations" ? (
-                  <>
-                    <p>Received {day.receivedCount}</p>
-                    <p>Expected {day.expectedCount}</p>
-                    <p>Missing {day.missingCount}</p>
-                    <p>Not ordered {day.notOrderedCount}</p>
-                    <p>Suppliers {day.supplierCount}</p>
-                  </>
-                ) : (
-                  <>
-                    <p>Invoices {day.includedInvoiceCount}</p>
-                    <p>Purchases {money(day.purchases)}</p>
-                    <p>Make-in {money(day.makeIn)}</p>
-                    <p>Bought-in {money(day.boughtIn)}</p>
-                    <p>Sales {money(day.sales)}</p>
-                    <p>GP est. {day.sales ? percent(day.gp) : "-"}</p>
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        </Panel>
-      </div>
-
+      <InvoiceModal title="Invoice Control Centre settings" open={settingsOpen} onClose={()=>setSettingsOpen(false)} wide footer={<button onClick={()=>setSettingsOpen(false)} type="button">Close</button>}>
       <Panel title="Delivery schedules" action="Manual or suggested">
+        <label>Search suppliers<input value={scheduleQuery} onChange={event=>setScheduleQuery(event.target.value)} /></label>
         <div className="invoice-schedule-list">
-          {rows.map((row) => (
+          {scheduleRows.filter(row=>row.supplier.name.toLowerCase().includes(scheduleQuery.toLowerCase())).map((row) => (
             <div className="invoice-schedule-row" key={`schedule-${row.supplier.id}`}>
               <div>
                 <strong>{row.supplier.name}</strong>
@@ -11992,13 +11986,13 @@ function InvoiceControlCentre({
               <div className="weekday-toggle-row">
                 {weekdays.map((day) => (
                   <label key={day}>
-                    <input checked={row.schedule.deliveryDays.includes(day)} onChange={(event) => updateScheduleDay(row.supplier, day, event.target.checked)} type="checkbox" />
+                    <input disabled={!schedulePermissions.canEdit} checked={row.schedule.deliveryDays.includes(day)} onChange={(event) => updateScheduleDay(row.supplier, day, event.target.checked)} type="checkbox" />
                     {day.slice(0, 3)}
                   </label>
                 ))}
               </div>
               {row.schedule.suggestedDeliveryDays?.length > 0 && (
-                <button className="ghost" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
+                <button disabled={!schedulePermissions.canEdit} className="ghost" onClick={() => applySuggestedSchedule(row.supplier, row.schedule.suggestedDeliveryDays)} type="button">
                   Use suggested delivery days
                 </button>
               )}
@@ -12007,9 +12001,12 @@ function InvoiceControlCentre({
         </div>
       </Panel>
 
+      </InvoiceModal>
+
       {selectedCell && (
-        <AppModal
+        <InvoiceModal
           className="invoice-control-status-modal"
+          wide={selectedCellHasInvoices}
           footer={selectedCellHasInvoices ? (
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
@@ -12018,9 +12015,10 @@ function InvoiceControlCentre({
           ) : (
             <>
               <button className="ghost" onClick={() => setSelectedCell(null)} type="button">Close</button>
-              {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
-              {permissions.canEdit && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "not_ordered")} type="button">Mark as Not Ordered</button>}
-              {permissions.canAdd && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoices</PrimaryAction>}
+              {schedulePermissions.canEdit && recordsReady && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "expected")} type="button">Mark as Expected</button>}
+              {schedulePermissions.canEdit && recordsReady && <button className="ghost" onClick={() => markOverride(selectedCell.supplier, selectedCell.date, "not_ordered")} type="button">Mark as Not Ordered</button>}
+              {schedulePermissions.canEdit && recordsReady && selectedCell.date < today() && <button className="ghost" onClick={()=>markOverride(selectedCell.supplier,selectedCell.date,"expected")} type="button">Mark as Missing</button>}
+              {permissions.canImport && <PrimaryAction onClick={() => { setSelectedCell(null); onAddInvoice(selectedCell.supplier.name, selectedCell.date); }}>Upload Invoices</PrimaryAction>}
             </>
           )}
           onClose={() => setSelectedCell(null)}
@@ -12033,37 +12031,60 @@ function InvoiceControlCentre({
               <>
                 <div className="invoice-review-modal-summary">
                   <div><span>Documents</span><strong>{selectedCellInvoiceRows.length}</strong></div>
-                  <div><span>Day total</span><strong>{money(selectedCell.total)}</strong></div>
+                  <div><span>Confirmed day total</span><strong>{money(invoiceGroupForSupplierDate(selectedCell.supplier,selectedCell.date,invoices,{totalForInvoice:invoiceTotal}).total)}</strong></div>
                 </div>
-                <DataTable
+                <div className="unified-document-list"><DataTable
                   columns={[
                     { key: "number", label: "Document #" },
                     { key: "type", label: "Type", render: (value, row) => <Badge tone={isCreditNoteDocument(documentTypeFor(row.invoice)) ? "amber" : "green"}>{value}</Badge> },
                     { key: "total", label: "Signed total", render: money },
                     { key: "lines", label: "Lines" },
-                    { key: "status", label: "Status" },
+                    { key: "status", label: "Review" },
+                    { key: "sync", label: "Saving" },
+                    { key: "open", label: "Details", render: (_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">Open {row.number}</button> },
                   ]}
                   onRowClick={(row) => {
                     if (!row.invoice) return;
-                    setSelectedCell(null);
                     openControlInvoice(row.invoice);
                   }}
                   rows={selectedCellInvoiceRows}
-                />
+                /></div>
               </>
             ) : (
-              <p className="helper-text">Quick actions update this supplier/day only. Upload Invoices opens the invoice workflow with supplier and date prepared.</p>
+              <p className="helper-text">{!recordsReady && "Cloud records are not verified. This is not confirmed absence. "}Quick actions update this supplier/day only. Upload Invoices opens the invoice workflow with supplier and date prepared.</p>
             )}
           </div>
-        </AppModal>
+        </InvoiceModal>
       )}
 
+      <InvoiceModal className="invoice-query-modal" title={browseSupplier ? `${browseSupplier} documents` : "View invoices"} open={browserOpen} onClose={()=>setBrowserOpen(false)} wide footer={<button onClick={()=>setBrowserOpen(false)} type="button">Close</button>}>
+        <div className="unified-query-filters">
+          <label>Supplier<select aria-label="Supplier" value={browseSupplier} onChange={e=>setBrowseSupplier(e.target.value)}><option value="">All suppliers</option>{[...new Set(browseDocuments.map(r=>r.supplier))].filter(Boolean).map(name=><option key={name}>{name}</option>)}</select></label>
+          <label>From<input aria-label="From" type="date" value={browseFrom} onChange={e=>setBrowseFrom(e.target.value)} /></label>
+          <label>To<input aria-label="To" type="date" value={browseTo} onChange={e=>setBrowseTo(e.target.value)} /></label>
+          <label>Type<select aria-label="Type" value={browseType} onChange={e=>setBrowseType(e.target.value)}>{["All","Invoices","Credit notes"].map(x=><option key={x}>{x}</option>)}</select></label>
+          <label>Status<select aria-label="Status" value={browseStatus} onChange={e=>setBrowseStatus(e.target.value)}>{["All","Confirmed","Pending","Review"].map(x=><option key={x}>{x}</option>)}</select></label>
+        </div>
+        {!recordsReady && <p role="alert">Cloud records are not verified. Retained documents and pending work are shown; absence is not confirmed.</p>}
+        <div className="unified-document-list"><DataTable query={browseQuery} onQueryChange={setBrowseQuery} columns={[
+          {key:"number",label:"Document"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},
+          {key:"type",label:"Type"},{key:"total",label:"Signed value",render:money},{key:"review",label:"Review"},{key:"sync",label:"Saving"},
+          {key:"open",label:"Details",render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">Open {row.number}</button>}
+        ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} /></div>
+        {legacyInvoiceArchive.length>0 && <details><summary>Archived historical documents · {legacyInvoiceArchive.length} read-only</summary>
+          <DataTable columns={[{key:"documentNumber",label:"Document number"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},{key:"sourceInvoiceTotal",label:"Total",render:money},{key:"archiveReason",label:"Archive reason"},{key:"financialHeaderReliable",label:"Supplier spend",render:value=>value?"Included":"Excluded"}]} rows={legacyInvoiceArchive}/>
+        </details>}
+      </InvoiceModal>
+
       {viewInvoice && (
-        <AppModal
+        <InvoiceModal
           className="invoice-control-document-modal invoice-review-modal"
           footer={(
             <>
               <button className="ghost" disabled={viewInvoiceSaving} onClick={closeControlInvoice} type="button">Close</button>
+              {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={()=>{const dirty=viewOriginalRef.current!==JSON.stringify(viewInvoice);openReviewDetail(viewInvoice);if(dirty)reviewOriginalRef.current="unsaved-editor-changes";setViewInvoice(null);setReviewModalOpen(true);}} type="button">Review / Invoice is correct</button>}
+              {permissions.canEdit && ["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus) && <button disabled={viewInvoiceSaving || viewOriginalRef.current!==JSON.stringify(viewInvoice)} onClick={async()=>{setViewInvoiceSaving(true);try{const result=await persistInvoiceDocument(viewInvoice,{retry:true});const next=invoiceForControlEditor(result.invoice||viewInvoice,departmentNames);viewOriginalRef.current=JSON.stringify(next);setViewInvoice(next);setViewInvoiceStatus(!result.persisted || result.error?"Save not confirmed. Pending work is preserved; review the conflict before retrying.":"Saved to cloud.");}catch(error){setViewInvoiceStatus(error.message);}finally{setViewInvoiceSaving(false);}}} type="button">Retry pending save</button>}
+              {permissions.canDelete && <button className="ghost" disabled={viewInvoiceSaving} onClick={()=>{const request=()=>{requestInvoiceDelete(viewInvoice);setViewInvoice(null);setSelectedCell(null);setBrowserOpen(false);};if(viewOriginalRef.current!==JSON.stringify(viewInvoice)){setLeaveAction(()=>request);return;}request();}} type="button">Delete document…</button>}
               {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={saveControlInvoice} type="button"><Save size={16} />{viewInvoiceSaving ? "Saving..." : "Save changes"}</button>}
             </>
           )}
@@ -12073,6 +12094,9 @@ function InvoiceControlCentre({
           wide
         >
           <div className="modal-stack invoice-control-document-detail">
+            {(selectedCell || browserOpen) && <button className="ghost" onClick={closeControlInvoice} type="button">Back to document selection</button>}
+            <p className="invoice-status">{["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus)?"Pending / save failed — excluded from confirmed totals":(client?"Confirmed cloud version":"Demonstration document")}</p>
+            <InvoiceOriginals key={`${companyId}:${locationId}:${viewInvoice.id}`} client={client} invoice={viewInvoice} companyId={companyId} locationId={locationId} />
             {viewInvoiceStatus && <div className={`invoice-status ${viewInvoiceStatusTone}`}>{viewInvoiceStatus}</div>}
             <div className="form-grid six">
               <SupplierSelector id="supplier-list-invoice-control-document" suppliers={suppliers} value={viewInvoice.supplier || ""} onChange={(value) => updateControlInvoice("supplier", value)} />
@@ -12140,24 +12164,21 @@ function InvoiceControlCentre({
               </div>
             )}
           </div>
-        </AppModal>
+        </InvoiceModal>
       )}
+      <InvoiceModal title="Unsaved invoice edits" open={Boolean(leaveAction)} onClose={()=>setLeaveAction(null)} footer={<><button onClick={()=>setLeaveAction(null)} type="button">Keep editing</button><button onClick={()=>{leaveAction?.();setLeaveAction(null);}} type="button">Close without saving edits</button></>}>
+        <p>These edits have not been saved. Keep editing to save them. Closing leaves the previously saved or pending invoice unchanged.</p>
+      </InvoiceModal>
     </div>
   );
 }
 
 function InvoiceControlCell({ cell, onClick }) {
-  if (cell.state === "no_delivery") {
-    return <td className="invoice-control-cell no-delivery"><span>–</span></td>;
-  }
-  return (
-    <td>
-      <button className={`invoice-control-cell ${cell.state}`} onClick={onClick} type="button">
-        <strong>{cell.label}</strong>
-        {cell.invoice ? <span>{money(cell.total)}</span> : <span>{formatRangeDate(cell.date)}</span>}
-      </button>
-    </td>
-  );
+  return <td><button className={`invoice-control-cell ${cell.state}`} aria-label={`${cell.supplier.name}, ${cell.date}: ${cell.label}${cell.pendingCount ? `, ${cell.pendingCount} pending` : ""}`} onClick={onClick} type="button">
+    <strong>{cell.label}</strong><span>{cell.invoiceCount ? `${cell.invoiceCount} confirmed · ${money(cell.total)}` : formatRangeDate(cell.date)}</span>
+    {cell.invoices?.some(invoice=>isCreditNoteDocument(documentTypeFor(invoice))) && <small className="credit-note-label">Credit note included</small>}
+    {cell.pendingCount>0 && <small>{cell.pendingCount} pending / failed</small>}
+  </button></td>;
 }
 
 
