@@ -46,3 +46,11 @@ HOME=/private/tmp/marginflow-test-cli-home supabase --workdir /private/tmp/margi
 ```
 
 Não usar `--no-backup`, `db reset`, remoção de volumes, limpeza de browser ou remoção de tabelas. O CLI publica os serviços Docker em interfaces do host; mantê-los parados fora do ensaio. `/private/tmp` é temporário: o arquivo privado em `.marginflow-code-backups/isolated-validation-lab.tar.gz` conserva configuração, fixtures fictícios, dump e evidências desta execução, mas não os volumes Docker. Restauro integral do dump continua por comprovar.
+
+## Continuação de recuperação
+
+Ver `RESTORE_REPRODUCTION.md` para o novo destino e a restauração de atributos/ACLs. `relational-fixtures.mjs` acrescenta stocks relacionais, repartições de vendas e anexos ligados; não repete contas marcadas completas. Como o seed original, uma falha a meio exige inspeção antes de retomar — não é reset nem idempotência por transação.
+
+`concurrent-writes.mjs` cria uma nova fatura fictícia e verifica duas sessões API concorrentes, conservando o perdedor. `rollback-compatibility.mjs` exige a cópia de código de `f2caa5e` em `previous-app` e verifica que ambas as versões rejeitam um pendente antigo sem perder a gravação posterior. Esses testes não equivalem a E2E de browser. A suite `verify.mjs` da primeira etapa tem contagens fixas anteriores e não deve ser repetida sem adaptar a expectativa às novas faturas legitimamente criadas.
+
+A investigação encontrou um dataset de labour herdado do fallback antigo, de natureza fictícia não comprovada. Não o usar como fixture de negócio, não o exibir nem o limpar. Preservar a custódia privada e consultar os relatórios antes de reutilizar o laboratório. Os novos scripts não o alteram.

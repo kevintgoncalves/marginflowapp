@@ -46,3 +46,21 @@ test('storage failures report non-durability without deleting existing values', 
  assert.equal(p.saveLocalStorage('marginflow.invoices',[{id:'pending'}]),false);
  assert.equal(failures,1); assert.equal(raw.getItem('unchanged'),'work');
 });
+test('quota failure retains exact volatile work for export without overwriting saved data', () => {
+ const raw=memoryStorage(), scoped=createScopedStorage(()=>raw,scope);
+ scoped.setItem('marginflow.invoices','[{"id":"original"}]');
+ raw.setItem=()=>{throw new DOMException('Full','QuotaExceededError');};
+ const p=createWorkspacePersistence(scoped);
+ const work=[{id:'unsaved',syncRetryContext:{expectedRevision:4}}];
+ assert.equal(p.saveLocalStorage('marginflow.invoices',work),false);
+ assert.equal(scoped.getItem('marginflow.invoices'),'[{"id":"original"}]');
+ assert.deepEqual(JSON.parse(p.exportVolatileWrites()['marginflow.invoices']),work);
+ assert.equal(p.persistenceDiagnostics()[0].error,'QuotaExceededError');
+});
+test('serialization failures also report non-durability instead of success',()=>{
+ const raw=memoryStorage();let diagnostic;
+ const p=createWorkspacePersistence(createScopedStorage(()=>raw,scope),d=>diagnostic=d);
+ const cyclic={};cyclic.self=cyclic;
+ assert.equal(p.saveLocalStorage('marginflow.invoices',cyclic),false);
+ assert.equal(diagnostic.error,'TypeError');assert.equal(raw.length,0);
+});

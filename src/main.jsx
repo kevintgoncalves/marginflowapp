@@ -1,3 +1,4 @@
+import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
@@ -5587,10 +5588,11 @@ function App(props) {
   const userId = props.authUser?.id || "demo";
   const companyId = props.authMembership?.company_id || "demo";
   const locationId = props.authMembership?.location_id || "";
-  const persistence = useMemo(() => createWorkspacePersistence(
-    createScopedStorage(() => window.localStorage, { userId, companyId, locationId }),
-    () => queueMicrotask(() => window.dispatchEvent(new CustomEvent("marginflow-storage-error"))),
-  ), [userId, companyId, locationId]);
+  const persistence = useMemo(() => {
+    const scoped = createScopedStorage(() => window.localStorage, { userId, companyId, locationId });
+    return createWorkspacePersistence(scoped, (detail) => queueMicrotask(() =>
+      window.dispatchEvent(new CustomEvent("marginflow-storage-error", { detail: { ...detail, scope: scoped.prefix } }))));
+  }, [userId, companyId, locationId]);
   return <WorkspaceStorageContext.Provider value={persistence}>
     <WorkspaceApp key={persistence.localStorage.prefix} {...props} />
   </WorkspaceStorageContext.Provider>;
@@ -5598,7 +5600,7 @@ function App(props) {
 
 function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
   const { localStorage, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
-    saveSerializedLocalStorage, readMarginFlowLocalStorage, storedStateUpdater } = React.useContext(WorkspaceStorageContext);
+    saveSerializedLocalStorage, readMarginFlowLocalStorage, storedStateUpdater, persistenceDiagnostics, exportVolatileWrites } = React.useContext(WorkspaceStorageContext);
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
   const displayRecoveryMode = !demoMode && displayRecoveryModeEnabled();
   const demoCaptureMode = demoMode ? demoCaptureModeFromUrl() : "";
@@ -5621,10 +5623,18 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [cloudError, setCloudError] = useState("");
   const [localStorageError, setLocalStorageError] = useState(false);
   useEffect(() => {
-    const onStorageError = () => setLocalStorageError(true);
+    const onStorageError = (event) => {
+      if (event.detail?.scope === localStorage.prefix) setLocalStorageError(event.detail);
+    };
     window.addEventListener("marginflow-storage-error", onStorageError);
     return () => window.removeEventListener("marginflow-storage-error", onStorageError);
   }, []);
+  useEffect(() => {
+    if (!localStorageError) return;
+    const warn = event => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [localStorageError]);
   const [cloudLoadAttempt, setCloudLoadAttempt] = useState(0);
   const [invoiceApprovalBusy, setInvoiceApprovalBusy] = useState(false);
   const [duplicatePrompt, setDuplicatePrompt] = useState(null);
@@ -5908,8 +5918,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     if (!demoMode && !readOnly) {
       try {
         Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => saveSerializedLocalStorage(key, value, "cloud_snapshot"));
-      } catch {
-        setLocalStorageError(true);
+      } catch (error) {
+        setLocalStorageError({ error: error?.name || "Storage error" });
       }
     }
     setCompanySettingsState(snapshot.companySettings);
@@ -6346,7 +6356,11 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       if (relationalSourceId) {
         duplicateAction = "update_existing";
         existingInvoiceId = relationalSourceId;
-        expectedRevision = Number(sourceInvoice.syncRevision || 0);
+        expectedRevision = Number(invoice.syncRevision || 0);
+        if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+          setCloudError("The edited version has no verified revision. Export this work and reconcile with the cloud before saving.");
+          return { invoice, persisted: false, cancelled: true };
+        }
         invoiceForPersistence = {
           ...invoice,
           id: existingInvoiceId,
@@ -6969,7 +6983,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
 
       <main className="workspace">
         {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
-        {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes. Keep this page open. Confirm cloud saving or download an emergency backup from Settings before closing.</div>}
+        {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
+          <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
         {!demoMode && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoices.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
@@ -7114,6 +7129,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             suppliers={suppliers}
           />
         )}
+        {active === "settings" && cloudEnabled && !readOnly && permissionsByPage.invoices?.canEdit && <PendingRecoveryPanel client={supabase} scope={cloudScope} working={invoices} download={downloadJsonFile} onStage={rows => setInvoices(current => {
+          const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
+          return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
+        })} />}
         {active === "products" && <Products companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers

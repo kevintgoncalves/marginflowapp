@@ -36,6 +36,8 @@ export function createScopedStorage(getStorage, { userId, companyId, locationId 
 }
 
 export function createWorkspacePersistence(localStorage, onError = () => {}) {
+const volatileWrites = new Map();
+const failures = new Map();
 function safeReadLocalStorage(key, fallback) {
   try {
     const stored = localStorage.getItem(key);
@@ -100,7 +102,16 @@ function saveInvoiceDropSafetyBackup(key, nextSerialized, reason = "state_update
 
 function saveSerializedLocalStorage(key, serializedValue, reason = "state_update") {
   saveInvoiceDropSafetyBackup(key, serializedValue, reason);
-  localStorage.setItem(key, serializedValue);
+  try {
+    localStorage.setItem(key, serializedValue);
+    volatileWrites.delete(key); failures.delete(key);
+  } catch (error) {
+    volatileWrites.set(key, serializedValue);
+    const diagnostic = { key, error: error?.name || 'Error', attemptedBytes: serializedValue.length * 2 };
+    failures.set(key, diagnostic);
+    onError(diagnostic);
+    throw error;
+  }
 }
 
 function readInvoiceAutoBackups() {
@@ -117,11 +128,15 @@ function readInvoiceAutoBackups() {
 
 function saveLocalStorage(key, value) {
   try {
-    saveSerializedLocalStorage(key, JSON.stringify(value));
+    let serialized;
+    try { serialized = JSON.stringify(value); } catch (error) {
+      onError({ key, error: error?.name || "SerializationError", attemptedBytes: null });
+      return false;
+    }
+    saveSerializedLocalStorage(key, serialized);
     return true;
   } catch {
     // Never imply durability when the browser rejected the write.
-    onError();
     return false;
   }
 }
@@ -163,5 +178,7 @@ function storedStateUpdater(setState, key) {
 
 return { localStorage, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
   saveSerializedLocalStorage, readInvoiceAutoBackups, readMarginFlowLocalStorage,
-  buildFullBackupPayload, storedStateUpdater };
+  buildFullBackupPayload, storedStateUpdater,
+  persistenceDiagnostics: () => [...failures.values()],
+  exportVolatileWrites: () => Object.fromEntries(volatileWrites) };
 }
