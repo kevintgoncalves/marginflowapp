@@ -2,7 +2,7 @@
 
 begin;
 -- Synthetic reference prerequisite only; rolled back with the existing test.
-insert into public.plans (slug,name) values ('pro','Schema baseline synthetic test');
+insert into public.plans (slug,name) values ('pro','Schema baseline synthetic test') ON CONFLICT (slug) DO NOTHING;
 
 insert into auth.users (id, aud, role, email, created_at, updated_at)
 values

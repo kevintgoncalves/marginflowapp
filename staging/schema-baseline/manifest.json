@@ -56,12 +56,15 @@
   "postgresImage": "public.ecr.aws/supabase/postgres:15.8.1.085",
   "expectedSchemaSha256": "0026767d2d0e3f924605747c92d5da820f0736c6566e299a8153629dff1143b0",
   "artifacts": {
-    "archive-test.sql": "aeaa5b9cf1fc041391c930de303fbf7e15416bce6413bd659c8eac1e7a1f7475",
-    "cloud-first-test.sql": "e66c943577c7972e860c5840d76a3c3a609f34cf8412bc0915a15fa02237cd3c",
+    "archive-test.sql": "88aed6490d8a2b36d231e70e31eb10878422e18b72827eff70744de08b6d2efa",
+    "cloud-first-test.sql": "259f4e6718845d13e08b7540e0638e2465f3cdd77aab5379647f7cfa88c1b6e8",
     "supabase/config.toml": "304edd1383fa08985bb6d64619c8f419f816fae3bee6d56e8b2cad551ef2dc84",
     "supabase/migrations/20260915000000_schema_baseline.sql": "d8ffc19a1d0ee722ccbbedb52a26928de533ca26fc7f0e54cb3eec7fd75cdf54",
     "supabase/migrations/20260915000001_exact_source_acl.sql": "e21bb318d0df38d64d0aff46cb72523a69aa91ae0961c0894735dcb11d828396",
-    "supabase/migrations/20260915000002_staging_application_contract.sql": "56a3357542543121da1585e1ff18abc41187f37cdead2fb395183b9f8f46f8e5"
+    "supabase/migrations/20260915000002_staging_application_contract.sql": "56a3357542543121da1585e1ff18abc41187f37cdead2fb395183b9f8f46f8e5",
+    "reference-seed.sql": "25e524c3ef3db0434c0a3d89ca6b8e1a5228160991157ed43da98cb8d7aafd92",
+    "onboarding-test.sql": "5126bd1d148e3fae4d743b63d7e961a8b1d8ad7205b82084227449e3b01a00a8",
+    "test_seed_refusals.py": "5e2735f4c9f30ec22038797d73309fe77bd1fd268a8e02950dd27b81adab6594"
   },
   "expectedExtensions": {
     "plpgsql": "1.0",
@@ -81,5 +84,34 @@
     "applicationUserTriggers": 73,
     "publicAuthStoragePolicies": 298
   },
-  "rawExportSha256": "fd4cd267cd9194402ec95aa1db424b7280bda18a95a72e2f76b428a866366fd0"
+  "rawExportSha256": "fd4cd267cd9194402ec95aa1db424b7280bda18a95a72e2f76b428a866366fd0",
+  "referenceSeed": {
+    "baseCommit": "9b091dfe2a5112fd8721e1917318a603fa475361",
+    "sourceRanges": {
+      "20260813090000_saas_foundation_4a.sql": [
+        "130-192",
+        "275-344"
+      ],
+      "20260813110000_internal_admin_back_office_4c.sql": [
+        "63-65",
+        "606"
+      ]
+    },
+    "expectedCounts": {
+      "plans": 3,
+      "features": 14,
+      "plan_features": 28,
+      "internal_roles": 4,
+      "internal_permissions": 18,
+      "internal_role_permissions": 41
+    },
+    "semantics": "Exact generic final reference state; read-only support template; no staff accounts. Empty or exact state only; drift/partial data aborts. Repeated application writes no persistent rows.",
+    "totalRows": 108,
+    "planFeatureCounts": {
+      "basic": 4,
+      "plus": 10,
+      "pro": 14
+    },
+    "expectedOperationalRows": 0
+  }
 }

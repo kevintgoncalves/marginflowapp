@@ -1,6 +1,6 @@
 -- Synthetic SQL-only authorization checks. No file bytes. Entire fixture rolls back.
 BEGIN;
-INSERT INTO public.plans(slug,name) VALUES ('pro','Synthetic schema contract test');
+INSERT INTO public.plans(slug,name) VALUES ('pro','Synthetic schema contract test') ON CONFLICT (slug) DO NOTHING;
 INSERT INTO auth.users(id,email) VALUES
  ('11000000-0000-4000-8000-000000000001','archive-owner@example.test'),
  ('11000000-0000-4000-8000-000000000002','archive-outsider@example.test');

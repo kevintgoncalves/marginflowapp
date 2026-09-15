@@ -16,7 +16,9 @@ PostgreSQL validada é `public.ecr.aws/supabase/postgres:15.8.1.085`.
 ```sh
 python3 -B staging/schema-baseline/test_lab.py
 python3 -B staging/schema-baseline/lab.py create
+python3 -B staging/schema-baseline/lab.py seed-reference
 python3 -B staging/schema-baseline/lab.py verify
+python3 -B staging/schema-baseline/test_seed_refusals.py
 python3 -B staging/schema-baseline/build.py
 ```
 
@@ -52,8 +54,9 @@ supabase --workdir /tmp/marginflow-schema-baseline-lab-84b36ad stop --project-id
 
 Depois remove apenas o diretório marcado. Este comando apaga os volumes/dados
 fictícios desse laboratório. Não usa `--all`, `db reset` nem remove outros projetos.
-Os logs ficam no diretório privado enquanto existir; guardar evidências antes de
-destruir, se necessário. Para repetir o ensaio, destruir e executar `create`.
+Os logs guardam apenas resumos sem outputs brutos do CLI, que podem conter chaves
+locais geradas. Não se guardam passwords, tokens ou service-role keys nos artefactos
+ou nos logs do runner. Para repetir o ensaio, destruir e executar `create`.
 A baseline é para uma instalação nova, não para reaplicação sobre schema existente.
 
 ## O que é instalado
@@ -79,18 +82,65 @@ Auth, Storage, roles e extensões geridas são inicializados pelo Supabase local
 Não se copia uma definição parcial de `graphql_public.graphql` nem ACLs dessa
 função. Não se usam `--no-acl`, desativação de triggers ou permissões de produção.
 
-## Schema apenas: limite importante
+## Seed de referências separado e explícito
 
-Todas as tabelas da aplicação ficam vazias, incluindo `plans`, `features` e
-permissões internas. Esses registos de configuração são **dados**, não schema.
-Por isso a criação de uma empresa exige primeiro referências de plano fictícias:
-o trigger atual requer um plano ativo com slug `pro`. O onboarding e as funcionalidades
-não ficam prontos para uso humano apenas por instalar schema.
+`create` continua a instalar **somente schema**, com seed automático desativado.
+`reference-seed.sql` fica fora de `supabase/migrations` e nunca é copiado para essa
+pasta. Aplicá-lo apenas pelo comando explícito `lab.py seed-reference` acima.
 
-Os testes SQL acrescentam o mínimo de referências e entidades inteiramente
-fictícias **dentro de transações terminadas com ROLLBACK**. Não existe seed
-permanente nem importação de dados reais. Uma futura fixture funcional de staging
-terá de ser explícita e separada; não enfraquecer o trigger para esconder essa dependência.
+| Tabela | Contagem exata |
+| --- | ---: |
+| plans | 3 |
+| features | 14 |
+| plan_features | 28 |
+| internal_roles | 4 |
+| internal_permissions | 18 |
+| internal_role_permissions | 41 |
+
+Os planos são `basic`, `plus`, `pro`, com 4/10/14 features respetivamente. Nomes,
+descrições, chaves e associações vêm dos INSERTs genéricos da migração SaaS 4A.
+O estado final aplica a restrição de 4C: Support tem leitura, sem associação a
+`support.workspace_write`. Essa permissão continua definida e disponível ao
+Super Admin conforme o original. Nenhuma conta interna ou acesso de utilizador
+é criado. Preços, limites e outros campos não configurados mantêm os defaults
+do schema; não são inventados valores comerciais.
+
+São apenas 108 linhas de configuração. Não há empresas, locais, departamentos,
+produtos, fornecedores, trabalhadores, vendas, faturas, stocks, utilizadores Auth
+ou objetos Storage. Nenhuma outra referência foi necessária ao onboarding.
+
+### Segurança e idempotência
+
+O runner verifica identidade local, marcador, configuração, schema e hashes antes
+do seed. O SQL exige sinalização de sessão do runner, serializa execuções e bloqueia
+as tabelas durante a verificação/aplicação. Essa sinalização não é uma credencial
+nem torna seguro copiar manualmente o SQL para outro destino.
+
+Os dados esperados são construídos em tabelas **temporárias**, usando os valores
+originais. O seed aceita apenas referências totalmente vazias ou o estado exato
+já esperado. Uma referência parcial, adicional ou alterada, ou qualquer dado
+operacional/utilizador/objeto, causa erro e rollback. Não atualiza nem apaga
+referências persistentes para as forçar a coincidir. Helpers temporários desaparecem
+quando termina a sessão; nenhum objeto persistente de schema é criado.
+
+Cada `seed-reference` aplica o seed e repete-o, comparando todas as colunas,
+incluindo UUIDs e timestamps. A segunda aplicação não escreve linhas persistentes.
+`verify` reconhece automaticamente baseline vazia ou fixture completa, compara os
+valores e contagens exatos, executa testes transacionais e confirma novamente a
+ausência de dados operacionais e alterações às referências/schema.
+
+Os testes de faturas/arquivo aceitam o plano `pro` já existente; quando executados
+sobre a baseline sem seed, criam-no apenas dentro da transação de teste.
+`onboarding-test.sql` usa identidades `example.test` sem passwords/tokens, assume
+`authenticated` para chamar as RPCs atuais e termina em ROLLBACK. Valida criação,
+retoma, settings, departamento, conclusão, trial Pro de 14 dias, entitlements e
+recusa a outro utilizador/sem autenticação. Não testa signup por email nem browser.
+
+Após estes comandos o ambiente tem as referências necessárias para iniciar um
+onboarding fictício, **mas nenhuma conta de acesso pré-criada**. A utilização humana
+subsequente deve criar apenas contas/dados fictícios. Depois de existirem dados
+operacionais, o seed e esta verificação de fixture vazia recusam execução; não são
+ferramentas de reconciliação nem manutenção de uma base em uso.
 
 ## Proveniência e comparação
 
@@ -120,7 +170,8 @@ mais o contrato de staging descrito acima. `manifest.json` regista o hash de um
 A comparação ignora apenas comentários de cabeçalho, linhas vazias, tokens aleatórios
 de restrição do dump e ordem de comandos GRANT/REVOKE. Preserva definições, owners,
 ACLs e privilégios por omissão. A história de migrações é intencionalmente diferente:
-a nova linhagem tem três entradas, sem falsificar as 44 antigas.
+a nova linhagem tem três entradas, sem falsificar as 44 antigas. O seed de dados
+não acrescenta uma entrada ao histórico de migrações.
 
 Não regenerar hashes para aceitar diferenças. Mudanças no código da aplicação,
 CLI, PostgreSQL, Auth ou Storage exigem nova derivação e revisão. Ver `VALIDATION.md`.
@@ -144,8 +195,10 @@ Para abandonar esta solução: destruir o laboratório com o comando acima e vol
 git switch ui/unified-invoices
 ```
 
-O commit local pode ser revertido apenas na branch `staging/schema-baseline`,
-sem tocar na branch original. Nenhum rollback de base existente é necessário.
+O commit local do seed pode ser revertido com `git revert <commit-do-seed>` apenas
+na branch `staging/schema-baseline`, depois de destruir o laboratório. Isso preserva
+o commit da baseline. Para voltar à baseline vazia sem reverter código: destruir
+e executar somente `create`, sem `seed-reference`. Nenhum rollback de base existente é necessário.
 
 Referências oficiais: [CLI local](https://supabase.com/docs/guides/local-development/cli/getting-started),
 [referência CLI](https://supabase.com/docs/reference/cli/su),

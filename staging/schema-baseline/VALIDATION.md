@@ -1,4 +1,77 @@
-# Validação local — 15 setembro 2026
+# Validação do seed de staging — 15 setembro 2026
+
+## Resultado atual
+
+**PASS: fixture mínima de referências e onboarding fictício local, sem mudança de schema ou segurança.**
+
+- Estado inicial: branch `staging/schema-baseline`, HEAD
+  `9b091dfe2a5112fd8721e1917318a603fa475361`, árvore limpa.
+- 44 migrações originais e os três SQL da baseline: conteúdo idêntico ao commit
+  inicial, mesmos caminhos/SHA-256. `ui/unified-invoices` permanece em `84b36ad`.
+- Seed fora da baseline/pasta de migrações, executado apenas por `seed-reference`.
+- Referências: **plans 3, features 14, plan_features 28, internal_roles 4,
+  internal_permissions 18, internal_role_permissions 41**; total **108**.
+- Associações plano/feature: **basic 4, plus 10, pro 14**.
+- Valores originais de SaaS 4A e restrição final de 4C: Support sem write.
+  Nenhuma outra referência foi necessária; nenhuma conta interna criada.
+- Conteúdo genérico comparado integralmente com as tabelas temporárias derivadas
+  dos valores originais; não apenas verificação das contagens.
+
+## Replay, idempotência e recusas
+
+A baseline passou num laboratório novo sem seed. O seed foi aplicado duas vezes:
+na segunda execução, **todas as linhas, UUIDs, timestamps e demais colunas** ficaram
+iguais. O runner verifica essa propriedade em cada chamada a `seed-reference`.
+Antes/depois do seed e dos testes, o hash normalizado de schema/ACLs permaneceu
+`0026767d2d0e3f924605747c92d5da820f0736c6566e299a8153629dff1143b0`.
+
+Zero empresas, locais, departamentos, fornecedores, produtos, vendas, faturas,
+stocks, funcionários, utilizadores Auth e objetos Storage após validação.
+Só subsiste a configuração do bucket vazio já criada pela baseline.
+
+Testes negativos SQL: o seed recusou (1) nome de plano alterado,
+(2) uma referência em falta e (3) um utilizador Auth fictício. Cada cenário decorreu
+numa transação revertida; nenhuma referência persistente foi alterada.
+As recusas não foram contornadas com UPDATE/DELETE, permissões ou flags de bypass.
+
+## Onboarding e testes
+
+`onboarding-test.sql` passou usando RPCs existentes sob o papel `authenticated`:
+
+- Criação e retoma do mesmo workspace sem duplicar empresa/local.
+- Pro trial inicialmente dormente; settings regionais persistidas.
+- Recusa de conclusão sem departamentos; criação de um departamento fictício.
+- Conclusão, estado `complete`, trial de **14 dias**, **14 features Pro** e write access.
+- Segunda conclusão sem reiniciar o trial.
+- Recusa de leitura/conclusão/alteração por outro utilizador e recusa sem autenticação.
+- Roles de referência não tornam o cliente membro do staff interno.
+- ROLLBACK de Auth, empresa, local, departamento, associação, subscrição e settings.
+
+**306 testes existentes PASS; 11 testes do runner PASS; 3 testes negativos SQL PASS;
+cloud-first/arquivo SQL PASS; safety:check PASS; build PASS.**
+O build correu com o runner existente numa cópia sem `.env` e com localhost/placeholder.
+Os testes anteriores de faturas/arquivo só mudaram para aceitar `pro` já presente
+(`ON CONFLICT DO NOTHING`), mantendo as suas assertions.
+
+O runner deixou de guardar outputs brutos do CLI porque podem conter credenciais
+locais geradas. O log de arranque desta tarefa foi substituído por um resumo sem
+segredos. Um teste cobre a ausência de outputs sensíveis nos logs de falha.
+
+## Limites e reversão
+
+Validação de base/RPC, não signup por email, login de browser ou E2E de toda a app.
+Nenhum utilizador ou password é pré-criado pelo seed. Nenhum schema, grant, política,
+trigger ou verificação de segurança foi alterado para fazer passar o onboarding.
+Não houve acesso Supabase remoto, uso de credenciais reais, Vercel, push ou deploy.
+
+O laboratório é descartável e foi destruído após a validação. Para reproduzir:
+`create`, `seed-reference`, `verify`, `test_seed_refusals.py` e `destroy`, conforme README.
+Reverter o commit do seed remove apenas esta extensão; não desfaz a baseline anterior.
+Para obter apenas schema, basta recriar sem executar `seed-reference`.
+
+---
+
+# Histórico: validação da baseline em 9b091dfe
 
 ## Resultado
 
