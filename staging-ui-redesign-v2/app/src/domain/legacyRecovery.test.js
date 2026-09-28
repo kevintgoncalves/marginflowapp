@@ -1,0 +1,586 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { buildLaptopRecoveryPreview } from "./legacyRecovery.js";
+import { buildOperationalHistoricalInvoice } from "./historicalInvoiceRecovery.js";
+import { diagnoseLaptopRecoveryConflicts } from "./legacyRecoveryDiagnostics.js";
+import { recoverLaptopLegacyData } from "../lib/legacyRecoveryRepository.js";
+
+const companyId = "11111111-1111-4111-8111-111111111111";
+const locationId = "22222222-2222-4222-8222-222222222222";
+const supplierId = "33333333-3333-4333-8333-333333333333";
+const productId = "44444444-4444-4444-8444-444444444444";
+const legacyDepartmentId = "55555555-5555-4555-8555-555555555555";
+const relationalDepartmentId = "66666666-6666-4666-8666-666666666666";
+const barDepartmentId = "77777777-7777-4777-8777-777777777777";
+const invoiceId = "88888888-8888-4888-8888-888888888888";
+const lineId = "99999999-9999-4999-8999-999999999999";
+
+function supplier(overrides = {}) {
+  return { id: supplierId, name: "TG Fruits", category: "Produce", active: true, ...overrides };
+}
+
+function product(overrides = {}) {
+  return {
+    id: productId,
+    name: "Cherry Tomatoes",
+    supplierId,
+    supplier: "TG Fruits",
+    departmentId: legacyDepartmentId,
+    department: "Kitchen Made",
+    packSize: "6x1kg",
+    quantity: 1,
+    unitCost: 11.8,
+    active: true,
+    ...overrides,
+  };
+}
+
+function invoice(overrides = {}) {
+  return {
+    id: invoiceId,
+    supplierId,
+    supplier: "TG Fruits",
+    documentType: "invoice",
+    documentNumber: "822871",
+    invoiceNumber: "822871",
+    date: "2026-08-08",
+    status: "Approved",
+    sourceInvoiceTotal: 23.6,
+    items: [{
+      id: lineId,
+      matchedProductId: productId,
+      productName: "Cherry Tomatoes",
+      departmentId: legacyDepartmentId,
+      department: "Kitchen Made",
+      quantity: 2,
+      unitCost: 11.8,
+      lineTotal: 23.6,
+      departmentSplits: [],
+    }],
+    ...overrides,
+  };
+}
+
+function snapshot(overrides = {}) {
+  return {
+    suppliers: [supplier()],
+    products: [product()],
+    departmentSettings: [{ id: legacyDepartmentId, name: "Kitchen Made", active: true }],
+    invoices: [invoice()],
+    ...overrides,
+  };
+}
+
+function relational(overrides = {}) {
+  return {
+    suppliers: [],
+    products: [],
+    departments: [{ id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true }],
+    invoices: [],
+    ...overrides,
+  };
+}
+
+function relationalInvoice(overrides = {}) {
+  return invoice({
+    supplierId,
+    items: invoice().items.map((line) => ({
+      ...line,
+      productId,
+      matchedProductId: productId,
+      departmentId: relationalDepartmentId,
+    })),
+    ...overrides,
+  });
+}
+
+function resolvedRelational(invoices = [], overrides = {}) {
+  return relational({
+    suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+    products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+    invoices,
+    ...overrides,
+  });
+}
+
+const scope = { companyId, locationId };
+
+test("TEST A: legacy supplier plans one stable insert and retry maps the same canonical row", async () => {
+  const first = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  assert.equal(first.suppliers.counts.needMigration, 1);
+  assert.equal(first.suppliers.migrate[0].id, supplierId);
+
+  const second = await buildLaptopRecoveryPreview({
+    snapshot: snapshot(),
+    relational: relational({ suppliers: [{ id: supplierId, company_id: companyId, location_id: locationId, name: "TG FRUITS LTD", active: true }] }),
+    scope,
+  });
+  assert.equal(second.suppliers.counts.needMigration, 0);
+  assert.equal(second.suppliers.counts.alreadyRelational, 1);
+});
+
+test("TEST B: legacy product preserves its UUID and retry creates no second product", async () => {
+  const first = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  assert.equal(first.products.counts.needMigration, 1);
+  assert.equal(first.products.migrate[0].id, productId);
+  assert.equal(first.products.migrate[0].departmentId, relationalDepartmentId);
+
+  const second = await buildLaptopRecoveryPreview({
+    snapshot: snapshot(),
+    relational: relational({
+      suppliers: [{ id: supplierId, company_id: companyId, location_id: locationId, name: "TG Fruits", active: true }],
+      products: [{ id: productId, company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, name: "Cherry Tomatoes", active: true }],
+    }),
+    scope,
+  });
+  assert.equal(second.products.counts.needMigration, 0);
+  assert.equal(second.products.counts.alreadyRelational, 1);
+});
+
+test("TEST C: an invoice with unresolved dependencies is preserved in the archive", async () => {
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ suppliers: [], products: [], departmentSettings: [] }),
+    relational: relational({ departments: [] }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /Supplier dependency is unresolved/);
+});
+
+test("TEST D: basic invoice recovery uses catalog first, one atomic invoice RPC and marks success only after response", async () => {
+  const threeLineInvoice = invoice({
+    sourceInvoiceTotal: 70.8,
+    items: [
+      invoice().items[0],
+      { ...invoice().items[0], id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+      { ...invoice().items[0], id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    ],
+  });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [threeLineInvoice] }), relational: relational(), scope });
+  const calls = [];
+  const stored = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      if (name === "recover_legacy_catalog_v1") return { data: { suppliers_inserted: 1, products_inserted: 1 }, error: null };
+      return { data: { invoice_id: invoiceId, sync_revision: 1, line_count: 3, split_count: 0, saved_at: "2026-08-08T12:00:00Z", recovery_verified: true }, error: null };
+    },
+  };
+  const result = await recoverLaptopLegacyData(client, preview, { onInvoicePersisted: (row) => stored.push(row) });
+  assert.deepEqual(calls.map((call) => call.name), ["recover_legacy_catalog_v1", "recover_legacy_invoice_v1"]);
+  assert.equal(calls[1].payload.p_invoice.items.length, 3);
+  assert.equal(result.imported.length, 1);
+  assert.equal(stored[0].syncStatus, "synced");
+});
+
+test("dependency-imperfect history becomes an operational invoice while product archive remains immutable", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: relational(), scope });
+  preview.products.archived = [{ id: "legacy-product", name: "Unit", legacy: { id: "legacy-product", name: "Unit" }, reason: "Generic label." }];
+  preview.invoices.archived = [{ id: "legacy-invoice", legacy: invoice({ id: "legacy-invoice" }), reason: "Unsafe product dependency." }];
+  const calls = [];
+  const client = {
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      if (name === "recover_legacy_catalog_v1") return { data: {}, error: null };
+      if (name === "archive_legacy_recovery_v1") return { data: { products_inserted: 1, invoices_inserted: 1 }, error: null };
+      return { data: { invoice_id: invoiceId, status: "created", sync_revision: 1, line_count: 1, split_count: 0, saved_at: "2026-08-10T12:00:00Z" }, error: null };
+    },
+  };
+
+  const result = await recoverLaptopLegacyData(client, preview);
+
+  assert.deepEqual(calls.map((call) => call.name), ["recover_legacy_catalog_v1", "archive_legacy_recovery_v1", "persist_invoice_document_v3"]);
+  assert.equal(calls[1].payload.p_company_id, companyId);
+  assert.equal(calls[1].payload.p_location_id, locationId);
+  assert.equal(calls[1].payload.p_products.length, 1);
+  assert.equal(calls[1].payload.p_invoices.length, 0);
+  assert.equal(calls[2].payload.p_invoice.historicalRecovery.mode, "operational_historical_unmapped");
+  assert.equal(result.historical.imported.length, 1);
+});
+
+test("historical invoice recovery nulls ambiguous products and collapses duplicate same-department splits", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: resolvedRelational(), scope });
+  const legacy = invoice({
+    items: [{
+      ...invoice().items[0],
+      matchedProductId: "ambiguous-product",
+      productName: "Lemons",
+      departmentSplits: [
+        { department: "Kitchen Made", percentage: 100 },
+        { department: "Kitchen Made", percentage: 100 },
+      ],
+    }],
+  });
+  const recovered = await buildOperationalHistoricalInvoice({ legacy, reason: "Unsafe dependencies." }, preview);
+  assert.equal(recovered.items[0].productId, "");
+  assert.equal(recovered.items[0].departmentId, relationalDepartmentId);
+  assert.deepEqual(recovered.items[0].departmentSplits, []);
+  assert.equal(recovered.items[0].historicalRecovery.allocationStatus, "duplicate_same_department_collapsed");
+  assert.equal(recovered.items[0].historicalRecovery.sourceDepartmentSplits.length, 2);
+});
+
+test("operational historical recovery is classified as already relational on every later preflight", async () => {
+  const base = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [] }), relational: resolvedRelational(), scope });
+  const legacy = invoice({
+    items: [{ ...invoice().items[0], matchedProductId: "missing-product", department: "Fresh Produce", departmentId: "" }],
+  });
+  const recovered = await buildOperationalHistoricalInvoice({ legacy, reason: "Unknown department." }, base);
+  assert.equal(recovered.items[0].departmentId, "");
+  assert.equal(recovered.items[0].historicalRecovery.sourceDepartmentName, "Fresh Produce");
+
+  const retry = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [legacy] }),
+    relational: resolvedRelational([recovered]),
+    scope,
+  });
+  assert.equal(retry.invoices.counts.needMigration, 0);
+  assert.equal(retry.invoices.counts.archived, 0);
+  assert.equal(retry.invoices.counts.conflicts, 0);
+  assert.equal(retry.invoices.already[0].classification, "historical_unmapped_operational");
+});
+
+test("similar legacy products remain separate without fuzzy merging", async () => {
+  const secondProductId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ products: [product(), product({ id: secondProductId, name: "Cherry Tomato 6x1kg" })], invoices: [] }),
+    relational: relational(),
+    scope,
+  });
+  assert.equal(preview.products.counts.needMigration, 2);
+  assert.deepEqual(new Set(preview.products.migrate.map((row) => row.id)), new Set([productId, secondProductId]));
+  assert.equal(preview.products.counts.conflicts, 0);
+});
+
+test("TEST E: split recovery maps exact departments and preserves percentages", async () => {
+  const splitInvoice = invoice({
+    items: [{
+      ...invoice().items[0],
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", department: "Kitchen Made", percentage: 60 },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", department: "Bar", percentage: 40 },
+      ],
+    }],
+  });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({
+      departmentSettings: [
+        { id: legacyDepartmentId, name: "Kitchen Made" },
+        { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "Bar" },
+      ],
+      invoices: [splitInvoice],
+    }),
+    relational: relational({ departments: [
+      { id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true },
+      { id: barDepartmentId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
+    ] }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.needMigration, 1);
+  assert.deepEqual(preview.invoices.migrate[0].items[0].departmentSplits.map((row) => [row.departmentId, row.percentage]), [
+    [relationalDepartmentId, 60],
+    [barDepartmentId, 40],
+  ]);
+});
+
+test("TEST F: an identical relational invoice is verified on retry and not resubmitted", async () => {
+  const first = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  const canonical = first.invoices.migrate[0];
+  const retry = await buildLaptopRecoveryPreview({
+    snapshot: snapshot(),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      invoices: [canonical],
+    }),
+    scope,
+  });
+  assert.equal(retry.invoices.counts.needMigration, 0);
+  assert.equal(retry.invoices.counts.alreadyRelational, 1);
+});
+
+test("TEST G: same strong invoice identity with different line content remains Review conflict", async () => {
+  const first = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  const different = { ...first.invoices.migrate[0], items: [{ ...first.invoices.migrate[0].items[0], quantity: 3, lineTotal: 35.4 }] };
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot(),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      invoices: [different],
+    }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.equal(preview.invoices.conflicts[0].cloudLineCount, 1);
+});
+
+test("TEST H: failed invoice RPC leaves the legacy row unsaved and reports failure", async () => {
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot(), relational: relational(), scope });
+  const stored = [];
+  const client = {
+    async rpc(name) {
+      if (name === "recover_legacy_catalog_v1") return { data: {}, error: null };
+      return { data: null, error: new Error("forced line failure") };
+    },
+  };
+  const result = await recoverLaptopLegacyData(client, preview, { onInvoicePersisted: (row) => stored.push(row) });
+  assert.equal(result.imported.length, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(stored.length, 0);
+});
+
+test("TEST I: successful module snapshot sync alone never qualifies an invoice as relational", async () => {
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [invoice({ syncStatus: "synced" })] }),
+    relational: relational(),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.needMigration, 1);
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+});
+
+test("PHASE 2 TEST 1: stale conflict with the same UUID and equivalent current content is Already relational", async () => {
+  const local = invoice({ syncStatus: "conflict", syncError: "stale cached conflict" });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: resolvedRelational([relationalInvoice()]),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.already[0].matchBasis, "same_invoice_uuid");
+});
+
+test("PHASE 2 TEST 2: stale conflict with the same UUID and material line differences remains Review conflict", async () => {
+  const local = invoice({ syncStatus: "conflict", syncError: "stale cached conflict" });
+  const cloud = relationalInvoice({
+    items: [relationalInvoice().items[0], {
+      ...relationalInvoice().items[0],
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }],
+    sourceInvoiceTotal: 47.2,
+  });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [local] }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /different material content/i);
+});
+
+test("PHASE 2 TEST 3: repeated generic Unit numbers keep separate UUIDs when contents differ", async () => {
+  const firstId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const secondId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const localInvoices = [
+    invoice({ id: firstId, documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-27" }),
+    invoice({ id: secondId, documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-07-13", sourceInvoiceTotal: 35.4, items: [{ ...invoice().items[0], quantity: 3, lineTotal: 35.4 }] }),
+  ];
+  const cloud = relationalInvoice({ documentNumber: "Unit", invoiceNumber: "Unit" });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.needMigration, 2);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.deepEqual(new Set(preview.invoices.migrate.map((row) => row.id)), new Set([firstId, secondId]));
+});
+
+test("PHASE 2 TEST 4: a non-generic candidate with the wrong date is a date conflict, not a migration", async () => {
+  const local = invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", date: "2020-08-08" });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: resolvedRelational([relationalInvoice({ date: "2026-08-08" })]),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.conflicts, 1);
+  assert.match(preview.invoices.conflicts[0].reason, /different date/i);
+});
+
+test("PHASE 2 TEST 5: equivalent different-UUID legacy copies are preserved as probable duplicates without insertion", async () => {
+  const localInvoices = [
+    invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+    invoice({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }),
+  ];
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([relationalInvoice()]), scope });
+  assert.equal(preview.invoices.counts.needMigration, 0);
+  assert.equal(preview.invoices.counts.alreadyRelational, 2);
+  assert.equal(preview.invoices.counts.probableDuplicateLegacyCopies, 2);
+  assert.ok(preview.invoices.already.every((row) => row.classification === "probable_duplicate_legacy_copy"));
+});
+
+test("PHASE 2 TEST 6: a zero relational header is equivalent only when complete lines prove the legacy total", async () => {
+  const local = invoice({ sourceInvoiceSubtotal: 23.6, sourceInvoiceTotal: 23.6 });
+  const cloud = relationalInvoice({ sourceInvoiceSubtotal: 0, subtotal: 0, sourceInvoiceTotal: 0, total: 0 });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: [local] }), relational: resolvedRelational([cloud]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+});
+
+test("PHASE 2 TEST 7: an invoice with no canonical product is archive-only", async () => {
+  const local = invoice({ items: [{ ...invoice().items[0], matchedProductId: "", productName: "Unknown Produce" }] });
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ products: [], invoices: [local] }), relational: resolvedRelational([]), scope });
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /not safe for canonical analytics/);
+});
+
+test("PHASE 2 TEST 8: an unresolved department preserves the invoice in the archive", async () => {
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ products: [], invoices: [invoice()] }),
+    relational: resolvedRelational([], { departments: [] }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.archived, 1);
+  assert.match(preview.invoices.archived[0].reason, /Department dependency is unresolved/);
+});
+
+test("PHASE 2 TEST 9: distinct invoices sharing a generic number are never treated as the same invoice", async () => {
+  const localInvoices = [
+    invoice({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-27" }),
+    invoice({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", documentNumber: "Unit", invoiceNumber: "Unit", date: "2026-06-28", sourceInvoiceTotal: 47.2, items: [{ ...invoice().items[0], quantity: 4, lineTotal: 47.2 }] }),
+  ];
+  const preview = await buildLaptopRecoveryPreview({ snapshot: snapshot({ invoices: localInvoices }), relational: resolvedRelational([]), scope });
+  assert.equal(preview.invoices.counts.alreadyRelational, 0);
+  assert.equal(preview.invoices.counts.needMigration, 2);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+});
+
+test("derived split amounts are recomputed as equivalent before diagnostics", async () => {
+  const splitLocal = invoice({
+    items: [{
+      ...invoice().items[0],
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", department: "Kitchen Made", percentage: 60 },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", department: "Bar", percentage: 40 },
+      ],
+    }],
+  });
+  const splitCloud = {
+    ...splitLocal,
+    supplierId,
+    items: [{
+      ...splitLocal.items[0],
+      productId,
+      matchedProductId: productId,
+      departmentSplits: [
+        { ...splitLocal.items[0].departmentSplits[0], departmentId: relationalDepartmentId, amount: 14.16 },
+        { ...splitLocal.items[0].departmentSplits[1], departmentId: barDepartmentId, amount: 9.44 },
+      ],
+    }],
+  };
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({
+      departmentSettings: [
+        { id: legacyDepartmentId, name: "Kitchen Made" },
+        { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "Bar" },
+      ],
+      invoices: [splitLocal],
+    }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      departments: [
+        { id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true },
+        { id: barDepartmentId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
+      ],
+      invoices: [splitCloud],
+    }),
+    scope,
+  });
+  assert.equal(preview.invoices.counts.conflicts, 0);
+  assert.equal(preview.invoices.counts.alreadyRelational, 1);
+  const before = structuredClone(preview);
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.estimates.likelyFalseConflicts, 0);
+  assert.equal(report.examples.length, 0);
+  assert.deepEqual(preview, before);
+  assert.equal(preview.invoices.counts.conflicts, 0);
+});
+
+test("read-only diagnostics keep a wrong invoice date classified as a genuine conflict", async () => {
+  const local = invoice({ date: "2026-08-08" });
+  const cloud = invoice({ date: "2020-08-08", supplierId, productId });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({ invoices: [local] }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      invoices: [cloud],
+    }),
+    scope,
+  });
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.breakdown.find((row) => row.code === "date_mismatch")?.count, 1);
+  assert.equal(report.examples[0].classification, "genuine business conflict");
+  assert.deepEqual(report.examples[0].materialDifferences.find((row) => row.path === "date"), {
+    path: "date",
+    legacy: "2026-08-08",
+    relational: "2020-08-08",
+  });
+});
+
+test("read-only diagnostics classify confirmed split differences as genuine business conflicts", async () => {
+  const local = invoice({
+    items: [{
+      ...invoice().items[0],
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { department: "Kitchen Made", departmentId: legacyDepartmentId, percentage: 75 },
+        { department: "Bar", departmentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", percentage: 25 },
+      ],
+    }],
+  });
+  const cloud = invoice({
+    supplierId,
+    items: [{
+      ...invoice().items[0],
+      productId,
+      matchedProductId: productId,
+      department: "Split",
+      departmentId: "",
+      departmentSplits: [
+        { department: "Kitchen Made", departmentId: relationalDepartmentId, percentage: 50 },
+        { department: "Bar", departmentId: barDepartmentId, percentage: 50 },
+      ],
+    }],
+  });
+  const preview = await buildLaptopRecoveryPreview({
+    snapshot: snapshot({
+      departmentSettings: [
+        { id: legacyDepartmentId, name: "Kitchen Made" },
+        { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "Bar" },
+      ],
+      invoices: [local],
+    }),
+    relational: relational({
+      suppliers: [{ id: supplierId, name: "TG Fruits", company_id: companyId, location_id: locationId, active: true }],
+      products: [{ id: productId, name: "Cherry Tomatoes", company_id: companyId, location_id: locationId, supplier_id: supplierId, department_id: relationalDepartmentId, active: true }],
+      departments: [
+        { id: relationalDepartmentId, company_id: companyId, location_id: locationId, name: "Kitchen Made", active: true },
+        { id: barDepartmentId, company_id: companyId, location_id: locationId, name: "Bar", active: true },
+      ],
+      invoices: [cloud],
+    }),
+    scope,
+  });
+
+  const report = diagnoseLaptopRecoveryConflicts(preview);
+  assert.equal(report.conflicts[0].conflictReasonCode, "department_split_mismatch");
+  assert.equal(report.conflicts[0].classification, "genuine business conflict");
+});
+
+test("recovery migration is install-only, reuses the v2 invoice transaction and verifies child counts", () => {
+  const sql = readFileSync(new URL("../../supabase/migrations/20260808120000_legacy_relational_recovery.sql", import.meta.url), "utf8");
+  assert.match(sql, /create or replace function public\.recover_legacy_catalog_v1/);
+  assert.match(sql, /create or replace function public\.recover_legacy_invoice_v1/);
+  assert.match(sql, /public\.persist_invoice_document_v2\(p_company_id, p_location_id, p_invoice\)/);
+  assert.match(sql, /Recovery verification failed/);
+  assert.match(sql, /pg_advisory_xact_lock/);
+  assert.doesNotMatch(sql, /\b(truncate|drop table|delete from)\b/i);
+});

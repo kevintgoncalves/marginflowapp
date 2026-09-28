@@ -1,0 +1,714 @@
+--- a/src/domain/adminBackOffice.test.js
++++ b/src/domain/adminBackOffice.test.js
+@@ -33,7 +33,8 @@
+ });
+ 
+ test('customer sign out and admin subscription purpose stay visible in the UI contract', () => {
+-  assert.match(mainSource, /className="sidebar-signout" onClick=\{onSignOut\}/);
++  const navigationSource = readFileSync(new URL("../components/WorkspaceNavigation.jsx", import.meta.url), "utf8");
++  assert.match(navigationSource, /className="sidebar-signout" onClick=\{onSignOut\}/);
+   assert.match(internalAdminSource, /Find workspaces, see who uses them/);
+   assert.match(internalAdminSource, /Manage plan access, trial dates, and subscription status/);
+   assert.match(internalAdminSource, /Extend 7 days/);
+--- a/src/main.jsx
++++ b/src/main.jsx
+@@ -1,6 +1,7 @@
+ import {invoicePreviewAmount} from './domain/invoicePreview.js';
+ import {archiveOriginals} from './lib/invoiceArchive.js';
+ import InvoiceModal from "./components/InvoiceModal.jsx";
++import WorkspaceNavigation from "./components/WorkspaceNavigation.jsx";
+ import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
+ import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
+ import React, { useEffect, useMemo, useRef, useState } from "react";
+@@ -5587,6 +5588,14 @@
+     if(page === "invoices") { setInvoiceBrowseRequest({id:uid()}); setActiveState("invoiceControl"); }
+     else setActiveState(page);
+   };
++  const [utilityPanel, setUtilityPanel] = useState("");
++  const [reportAnchor, setReportAnchor] = useState("");
++  useEffect(() => {
++    const url = new URL(window.location.href);
++    url.searchParams.set("page", active);
++    window.history.replaceState({}, "", url);
++    if (reportAnchor) document.getElementById(reportAnchor)?.scrollIntoView({block:"start"});
++  }, [active, reportAnchor]);
+   const [analysisRunId, setAnalysisRunId] = useState(0);
+   const [pathname, setPathname] = useState(currentPathname);
+   const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
+@@ -6885,54 +6894,16 @@
+ 
+   return (
+     <div className={`app-shell app-page-${active}`}>
+-      <aside className="sidebar">
+-        <div className="brand">
+-          <img alt="MarginFlow" className="brand-logo" src={marginflowLogo} />
+-        </div>
+-        <nav>
+-          {visibleNavItems.map((item) => {
+-            const Icon = item.icon;
+-            return (
+-              <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => { setActive(item.id); setDepartmentOpen(false); setDashboardPeriodOpen(false); }} type="button">
+-                <Icon size={18} />
+-                <span>{item.label}</span>
+-              </button>
+-            );
+-          })}
+-        </nav>
+-        <div className="sidebar-user-switcher">
+-          <button className="sidebar-location" onClick={() => { setDepartmentOpen((current) => !current); setDashboardPeriodOpen(false); }} type="button">
+-            <Store size={18} />
+-            <span><strong>{effectiveDepartment}</strong><small>Switch location</small></span>
+-          </button>
+-          <button aria-label="Collapse sidebar" className="sidebar-collapse" title="Collapse sidebar" type="button"><span aria-hidden="true">‹</span> Collapse</button>
+-          <button className="sidebar-signout" onClick={onSignOut} type="button"><LogOut size={17} /> <span>Sign out</span></button>
+-          <details className="sidebar-account">
+-            <summary>Account</summary>
+-            <strong>{currentUser.name}</strong>
+-            <small>{currentUser.email}</small>
+-            {demoMode ? (
+-              <div className="sidebar-account-actions">
+-                <button className="ghost" onClick={resetDemoData} type="button">Reset demo</button>
+-                <a className="ghost sidebar-link-button" href="/?mode=register">Create account</a>
+-              </div>
+-            ) : (
+-              <>
+-                <CloudStatusBanner
+-                  enabled={cloudEnabled}
+-                  error={cloudError}
+-                  loading={cloudLoading}
+-                  onRetry={retryCloudSync}
+-                  status={cloudStatus}
+-                />
+-                <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
+-              </>
+-            )}
+-          </details>
+-        </div>
+-      </aside>
+-
+-      <main className="workspace">
++      <WorkspaceNavigation active={active} items={visibleNavItems} logo={marginflowLogo}
++        company={effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || companySettings.tradingName || companySettings.companyName || "Your workspace"}
++        department={effectiveDepartment} departments={visibleDepartmentOptions} onDepartment={setDepartment} user={currentUser}
++        onNavigate={setActive} onInvoices={({status,type}) => { setInvoiceBrowseRequest({id:uid(),status,type}); setActiveState("invoiceControl"); }}
++        onUtility={setUtilityPanel} onReport={anchor => {setActive("dashboard");setReportAnchor(anchor);document.getElementById(anchor)?.scrollIntoView({block:"start"});}} onSignOut={onSignOut} />
++      <WorkspaceUtility title={utilityPanel} onClose={() => setUtilityPanel("")} department={effectiveDepartment} period={rangeLabel(dateRangeState,dateRange,financialSettings.weekStartsOn)}
++        pendingCount={demoMode ? 0 : pendingInvoiceCount} cloudError={cloudError} availablePages={visibleNavItems.map(item => item.id)}
++        onNavigate={page => {setUtilityPanel("");setActive(page);}} />
++
++      <main className="workspace" id="workspace-content" tabIndex={-1}>
+         {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
+         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
+           <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
+@@ -6950,6 +6921,7 @@
+         )}
+         <header className="topbar">
+           <div>
++            <p className="mf-eyebrow">{active === "dashboard" ? `Welcome back, ${currentUser.name?.split(" ")[0] || "there"}` : "Your workspace"}</p>
+             <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
+             {pageSubtitle && <p className="page-subtitle">{pageSubtitle}</p>}
+           </div>
+@@ -7008,6 +6980,10 @@
+             sales={sales}
+             setDateRangeState={setDateRangeState}
+             onNavigate={setActive}
++            onUtility={setUtilityPanel}
++            onInputSales={() => setSalesInputRequest({ id: uid() })}
++            availablePages={visibleNavItems.map(item => item.id)}
++            pendingCount={demoMode ? 0 : pendingInvoiceCount}
+             stocktakes={stocktakes}
+             suppliers={suppliers}
+             supplierSpend={departmentSupplierSpend}
+@@ -7503,6 +7479,8 @@
+         <Metric empty={!hasPurchases} label="Purchases" value={moneyOrEmpty(metrics.purchases, hasPurchases)} delta={hasPurchases ? department : "No invoices logged yet"} />
+         {dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
+         <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.realGp >= gpTarget ? "good" : "warn") : "default"} />
++        {dashboardMode && <Metric empty={!hasWaste} label="Waste" value={moneyOrEmpty(metrics.waste,hasWaste)} delta={hasWaste ? "Recorded waste" : "No waste logged yet"} />}
++        {dashboardMode && <Metric empty={!hasGp || !metrics.labourRecords?.length} label="Labour %" value={hasGp && metrics.labourRecords?.length ? percent(metrics.labourPercent) : "–"} delta={metrics.labourRecords?.length ? "Of net sales" : "No labour logged yet"} />}
+       </div>
+       <details className="more-metrics">
+         <summary>More metrics</summary>
+@@ -7579,6 +7557,7 @@
+ }
+ 
+ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, comparisonRange, dateRange, metrics }) {
++  const comparisonAvailable = Boolean(metrics.salesRows?.length && comparisonMetrics?.salesRows?.length);
+   const currentDuration = dateRange ? dateRangeLength(dateRange) : 0;
+   const comparisonDuration = comparisonRange ? dateRangeLength(comparisonRange) : 0;
+   const periodsHaveDifferentDurations = Boolean(comparisonRange && currentDuration !== comparisonDuration);
+@@ -7595,7 +7574,9 @@
+         </div>
+       )}
+       {comparisonMode === "None" || !comparisonMetrics ? (
+-        <EmptyState />
++        <p className="helper-text">Choose a comparison period to compare performance.</p>
++      ) : !comparisonAvailable ? (
++        <p className="helper-text">Comparison unavailable: sales records are needed in both periods. Missing records are not treated as zero sales.</p>
+       ) : (
+         <div className="metric-grid compact">
+           <Metric label="Net Sales change" value={percent(changePercent(metrics.netSales, comparisonMetrics.netSales))} delta={`${money(comparisonMetrics.netSales)} comparison`} tone={metrics.netSales >= comparisonMetrics.netSales ? "good" : "warn"} />
+@@ -7619,8 +7600,9 @@
+   if (dashboardMode) {
+     return (
+       <>
++        <Panel id="mf-sales-report" className="mf-sales-chart" title="Sales versus purchases" action={`${chartData.granularity} totals · selected period`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
+         <div className="dashboard-operational-view">
+-          <Panel className="dashboard-supplier-spend" title="Supplier spend">
++          <Panel id="mf-supplier-report" className="dashboard-supplier-spend" title="Supplier spend">
+             {hasData ? <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} /> : <EmptyState />}
+           </Panel>
+           <Panel
+@@ -7635,11 +7617,11 @@
+             {breakdownView === "Department" ? <DepartmentBreakdown rows={departmentRows} /> : <DailyGpTable rows={dailyRows} />}
+           </Panel>
+         </div>
+-        <details className="dashboard-history">
++        <details id="mf-gp-report" className="dashboard-history" open>
+           <summary>More metrics</summary>
+           <div className="dashboard-layout">
+             <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}><DailyGpChart rows={chartData.rows} targetGp={gpTarget} /></Panel>
+-            <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
++
+           </div>
+         </details>
+       </>
+@@ -7690,10 +7672,11 @@
+           <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
+         </Panel>
+       )}
++      {dashboardMode && <div className="mf-performance-heading"><h2>Performance</h2><label>Compare with<select aria-label="Dashboard comparison period" value={comparisonMode} onChange={event => setComparisonMode(event.target.value)}><option>Previous period</option><option>Same period last year</option><option>None</option></select></label></div>}
+       <PerformanceSummaryCards dashboardMode={dashboardMode} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />
+       <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
+       {dashboardMode ? (
+-        <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
++        <details className="dashboard-comparison" open><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
+       ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} />}
+       {showSalesManager && <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
+     </>
+@@ -7797,12 +7780,46 @@
+   );
+ }
+ 
+-function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
++function WorkspaceUtility({ title, onClose, department, period, pendingCount, cloudError, availablePages, onNavigate }) {
++  const [description, setDescription] = useState("");
++  const [category, setCategory] = useState("General question");
++  const [consent, setConsent] = useState(false);
++  const [downloaded, setDownloaded] = useState(false);
++  const go = (page, label) => availablePages.includes(page) && <button className="ghost" type="button" onClick={() => onNavigate(page)}>{label}<ChevronRight size={16} /></button>;
++  return <InvoiceModal title={title || "Workspace help"} open={Boolean(title)} onClose={onClose} className="mf-utility-drawer">
++    <div className="mf-utility-content">
++      {title === "MarginFlow AI" && <><Sparkles size={30} /><h3>Your profitability assistant</h3><p>{period} · {department}</p><Badge tone="amber">Coming soon</Badge><p>Contextual questions about your data are not available yet. No question is submitted and no records are changed.</p>{go("ai", "Open existing rule-based insights")}</>}
++      {title === "Notifications" && <><p>Current workspace operations</p>{cloudError && <div className="invoice-status error"><strong>Cloud sync needs attention</strong><span>{cloudError}</span></div>}{pendingCount > 0 && <><p>{pendingCount} invoice(s) awaiting cloud confirmation. Confirmed versions remain the reporting source.</p>{go("invoiceControl", "Review pending work")}</>}{!cloudError && !pendingCount && <p>No pending invoice sync notifications. Review the Invoice Control Centre for delivery and matching issues.</p>}{go("invoiceControl", "Open Invoice Control Centre")}</>}
++      {title === "Setup guide" && <><p>Review these steps to configure your workspace. Each opens an existing workflow; completion is not tracked here.</p><ol className="mf-setup-list"><li>Check your business and financial settings{go("settings", "Open settings")}</li><li>Review your supplier directory{go("suppliers", "Open suppliers")}</li><li>Add products and pack sizes{go("products", "Open products")}</li><li>Review your first invoices{go("invoiceControl", "Open invoice control")}</li><li>Record sales for a complete GP view{go("gp", "Open sales")}</li></ol></>}
++      {title === "Support" && <><p>Product guidance</p><details><summary>Why is a total unavailable?</summary><p>Check the selected dates and department. Sales and invoices must be loaded and confirmed before financial totals are ready.</p></details><details><summary>How do I correct an invoice?</summary><p>Open Invoice Control Centre, find the invoice, and review its matches. Pending changes stay separate from the confirmed reporting version.</p></details><details><summary>How do I count stock?</summary><p>Open Inventory → Stocktake, select the period and department, then use the existing count workflow.</p></details>
++        <h3>Report a problem</h3><p>Download a report to share through your existing support channel. Online submission and support-call booking are not available yet.</p>
++        <form onSubmit={event => {event.preventDefault();downloadJsonFile("marginflow-support-report.json", {category,description,...(consent ? {context:{page:currentSearchParams().get("page") || "dashboard",period,department,userAgent:navigator.userAgent}} : {})});setDownloaded(true);}}>
++          <label>Category<select value={category} onChange={event => setCategory(event.target.value)}>{["General question","Invoices","Products & stock","Sales & reports","Settings"].map(value => <option key={value}>{value}</option>)}</select></label>
++          <label>Description<textarea required rows={5} value={description} onChange={event => {setDescription(event.target.value);setDownloaded(false);}} /></label>
++          <label className="checkbox-field"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} /><span>Include browser, page, period and department context</span></label><p className="helper-text">You can attach a screenshot separately when sharing your report.</p><button type="submit">Download problem report</button>{downloaded && <p role="status">Report downloaded. It has not been sent to support.</p>}
++        </form></>}
++    </div>
++  </InvoiceModal>;
++}
++
++function ProductDetails({ product, onClose, onEdit }) {
++  const [tab, setTab] = useState("Details");
++  useEffect(() => setTab("Details"), [product?.id]);
++  return <InvoiceModal title={product?.name || "Product details"} open={Boolean(product)} onClose={onClose} className="mf-product-drawer" footer={onEdit && <button type="button" onClick={() => {onClose();onEdit(product);}}>Edit product</button>}>
++    {product && <><div className="segmented-control mf-detail-tabs" role="group" aria-label="Product detail views">{["Details","Costs","Suppliers","History"].map(label => <button key={label} aria-pressed={tab === label} className={tab === label ? "active" : ""} type="button" onClick={() => setTab(label)}>{label}</button>)}</div>
++      {tab === "Details" && <dl className="mf-detail-list"><dt>Department</dt><dd>{product.department || "Not set"}</dd><dt>Pack / unit</dt><dd>{product.packSize || product.baseUnit || "Not set"}</dd><dt>Aliases</dt><dd>{product.aliases?.join(", ") || "None recorded"}</dd><dt>Status</dt><dd>{product.active === false ? "Inactive" : "Active"}</dd></dl>}
++      {tab === "Costs" && <dl className="mf-detail-list"><dt>Current cost (ex VAT)</dt><dd>{money(product.unitCost)}</dd><dt>Normalised cost</dt><dd>{product.normalizedCostLabel || "Not available"}</dd><dt>Pack conversion</dt><dd>{product.packReview || "Not available"}</dd></dl>}
++      {tab === "Suppliers" && <><p>Primary supplier: <strong>{product.supplier || "Not set"}</strong></p>{product.supplierPrices?.length ? <DataTable columns={[{key:"supplier",label:"Supplier"},{key:"price",label:"Recorded price",render:money},{key:"date",label:"Date"}]} rows={product.supplierPrices.map((row,index) => ({...row,id:`supplier-${index}`}))} /> : <p>No additional supplier prices recorded.</p>}</>}
++      {tab === "History" && (product.priceHistory?.length ? <DataTable columns={[{key:"date",label:"Date"},{key:"supplier",label:"Supplier"},{key:"price",label:"Recorded price",render:money}]} rows={product.priceHistory.map((row,index) => ({...row,id:`history-${index}`}))} /> : <p>No price history recorded for this product.</p>)}
++    </>}
++  </InvoiceModal>;
++}
++
++function Dashboard({ onUtility, onInputSales, availablePages = [], pendingCount = 0, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+   const dashboardDepartment = department;
+   const dashboardMetrics = metrics;
+   const dashboardTarget = gpTarget;
+   const dashboardSupplierSpend = supplierSpend;
+-  const dashboardInsightCount = dashboardInsightsForMetrics(dashboardMetrics).length;
+   const recentInvoices = [...dashboardMetrics.invoices]
+     .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
+     .filter((invoice) => dashboardDepartment === "All departments" || Math.abs(invoice.departmentTotal) > 0.01)
+@@ -7812,6 +7829,7 @@
+     <div className="dashboard-page">
+       <div className="dashboard-content">
+         <section className="dashboard-main-column">
++          <button className="mf-ai-entry" type="button" onClick={() => onUtility?.("MarginFlow AI")}><Sparkles size={21} /><span>Ask about your costs, invoices or GP…<small>Contextual assistant · Coming soon</small></span><ChevronRight size={20} /></button>
+           <PerformanceSections dashboardMode dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+           <details className="dashboard-documents"><summary>Recent purchasing documents</summary>
+             <DataTable
+@@ -7827,10 +7845,17 @@
+           </details>
+         </section>
+         <aside className="dashboard-rail" aria-label="Operational summary">
+-          <div className="dashboard-rail-card warning"><span>Invoices</span><strong>{dashboardMetrics.invoiceCount ?? dashboardMetrics.invoices.length}</strong><small>Selected period</small><button onClick={() => onNavigate?.("invoices")} type="button">View invoices</button></div>
+-          <div className="dashboard-rail-card"><span>Waste</span><strong>{moneyOrEmpty(dashboardMetrics.waste, Boolean(dashboardMetrics.wasteRecords?.length))}</strong><small>{dashboardMetrics.netSales ? `${percent(dashboardMetrics.wastePercent)} of net sales` : "No sales baseline"}</small><button onClick={() => onNavigate?.("waste")} type="button">View waste</button></div>
+-          <div className="dashboard-rail-card"><span>Labour</span><strong>{moneyOrEmpty(dashboardMetrics.labour, Boolean(dashboardMetrics.labourRecords?.length))}</strong><small>{dashboardMetrics.labourRecords?.length ? `${numberValue(dashboardMetrics.labourHours).toFixed(1)} hours` : "No labour logged"}</small><button onClick={() => onNavigate?.("labour")} type="button">View labour</button></div>
+-          <div className="dashboard-rail-card warning"><span>AI Insights</span><strong>{dashboardInsightCount}</strong><small>Current filters</small><button onClick={() => onNavigate?.("ai")} type="button">View insights</button></div>
++          <section className="mf-rail-section"><h2>Attention needed</h2>
++            {pendingCount > 0 && availablePages.includes("invoiceControl") && <button className="mf-task" onClick={() => onNavigate("invoices")} type="button"><AlertTriangle size={20} /><span><strong>Pending invoices</strong><small>{pendingCount} awaiting cloud confirmation</small></span><ChevronRight size={17} /></button>}
++            {!dashboardMetrics.salesRows?.length && availablePages.includes("gp") && <button className="mf-task" onClick={() => onNavigate("gp")} type="button"><CalendarDays size={20} /><span><strong>No sales recorded</strong><small>Review the selected period</small></span><ChevronRight size={17} /></button>}
++            {availablePages.includes("invoiceControl") && <button className="mf-task" onClick={() => onNavigate("invoiceControl")} type="button"><ReceiptText size={20} /><span><strong>Invoice control</strong><small>Check review issues and expected deliveries</small></span><ChevronRight size={17} /></button>}
++          </section>
++          <section className="mf-rail-section"><h2>Quick actions</h2><div className="mf-quick-actions">
++            {availablePages.includes("gp") && <button type="button" onClick={onInputSales}><Plus size={18} />Input sales</button>}
++            {availablePages.includes("invoiceControl") && <button type="button" onClick={() => onNavigate("invoices")}><ReceiptText size={18} />Review invoices</button>}
++            {availablePages.includes("stocktake") && <button type="button" onClick={() => onNavigate("stocktake")}><Boxes size={18} />Start stocktake</button>}
++            {availablePages.includes("waste") && <button type="button" onClick={() => onNavigate("waste")}><Trash2 size={18} />Add waste</button>}
++          </div></section>
+         </aside>
+       </div>
+     </div>
+@@ -10887,7 +10912,7 @@
+   const [browserOpen,setBrowserOpen]=useState(false),[browseSupplier,setBrowseSupplier]=useState(""),[browseQuery,setBrowseQuery]=useState("");
+   const [browseFrom,setBrowseFrom]=useState(""),[browseTo,setBrowseTo]=useState(""),[browseType,setBrowseType]=useState("All"),[browseStatus,setBrowseStatus]=useState("All");
+   const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null);
+-  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");}},[browseRequest?.id]);
++  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");setBrowseStatus(browseRequest.status || "All");setBrowseType(browseRequest.type || "All");}},[browseRequest?.id]);
+   const pendingDocuments=workingDocuments.filter(row=>["pending_sync","sync_failed","local_only"].includes(row.syncStatus));
+   const browseDocuments=documentsForInvoiceBrowser(invoices,workingDocuments);
+   const openBrowse=(supplier="",range=null)=>{setBrowseSupplier(supplier);setBrowseFrom(range?.start||"");setBrowseTo(range?.end||"");setBrowserOpen(true);};
+@@ -11734,6 +11759,12 @@
+ 
+   return (
+     <div className="page-grid invoice-control-page unified-invoices">
++      <section className="mf-invoice-strip" aria-label="Invoice status summary">
++        <button type="button" onClick={() => {openBrowse();setBrowseStatus("All");setBrowseType("All");}}><span>All documents</span><strong>{recordsReady ? browseDocuments.length : "—"}</strong><small>All recorded periods</small></button>
++        <button type="button" onClick={openReviewModal}><span>Needs review</span><strong>{recordsReady ? reviewDocuments.length : "—"}</strong><small>Selected week</small></button>
++        <button type="button" onClick={() => {openBrowse();setBrowseStatus("Pending");setBrowseType("All");}}><span>Pending / failed saves</span><strong>{pendingDocuments.length}</strong><small>Working documents</small></button>
++        <button type="button" onClick={() => {openBrowse();setBrowseType("Credit notes");setBrowseStatus("All");}}><span>Credit notes</span><strong>{recordsReady ? browseDocuments.filter(invoice => isCreditNoteDocument(documentTypeFor(invoice))).length : "—"}</strong><small>All recorded periods</small></button>
++      </section>
+       <div className="unified-invoice-actions" aria-label="Invoice Control Centre actions">
+         {(permissions.canImport || permissions.canAdd) && <PrimaryAction onClick={()=>onAddInvoice("",today())}>Add invoices</PrimaryAction>}
+         <button onClick={()=>openBrowse()} type="button">View invoices</button>
+@@ -12215,8 +12246,12 @@
+   const [mergeStatus, setMergeStatus] = useState("");
+   const [mergeBusy, setMergeBusy] = useState(false);
+   const [productQuery, setProductQuery] = useState("");
++  const [productDepartment, setProductDepartment] = useState("");
++  const [productSupplier, setProductSupplier] = useState("");
++  const [productDetail, setProductDetail] = useState(null);
+   const rows = useMemo(() => buildProductRows(products, { formatMoney: money, formatPercent: percent }), [products]);
+-  const productRowsForExport = useMemo(() => tableRowsMatchingQuery(rows, productQuery), [productQuery, rows]);
++  const filteredProductRows = useMemo(() => rows.filter(row => (!productDepartment || row.department === productDepartment) && (!productSupplier || row.supplier === productSupplier)), [rows,productDepartment,productSupplier]);
++  const productRowsForExport = useMemo(() => tableRowsMatchingQuery(filteredProductRows, productQuery), [productQuery, filteredProductRows]);
+   const activeProducts = useMemo(() => products.filter((product) => product.active !== false), [products]);
+   const duplicateSuggestions = useMemo(() => mergeOpen ? suggestProductDuplicateGroups(activeProducts, { organisationId: companyId }) : [], [activeProducts, companyId, mergeOpen]);
+   const visibleMergeProducts = useMemo(() => {
+@@ -12367,7 +12402,9 @@
+ 
+   return (
+     <div className="page-grid">
+-      <Panel title="Product database" action="Aliases + supplier comparison">
++      <ProductDetails product={productDetail} onClose={() => setProductDetail(null)} onEdit={permissions.canEdit ? openProductModal : null} />
++      <Panel title="Product database" action={`${filteredProductRows.length} active products`}>
++        <div className="mf-filter-row"><label>Department<select value={productDepartment} onChange={event => setProductDepartment(event.target.value)}><option value="">All departments</option>{[...new Set(rows.map(row => row.department).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label><label>Supplier<select value={productSupplier} onChange={event => setProductSupplier(event.target.value)}><option value="">All suppliers</option>{[...new Set(rows.map(row => row.supplier).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label><button className="ghost" type="button" onClick={() => {setProductDepartment("");setProductSupplier("");setProductQuery("");}}>Clear filters</button></div>
+         {status && <div className="invoice-status info">{status}</div>}
+         <DataTable
+           columns={[
+@@ -12380,7 +12417,8 @@
+           ]}
+           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
+           onEdit={permissions.canEdit ? openProductModal : null}
+-          rows={rows}
++          rows={filteredProductRows}
++          onRowClick={setProductDetail}
+           query={productQuery}
+           onQueryChange={setProductQuery}
+           toolbarAction={(
+@@ -12558,6 +12596,7 @@
+ }
+ 
+ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, setInvoiceDayStatusOverrides = () => {}, setInvoices = () => {}, setProducts = () => {}, suppliers, setSupplierDeliverySchedules = () => {}, setSuppliers, supplierDeliverySchedules = [], supplierSpend }) {
++  const [directoryCategory, setDirectoryCategory] = useState("");
+   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
+   const emptyBulkRow = () => ({ ...empty, id: uid() });
+   const [form, setForm] = useState(empty);
+@@ -12745,7 +12784,8 @@
+ 
+   return (
+     <div className="page-grid">
+-      <Panel title="Supplier directory" action="Spend totals">
++      <Panel title="Supplier directory" action="Active suppliers">
++        <div className="mf-filter-row"><label>Category<select value={directoryCategory} onChange={event => setDirectoryCategory(event.target.value)}><option value="">All categories</option>{[...new Set(supplierRows.map(row => row.category).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label></div>
+         <DataTable
+           columns={[
+             {
+@@ -12776,7 +12816,7 @@
+           ]}
+           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
+           onEdit={permissions.canEdit ? openSupplierModal : null}
+-          rows={supplierRows}
++          rows={supplierRows.filter(row => !directoryCategory || row.category === directoryCategory)}
+           toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openSupplierModal()}>Add Supplier</PrimaryAction> : null}
+         />
+       </Panel>
+@@ -16335,7 +16375,7 @@
+         />
+       ) : (
+         <>
+-          <button className="settings-back-link" onClick={() => setSettingsSection("")} type="button">Back to Settings</button>
++          <div className="mf-settings-nav"><button className="settings-back-link" onClick={() => setSettingsSection("")} type="button">Back to Settings</button><label>Settings section<select value={settingsSection} onChange={event => setSettingsSection(event.target.value)}>{settingsDestinations.filter(([id],index,rows) => rows.findIndex(row => row[0] === id) === index).map(([id,label]) => <option key={id} value={id}>{label}</option>)}</select></label></div>
+       {!demoMode && (
+         <Panel className="settings-cloud-section" title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
+           <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
+@@ -16501,7 +16541,7 @@
+       </Panel>
+ 
+       <Panel className="settings-notifications-section" title="Notifications">
+-        <p className="helper-text">Notification preferences are managed through your account and connected services.</p>
++        <p className="helper-text">Notification preferences are not configurable here yet. Open Notifications in the sidebar for current operational items.</p>
+       </Panel>
+ 
+       <Panel className="settings-datetime-section" title="Financial settings">
+@@ -16515,7 +16555,7 @@
+         </div>
+       </Panel>
+ 
+-      <Panel title="Labour settings">
++      <Panel className="settings-datetime-section" title="Labour settings">
+         <div className="form-grid six">
+           <Field label="Target labour %" type="number" value={labourSettings.targetLabourPercent} onChange={(value) => updateLabourSettings("targetLabourPercent", numberValue(value))} />
+           <CheckboxField checked={labourSettings.weeklyView} label="Use weekly labour control by default" onChange={(value) => updateLabourSettings("weeklyView", value)} />
+@@ -16591,7 +16631,7 @@
+         </EditModal>
+       )}
+ 
+-      <Panel title="Menu costing settings">
++      <Panel className="settings-datetime-section" title="Menu costing settings">
+         <div className="form-grid six">
+           <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
+           <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
+@@ -16600,7 +16640,7 @@
+         </div>
+       </Panel>
+ 
+-      <Panel title="Invoice settings">
++      <Panel className="settings-invoice-section" title="Invoice settings">
+         <div className="form-grid six">
+           <CheckboxField checked={invoiceSettings.requireApprovalBeforeGp} label="Require approval before invoice affects GP" onChange={(value) => updateInvoice("requireApprovalBeforeGp", value)} />
+           <label>Default invoice department<select value={invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateInvoice("defaultInvoiceDepartment", event.target.value)}>{departmentSettings.filter((department) => department.active).map((department) => <option key={department.id}>{department.name}</option>)}</select></label>
+@@ -16898,37 +16938,22 @@
+   );
+ }
+ 
+-function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
+-  const integrationStatus = cloudEnabled && cloudStatus === "synced" ? "Connected" : "Manage";
+-
+-  return (
+-    <div className="settings-landing-grid">
+-      <section className="settings-summary-card">
+-        <h2>Business</h2>
+-        <div className="settings-summary-row"><span>Business details</span><button onClick={() => onOpen("business")} type="button">Update profile</button></div>
+-        <div className="settings-summary-row"><span>Locations</span><button onClick={() => onOpen("locations")} type="button">Manage</button></div>
+-        <div className="settings-summary-row"><span>Users</span><button onClick={() => onOpen("users")} type="button">Team access</button></div>
+-      </section>
+-      <section className="settings-summary-card">
+-        <h2>Integrations</h2>
+-        <div className="settings-summary-row"><span>Cloud sync</span><button className={integrationStatus === "Connected" ? "success" : ""} onClick={() => onOpen("cloud")} type="button">{integrationStatus}</button></div>
+-        <div className="settings-summary-row"><span>Data &amp; Time</span><button onClick={() => onOpen("datetime")} type="button">Preferences</button></div>
+-        <div className="settings-summary-row"><span>Notifications</span><button onClick={() => onOpen("notifications")} type="button">Manage</button></div>
+-      </section>
+-      <section className="settings-summary-card">
+-        <h2>Data</h2>
+-        <div className="settings-summary-row"><span>Backup &amp; Restore</span><button onClick={() => onOpen("backup")} type="button">Open</button></div>
+-        <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("categories")} type="button">Manage</button></div>
+-        <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("units")} type="button">Manage</button></div>
+-      </section>
+-      <section className="settings-summary-card danger-zone-card">
+-        <h2>Danger Zone</h2>
+-        <strong>Delete Data</strong>
+-        <p>{demoMode ? "Reset this temporary demo data" : "Permanently delete saved application data"}</p>
+-        <button className="danger" onClick={() => onOpen("danger")} type="button">{demoMode ? "Reset demo" : "Delete data"}</button>
+-      </section>
+-    </div>
+-  );
++const settingsDestinations = [
++  ["business", "Business & Workspace", "Business identity and contact details"],
++  ["users", "Account & Security", "Account details and access"],
++  ["locations", "Locations & Departments", "Location access; department configuration is under Categories"],
++  ["datetime", "Financial Settings", "Currency, VAT, GP targets, labour and reporting preferences"],
++  ["users", "Users & Roles", "Existing team access and permissions"],
++  ["invoice", "Invoice Processing", "Approval rules and default department"],
++  ["cloud", "Integrations", "Cloud connection status"],
++  ["notifications", "Notifications", "Preferences not yet available"],
++  ["backup", "Data & Recovery", "Existing export and recovery tools"],
++  ["categories", "Categories", "Existing department categories"],
++  ["units", "Units", "Product unit configuration"],
++  ["danger", "Advanced data tools", "Existing reset controls; changes require confirmation"],
++];
++function SettingsLanding({ onOpen }) {
++  return <div className="mf-settings-index">{settingsDestinations.map(([id,label,description]) => <button key={label} className="mf-settings-destination" onClick={() => onOpen(id)} type="button"><Settings size={19} /><span><strong>{label}</strong><small>{description}</small></span><ChevronRight size={18} /></button>)}</div>;
+ }
+ 
+ function DataTable({ mobileSort = false, columns, rows, onEdit, onDelete, onRowClick, toolbarAction, query: controlledQuery, onQueryChange }) {
+@@ -16949,7 +16974,7 @@
+   return (
+     <>
+       <div className="table-toolbar">
+-        <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => (onQueryChange || setUncontrolledQuery)(event.target.value)} /></label>
++        <label><Search size={15} /><input aria-label="Search table" placeholder="Search..." value={query} onChange={(event) => (onQueryChange || setUncontrolledQuery)(event.target.value)} /></label>
+         {toolbarAction}
+         {mobileSort && <label className="invoice-mobile-sort">Sort by<select aria-label="Sort by" value={`${sort.key}:${sort.dir}`} onChange={event=>{const [key,dir]=event.target.value.split(":");setSort({key,dir});}}>{columns.filter(column=>column.sortable!==false).flatMap(column=>["asc","desc"].map(dir=><option key={`${column.key}:${dir}`} value={`${column.key}:${dir}`}>{column.label} · {dir === "asc" ? "ascending" : "descending"}</option>))}</select></label>}
+       </div>
+@@ -16988,8 +17013,8 @@
+                 {(onEdit || onDelete) && (
+                   <td>
+                     <div className="row-actions" onClick={onRowClick ? (event) => event.stopPropagation() : undefined}>
+-                      {onEdit && <button className="icon" onClick={() => onEdit(row)} type="button"><Edit3 size={15} /></button>}
+-                      {onDelete && <button className="icon danger" onClick={() => onDelete(row.id)} type="button"><Trash2 size={15} /></button>}
++                      {onEdit && <button className="icon" aria-label={`Edit ${row.name || row.id}`} onClick={() => onEdit(row)} type="button"><Edit3 size={15} /></button>}
++                      {onDelete && <button className="icon danger" aria-label={`Delete ${row.name || row.id}`} onClick={() => onDelete(row.id)} type="button"><Trash2 size={15} /></button>}
+                     </div>
+                   </td>
+                 )}
+@@ -17069,7 +17094,7 @@
+ }
+ 
+ function PrimaryAction({ children, className = "", ...props }) {
+-  return <button {...props} className={`page-primary-action ${className}`.trim()} type="button"><Plus size={16} />{children}</button>;
++  return <button {...props} className={`page-primary-action ${className}`.trim()} type="button"><Plus size={16} aria-hidden="true" /><span>{children}</span></button>;
+ }
+ 
+ function Field({ label, value, onChange, type = "text", readOnly = false }) {
+@@ -17095,9 +17120,9 @@
+   );
+ }
+ 
+-function Panel({ title, action, centerAction = null, children, className = "" }) {
++function Panel({ id, title, action, centerAction = null, children, className = "" }) {
+   return (
+-    <section className={`panel ${className}`.trim()}>
++    <section id={id} className={`panel ${className}`.trim()}>
+       <div className={`panel-head ${centerAction ? "with-centered-action" : ""}`}>
+         <h2>{title}</h2>
+         {centerAction && <div className="panel-center-action">{centerAction}</div>}
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -7722,3 +7722,175 @@
+ .unified-invoice-modal .invoice-version-status { padding:10px; background:#fff4dd; color:#654514; border:1px solid #d6bb89; border-radius:6px; }
+ .unified-invoice-modal .invoice-status.info { background:#eaf2fa; color:#244766; border-color:#b7cee3; }
+ .unified-invoice-modal .invoice-status.success { background:#eef3f7; color:#244766; }
++
++/* Staging UI redesign: presentation only; existing workflows and data contracts retained. */
++:root {
++  color-scheme: light;
++  --bg: #fafbfa; --surface: #fff; --surface-subtle: #f5f7f6;
++  --card: #fff; --card-soft: #f5f7f6; --text: #161c22; --text-primary: #161c22;
++  --text-secondary: #505b66; --muted: #64707b; --line: #e2e7e6; --border-subtle: #e2e7e6;
++  --primary: #075c3e; --success: #087a43; --warning: #936000; --danger: #bb2343;
++  --mf-green-soft: #eaf4ee; --mf-green-light: #9cddbc;
++  --shadow: 0 12px 36px #162c2014;
++}
++.app-shell { grid-template-columns: 260px minmax(0,1fr); }
++.app-shell .workspace { min-width: 0; padding: 32px; gap: 22px; background: var(--bg); }
++.app-shell .sidebar.mf-sidebar { position: sticky; top: 0; height: 100dvh; display: flex; flex-direction: column; width: auto; padding: 24px 18px 16px; gap: 18px; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--line); }
++.mf-sidebar .brand { display: block; min-height: 36px; margin: 0 6px 8px; }
++.mf-sidebar .brand-logo { width: 188px; max-width: 100%; height: auto; }
++.mf-workspace-picker { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
++.mf-workspace-picker > div { min-width: 0; flex: 1; }
++.mf-workspace-picker strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
++.mf-workspace-picker select { width: 100%; min-height: 28px; padding: 4px 0; font-size: 12px; border: 0; color: var(--muted); background: transparent; }
++.mf-nav-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); border-radius: 22px; }
++.mf-nav-search input { min-width: 0; width: 100%; min-height: 40px; border: 0; background: transparent; padding: 0; box-shadow: none; }
++.mf-sidebar nav { display: grid; order: initial; flex: 0 0 auto; gap: 5px; margin: 0; }
++.mf-sidebar nav button, .mf-sidebar-utilities button { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: flex-start; gap: 12px; border: 0; border-radius: 9px; padding: 9px 12px; background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; text-align: left; line-height: 1.3; }
++.mf-sidebar nav button svg { width: 18px; height: 18px; }
++.mf-sidebar nav button.active { color: var(--primary); background: var(--mf-green-soft); font-weight: 650; }
++.mf-nav-group { border: 0; }
++.mf-nav-group summary { display: flex; justify-content: space-between; align-items: center; min-height: 42px; gap: 8px; padding: 10px 12px; font-size: 13px; cursor: pointer; color: var(--text); list-style: none; }
++.mf-nav-group summary::-webkit-details-marker { display: none; }
++.mf-nav-group[open] summary svg { transform: rotate(180deg); }
++.mf-nav-group > div { margin-left: 12px; padding-left: 7px; border-left: 1px solid var(--line); }
++.mf-sidebar-utilities { display: grid; gap: 3px; margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line); }
++.mf-sidebar-person { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 16px; }
++.mf-sidebar-person > span:nth-child(2) { flex: 1; min-width: 0; }
++.mf-sidebar-person strong, .mf-sidebar-person small { display: block; font-size: 12px; overflow-wrap: anywhere; }
++.mf-sidebar-person small { color: var(--muted); margin-top: 4px; }
++.mf-sidebar-person button { padding: 7px; background: transparent; color: var(--muted); }
++.mf-avatar { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 50%; background: var(--surface-subtle); font-size: 12px; }
++.mf-mobile-header { display: none; }
++.mf-skip-link { position: fixed; top: -100px; left: 16px; z-index: 10000; background: var(--surface); color: var(--primary); padding: 12px; }
++.mf-skip-link:focus { top: 12px; }
++.mf-eyebrow { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
++.topbar h1 { font-size: clamp(27px,2.6vw,36px); letter-spacing: -.035em; color: var(--text); font-weight: 700; }
++.app-shell .topbar { margin-bottom: 2px; min-height: 64px; }
++.app-shell .panel, .mf-rail-section, .settings-summary-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: none; }
++.app-shell .panel-head h2, .mf-rail-section h2 { font-size: 18px; letter-spacing: -.025em; }
++.app-shell button, .app-modal button { font-weight: 550; }
++.app-shell button svg, .app-modal button svg { flex: 0 0 auto; }
++.app-shell .page-primary-action { display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 10px 16px; min-height: 42px; background: var(--primary); color: var(--surface); border-radius: 10px; }
++.app-shell .page-primary-action svg { position: static; transform: none; margin: 0; flex: 0 0 16px; }
++.app-shell .page-primary-action span { position: static; }
++.app-shell :is(input, select, textarea), .app-modal :is(input, select, textarea) { border-color: var(--line); border-radius: 10px; color: var(--text); }
++.app-shell button.ghost, .app-modal button.ghost { background: var(--surface); border: 1px solid var(--line); color: var(--text); }
++:where(button, a, input, select, textarea, summary):focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
++.mf-sidebar button:hover, .mf-nav-group summary:hover { background: var(--surface-subtle); }
++.app-shell .table-toolbar > label:not(.invoice-mobile-sort), .search-field, .merge-search { display: flex; align-items: center; gap: 10px; position: relative; }
++.app-shell .table-toolbar > label > svg, .search-field > svg, .merge-search > svg { position: static; inset: auto; transform: none; flex: 0 0 17px; margin: 0; }
++.app-shell .table-toolbar > label > input, .search-field > input, .merge-search > input { min-width: 0; flex: 1; padding-left: 0; }
++.search-field { padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; }
++.search-field > input { border: 0; }
++.table-wrap { max-width: 100%; overflow-x: auto; }
++.app-shell th { background: var(--surface-subtle); color: var(--muted); }
++.app-shell td { border-bottom-color: var(--line); }
++.app-shell .dashboard-content { display: grid; grid-template-columns: minmax(0,1fr) 260px; gap: 24px; align-items: start; }
++.app-shell .dashboard-main-column, .app-shell .dashboard-rail { min-width: 0; display: grid; gap: 20px; }
++.mf-ai-entry { display: flex; width: 100%; min-height: 84px; justify-content: flex-start; gap: 14px; text-align: left; border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 12px; padding: 18px; }
++.mf-ai-entry > span { flex: 1; }
++.mf-ai-entry small { display: block; font-size: 11px; margin-top: 7px; }
++.mf-rail-section { padding: 20px; }
++.mf-rail-section h2 { margin: 0 0 18px; }
++.mf-task { padding: 16px 0; display: flex; width: 100%; gap: 10px; text-align: left; background: transparent; color: var(--primary); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
++.mf-task:last-child { border-bottom: 0; padding-bottom: 0; }
++.mf-task > span { min-width: 0; flex: 1; }
++.mf-task strong { color: var(--text); font-size: 13px; display: block; }
++.mf-task small { color: var(--muted); font-size: 12px; line-height: 1.5; display: block; margin-top: 5px; }
++.mf-quick-actions { display: grid; gap: 10px; }
++.mf-quick-actions button { min-height: 44px; background: var(--surface); border: 1px solid var(--line); color: var(--text); justify-content: flex-start; padding: 10px 12px; text-align: left; font-size: 13px; }
++.app-shell .primary-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
++.app-shell .primary-metrics .metric-card { padding: 20px 16px; background: transparent; border: 0; border-right: 1px solid var(--line); border-radius: 0; min-height: 116px; }
++.app-shell .primary-metrics .metric-card:last-child { border: 0; }
++.app-shell .primary-metrics .metric-card strong { font-size: clamp(21px,2vw,30px); }
++.app-shell .primary-metrics .metric-card > span { font-size: 12px; }
++.app-shell .dashboard-operational-view { grid-template-columns: minmax(0,1fr); }
++.mf-sales-chart .grouped-bars { min-height: 240px; }
++.sales-bar, .legend-sales { background: var(--primary) !important; }
++.purchase-bar, .legend-purchases { background: var(--mf-green-light) !important; }
++.dashboard-history summary, .dashboard-comparison summary, .dashboard-documents summary { font-size: 13px; cursor: pointer; padding: 12px 0; }
++.mf-filter-row { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 0 20px 18px; }
++.mf-filter-row label { min-width: 160px; font-size: 12px; }
++.mf-detail-list { display: grid; gap: 8px; }
++.mf-detail-list dt { font-size: 12px; color: var(--muted); margin-top: 14px; }
++.mf-detail-list dd { margin: 0; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
++.mf-detail-tabs { margin-bottom: 22px; flex-wrap: wrap; }
++.mf-utility-content { display: grid; gap: 16px; line-height: 1.6; }
++.mf-utility-content p, .mf-utility-content h3 { margin: 0; }
++.mf-utility-content form { display: grid; gap: 16px; }
++.mf-utility-content details { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
++.mf-utility-content summary { cursor: pointer; font-weight: 600; }
++.mf-setup-list { display: grid; gap: 20px; padding-left: 20px; }
++.mf-setup-list li > button { display: flex; margin-top: 8px; }
++.app-modal.mf-product-drawer, .app-modal.mf-utility-drawer { position: fixed; inset: 0 0 0 auto; width: min(620px,100%); max-height: 100dvh; height: 100dvh; border-radius: 0; }
++.app-modal.mf-navigation-drawer { position: fixed; inset: 0 auto 0 0; width: min(340px,100%); height: 100dvh; max-height: 100dvh; border-radius: 0; }
++.mf-mobile-sidebar { display: flex; flex-direction: column; gap: 18px; }
++.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
++@media (max-width: 1200px) {
++  .app-shell { grid-template-columns: 238px minmax(0,1fr); }
++  .app-shell .workspace { padding: 24px; }
++  .app-shell .dashboard-content { grid-template-columns: minmax(0,1fr); }
++  .app-shell .dashboard-rail { grid-template-columns: repeat(2,minmax(0,1fr)); }
++}
++@media (max-width: 760px) {
++  .app-shell { display: block; }
++  .app-shell .sidebar.mf-sidebar { display: none; }
++  .mf-mobile-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
++  .mf-mobile-header img { width: 155px; height: auto; }
++  .mf-mobile-header button { background: var(--surface); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; }
++  .app-shell .workspace { padding: 20px 16px; gap: 18px; }
++  .app-shell .dashboard-rail { grid-template-columns: minmax(0,1fr); }
++  .app-shell .primary-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
++  .app-shell .primary-metrics .metric-card { border-bottom: 1px solid var(--line); }
++  .app-shell .primary-metrics .metric-card strong { font-size: 24px; }
++  .app-shell .topbar { flex-wrap: wrap; gap: 14px; }
++  .mf-filter-row { padding: 0 12px 14px; }
++  .mf-filter-row label { flex: 1; min-width: 130px; }
++  .app-shell .dashboard-layout { grid-template-columns: minmax(0,1fr); }
++  .app-shell .table-wrap table { min-width: 640px; }
++  .mf-detail-tabs button { padding: 9px; }
++}
++.mf-sidebar .sidebar-signout { width: auto; margin: 0; }
++.settings-section-invoice > .settings-invoice-section { display: block; }
++.mf-settings-nav { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; grid-column: 1/-1; }
++.mf-settings-index { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; grid-column: 1/-1; }
++.mf-settings-destination { display: flex; text-align: left; align-items: center; gap: 14px; min-height: 105px; padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--primary); }
++.mf-settings-destination > span { flex: 1; }
++.mf-settings-destination strong { display: block; color: var(--text); font-size: 15px; }
++.mf-settings-destination small { display: block; margin-top: 7px; color: var(--muted); line-height: 1.5; font-size: 12px; }
++@media (max-width:760px) { .mf-settings-index { grid-template-columns: minmax(0,1fr); } }
++.app-shell .page-grid, .app-shell .settings-grid { grid-template-columns: minmax(0,1fr); }
++.app-shell .page-grid > .panel, .app-shell .panel { min-width: 0; max-width: 100%; }
++.app-shell .dashboard-rail { padding-top: 0; }
++.app-shell .primary-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 0; }
++.app-shell .primary-metrics .metric-card { min-height: 108px; border-bottom: 1px solid var(--line); }
++.app-shell .dashboard-history .dashboard-layout { grid-template-columns: minmax(0,1fr); }
++.app-shell .table-toolbar > .button-row, .app-page-suppliers .table-toolbar > button { position: static; top: auto; right: auto; }
++.app-shell .table-toolbar { display: flex; flex-wrap: wrap; gap: 14px; }
++.app-shell .table-toolbar > label { min-width: 0; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; }
++.app-shell .table-toolbar > label input { border: 0; background: transparent; }
++.app-shell .table-toolbar > .button-row { flex-wrap: wrap; }
++.app-shell .table-toolbar > .button-row button { white-space: normal; }
++.app-shell .sidebar.mf-sidebar nav button.active { background: var(--mf-green-soft); color: var(--primary); }
++@media(max-width:760px) {
++ .app-shell .primary-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
++ .app-shell .sales-controls, .app-shell .labour-controls { position: static; }
++ .app-shell .dashboard-performance-breakdown > .panel-head { display: flex; flex-wrap: wrap; gap: 12px; }
++ .app-shell .panel-head { flex-wrap: wrap; }
++}
++.mf-invoice-strip { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border: 1px solid var(--line); background: var(--surface); border-radius: 12px; overflow: hidden; }
++.mf-invoice-strip button { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 18px; background: var(--surface); color: var(--text); border: 0; border-right: 1px solid var(--line); border-radius: 0; text-align: left; }
++.mf-invoice-strip button:last-child { border-right: 0; }
++.mf-invoice-strip span, .mf-invoice-strip small { font-size: 12px; color: var(--muted); }
++.mf-invoice-strip strong { font-size: 28px; font-weight: 650; }
++.mf-invoice-strip button:hover { background: var(--mf-green-soft); }
++@media(min-width:761px) {
++ .app-modal.invoice-control-document-modal { position: fixed; inset: 0 0 0 auto; width: min(1100px,90vw); height: 100dvh; max-height: 100dvh; border-radius: 0; }
++}
++@media(max-width:760px) { .mf-invoice-strip { grid-template-columns: repeat(2,minmax(0,1fr)); } }
++.app-shell .dashboard-main-column > .primary-metrics { padding: 0; }
++.mf-performance-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
++.mf-performance-heading h2 { font-size: 20px; letter-spacing: -.025em; margin: 0; }
++.mf-performance-heading label { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
++.mf-performance-heading select { width: auto; max-width: 210px; }
++@media(max-width:760px) { .mf-performance-heading { flex-wrap: wrap; } .mf-performance-heading label { width: 100%; } }
+--- /dev/null
++++ b/src/components/WorkspaceNavigation.jsx
+@@ -0,0 +1,43 @@
++import React, { useState } from "react";
++import { Search, Menu, ChevronDown, Store, Bell, CircleHelp, ListChecks, Sparkles, LogOut } from "lucide-react";
++import InvoiceModal from "./InvoiceModal.jsx";
++
++// Presentation-only navigation. Permissions and page routing remain owned by WorkspaceApp.
++export default function WorkspaceNavigation({ active, items, logo, company, department, departments, onDepartment, user, onNavigate, onInvoices, onUtility, onReport, onSignOut }) {
++  const [mobileOpen, setMobileOpen] = useState(false);
++  const [query, setQuery] = useState("");
++  const navigate = (id) => { onNavigate(id); setMobileOpen(false); };
++  const permitted = id => items.some(item => item.id === id);
++  const link = (id, label) => {
++    const item = items.find(entry => entry.id === id);
++    if (!item) return null;
++    const Icon = item.icon;
++    return <button key={`${id}-${label || item.label}`} aria-current={active === id ? "page" : undefined} className={active === id ? "active" : ""} onClick={() => navigate(id)} type="button"><Icon size={18} /><span>{label || item.label}</span></button>;
++  };
++  const group = (label, ids) => ids.some(permitted) && <details key={label} className="mf-nav-group" open={query || ids.includes(active) ? true : undefined}>
++    <summary><span>{label}</span><ChevronDown size={15} /></summary><div>{ids.map(id => link(id))}</div>
++  </details>;
++  const contents = <>
++    <div className="brand"><img alt="MarginFlow" className="brand-logo" src={logo} /></div>
++    <div className="mf-workspace-picker"><Store size={20} /><div><strong>{company}</strong><label><span className="sr-only">Department</span><select aria-label="Workspace department" value={department} onChange={event => onDepartment(event.target.value)}>{departments.map(name => <option key={name}>{name}</option>)}</select></label></div></div>
++    <label className="mf-nav-search"><Search size={17} /><input aria-label="Search pages" placeholder="Search pages…" value={query} onChange={event => setQuery(event.target.value)} /></label>
++    <nav aria-label="Main navigation">
++      {query ? <>{items.filter(item => item.label.toLowerCase().includes(query.toLowerCase())).map(item => link(item.id))}{!items.some(item => item.label.toLowerCase().includes(query.toLowerCase())) && <p className="helper-text">No matching pages.</p>}</> : <>
++        {link("dashboard")}
++        {permitted("invoiceControl") && <details className="mf-nav-group" open={active === "invoiceControl" ? true : undefined}><summary><span>Invoice Control Centre</span><ChevronDown size={15} /></summary><div>{[["All invoices", "All", "All"], ["Needs review", "Review", "All"], ["Pending processing", "Pending", "All"], ["Credit notes", "All", "Credit notes"]].map(([label,status,type]) => <button key={label} type="button" onClick={() => { onInvoices({status,type}); setMobileOpen(false); }}>{label}</button>)}<button type="button" disabled title="A separate processing history view is not available">Processing history · unavailable</button>{link("invoiceControl", "Delivery schedule")}</div></details>}
++        {group("Inventory", ["products", "suppliers", "stocktake", "waste"])}
++        {group("Costing", ["recipes", "menu"])}
++        <details className="mf-nav-group" open={["gp","labour","ai"].includes(active) ? true : undefined}><summary><span>Reports</span><ChevronDown size={15} /></summary><div>{permitted("dashboard") && [["Overview","workspace-content"],["Purchases","mf-sales-report"],["Gross Profit","mf-gp-report"],["Supplier Spend","mf-supplier-report"]].map(([label,anchor]) => <button key={label} type="button" onClick={() => {onReport(anchor);setMobileOpen(false);}}>{label}</button>)}{link("gp")}{link("labour")}{link("waste")}{link("ai")}</div></details>
++        {link("settings")}
++      </>}
++    </nav>
++    <div className="mf-sidebar-utilities">{[["Notifications",Bell],["Setup guide",ListChecks],["Support",CircleHelp],["MarginFlow AI",Sparkles]].map(([label,Icon]) => <button key={label} onClick={() => { setMobileOpen(false); onUtility(label); }} type="button"><Icon size={18} /><span>{label}</span></button>)}</div>
++    <div className="mf-sidebar-person"><span className="mf-avatar">{user.name?.split(" ").map(word => word[0]).slice(0,2).join("")}</span><span><strong>{user.name}</strong><small>{company}</small></span><button className="sidebar-signout" onClick={onSignOut} aria-label="Sign out" title="Sign out" type="button"><LogOut size={17} /></button></div>
++  </>;
++  return <>
++    <a className="mf-skip-link" href="#workspace-content">Skip to content</a>
++    <aside className="sidebar mf-sidebar">{contents}</aside>
++    <div className="mf-mobile-header"><img alt="MarginFlow" src={logo} /><button aria-label="Open navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen(true)} type="button"><Menu size={21} />Menu</button></div>
++    <InvoiceModal title="Navigation" className="mf-navigation-drawer" open={mobileOpen} onClose={() => setMobileOpen(false)}><div className="mf-sidebar mf-mobile-sidebar">{contents}</div></InvoiceModal>
++  </>;
++}

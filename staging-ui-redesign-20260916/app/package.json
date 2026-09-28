@@ -1,0 +1,28 @@
+{
+  "name": "marginflow-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "node --test src/domain/*.test.js src/workforce/*.test.js scripts/*.test.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "safety:check": "node scripts/check-data-safety.mjs",
+    "prebuild": "npm run safety:check && npm test && node scripts/check-production-release.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
+    "exceljs": "^4.4.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
+    "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7"
+  }
+}
