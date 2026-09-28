@@ -1,3 +1,4 @@
+import { readAllPages } from "./paginatedRead.js";
 import { normalizeSupplierDescription, normalizeSupplierProductCode } from "../domain/invoiceProductMatching.js";
 import { normalizeHeader, numberValue } from "../domain/numberUtils.js";
 
@@ -112,41 +113,26 @@ export function mergeRelationalSupplierProductMappings(snapshotMappings = [], re
   return [...relationalByIdentity.values(), ...fallback];
 }
 
-async function selectedRows(query) {
-  const { data, error } = await query;
-  if (error) throw error;
-  return data || [];
-}
-
 export async function loadRelationalSupplierProductMappings(client, {
-  companyId = "",
-  locationId = "",
-  suppliers = [],
-  products = [],
-  departments = [],
+  companyId = "", locationId = "", suppliers = [], products = [], departments = [],
 } = {}) {
   if (!client || !isUuid(companyId)) return [];
-  let mappingQuery = client
-    .from("supplier_product_mappings")
-    .select("*")
-    .eq("company_id", companyId)
-    .order("updated_at", { ascending: false });
-  mappingQuery = locationId && isUuid(locationId)
-    ? mappingQuery.or(`location_id.is.null,location_id.eq.${locationId}`)
-    : mappingQuery.is("location_id", null);
-  const mappingRows = await selectedRows(mappingQuery);
-  if (!mappingRows.length) return [];
-
-  const mappingIds = mappingRows.map((row) => row.id);
-  const splitRules = await selectedRows(client
-    .from("supplier_product_split_rules")
-    .select("*")
-    .in("supplier_product_mapping_id", mappingIds));
-  const splitRuleIds = splitRules.map((rule) => rule.id);
-  const splitLines = splitRuleIds.length
-    ? await selectedRows(client.from("supplier_product_split_rule_lines").select("*").in("split_rule_id", splitRuleIds))
-    : [];
-  return mappingRows.map((row) => relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }));
+  const mappingRows = await readAllPages((head = false) => {
+    let query = client.from("supplier_product_mappings").select("*", { count: "exact", head }).eq("company_id", companyId);
+    return locationId && isUuid(locationId)
+      ? query.or(`location_id.is.null,location_id.eq.${locationId}`) : query.is("location_id", null);
+  }, { label: "supplier mappings" });
+  const related = async (table, column, ids) => {
+    const rows = [];
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      rows.push(...await readAllPages((head = false) => client.from(table)
+        .select("*", { count: "exact", head }).in(column, ids.slice(offset, offset + 100)), { label: table }));
+    }
+    return rows;
+  };
+  const splitRules = await related("supplier_product_split_rules", "supplier_product_mapping_id", mappingRows.map(row => row.id));
+  const splitLines = await related("supplier_product_split_rule_lines", "split_rule_id", splitRules.map(row => row.id));
+  return mappingRows.map(row => relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }));
 }
 
 function persistencePayload(mapping = {}, scope = {}) {
@@ -206,7 +192,9 @@ export async function persistRelationalSupplierProductMappings(client, mappings 
     }
     const { data, error } = await client.rpc("persist_supplier_product_learning_v2", payload);
     if (error) throw error;
-    persisted.push({ mappingId: mapping.id || "", relationalId: Array.isArray(data) ? data[0]?.mapping_id : data?.mapping_id || data });
+    const relationalId = Array.isArray(data) ? data[0]?.mapping_id : data?.mapping_id || data;
+    if (!isUuid(relationalId)) throw new Error("The database did not acknowledge the saved match. Retry this decision.");
+    persisted.push({ mappingId: mapping.id || "", relationalId });
   }
   return { persisted, skipped };
 }

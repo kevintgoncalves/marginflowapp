@@ -1,0 +1,199 @@
+{
+  "baselineCommit": "a9fdf57668b7dbc2a7694955789af4232e9e8caa",
+  "files": [
+    {
+      "path": "src/styles.css",
+      "oldSha256": "4fb93b6a4ec0cc7bfd8097f0364aa7b9094972bc592d439e28c2d0cb783923ac",
+      "newSha256": "589ff1573dd2437c9f80a6e6dd341752524ffe1114a8425488bd3f7cb2857c85",
+      "source": "staging-quotation-v7/app/src/styles.css"
+    },
+    {
+      "path": "src/main.jsx",
+      "oldSha256": "9ebf8b02fa8637c7926a9b593e19388df289ed55a35353d90bf07a978b0ab21b",
+      "newSha256": "9ec86115a589e86386676c7d46fca66cd2a2be1f29d1d2e09cf0ce77780e39d5",
+      "source": "staging-quotation-v7/app/src/main.jsx"
+    },
+    {
+      "path": "src/utils/exportProductsExcel.js",
+      "oldSha256": "bcb829a4eaea16101c89827a65df0fab042a666221d9a42d84d80d1a672d623c",
+      "newSha256": "3d5ceab1289c74d5b6f1ce599cea8bb19df7077b212c599d469dcd543c60cb6a",
+      "source": "staging-quotation-v7/app/src/utils/exportProductsExcel.js"
+    },
+    {
+      "path": "src/utils/exportProductsExcel.test.js",
+      "oldSha256": "32ec43e2cb85ece1642d67d23e87073d62a6acba5a147ca3f6033d9a7b88f690",
+      "newSha256": "185befdb27f31a8d6dded9f7d7d9bfc749888d3807161e5c4f1bd85a857a3eb9",
+      "source": "staging-quotation-v7/app/src/utils/exportProductsExcel.test.js"
+    },
+    {
+      "path": "src/components/QuotationPanel.jsx",
+      "oldSha256": null,
+      "newSha256": "ca39ecfe453957175afade194b41eea89b7521bfa459210afae852aea3f399e7",
+      "source": "staging-quotation-v7/app/src/components/QuotationPanel.jsx"
+    },
+    {
+      "path": "src/components/DataTable.jsx",
+      "oldSha256": null,
+      "newSha256": "97953c2516cd2f1c37007d28217a511d8302a5321178bdb711694cc11fb1913b",
+      "source": "staging-quotation-v7/app/src/components/DataTable.jsx",
+      "reviewedSourceSha256": "425488f2baefa9b72863b06ad5dacc4b38f2603ec633a63c3fb146f9e5f6ea4c",
+      "integrationNote": "Removed a trailing blank line flagged by git diff --check; no functional change."
+    },
+    {
+      "path": "src/components/CompanySubscription.jsx",
+      "oldSha256": null,
+      "newSha256": "81406c439a02241a715c2d7ff71591d01f2f38632c6570e9c442a0ee36f775de",
+      "source": "staging-quotation-v7/app/src/components/CompanySubscription.jsx"
+    },
+    {
+      "path": "src/components/InvoiceModal.jsx",
+      "oldSha256": "0a348798d2fe96378838e771bab970e93fffa0ad8e8401abf15b01ae8fcf2484",
+      "newSha256": "9ec302b3e1273776a5e3c00fcfeee267b90df8aae401674e5919e38c6b6df84e",
+      "source": "staging-quotation-v7/app/src/components/InvoiceModal.jsx"
+    },
+    {
+      "path": "src/components/InteractiveChart.jsx",
+      "oldSha256": null,
+      "newSha256": "791e36686d305de7e45e05907032234e98f0cb677ce03c5e56fe5970f77fc4ff",
+      "source": "staging-quotation-v7/app/src/components/InteractiveChart.jsx"
+    },
+    {
+      "path": "src/components/WorkspaceNavigation.jsx",
+      "oldSha256": null,
+      "newSha256": "0c424a726fe1bc481517522b2f61772803036de434fc6a89930d3bfb810260ed",
+      "source": "staging-quotation-v7/app/src/components/WorkspaceNavigation.jsx"
+    },
+    {
+      "path": "src/components/PersonalAccount.jsx",
+      "oldSha256": null,
+      "newSha256": "4282f9c74661418fb46fcb5130d78a2f22665af1eed622caadc1448d9dc7502f",
+      "source": "staging-quotation-v7/app/src/components/PersonalAccount.jsx"
+    },
+    {
+      "path": "src/components/ProductSupplierComparison.jsx",
+      "oldSha256": null,
+      "newSha256": "401c464a3ff13382ac1a538f31f88f76d4a0b1bc7dbc458ddafe19fb00807661",
+      "source": "staging-quotation-v7/app/src/components/ProductSupplierComparison.jsx"
+    },
+    {
+      "path": "src/hooks/useQuotationDraft.js",
+      "oldSha256": null,
+      "newSha256": "41acec4142b1ab648aba08b7bfaeb6f2ee9422363720fa6da327d1953fa84d41",
+      "source": "staging-quotation-v7/app/src/hooks/useQuotationDraft.js"
+    },
+    {
+      "path": "src/lib/invoiceLearningRepository.js",
+      "oldSha256": "f307148cb9836a42b186609e35150af49dd27f3dcb1afde8c70e514604e9e7ff",
+      "newSha256": "977bbf7a18e8f71c237c66a411e29c1d338dcba889d773606b902696af995526",
+      "source": "staging-quotation-v7/app/src/lib/invoiceLearningRepository.js"
+    },
+    {
+      "path": "src/domain/latestProductComparison.test.js",
+      "oldSha256": null,
+      "newSha256": "d0a95959f076a3fbb199d81aab557e3815272a4110e83ae62d019e1b57c54aaf",
+      "source": "staging-quotation-v7/app/src/domain/latestProductComparison.test.js"
+    },
+    {
+      "path": "src/domain/selfAccount.js",
+      "oldSha256": null,
+      "newSha256": "19b4e5ae5e90e5dbaea7546b79caccce594808a28d59da8739f60fc2a6066926",
+      "source": "staging-quotation-v7/app/src/domain/selfAccount.js"
+    },
+    {
+      "path": "src/domain/quotation.test.js",
+      "oldSha256": null,
+      "newSha256": "8c24702794452a888460397555e8e9fc0704165494430c78a8c1c6b874dec986",
+      "source": "staging-quotation-v7/app/src/domain/quotation.test.js"
+    },
+    {
+      "path": "src/domain/settingsNavigation.test.js",
+      "oldSha256": null,
+      "newSha256": "1a29c28cdd472c606ec725182eafe2d7b6c952ee3a28472815f5b58ce6310d3a",
+      "source": "staging-quotation-v7/app/src/domain/settingsNavigation.test.js"
+    },
+    {
+      "path": "src/domain/chartPresentation.js",
+      "oldSha256": null,
+      "newSha256": "fc01c71ed09df95fb3c1f6a2c7c3f7e877dd7ca45e1a6d8b629463cdf5940cde",
+      "source": "staging-quotation-v7/app/src/domain/chartPresentation.js"
+    },
+    {
+      "path": "src/domain/invoiceLearning.js",
+      "oldSha256": "fc03dfcb86c24e005c804afe571186f6e4c12ffd5ff6ee2fff906ac4cde6e623",
+      "newSha256": "b3455c2e3821406136bf0d1c209d8e9af0f030f31ff25fc5ef0ae4b076a4c569",
+      "source": "staging-quotation-v7/app/src/domain/invoiceLearning.js"
+    },
+    {
+      "path": "src/domain/purchaseComparison.js",
+      "oldSha256": null,
+      "newSha256": "14f96670d090513eb53b8dc4df15cd683792139c118e83f5e991ca1fb82d3c92",
+      "source": "staging-quotation-v7/app/src/domain/purchaseComparison.js"
+    },
+    {
+      "path": "src/domain/selfAccount.test.js",
+      "oldSha256": null,
+      "newSha256": "86f0f185ba2fff4e632c41c2a5a6875ea8046db2db3bc9e839321d592538bc0b",
+      "source": "staging-quotation-v7/app/src/domain/selfAccount.test.js"
+    },
+    {
+      "path": "src/domain/reusablePurchasing.test.js",
+      "oldSha256": null,
+      "newSha256": "0895c44d9dd8a2eb44bfbf3c06993c608ed4a69aa2348752e2376dbbd2459a70",
+      "source": "staging-quotation-v7/app/src/domain/reusablePurchasing.test.js"
+    },
+    {
+      "path": "src/domain/latestProductComparison.js",
+      "oldSha256": null,
+      "newSha256": "4a2c0555bf356c8162c83938c66cef21a234d675ea72db0f79b4cbaad3e9d685",
+      "source": "staging-quotation-v7/app/src/domain/latestProductComparison.js"
+    },
+    {
+      "path": "src/domain/quotation.js",
+      "oldSha256": null,
+      "newSha256": "172e9e3df15bdefc4cfe3150e330bd4e294794c4033de3226e4ae915b29168bb",
+      "source": "staging-quotation-v7/app/src/domain/quotation.js"
+    },
+    {
+      "path": "src/domain/settingsNavigation.js",
+      "oldSha256": null,
+      "newSha256": "2c8db9697348f0adb942969bf07148154a7e9d1bbc0e90c06e0f3fc92828741f",
+      "source": "staging-quotation-v7/app/src/domain/settingsNavigation.js"
+    },
+    {
+      "path": "src/domain/invoiceProductMatching.js",
+      "oldSha256": "ece142cb0d396647157ffbdbdf2b90971e02c47ca58420ef60c5165d36695a96",
+      "newSha256": "b499adaedd781b5e9e73f78bd250ad3c168781deab5fba9d7e9f7f6fe7d660de",
+      "source": "staging-quotation-v7/app/src/domain/invoiceProductMatching.js"
+    },
+    {
+      "path": "src/domain/adminBackOffice.test.js",
+      "oldSha256": "fa0754784436938d8b3150777a59500d661149af55de9b4a4bb7d9b56d19bbf8",
+      "newSha256": "280afdfaa842fb0183772797d0e4d54ff5241ee4e353236ddc7a55489fe5f045",
+      "source": "staging-quotation-v7/app/src/domain/adminBackOffice.test.js"
+    },
+    {
+      "path": "src/domain/chartPresentation.test.js",
+      "oldSha256": null,
+      "newSha256": "807bc90c7c7ac565550dfe93a4585d4978199c987de0f245205ca273a73a8958",
+      "source": "staging-quotation-v7/app/src/domain/chartPresentation.test.js"
+    },
+    {
+      "path": "src/domain/reusablePurchasing.js",
+      "oldSha256": null,
+      "newSha256": "3f6d653c008c550a22386bcf1994d5ee5d84d77f98073d2961e23ec0776000b4",
+      "source": "staging-quotation-v7/app/src/domain/reusablePurchasing.js"
+    },
+    {
+      "path": "src/domain/invoiceProductResolution.js",
+      "oldSha256": "4f769e2467e8b05d5d66c927de81911afc4043acd4f59e069801937e1182b414",
+      "newSha256": "f1fd43f09cbe21fbf442ea7bd7e8f7b52bf5bfa43760940dbbba4163a549d995",
+      "source": "staging-quotation-v7/app/src/domain/invoiceProductResolution.js"
+    },
+    {
+      "path": "scripts/reusable-purchasing.integration.test.mjs",
+      "oldSha256": null,
+      "newSha256": "234c576eb7ce789bbb0a0fdd067d4afcb2e43d85b1fbb5f932ca1d000770b878",
+      "source": "staging-quotation-v7/app/scripts/reusable-purchasing.integration.test.mjs"
+    }
+  ]
+}

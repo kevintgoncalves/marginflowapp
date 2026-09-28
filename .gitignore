@@ -6,3 +6,20 @@ dist
 .netlify
 supabase/.temp
 .DS_Store
+
+# Preserved local review copies are not application/deployment source.
+/staging-ui-redesign-20260916/
+/staging-ui-redesign-v2/
+/staging-ui-navigation-v3/
+/staging-ui-account-v4/
+/staging-import-products-v5/
+/staging-products-v6/
+/staging-quotation-v7/
+/.local-review/
+
+# Local source archives and environment credentials (keep the empty template).
+*.zip
+*.tar
+*.tar.gz
+.env.*
+!.env.example

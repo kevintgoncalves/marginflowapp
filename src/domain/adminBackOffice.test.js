@@ -33,7 +33,8 @@ test('internal navigation is separate from the customer workspace', () => {
 });
 
 test('customer sign out and admin subscription purpose stay visible in the UI contract', () => {
-  assert.match(mainSource, /className="sidebar-signout" onClick=\{onSignOut\}/);
+  const navigationSource = readFileSync(new URL("../components/WorkspaceNavigation.jsx", import.meta.url), "utf8");
+  assert.match(navigationSource, /className="sidebar-signout" onClick=\{onSignOut\}/);
   assert.match(internalAdminSource, /Find workspaces, see who uses them/);
   assert.match(internalAdminSource, /Manage plan access, trial dates, and subscription status/);
   assert.match(internalAdminSource, /Extend 7 days/);

@@ -1,52 +1,52 @@
-import { downloadBlob } from "./downloadFile.js";
-
-const excelMimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-
-function numericCell(value) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
+import { downloadBlob } from './downloadFile.js';
+import { comparisonUnit } from '../domain/latestProductComparison.js';
+const numeric = value => value === '' || value == null || !Number.isFinite(Number(value)) ? null : Number(value);
 export function productExportRows(products = []) {
-  return products.map((product) => ({
-    product: product.name || "",
-    currentSupplier: product.supplier || "",
-    currentCost: numericCell(product.unitCost),
-    normalisedCost: numericCell(product.normalizedCost),
-    cheapestSupplier: product.cheapestSupplierName || product.cheapestSupplier || "",
-    priceDifference: numericCell(product.priceDifference),
-    pack: product.packSize || "",
-    packReview: product.packReview || "",
-    department: product.department || "",
+  return products.map(product => {
+    const c=product.comparison || {};
+    return { reference:product.id, product:product.name || '', department:product.department || '', pack:product.packSize || product.baseUnit || '',
+      currentCost:numeric(product.unitCost), currentSupplier:product.supplier || '', active:product.active===false?'Inactive':'Active',
+      currentPrice:c.current?.valid ? c.current.price : null, unit:comparisonUnit(c.unit || ''), currency:c.currency || '', currentDate:c.current?.date || '',
+      cheapestSupplier:c.best?.supplier || '', cheapestPrice:c.best?.price ?? null, cheapestDate:c.best?.date || '',
+      difference:c.difference ?? null, differencePercent:c.percent == null ? null : c.percent/100,
+      comparisonStatus:c.status || 'No confirmed prices' };
+  });
+}
+export function supplierExportRows(products = []) {
+  return products.flatMap(product=>[...(product.comparison?.comparable || []),...(product.comparison?.review || [])].map(article=>{
+    const best=product.comparison.best;
+    const sameBasis=article.valid && best && article.unit===best.unit && article.currency===best.currency && !product.comparison.review.some(row=>row.key===article.key);
+    return {reference:product.id,product:product.name,supplier:article.supplier,code:article.code || '',description:article.description,
+      brand:article.brand || '',specification:article.specification || '',pack:article.pack,packPrice:numeric(article.netPackPrice),
+      unit:comparisonUnit(article.unit || ''),currency:article.currency,normalisedPrice:article.valid ? article.price : null,
+      currentSupplier:article.isCurrentSupplier?'Yes':'No',cheapest:article.isCheapest?'Yes':'No',
+      currentDifference:numeric(article.delta),currentPercent:article.percent == null ? null : article.percent/100,
+      cheapestDifference:sameBasis?article.price-best.price:null,cheapestPercent:sameBasis && best.price>0?(article.price-best.price)/best.price:null,
+      date:article.date,invoice:article.invoiceNumber,invoiceId:article.invoiceId,equivalence:article.equivalence,status:article.status,
+      missing:[!article.code?'Article code':'',!article.brand && !article.specification?'Brand/specification':'',article.netPackPrice==null?'Pack price':'',!sameBasis?'Comparable price':''].filter(Boolean).join('; ') || 'None'};
   }));
 }
-
+const productColumns=[['Product reference','reference',30],['Product','product',32],['Category','department',20],['Unit / pack','pack',22],['Catalogue cost (ex VAT)','currentCost',22],['Current supplier','currentSupplier',26],['Status','active',14],['Current comparable price','currentPrice',24],['Comparison unit','unit',18],['Currency','currency',12],['Current price date','currentDate',20],['Cheapest supplier','cheapestSupplier',26],['Cheapest comparable price','cheapestPrice',26],['Cheapest price date','cheapestDate',20],['Saving vs current / unit','difference',25],['Saving vs current %','differencePercent',22],['Comparison status','comparisonStatus',30]];
+const supplierColumns=[['Product reference','reference',30],['Product','product',30],['Supplier','supplier',26],['Article code','code',20],['Original description','description',36],['Brand','brand',20],['Specification','specification',30],['Pack','pack',20],['Net pack price','packPrice',20],['Comparison unit','unit',18],['Currency','currency',12],['Normalised price','normalisedPrice',20],['Current supplier','currentSupplier',18],['Cheapest comparable','cheapest',22],['Saving vs current / unit','currentDifference',26],['Saving vs current %','currentPercent',22],['Above cheapest / unit','cheapestDifference',24],['Above cheapest %','cheapestPercent',22],['Price date','date',18],['Invoice reference','invoice',24],['Invoice ID','invoiceId',32],['Equivalence','equivalence',28],['Conversion / review','status',34],['Missing information','missing',38]];
+export async function createProductsWorkbook(products) {
+  const module=await import('exceljs');const ExcelJS=module.default || module;
+  const workbook=new ExcelJS.Workbook();workbook.creator='MarginFlow';
+  for(const [name,columns,rows] of [['Products',productColumns,productExportRows(products)],['Supplier comparison',supplierColumns,supplierExportRows(products)]]){
+    const sheet=workbook.addWorksheet(name,{views:[{state:'frozen',ySplit:1}]});
+    sheet.columns=columns.map(([header,key,width])=>({header,key,width}));
+    rows.forEach(row=>sheet.addRow(row));
+    sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};
+    sheet.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF202020'}};
+    sheet.autoFilter={from:{row:1,column:1},to:{row:Math.max(sheet.rowCount,1),column:columns.length}};
+    for(const column of sheet.columns){
+      if(/Percent$/.test(column.key)) column.numFmt='0.00%';
+      else if(/Price$|Cost$|Difference$|^difference$/.test(column.key)) column.numFmt='#,##0.0000';
+    }
+    sheet.eachRow((row,index)=>{if(index>1)row.alignment={vertical:'top',wrapText:true};});
+  }
+  return workbook;
+}
 export async function downloadProductsExcel(products, filename) {
-  const excelModule = await import("exceljs");
-  const ExcelJS = excelModule.default || excelModule;
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = "MarginFlow";
-  const worksheet = workbook.addWorksheet("Products", { views: [{ state: "frozen", ySplit: 1 }] });
-  worksheet.columns = [
-    { header: "Product", key: "product", width: 34 },
-    { header: "Current Supplier", key: "currentSupplier", width: 26 },
-    { header: "Current Cost", key: "currentCost", width: 16 },
-    { header: "Normalised Cost", key: "normalisedCost", width: 18 },
-    { header: "Cheapest Supplier", key: "cheapestSupplier", width: 28 },
-    { header: "Price Difference", key: "priceDifference", width: 18 },
-    { header: "Pack", key: "pack", width: 22 },
-    { header: "Pack Review", key: "packReview", width: 34 },
-    { header: "Department", key: "department", width: 20 },
-  ];
-  productExportRows(products).forEach((row) => worksheet.addRow(row));
-  const header = worksheet.getRow(1);
-  header.font = { bold: true, color: { argb: "FFFFFFFF" } };
-  header.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E293B" } };
-  header.alignment = { vertical: "middle" };
-  worksheet.autoFilter = `A1:I${Math.max(1, worksheet.rowCount)}`;
-  worksheet.getColumn("currentCost").numFmt = '"£"#,##0.00';
-  worksheet.getColumn("normalisedCost").numFmt = '"£"#,##0.0000';
-  worksheet.getColumn("priceDifference").numFmt = '0.0"%"';
-  const buffer = await workbook.xlsx.writeBuffer();
-  downloadBlob(filename, new Blob([buffer], { type: excelMimeType }));
+  const workbook=await createProductsWorkbook(products);
+  downloadBlob(filename,new Blob([await workbook.xlsx.writeBuffer()],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
 }

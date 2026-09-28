@@ -107,7 +107,7 @@ export function learnSupplierProductMappings({
 
   invoiceLines.forEach((line) => {
     const productId = line.matchedProductId || line.productId || "";
-    if (!productId || line.forgetLearnedRule || line.matchStatus === "Manual invoice") return;
+    if (!productId || line.learningScope === "invoice" || line.forgetLearnedRule || line.matchStatus === "Manual invoice") return;
     const key = mappingKeyForLine({ companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier, line });
     if (!key) return;
 
@@ -129,7 +129,7 @@ export function learnSupplierProductMappings({
     const sameDecision = existing
       && existing.productId === productId
       && sameAllocation(existing, allocation);
-    const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + 1 : 1;
+    const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + (invoice.id && existing.lastConfirmedInvoiceId === invoice.id ? 0 : 1) : 1;
     const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, "user_selected"].includes(line.productMatchSource)
       || ["manual_match", "manually_matched"].includes(line.productResolution);
     const autoApply = code ? true : manualProductSelection || confirmationCount >= 2 || line.rememberSupplierMapping === true;
@@ -152,7 +152,7 @@ export function learnSupplierProductMappings({
     });
     const row = {
       ...(existing || {}),
-      id: existing?.id || stableId("spm", [companyId || "local", resolvedSupplierId || supplier, code || description]),
+      id: existing?.id || stableId("spm", [companyId || "local", locationId || "company", resolvedSupplierId || supplier, code || description, ...(code ? [] : [unit, packSize])]),
       mappingKey: key,
       companyId: companyId || existing?.companyId || "",
       locationId: locationId || existing?.locationId || "",

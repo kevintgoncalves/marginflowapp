@@ -1,0 +1,20 @@
+# Keep manual Vercel uploads consistent with the Git source selection.
+.git
+node_modules
+dist
+.vercel
+.netlify
+.env
+.env.*
+!.env.example
+.local-review
+staging-ui-redesign-20260916
+staging-ui-redesign-v2
+staging-ui-navigation-v3
+staging-ui-account-v4
+staging-import-products-v5
+staging-products-v6
+staging-quotation-v7
+*.zip
+*.tar
+*.tar.gz

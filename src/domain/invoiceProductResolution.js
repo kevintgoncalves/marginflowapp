@@ -169,6 +169,7 @@ export function lineWithExistingProductResolution(line = {}, product = {}) {
   const productName = product.name || product.productName || line.productName || line.matchedProductName || "";
   return {
     ...line,
+    rawDescription: line.rawDescription || line.originalExtraction?.rawDescription || line.productName || "",
     productName,
     matchedProductId: productId,
     matchedProductName: productName,

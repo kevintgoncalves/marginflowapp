@@ -69,7 +69,7 @@ function sameSupplier(row = {}, supplierId = "", supplierName = "") {
 
 function mappingProduct(mapping = {}, products = []) {
   const productId = mapping.productId || mapping.product_id || "";
-  return products.find((product) => product.id === productId) || (productId ? { id: productId, name: mapping.productName || mapping.product_name || "" } : null);
+  return products.find((product) => product.id === productId) || null;
 }
 
 function allocationFromMapping(mapping = {}) {
@@ -164,12 +164,17 @@ export function matchInvoiceLineToExistingProduct({
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
 
   if (normalizedCode) {
-    const mapping = mappings.find((candidate) => (
-      candidate.autoApply !== false
-      && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode
-    ));
-    const product = mappingProduct(mapping, products);
-    if (mapping && product) {
+    const candidates = mappings.filter(candidate => candidate.autoApply !== false
+      && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode);
+    if (candidates.length) {
+      const compatible = candidates.filter(mapping => unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure)
+        && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size));
+      const mapping = compatible[0];
+      const product = mapping && mappingProduct(mapping, products);
+      if (!product || new Set(compatible.map(row => row.productId || row.product_id)).size !== 1) {
+        return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
+          reviewReasons: [compatible.length ? "ambiguous_product_match" : "pack_changed"] });
+      }
       return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_CODE, confidence: 1, mapping }), context);
     }
   }

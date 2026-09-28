@@ -1,6 +1,18 @@
+import DataTable from "./components/DataTable.jsx";
+import { refreshPendingInvoice, purchaseConversion } from "./domain/reusablePurchasing.js";
+import ProductSupplierComparison from "./components/ProductSupplierComparison.jsx";
+import { latestProductComparisons, comparisonMoney, comparisonUnit } from "./domain/latestProductComparison.js";
+import QuotationPanel from "./components/QuotationPanel.jsx";
+import useQuotationDraft from "./hooks/useQuotationDraft.js";
+import { quotationEligible, selectQuotationIds } from "./domain/quotation.js";
+import PersonalAccount from "./components/PersonalAccount.jsx";
+import CompanySubscription from "./components/CompanySubscription.jsx";
+import { settingsSectionFromUrl, workspaceUrl, settingsLeaves, settingsGroups } from "./domain/settingsNavigation.js";
 import {invoicePreviewAmount} from './domain/invoicePreview.js';
 import {archiveOriginals} from './lib/invoiceArchive.js';
 import InvoiceModal from "./components/InvoiceModal.jsx";
+import WorkspaceNavigation from "./components/WorkspaceNavigation.jsx";
+import InteractiveChart from "./components/InteractiveChart.jsx";
 import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -2081,6 +2093,8 @@ function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.
     price_deviation: "Price differs from recent accepted invoices",
     unaccounted_invoice_charge: "Invoice includes a non-product charge",
     unit_conflict: "Unit conflicts with the matched product",
+    pack_changed: "Supplier pack changed. Confirm the match and conversion.",
+    mapping_conflict: "Conflicting reusable matches. Choose the correct product.",
     pack_size_conflict: "Pack size conflicts with the matched product",
     invalid_split: "Split allocation must be corrected",
     missing_department: "Select a department",
@@ -5583,10 +5597,33 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [active, setActiveState] = useState(() => appPageFromUrl("dashboard") === "invoices" ? "invoiceControl" : appPageFromUrl("dashboard"));
   const [invoiceActionRequest,setInvoiceActionRequest]=useState(null);
   const [invoiceBrowseRequest, setInvoiceBrowseRequest] = useState(() => appPageFromUrl("dashboard") === "invoices" ? {id:"legacy"} : null);
-  const setActive = (page) => {
-    if(page === "invoices") { setInvoiceBrowseRequest({id:uid()}); setActiveState("invoiceControl"); }
-    else setActiveState(page);
+  const [settingsSection, setSettingsSection] = useState(() => settingsSectionFromUrl(window.location.href));
+  useEffect(() => {
+    const redirect = () => { const url=new URL(window.location.href); if(url.searchParams.get("page")==="settings" && url.searchParams.get("section")==="categories") window.history.replaceState({},"",workspaceUrl(url.href,"settings","locations")); };
+    redirect(); window.addEventListener("popstate",redirect); return()=>window.removeEventListener("popstate",redirect);
+  }, []);
+  const setActive = (page, section = "profile") => {
+    const destination = page === "invoices" ? "invoiceControl" : page;
+    if (page === "invoices") setInvoiceBrowseRequest({id:uid()});
+    const href = workspaceUrl(window.location.href, destination, section);
+    if (href !== window.location.href) window.history.pushState({}, "", href);
+    setActiveState(destination);
+    if (destination === "settings") setSettingsSection(section);
   };
+  const [utilityPanel, setUtilityPanel] = useState("");
+  const [reportAnchor, setReportAnchor] = useState("");
+  useEffect(() => {
+    const restore = () => {
+      const page = appPageFromUrl("dashboard");
+      setActiveState(page === "invoices" ? "invoiceControl" : page);
+      setSettingsSection(settingsSectionFromUrl(window.location.href));
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
+  useEffect(() => {
+    if (reportAnchor) document.getElementById(reportAnchor)?.scrollIntoView({block:"start"});
+  }, [active, reportAnchor]);
   const [analysisRunId, setAnalysisRunId] = useState(0);
   const [pathname, setPathname] = useState(currentPathname);
   const [invoiceControlWeekRange, setInvoiceControlWeekRange] = useState(() => {
@@ -5805,6 +5842,20 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const workingInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
   const operationalInvoices = useMemo(() => demoMode ? invoices : confirmedInvoicesForScope(confirmedInvoices, cloudScope), [demoMode, invoices, confirmedInvoices, cloudScope]);
+  useEffect(() => {
+    if (!confirmedInvoicesLoaded && !demoMode) return;
+    const confirmedIds = new Set(confirmedInvoices.map(invoice => invoice.id));
+    setInvoices(current => {
+      let changed = false;
+      const next = current.map(invoice => {
+        if (confirmedIds.has(invoice.id) || !["pending_sync", "sync_failed", "local_only"].includes(invoice.syncStatus)) return invoice;
+        const refreshed = refreshPendingInvoice(invoice, supplierProductMappings, products, cloudScope.companyId || "", cloudScope.locationId || "");
+        if (refreshed !== invoice) changed = true;
+        return refreshed;
+      });
+      return changed ? next : current;
+    });
+  }, [supplierProductMappings, products, confirmedInvoices, confirmedInvoicesLoaded, demoMode, cloudScope.companyId, cloudScope.locationId]);
   const pendingInvoiceCount = workingInvoices.filter((invoice) => invoice.syncStatus !== "synced").length;
   const rememberCloudInvoice = (invoice) => {
     invoiceCommitGenerationRef.current += 1;
@@ -6318,7 +6369,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       }
     } else if (assessment.kind === "same_document") {
       const decision = await requestDuplicateDecision(assessment, invoice);
-      if (decision === "open_existing") { setActiveState("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId:assessment.existing?.id}); }
+      if (decision === "open_existing") { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId:assessment.existing?.id}); }
       return { invoice: assessment.existing, persisted: true, cancelled: true, decision };
     }
     if (["same_uuid_changed", "possible_duplicate"].includes(assessment.kind)) {
@@ -6883,56 +6934,33 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         ? <button className="page-primary-action" onClick={() => setAnalysisRunId((current) => current + 1)} type="button">Run analysis</button>
       : null;
 
+  const dashboardFilters = hasDepartmentContext ? <DashboardFilterBar
+            ActiveIcon={ActiveIcon}
+            dateRange={dateRange}
+            dateRangeOpen={dashboardPeriodOpen}
+            dateRangeState={dateRangeState}
+            department={effectiveDepartment}
+            departmentOpen={departmentOpen}
+            departmentOptions={visibleDepartmentOptions}
+            onDateRangeOpenChange={setDashboardPeriodOpen}
+            onDepartmentOpenChange={setDepartmentOpen}
+            setDateRangeState={setDateRangeState}
+            setDepartment={setDepartment}
+            weekStartsOn={financialSettings.weekStartsOn}
+          /> : null;
+
   return (
     <div className={`app-shell app-page-${active}`}>
-      <aside className="sidebar">
-        <div className="brand">
-          <img alt="MarginFlow" className="brand-logo" src={marginflowLogo} />
-        </div>
-        <nav>
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button className={active === item.id ? "active" : ""} key={item.id} onClick={() => { setActive(item.id); setDepartmentOpen(false); setDashboardPeriodOpen(false); }} type="button">
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="sidebar-user-switcher">
-          <button className="sidebar-location" onClick={() => { setDepartmentOpen((current) => !current); setDashboardPeriodOpen(false); }} type="button">
-            <Store size={18} />
-            <span><strong>{effectiveDepartment}</strong><small>Switch location</small></span>
-          </button>
-          <button aria-label="Collapse sidebar" className="sidebar-collapse" title="Collapse sidebar" type="button"><span aria-hidden="true">‹</span> Collapse</button>
-          <button className="sidebar-signout" onClick={onSignOut} type="button"><LogOut size={17} /> <span>Sign out</span></button>
-          <details className="sidebar-account">
-            <summary>Account</summary>
-            <strong>{currentUser.name}</strong>
-            <small>{currentUser.email}</small>
-            {demoMode ? (
-              <div className="sidebar-account-actions">
-                <button className="ghost" onClick={resetDemoData} type="button">Reset demo</button>
-                <a className="ghost sidebar-link-button" href="/?mode=register">Create account</a>
-              </div>
-            ) : (
-              <>
-                <CloudStatusBanner
-                  enabled={cloudEnabled}
-                  error={cloudError}
-                  loading={cloudLoading}
-                  onRetry={retryCloudSync}
-                  status={cloudStatus}
-                />
-                <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
-              </>
-            )}
-          </details>
-        </div>
-      </aside>
+      <WorkspaceNavigation active={active} items={visibleNavItems} logo={marginflowLogo}
+        company={effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || companySettings.tradingName || companySettings.companyName || "Your workspace"}
+        department={effectiveDepartment} departments={visibleDepartmentOptions} onDepartment={setDepartment} user={{...currentUser, email: effectiveAuthUser?.email || currentUser.email, role: effectiveAuthMembership?.role_label || currentUser.role}} location={effectiveAuthMembership?.locations?.name} settingsSection={settingsSection} onSettings={section => setActive("settings", section)}
+        onNavigate={setActive} onInvoices={({status,type}) => { setInvoiceBrowseRequest({id:uid(),status,type}); setActive("invoiceControl"); }}
+        onUtility={setUtilityPanel} onReport={anchor => {setActive("dashboard");setReportAnchor(anchor);document.getElementById(anchor)?.scrollIntoView({block:"start"});}} onSignOut={onSignOut} />
+      <WorkspaceUtility title={utilityPanel} onClose={() => setUtilityPanel("")} department={effectiveDepartment} period={rangeLabel(dateRangeState,dateRange,financialSettings.weekStartsOn)}
+        pendingCount={demoMode ? 0 : pendingInvoiceCount} cloudError={cloudError} availablePages={visibleNavItems.map(item => item.id)}
+        onNavigate={page => {setUtilityPanel("");setActive(page);}} />
 
-      <main className="workspace">
+      <main className="workspace" id="workspace-content" tabIndex={-1}>
         {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
           <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
@@ -6950,28 +6978,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         )}
         <header className="topbar">
           <div>
-            <h1>{visibleNavItems.find((item) => item.id === active)?.label}</h1>
-            {pageSubtitle && <p className="page-subtitle">{pageSubtitle}</p>}
+            <p className="mf-eyebrow">{active === "settings" ? `Settings / ${settingsGroups.find(group => group.children.some(([id]) => id === settingsSection))?.label || "My account"}` : active === "dashboard" ? `Welcome back, ${currentUser.name?.split(" ")[0] || "there"}` : "Your workspace"}</p>
+            <h1>{active === "settings" ? settingsLeaves.find(([id]) => id === settingsSection)?.[1] : visibleNavItems.find((item) => item.id === active)?.label}</h1>
+            {pageSubtitle && active !== "settings" && <p className="page-subtitle">{pageSubtitle}</p>}
           </div>
           {topbarAction}
         </header>
-
-        {hasDepartmentContext && active === "dashboard" && (
-          <DashboardFilterBar
-            ActiveIcon={ActiveIcon}
-            dateRange={dateRange}
-            dateRangeOpen={dashboardPeriodOpen}
-            dateRangeState={dateRangeState}
-            department={effectiveDepartment}
-            departmentOpen={departmentOpen}
-            departmentOptions={visibleDepartmentOptions}
-            onDateRangeOpenChange={setDashboardPeriodOpen}
-            onDepartmentOpenChange={setDepartmentOpen}
-            setDateRangeState={setDateRangeState}
-            setDepartment={setDepartment}
-            weekStartsOn={financialSettings.weekStartsOn}
-          />
-        )}
 
         {hasDepartmentContext && active !== "dashboard" && (
           <div className="view-context">
@@ -6994,6 +7006,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
 
         {active === "dashboard" && (
           <Dashboard
+            filterBar={dashboardFilters}
             dateRange={dateRange}
             dateRangeState={dateRangeState}
             demoMode={demoMode}
@@ -7008,6 +7021,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             sales={sales}
             setDateRangeState={setDateRangeState}
             onNavigate={setActive}
+            onUtility={setUtilityPanel}
+            onInputSales={() => setSalesInputRequest({ id: uid() })}
+            availablePages={visibleNavItems.map(item => item.id)}
+            pendingCount={demoMode ? 0 : pendingInvoiceCount}
             stocktakes={stocktakes}
             suppliers={suppliers}
             supplierSpend={departmentSupplierSpend}
@@ -7090,11 +7107,11 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             suppliers={suppliers}
           />
         )}
-        {active === "settings" && cloudEnabled && !readOnly && permissionsByPage.invoices?.canEdit && <PendingRecoveryPanel client={supabase} scope={cloudScope} working={invoices} download={downloadJsonFile} onStage={rows => setInvoices(current => {
+        {active === "settings" && settingsSection === "backup" && cloudEnabled && !readOnly && permissionsByPage.invoices?.canEdit && <PendingRecoveryPanel client={supabase} scope={cloudScope} working={invoices} download={downloadJsonFile} onStage={rows => setInvoices(current => {
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setInvoiceBrowseRequest({id:uid(),invoiceId}); setActive("invoiceControl"); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -7172,6 +7189,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {active === "ai" && <AiInsightsPage metrics={metrics} onNavigate={setActive} runId={analysisRunId} />}
         {active === "settings" && (
           <SettingsPanel
+            accountReadOnly={readOnly || supportMode}
+            section={settingsSection}
             aiSettings={aiSettings}
             companySettings={companySettings}
             cloudEnabled={cloudEnabled}
@@ -7503,6 +7522,8 @@ function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeStat
         <Metric empty={!hasPurchases} label="Purchases" value={moneyOrEmpty(metrics.purchases, hasPurchases)} delta={hasPurchases ? department : "No invoices logged yet"} />
         {dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
         <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.realGp >= gpTarget ? "good" : "warn") : "default"} />
+        {dashboardMode && <Metric empty={!hasWaste} label="Waste" value={moneyOrEmpty(metrics.waste,hasWaste)} delta={hasWaste ? "Recorded waste" : "No waste logged yet"} />}
+        {dashboardMode && <Metric empty={!hasGp || !metrics.labourRecords?.length} label="Labour %" value={hasGp && metrics.labourRecords?.length ? percent(metrics.labourPercent) : "–"} delta={metrics.labourRecords?.length ? "Of net sales" : "No labour logged yet"} />}
       </div>
       <details className="more-metrics">
         <summary>More metrics</summary>
@@ -7579,6 +7600,7 @@ function aggregateDashboardRows(rows, range) {
 }
 
 function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics, comparisonRange, dateRange, metrics }) {
+  const comparisonAvailable = Boolean(metrics.salesRows?.length && comparisonMetrics?.salesRows?.length);
   const currentDuration = dateRange ? dateRangeLength(dateRange) : 0;
   const comparisonDuration = comparisonRange ? dateRangeLength(comparisonRange) : 0;
   const periodsHaveDifferentDurations = Boolean(comparisonRange && currentDuration !== comparisonDuration);
@@ -7595,7 +7617,9 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
         </div>
       )}
       {comparisonMode === "None" || !comparisonMetrics ? (
-        <EmptyState />
+        <p className="helper-text">Choose a comparison period to compare performance.</p>
+      ) : !comparisonAvailable ? (
+        <p className="helper-text">Comparison unavailable: sales records are needed in both periods. Missing records are not treated as zero sales.</p>
       ) : (
         <div className="metric-grid compact">
           <Metric label="Net Sales change" value={percent(changePercent(metrics.netSales, comparisonMetrics.netSales))} delta={`${money(comparisonMetrics.netSales)} comparison`} tone={metrics.netSales >= comparisonMetrics.netSales ? "good" : "warn"} />
@@ -7620,7 +7644,7 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
     return (
       <>
         <div className="dashboard-operational-view">
-          <Panel className="dashboard-supplier-spend" title="Supplier spend">
+          <Panel id="mf-supplier-report" className="dashboard-supplier-spend" title="Supplier spend">
             {hasData ? <SupplierSpendChart rows={sortedSuppliers} total={totalSupplierSpend} /> : <EmptyState />}
           </Panel>
           <Panel
@@ -7635,11 +7659,11 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
             {breakdownView === "Department" ? <DepartmentBreakdown rows={departmentRows} /> : <DailyGpTable rows={dailyRows} />}
           </Panel>
         </div>
-        <details className="dashboard-history">
+        <details id="mf-gp-report" className="dashboard-history" open>
           <summary>More metrics</summary>
           <div className="dashboard-layout">
             <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} GP trend`} action={`${chartData.granularity} view`}><DailyGpChart rows={chartData.rows} targetGp={gpTarget} /></Panel>
-            <Panel className="dashboard-compact-chart-panel" title={`${chartPrefix} sales vs purchases`} action={`${chartData.granularity} totals`}><SalesPurchasesChart rows={chartData.rows} /></Panel>
+
           </div>
         </details>
       </>
@@ -7677,7 +7701,37 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
   );
 }
 
-function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
+function DashboardPerformance({filterBar,metrics,dailyRows,comparisonMetrics,compareRange,comparisonMode,setComparisonMode,gpTarget}) {
+  const [metricView,setMetricView]=useState("Sales & purchases");
+  const hasSales=Boolean(metrics.salesRows?.length),hasPurchases=Boolean(metrics.invoices?.length),hasWaste=Boolean(metrics.wasteRecords?.length),hasLabour=Boolean(metrics.labourRecords?.length);
+  const hasGp=hasSales&&metrics.netSales>0;
+  const comparisonReady=hasSales&&Boolean(comparisonMetrics?.salesRows?.length)&&comparisonMetrics.netSales!==0;
+  const salesDates=new Set((metrics.salesRows||[]).map(row=>row.date));
+  const purchaseDates=new Set((metrics.invoices||[]).map(row=>row.date));
+  const rows=dailyRows.map(row=>({...row,label:formatRangeDate(row.date),netSales:salesDates.has(row.date)?row.netSales:null,purchases:purchaseDates.has(row.date)?row.purchases:null}));
+  const series=metricView==="Net sales"?[{key:"netSales",label:"Net sales"}]:metricView==="Purchases"?[{key:"purchases",label:"Purchases"}]:[{key:"netSales",label:"Net sales"},{key:"purchases",label:"Purchases"}];
+  return <section className="mf-performance-surface" id="mf-sales-report">
+    <h2>Performance</h2>
+    <div className="mf-performance-filters">{filterBar}<label className="mf-comparison-filter"><span>vs</span><select aria-label="Dashboard comparison period" value={comparisonMode} onChange={event=>setComparisonMode(event.target.value)}><option>Previous period</option><option>Same period last year</option><option>None</option></select></label></div>
+    <InteractiveChart title="Sales versus purchases" rows={rows} series={series} formatValue={chartMoney}
+      controls={<label className="mf-chart-metric"><span>Metric</span><select aria-label="Performance metric" value={metricView} onChange={event=>setMetricView(event.target.value)}><option>Sales &amp; purchases</option><option>Net sales</option><option>Purchases</option></select></label>}
+      summary={<><span>Net sales</span><strong>{moneyOrEmpty(metrics.netSales,hasSales)}</strong>{comparisonReady?<span className={`mf-change-capsule ${metrics.netSales>=comparisonMetrics.netSales?'positive':'negative'}`}>{metrics.netSales>=comparisonMetrics.netSales?'▲':'▼'} {percent(Math.abs(changePercent(metrics.netSales,comparisonMetrics.netSales)))}</span>:<small>{comparisonMode==="None"?"Comparison off":"Comparison unavailable"}</small>}{compareRange&&<small>{formatRangeDate(compareRange.start)} – {formatRangeDate(compareRange.end)}</small>}<small>Selected department &amp; period</small></>}/>
+    <div className="mf-performance-facts">
+      <div><span>Purchases</span><strong>{moneyOrEmpty(metrics.purchases,hasPurchases)}</strong><small>Confirmed financial inputs</small></div>
+      <div><span>Invoice GP</span><strong>{hasGp?percent(metrics.invoiceGp):"—"}</strong><small>Target {percent(gpTarget)}</small></div>
+      <div><span>Real GP incl. waste</span><strong>{hasGp?percent(metrics.realGp):"—"}</strong><small>Stock-adjusted GP</small></div>
+      <div><span>Waste</span><strong>{moneyOrEmpty(metrics.waste,hasWaste)}</strong><small>{hasWaste?"Recorded waste":"No waste recorded"}</small></div>
+      <div><span>Labour %</span><strong>{hasGp&&hasLabour?percent(metrics.labourPercent):"—"}</strong><small>{hasLabour?"Of net sales":"No labour recorded"}</small></div>
+      <div><span>Gross sales</span><strong>{moneyOrEmpty(metrics.grossSales,hasSales)}</strong><small>Including VAT / tax</small></div>
+    </div>
+  </section>;
+}
+
+function chartMoney(value,compact=false) {
+  return compact?new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP",notation:"compact",maximumFractionDigits:1}).format(value):money(value);
+}
+
+function PerformanceSections({ filterBar, dashboardMode = false, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -7690,7 +7744,7 @@ function PerformanceSections({ dashboardMode = false, dateRange, dateRangeState,
           <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
         </Panel>
       )}
-      <PerformanceSummaryCards dashboardMode={dashboardMode} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />
+      {dashboardMode ? <DashboardPerformance filterBar={filterBar} metrics={metrics} dailyRows={dailyRows} comparisonMetrics={comparisonMetrics} compareRange={compareRange} comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} gpTarget={gpTarget} /> : <PerformanceSummaryCards dashboardMode={false} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />}
       <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       {dashboardMode ? (
         <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
@@ -7714,6 +7768,13 @@ function DashboardFilterBar({
   setDepartment,
   weekStartsOn,
 }) {
+  const filterRef = useRef(null);
+  useEffect(() => {
+    if (!dateRangeOpen && !departmentOpen) return;
+    const dismiss = event => { if (event.key === "Escape" || (event.type === "pointerdown" && !filterRef.current?.contains(event.target))) {onDateRangeOpenChange(false);onDepartmentOpenChange(false);} };
+    document.addEventListener("pointerdown",dismiss);document.addEventListener("keydown",dismiss);
+    return () => {document.removeEventListener("pointerdown",dismiss);document.removeEventListener("keydown",dismiss);};
+  }, [dateRangeOpen,departmentOpen,onDateRangeOpenChange,onDepartmentOpenChange]);
   const activePreset = normalizeRangePreset(dateRangeState.preset);
   const selectPreset = (preset) => {
     const normalizedPreset = normalizeRangePreset(preset);
@@ -7737,7 +7798,7 @@ function DashboardFilterBar({
   };
 
   return (
-    <div className="dashboard-filter-bar" aria-label="Dashboard filters">
+    <div ref={filterRef} className="dashboard-filter-bar" aria-label="Dashboard filters">
       <div className="dashboard-filter">
         <button
           aria-expanded={departmentOpen}
@@ -7752,7 +7813,7 @@ function DashboardFilterBar({
         {departmentOpen && (
           <div className="dashboard-filter-menu dashboard-department-menu">
             {departmentOptions.map((option) => (
-              <button className={department === option ? "active" : ""} key={option} onClick={() => setDepartment(option)} type="button">
+              <button className={department === option ? "active" : ""} key={option} onClick={() => {setDepartment(option);onDepartmentOpenChange(false);}} type="button">
                 {option}
               </button>
             ))}
@@ -7797,12 +7858,46 @@ function DashboardFilterBar({
   );
 }
 
-function Dashboard({ dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function WorkspaceUtility({ title, onClose, department, period, pendingCount, cloudError, availablePages, onNavigate }) {
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("General question");
+  const [consent, setConsent] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
+  const go = (page, label) => availablePages.includes(page) && <button className="ghost" type="button" onClick={() => onNavigate(page)}>{label}<ChevronRight size={16} /></button>;
+  return <InvoiceModal title={title || "Workspace help"} open={Boolean(title)} onClose={onClose} className="mf-utility-drawer">
+    <div className="mf-utility-content">
+      {title === "MarginFlow AI" && <><Sparkles size={30} /><h3>Your profitability assistant</h3><p>{period} · {department}</p><Badge tone="amber">Coming soon</Badge><p>Contextual questions about your data are not available yet. No question is submitted and no records are changed.</p>{go("ai", "Open existing rule-based insights")}</>}
+      {title === "Notifications" && <><p>Current workspace operations</p>{cloudError && <div className="invoice-status error"><strong>Cloud sync needs attention</strong><span>{cloudError}</span></div>}{pendingCount > 0 && <><p>{pendingCount} invoice(s) awaiting cloud confirmation. Confirmed versions remain the reporting source.</p>{go("invoiceControl", "Review pending work")}</>}{!cloudError && !pendingCount && <p>No pending invoice sync notifications. Review the Invoice Control Centre for delivery and matching issues.</p>}{go("invoiceControl", "Open Invoice Control Centre")}</>}
+      {title === "Setup guide" && <><p>Review these steps to configure your workspace. Each opens an existing workflow; completion is not tracked here.</p><ol className="mf-setup-list"><li>Check your business and financial settings{go("settings", "Open settings")}</li><li>Review your supplier directory{go("suppliers", "Open suppliers")}</li><li>Add products and pack sizes{go("products", "Open products")}</li><li>Review your first invoices{go("invoiceControl", "Open invoice control")}</li><li>Record sales for a complete GP view{go("gp", "Open sales")}</li></ol></>}
+      {title === "Support" && <><p>Product guidance</p><details><summary>Why is a total unavailable?</summary><p>Check the selected dates and department. Sales and invoices must be loaded and confirmed before financial totals are ready.</p></details><details><summary>How do I correct an invoice?</summary><p>Open Invoice Control Centre, find the invoice, and review its matches. Pending changes stay separate from the confirmed reporting version.</p></details><details><summary>How do I count stock?</summary><p>Open Inventory → Stocktake, select the period and department, then use the existing count workflow.</p></details>
+        <h3>Report a problem</h3><p>Download a report to share through your existing support channel. Online submission and support-call booking are not available yet.</p>
+        <form onSubmit={event => {event.preventDefault();downloadJsonFile("marginflow-support-report.json", {category,description,...(consent ? {context:{page:currentSearchParams().get("page") || "dashboard",period,department,userAgent:navigator.userAgent}} : {})});setDownloaded(true);}}>
+          <label>Category<select value={category} onChange={event => setCategory(event.target.value)}>{["General question","Invoices","Products & stock","Sales & reports","Settings"].map(value => <option key={value}>{value}</option>)}</select></label>
+          <label>Description<textarea required rows={5} value={description} onChange={event => {setDescription(event.target.value);setDownloaded(false);}} /></label>
+          <label className="checkbox-field"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} /><span>Include browser, page, period and department context</span></label><p className="helper-text">You can attach a screenshot separately when sharing your report.</p><button type="submit">Download problem report</button>{downloaded && <p role="status">Report downloaded. It has not been sent to support.</p>}
+        </form></>}
+    </div>
+  </InvoiceModal>;
+}
+
+function ProductDetails({ product, onClose, onEdit }) {
+  const [tab, setTab] = useState("Details");
+  useEffect(() => setTab("Details"), [product?.id]);
+  return <InvoiceModal title={product?.name || "Product details"} open={Boolean(product)} onClose={onClose} className="mf-product-drawer" footer={onEdit && <button type="button" onClick={() => {onClose();onEdit(product);}}>Edit product</button>}>
+    {product && <><div className="segmented-control mf-detail-tabs" role="group" aria-label="Product detail views">{["Details","Costs","Suppliers","History"].map(label => <button key={label} aria-pressed={tab === label} className={tab === label ? "active" : ""} type="button" onClick={() => setTab(label)}>{label}</button>)}</div>
+      {tab === "Details" && <dl className="mf-detail-list"><dt>Department</dt><dd>{product.department || "Not set"}</dd><dt>Pack / unit</dt><dd>{product.packSize || product.baseUnit || "Not set"}</dd><dt>Aliases</dt><dd>{product.aliases?.join(", ") || "None recorded"}</dd><dt>Status</dt><dd>{product.active === false ? "Inactive" : "Active"}</dd></dl>}
+      {tab === "Costs" && <dl className="mf-detail-list"><dt>Current cost (ex VAT)</dt><dd>{money(product.unitCost)}</dd><dt>Normalised cost</dt><dd>{product.normalizedCostLabel || "Not available"}</dd><dt>Pack conversion</dt><dd>{product.packReview || "Not available"}</dd></dl>}
+      {tab === "Suppliers" && <><p>Primary supplier: <strong>{product.supplier || "Not set"}</strong></p>{product.supplierPrices?.length ? <DataTable columns={[{key:"supplier",label:"Supplier"},{key:"price",label:"Recorded price",render:money},{key:"date",label:"Date"}]} rows={product.supplierPrices.map((row,index) => ({...row,id:`supplier-${index}`}))} /> : <p>No additional supplier prices recorded.</p>}</>}
+      {tab === "History" && (product.priceHistory?.length ? <DataTable columns={[{key:"date",label:"Date"},{key:"supplier",label:"Supplier"},{key:"price",label:"Recorded price",render:money}]} rows={product.priceHistory.map((row,index) => ({...row,id:`history-${index}`}))} /> : <p>No price history recorded for this product.</p>)}
+    </>}
+  </InvoiceModal>;
+}
+
+function Dashboard({ filterBar, onUtility, onInputSales, availablePages = [], pendingCount = 0, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const dashboardDepartment = department;
   const dashboardMetrics = metrics;
   const dashboardTarget = gpTarget;
   const dashboardSupplierSpend = supplierSpend;
-  const dashboardInsightCount = dashboardInsightsForMetrics(dashboardMetrics).length;
   const recentInvoices = [...dashboardMetrics.invoices]
     .map((invoice) => ({ ...invoice, departmentTotal: (invoice.items || []).reduce((sum, item) => sum + lineTotalForDepartment(item, dashboardDepartment, invoice), 0) }))
     .filter((invoice) => dashboardDepartment === "All departments" || Math.abs(invoice.departmentTotal) > 0.01)
@@ -7812,7 +7907,8 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
     <div className="dashboard-page">
       <div className="dashboard-content">
         <section className="dashboard-main-column">
-          <PerformanceSections dashboardMode dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+          <button className="mf-ai-entry" type="button" onClick={() => onUtility?.("MarginFlow AI")}><Sparkles size={21} /><span>Ask about your costs, invoices or GP…<small>Contextual assistant · Coming soon</small></span><ChevronRight size={20} /></button>
+          <PerformanceSections dashboardMode filterBar={filterBar} dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
           <details className="dashboard-documents"><summary>Recent purchasing documents</summary>
             <DataTable
               columns={[
@@ -7827,10 +7923,17 @@ function Dashboard({ dateRange, dateRangeState, demoMode = false, department, de
           </details>
         </section>
         <aside className="dashboard-rail" aria-label="Operational summary">
-          <div className="dashboard-rail-card warning"><span>Invoices</span><strong>{dashboardMetrics.invoiceCount ?? dashboardMetrics.invoices.length}</strong><small>Selected period</small><button onClick={() => onNavigate?.("invoices")} type="button">View invoices</button></div>
-          <div className="dashboard-rail-card"><span>Waste</span><strong>{moneyOrEmpty(dashboardMetrics.waste, Boolean(dashboardMetrics.wasteRecords?.length))}</strong><small>{dashboardMetrics.netSales ? `${percent(dashboardMetrics.wastePercent)} of net sales` : "No sales baseline"}</small><button onClick={() => onNavigate?.("waste")} type="button">View waste</button></div>
-          <div className="dashboard-rail-card"><span>Labour</span><strong>{moneyOrEmpty(dashboardMetrics.labour, Boolean(dashboardMetrics.labourRecords?.length))}</strong><small>{dashboardMetrics.labourRecords?.length ? `${numberValue(dashboardMetrics.labourHours).toFixed(1)} hours` : "No labour logged"}</small><button onClick={() => onNavigate?.("labour")} type="button">View labour</button></div>
-          <div className="dashboard-rail-card warning"><span>AI Insights</span><strong>{dashboardInsightCount}</strong><small>Current filters</small><button onClick={() => onNavigate?.("ai")} type="button">View insights</button></div>
+          <section className="mf-rail-section"><h2>Attention needed</h2>
+            {pendingCount > 0 && availablePages.includes("invoiceControl") && <button className="mf-task" onClick={() => onNavigate("invoices")} type="button"><AlertTriangle size={20} /><span><strong>Pending invoices</strong><small>{pendingCount} awaiting cloud confirmation</small></span><ChevronRight size={17} /></button>}
+            {!dashboardMetrics.salesRows?.length && availablePages.includes("gp") && <button className="mf-task" onClick={() => onNavigate("gp")} type="button"><CalendarDays size={20} /><span><strong>No sales recorded</strong><small>Review the selected period</small></span><ChevronRight size={17} /></button>}
+            {availablePages.includes("invoiceControl") && <button className="mf-task" onClick={() => onNavigate("invoiceControl")} type="button"><ReceiptText size={20} /><span><strong>Invoice control</strong><small>Check review issues and expected deliveries</small></span><ChevronRight size={17} /></button>}
+          </section>
+          <section className="mf-rail-section"><h2>Quick actions</h2><div className="mf-quick-actions">
+            {availablePages.includes("gp") && <button type="button" onClick={onInputSales}><Plus size={18} />Input sales</button>}
+            {availablePages.includes("invoiceControl") && <button type="button" onClick={() => onNavigate("invoices")}><ReceiptText size={18} />Review invoices</button>}
+            {availablePages.includes("stocktake") && <button type="button" onClick={() => onNavigate("stocktake")}><Boxes size={18} />Start stocktake</button>}
+            {availablePages.includes("waste") && <button type="button" onClick={() => onNavigate("waste")}><Trash2 size={18} />Add waste</button>}
+          </div></section>
         </aside>
       </div>
     </div>
@@ -7862,6 +7965,43 @@ function DateRangeControls({ dateRangeState, setDateRangeState, weekStartsOn = "
       )}
     </div>
   );
+}
+
+function useImmediateInvoiceLearning({ supplierProductMappings, products, suppliers, companyId, locationId,
+  departmentSettings, persistInvoiceLearning, setSupplierProductMappings, setInvoiceLineCorrections, departmentNames }) {
+  const learningRef = useRef(supplierProductMappings);
+  learningRef.current = supplierProductMappings;
+  const productsRef = useRef(products);
+  productsRef.current = products;
+  const [learningNotice, setLearningNotice] = useState("");
+  const learningQueue = useRef(Promise.resolve());
+  const saveExplicitDecision = (invoice, line) => {
+    if (line.learningScope === "invoice") {
+      setLearningNotice("Only this invoice: this selection will not become a reusable rule.");
+      return;
+    }
+    setLearningNotice("Saving reusable match…");
+    learningQueue.current = learningQueue.current.catch(() => {}).then(async () => {
+      const supplierRecord = canonicalSupplierForName(suppliers, invoice.supplier || line.supplier);
+      const result = learnSupplierProductMappings({ mappings: learningRef.current,
+        invoice: { ...invoice, items: [line] }, products: productsRef.current, companyId, locationId,
+        supplierId: supplierRecord?.id || invoice.supplierId || "",
+        supplierName: supplierRecord?.name || invoice.supplier || line.supplier,
+        departments: departmentSettings });
+      const outcome = await persistInvoiceLearning(result.learned);
+      if (!result.learned.length || outcome?.persisted?.length !== result.learned.length) {
+        setLearningNotice("Match kept on this invoice. Reusable rule not confirmed by the database. Check the connection and select the product again to retry.");
+        return;
+      }
+      const ids = new Map(outcome.persisted.map(row => [row.mappingId, row.relationalId]));
+      const rules = result.mappings.map(rule => ids.has(rule.id) ? { ...rule, relationalId: ids.get(rule.id), persistenceSource: "relational" } : rule);
+      learningRef.current = rules;
+      setSupplierProductMappings(rules);
+      setInvoiceLineCorrections(current => correctionHistoryForInvoice({ existingCorrections: current, invoice: { ...invoice, items: [line] } }));
+      setLearningNotice("Reusable match saved to database. Compatible pending lines updated; manual exceptions retained.");
+    }).catch(() => setLearningNotice("Reusable match could not be saved. Your invoice selection is retained. Select the product again to retry."));
+  };
+  return { learningRef, productsRef, learningNotice, saveExplicitDecision };
 }
 
 function Invoices({
@@ -7932,6 +8072,10 @@ function Invoices({
   };
   const [invoiceBatch, setInvoiceBatchState] = useState(() => readStoredInvoiceBatch());
   const invoiceBatchRef = useRef(invoiceBatch);
+  const { learningRef, productsRef, learningNotice, saveExplicitDecision } = useImmediateInvoiceLearning({
+    supplierProductMappings, products, suppliers, companyId, locationId, departmentSettings,
+    persistInvoiceLearning, setSupplierProductMappings, setInvoiceLineCorrections, departmentNames,
+  });
   const setInvoiceBatch = (updater) => {
     setInvoiceBatchState((current) => {
       const next = typeof updater === "function" ? updater(current) : updater;
@@ -7939,6 +8083,22 @@ function Invoices({
       return next ? withDerivedInvoiceBatchStage(next) : null;
     });
   };
+  useEffect(() => {
+    setDraft(current => refreshPendingInvoice(current, supplierProductMappings, products, companyId, locationId));
+    setInvoiceBatch(current => {
+      if (!current) return current;
+      let changed = false;
+      const items = (current.items || []).map(item => {
+        if (!item.invoice || ["imported", "importing"].includes(item.status)) return item;
+        const invoice = refreshPendingInvoice(item.invoice, supplierProductMappings, products, companyId, locationId);
+        if (invoice === item.invoice) return item;
+        changed = true;
+        const validation = batchValidationForInvoice(invoice);
+        return { ...item, invoice, ...classifyBatchInvoice(item.id, invoice, validation) };
+      });
+      return changed ? { ...current, items } : current;
+    });
+  }, [supplierProductMappings, products, companyId, locationId]);
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
@@ -8117,7 +8277,13 @@ function Invoices({
   const updateBatchItem = (itemId, patch) => {
     setInvoiceBatch((current) => current ? {
       ...current,
-      items: (current.items || []).map((item) => item.id === itemId ? { ...item, ...patch } : item),
+      items: (current.items || []).map((item) => {
+        if (item.id !== itemId) return item;
+        const next = { ...item, ...patch };
+        if (!next.invoice || ["imported", "importing"].includes(next.status)) return next;
+        const invoice = refreshPendingInvoice(next.invoice, learningRef.current, productsRef.current, companyId, locationId);
+        return invoice === next.invoice ? next : { ...next, invoice, ...classifyBatchInvoice(itemId, invoice, batchValidationForInvoice(invoice)) };
+      }),
     } : current);
   };
 
@@ -8384,7 +8550,7 @@ function Invoices({
     const documentType = detectedDocumentType === PURCHASING_DOCUMENT_TYPES.UNKNOWN ? PURCHASING_DOCUMENT_TYPES.INVOICE : detectedDocumentType;
     const creditReason = normalizeCreditReason(payload.creditReason || payload.credit_reason || inferCreditReasonFromText(invoiceText));
     const inventoryEffect = normalizeInventoryEffect(payload.inventoryEffect || payload.inventory_effect, defaultInventoryEffectForCreditReason(creditReason));
-    const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
+    const supplierScopedMappings = learningRef.current.filter((mapping) => (
       mapping.active !== false
       && (!companyId || !mapping.companyId || mapping.companyId === companyId)
       && (!locationId || !mapping.locationId || mapping.locationId === locationId)
@@ -8593,7 +8759,7 @@ function Invoices({
       const documentType = detectedDocumentType === PURCHASING_DOCUMENT_TYPES.UNKNOWN ? PURCHASING_DOCUMENT_TYPES.INVOICE : detectedDocumentType;
       const creditReason = normalizeCreditReason(payload.creditReason || payload.credit_reason || inferCreditReasonFromText(invoiceText));
       const inventoryEffect = normalizeInventoryEffect(payload.inventoryEffect || payload.inventory_effect, defaultInventoryEffectForCreditReason(creditReason));
-      const supplierScopedMappings = supplierProductMappings.filter((mapping) => (
+      const supplierScopedMappings = learningRef.current.filter((mapping) => (
         mapping.active !== false
         && (!companyId || !mapping.companyId || mapping.companyId === companyId)
         && (!locationId || !mapping.locationId || mapping.locationId === locationId)
@@ -8804,7 +8970,7 @@ function Invoices({
           ? normalizeInvoiceLineForEditor({
             ...lineWithExistingProductResolution(item, product),
             forgetLearnedRule: false,
-            packSize: item.packSize || product.packSize || "",
+            packSize: item.packSize || "",
             supplier: item.supplier || product.supplier || current.supplier,
             department: assignment.department,
             departmentId: assignment.departmentId || item.departmentId || "",
@@ -8819,6 +8985,11 @@ function Invoices({
   const applyExistingProductToDraftLine = (id, productId) => {
     const product = products.find((candidate) => candidate.id === productId);
     if (!product) return;
+    const sourceLine = draft?.items?.find(item => item.id === id);
+    if (sourceLine) {
+      const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
+      saveExplicitDecision(draft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+    }
     setDraft((current) => ({
       ...current,
       status: `Matched to ${productDisplayName(product)}.`,
@@ -8833,7 +9004,7 @@ function Invoices({
         return normalizeInvoiceLineForEditor({
           ...lineWithExistingProductResolution(item, product),
           forgetLearnedRule: false,
-          packSize: item.packSize || product.packSize || "",
+          packSize: item.packSize || "",
           supplier: item.supplier || product.supplier || current.supplier,
           department: assignment.department,
           departmentId: assignment.departmentId || item.departmentId || "",
@@ -8897,7 +9068,7 @@ function Invoices({
             source: item.automaticProductMatch.productMatchSource || item.productMatchSource,
             confidence: item.automaticProductMatch.productMatchConfidence ?? item.productMatchConfidence ?? 1,
           }),
-          packSize: item.packSize || product.packSize || "",
+          packSize: item.packSize || "",
           supplier: item.supplier || product.supplier || current.supplier,
           department,
         }, departmentNames);
@@ -9235,6 +9406,11 @@ function Invoices({
   const applyExistingProductToBatchLine = (id, productId) => {
     const product = products.find((candidate) => candidate.id === productId);
     if (!product) return;
+    const sourceLine = selectedBatchInvoice?.items?.find(item => item.id === id);
+    if (sourceLine) {
+      const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
+      saveExplicitDecision(selectedBatchInvoice, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+    }
     updateSelectedBatchInvoice((base) => ({
       ...base,
       items: (base.items || []).map((item) => {
@@ -9248,7 +9424,7 @@ function Invoices({
         return normalizeInvoiceLineForEditor({
           ...lineWithExistingProductResolution(item, product),
           forgetLearnedRule: false,
-          packSize: item.packSize || product.packSize || "",
+          packSize: item.packSize || "",
           supplier: item.supplier || product.supplier || base.supplier,
           department: assignment.department,
           departmentId: assignment.departmentId || item.departmentId || "",
@@ -10050,7 +10226,7 @@ function Invoices({
         </Panel>
 
         <Panel title={`Review ${documentTypeLabel(draftDocumentType).toLowerCase()} lines`} action={`${draft.items.length} line(s)`}>
-        <InvoiceLineEditor
+        <InvoiceLineEditor learningNotice={learningNotice}
           addSplit={addDraftSplit}
           applySuggestion={applySuggestion}
           applyExistingProduct={applyExistingProductToDraftLine}
@@ -10152,7 +10328,7 @@ function Invoices({
                     {[...new Set(selectedBatchWarningIssues.map((issue) => invoiceReviewIssueText(issue, selectedBatchDocumentType)))].map((message) => <span key={message}>{message}</span>)}
                   </div>
                 )}
-                <InvoiceLineEditor
+                <InvoiceLineEditor learningNotice={learningNotice}
                   addSplit={addBatchReviewSplit}
                   applyExistingProduct={applyExistingProductToBatchLine}
                   createProductFromLine={permissions.canAdd ? createProductFromBatchLine : null}
@@ -10380,7 +10556,7 @@ function Invoices({
             )}
             {editDraftHasLines ? (
               <>
-                <InvoiceLineEditor
+                <InvoiceLineEditor learningNotice={learningNotice}
                   addSplit={addEditSplit}
                   documentType={editDraftDocumentType}
                   departmentNames={departmentNames}
@@ -10470,7 +10646,7 @@ function Invoices({
                   onPercentChange={(value) => updateManualField("invoiceDiscountPercent", value)}
                 />
               </div>
-              <InvoiceLineEditor
+              <InvoiceLineEditor learningNotice={learningNotice}
                 addSplit={addManualSplit}
                 documentType={normalizeDocumentType(manualDraft.documentType)}
                 departmentNames={departmentNames}
@@ -10535,6 +10711,7 @@ function DiscountEditor({ amount, percent, onAmountChange, onPercentChange, amou
 }
 
 function InvoiceLineEditor({
+  learningNotice = "",
   addSplit,
   applyExistingProduct,
   applySuggestion,
@@ -10558,6 +10735,7 @@ function InvoiceLineEditor({
 
   return (
     <div className={wrapClassName}>
+      {learningNotice && <p role="status" className="invoice-status info">{learningNotice}</p>}
       <table className="invoice-review-table">
         <thead>
           <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
@@ -10671,6 +10849,11 @@ function InvoiceLineEditor({
                       {resetProductResolution && <button className="ghost mini-button" onClick={() => resetProductResolution(item.id)} type="button">Choose an existing product instead</button>}
                     </div>
                   )}
+                  {applyExistingProduct && <label className="line-note">Apply selection to
+                    <select aria-label="Match scope" value={item.learningScope || "reuse"} onChange={event => updateLine(item.id, "learningScope", event.target.value)}>
+                      <option value="reuse">Compatible pending and future invoices</option><option value="invoice">Only this invoice</option>
+                    </select>
+                  </label>}
                   {!existingSelected && !item.suggestedProductName && item.matchStatus && <small className="line-note">{item.matchStatus}</small>}
                 </td>
                 <td>
@@ -10688,7 +10871,13 @@ function InvoiceLineEditor({
                     )}
                   </div>
                 </td>
-                <td><input value={item.packSize || ""} onChange={(event) => updateLine(item.id, "packSize", event.target.value)} /></td>
+                <td><label>Pack size<input value={item.packSize || ""} onChange={event => updateLine(item.id, "packSize", event.target.value)} /></label>
+                  <label>Billed per<select aria-label="Billing unit" value={item.unitOfMeasure || ""} onChange={event => updateLine(item.id, "unitOfMeasure", event.target.value)}>
+                    <option value="">Needs conversion</option>{[...new Set([item.unitOfMeasure, "kg", "l", "each", "bag", "sack", "pack", "case", "box", "bottle"].filter(Boolean))].map(unit => <option key={unit}>{unit}</option>)}
+                  </select></label>
+                  <small>{purchaseConversion(item).valid ? `${purchaseConversion(item).volume} ${purchaseConversion(item).unit} · ${money(purchaseConversion(item).price)}/${purchaseConversion(item).unit}` : "Needs conversion · excluded from price comparison"}</small>
+                  {applyExistingProduct && item.matchedProductId && <button type="button" className="ghost mini-button" onClick={() => applyExistingProduct(item.id, item.matchedProductId)}>Save match and conversion</button>}
+                </td>
                 <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
                 <td><input min="0" step="0.01" type="number" value={item.unitCost ?? 0} onChange={(event) => updateLine(item.id, "unitCost", event.target.value)} /></td>
                 <DiscountEditor
@@ -10882,12 +11071,16 @@ function InvoiceControlCentre({
   supplierDeliverySchedules,
   suppliers,
 }) {
+  const { learningRef, productsRef, learningNotice, saveExplicitDecision } = useImmediateInvoiceLearning({
+    supplierProductMappings, products, suppliers, companyId, locationId, departmentSettings,
+    persistInvoiceLearning, setSupplierProductMappings, setInvoiceLineCorrections, departmentNames,
+  });
   const [leaveAction,setLeaveAction]=useState(null);
   const [settingsOpen,setSettingsOpen]=useState(false),[scheduleQuery,setScheduleQuery]=useState("");
   const [browserOpen,setBrowserOpen]=useState(false),[browseSupplier,setBrowseSupplier]=useState(""),[browseQuery,setBrowseQuery]=useState("");
   const [browseFrom,setBrowseFrom]=useState(""),[browseTo,setBrowseTo]=useState(""),[browseType,setBrowseType]=useState("All"),[browseStatus,setBrowseStatus]=useState("All");
   const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null);
-  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");}},[browseRequest?.id]);
+  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");setBrowseStatus(browseRequest.status || "All");setBrowseType(browseRequest.type || "All");}},[browseRequest?.id]);
   const pendingDocuments=workingDocuments.filter(row=>["pending_sync","sync_failed","local_only"].includes(row.syncStatus));
   const browseDocuments=documentsForInvoiceBrowser(invoices,workingDocuments);
   const openBrowse=(supplier="",range=null)=>{setBrowseSupplier(supplier);setBrowseFrom(range?.start||"");setBrowseTo(range?.end||"");setBrowserOpen(true);};
@@ -11165,6 +11358,11 @@ function InvoiceControlCentre({
   const applyExistingProductToReviewLine = (id, productId) => {
     const product = products.find((candidate) => candidate.id === productId);
     if (!product) return;
+    const sourceLine = reviewDetailDraft?.items?.find(item => item.id === id);
+    if (sourceLine) {
+      const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
+      saveExplicitDecision(reviewDetailDraft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+    }
     setReviewDetailDraft((current) => {
       if (!current) return current;
       const base = invoiceWithClearedReviewConfirmation(current);
@@ -11181,7 +11379,7 @@ function InvoiceControlCentre({
           return normalizeInvoiceLineForEditor({
             ...lineWithExistingProductResolution(item, product),
             forgetLearnedRule: false,
-            packSize: item.packSize || product.packSize || "",
+            packSize: item.packSize || "",
             supplier: item.supplier || product.supplier || base.supplier,
             department: assignment.department,
             departmentId: assignment.departmentId || item.departmentId || "",
@@ -11734,6 +11932,12 @@ function InvoiceControlCentre({
 
   return (
     <div className="page-grid invoice-control-page unified-invoices">
+      <section className="mf-invoice-strip" aria-label="Invoice status summary">
+        <button type="button" onClick={() => {openBrowse();setBrowseStatus("All");setBrowseType("All");}}><span>All documents</span><strong>{recordsReady ? browseDocuments.length : "—"}</strong><small>All recorded periods</small></button>
+        <button type="button" onClick={openReviewModal}><span>Needs review</span><strong>{recordsReady ? reviewDocuments.length : "—"}</strong><small>Selected week</small></button>
+        <button type="button" onClick={() => {openBrowse();setBrowseStatus("Pending");setBrowseType("All");}}><span>Pending / failed saves</span><strong>{pendingDocuments.length}</strong><small>Working documents</small></button>
+        <button type="button" onClick={() => {openBrowse();setBrowseType("Credit notes");setBrowseStatus("All");}}><span>Credit notes</span><strong>{recordsReady ? browseDocuments.filter(invoice => isCreditNoteDocument(documentTypeFor(invoice))).length : "—"}</strong><small>All recorded periods</small></button>
+      </section>
       <div className="unified-invoice-actions" aria-label="Invoice Control Centre actions">
         {(permissions.canImport || permissions.canAdd) && <PrimaryAction onClick={()=>onAddInvoice("",today())}>Add invoices</PrimaryAction>}
         <button onClick={()=>openBrowse()} type="button">View invoices</button>
@@ -11832,7 +12036,7 @@ function InvoiceControlCentre({
                   <strong>Invoice lines</strong>
                   {permissions.canEdit && <button className="ghost" onClick={addReviewLine} type="button"><Plus size={16} />Add line</button>}
                 </div>
-                <InvoiceLineEditor
+                <InvoiceLineEditor learningNotice={learningNotice}
                   addSplit={addReviewSplit}
                   applyExistingProduct={applyExistingProductToReviewLine}
                   createProductFromLine={permissions.canAdd ? createProductFromReviewLine : null}
@@ -12157,7 +12361,7 @@ function InvoiceControlCentre({
                   <strong>Invoice lines</strong>
                   {permissions.canEdit && <button className="ghost" onClick={addControlLine} type="button"><Plus size={16} />Add line</button>}
                 </div>
-                <InvoiceLineEditor
+                <InvoiceLineEditor learningNotice={learningNotice}
                   addSplit={addControlSplit}
                   departmentNames={departmentNames}
                   documentType={viewInvoiceDocumentType}
@@ -12197,7 +12401,7 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const visibleSuppliers = activeSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
@@ -12215,8 +12419,18 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
   const [mergeStatus, setMergeStatus] = useState("");
   const [mergeBusy, setMergeBusy] = useState(false);
   const [productQuery, setProductQuery] = useState("");
-  const rows = useMemo(() => buildProductRows(products, { formatMoney: money, formatPercent: percent }), [products]);
-  const productRowsForExport = useMemo(() => tableRowsMatchingQuery(rows, productQuery), [productQuery, rows]);
+  const [productDepartment, setProductDepartment] = useState("");
+  const [productSupplier, setProductSupplier] = useState("");
+  const [productDetail, setProductDetail] = useState(null);
+  const [comparisonId, setComparisonId] = useState("");
+  const [quotationOpen, setQuotationOpen] = useState(false);
+  const {draft: quotationDraft, setDraft: setQuotationDraft, message: quotationDraftMessage} = useQuotationDraft(userId, draftCompanyId);
+  const quotationSelection = quotationDraft.ids;
+  const setQuotationSelection = updater => setQuotationDraft(current => ({...current, ids: updater(current.ids)}));
+  const rows = useMemo(() => latestProductComparisons(products, invoices, supplierProductMappings), [products, invoices, supplierProductMappings]);
+  const comparisonProduct = rows.find(row => row.id === comparisonId);
+  const filteredProductRows = useMemo(() => rows.filter(row => (!productDepartment || row.department === productDepartment) && (!productSupplier || row.supplier === productSupplier || row.comparison.articles.some(article => article.supplier === productSupplier))), [rows,productDepartment,productSupplier]);
+  const productRowsForExport = useMemo(() => tableRowsMatchingQuery(filteredProductRows, productQuery), [productQuery, filteredProductRows]);
   const activeProducts = useMemo(() => products.filter((product) => product.active !== false), [products]);
   const duplicateSuggestions = useMemo(() => mergeOpen ? suggestProductDuplicateGroups(activeProducts, { organisationId: companyId }) : [], [activeProducts, companyId, mergeOpen]);
   const visibleMergeProducts = useMemo(() => {
@@ -12367,34 +12581,51 @@ function Products({ companyId = "", departmentNames, mergeSnapshot = {}, onMerge
 
   return (
     <div className="page-grid">
-      <Panel title="Product database" action="Aliases + supplier comparison">
+      <InvoiceModal title="Request quotation" open={quotationOpen} onClose={() => setQuotationOpen(false)} className="mf-product-drawer mf-comparison-drawer">
+        {quotationOpen && <QuotationPanel products={products.map(product => rows.find(row => row.id === product.id) || product)} invoices={invoices} matching={productRowsForExport} draft={quotationDraft} setDraft={setQuotationDraft} message={quotationDraftMessage} />}
+      </InvoiceModal>
+      <ProductDetails product={productDetail} onClose={() => setProductDetail(null)} onEdit={permissions.canEdit ? openProductModal : null} />
+      <InvoiceModal title={comparisonProduct ? `${comparisonProduct.name} · Supplier comparison` : "Supplier comparison"} open={Boolean(comparisonProduct)} onClose={() => setComparisonId("")} className="mf-product-drawer mf-comparison-drawer">
+        {comparisonProduct && <ProductSupplierComparison product={comparisonProduct} onOpenInvoice={id => { setComparisonId(""); onOpenInvoice?.(id); }} />}
+      </InvoiceModal>
+      <div className="mf-products-database"><Panel title="Product database" action={`${filteredProductRows.length} active products`}>
+        <div className="mf-filter-row"><label>Department<select value={productDepartment} onChange={event => setProductDepartment(event.target.value)}><option value="">All departments</option>{[...new Set(rows.map(row => row.department).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label><label>Supplier<select value={productSupplier} onChange={event => setProductSupplier(event.target.value)}><option value="">All suppliers</option>{[...new Set(rows.flatMap(row => [row.supplier, ...row.comparison.articles.map(article => article.supplier)]).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label><button className="ghost" type="button" onClick={() => {setProductDepartment("");setProductSupplier("");setProductQuery("");}}>Clear filters</button></div>
         {status && <div className="invoice-status info">{status}</div>}
+        <div className="mf-quote-selection-bar"><strong aria-live="polite">{quotationSelection.length} products selected</strong><button className="ghost" onClick={() => setQuotationSelection(current => selectQuotationIds(current, productRowsForExport.filter(quotationEligible).map(row => row.id)))}>Select all {productRowsForExport.filter(quotationEligible).length} matching products</button><button className="ghost" onClick={() => setQuotationOpen(true)}>Review / remove selected</button><button className="ghost" onClick={() => setQuotationSelection(() => [])}>Clear selection</button></div>
+        <p className="mf-quote-draft-status" role="status">{quotationDraftMessage}</p>
         <DataTable
+          pageSize={50}
           columns={[
+            { key: "quotation", label: "Quote", sortable: false, headerRender: pageRows => { const eligible = pageRows.filter(quotationEligible); const count = eligible.filter(row => quotationSelection.includes(row.id)).length; return <input type="checkbox" aria-label="Select current page for quotation" aria-checked={count && count < eligible.length ? "mixed" : count > 0} ref={node => { if (node) node.indeterminate = count > 0 && count < eligible.length; }} checked={eligible.length > 0 && count === eligible.length} disabled={!eligible.length} onChange={event => setQuotationSelection(current => event.target.checked ? selectQuotationIds(current, eligible.map(row => row.id)) : current.filter(id => !eligible.some(row => row.id === id)))} />; }, render: (_, row) => <input aria-label={`Select ${row.name} for quotation`} type="checkbox" checked={quotationSelection.includes(row.id)} onClick={event => event.stopPropagation()} onChange={event => setQuotationSelection(current => event.target.checked ? [...current, row.id] : current.filter(id => id !== row.id))} /> },
             { key: "name", label: "Product" },
             { key: "department", label: "Category" },
             { key: "packSize", label: "Unit", render: (value, row) => value || row.baseUnit || "-" },
             { key: "unitCost", label: "Cost (ex)", render: (value) => money(value) },
             { key: "supplier", label: "Supplier" },
+            { key: "cheapestSupplierName", label: "Cheapest supplier", render: (value, row) => value ? <span>{value}<small className="mf-price-date">{comparisonMoney(row.comparison.best.price, row.comparison.best.currency)}/{comparisonUnit(row.comparison.best.unit)} · {row.comparison.best.date}</small></span> : row.comparison.status },
+            { key: "priceDifferenceLabel", label: "Price difference" },
+            { key: "comparisonAction", label: "Comparison", render: (_, row) => <button className="ghost mini-button" type="button" onClick={event => { event.stopPropagation(); setComparisonId(row.id); }}>View comparison</button> },
             { key: "active", label: "Status", render: (value) => <Badge tone={value === false ? "amber" : "green"}>{value === false ? "Inactive" : "Active"}</Badge> },
           ]}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete product", message: "Are you sure you want to delete this product?", onConfirm: () => setProducts((current) => current.filter((product) => product.id !== id)) }) : null}
           onEdit={permissions.canEdit ? openProductModal : null}
-          rows={rows}
+          rows={filteredProductRows}
+          onRowClick={setProductDetail}
           query={productQuery}
           onQueryChange={setProductQuery}
           toolbarAction={(
             <div className="button-row left tight">
               <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
+              <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
               {permissions.canAdd && <PrimaryAction onClick={() => openProductModal()}>Add Product</PrimaryAction>}
             </div>
           )}
         />
-      </Panel>
+      </Panel></div>
       {modalOpen && !editingId && (
         <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add products">
+          <div className="split-modal wide bulk-modal mf-workflow-screen" role="dialog" aria-modal="true" aria-label="Add products">
             <div className="modal-header">
               <div><h3>Add products</h3><p>Bulk create products</p></div>
               <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
@@ -12558,6 +12789,7 @@ function BulkProductsTable({ departmentNames, rows, setRows, suppliers, updateRo
 }
 
 function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "suppliers"), products, requestDelete, setCreditNotes, setInvoiceDayStatusOverrides = () => {}, setInvoices = () => {}, setProducts = () => {}, suppliers, setSupplierDeliverySchedules = () => {}, setSuppliers, supplierDeliverySchedules = [], supplierSpend }) {
+  const [directoryCategory, setDirectoryCategory] = useState("");
   const empty = { name: "", category: "", contact: "", email: "", phone: "", active: true };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -12745,7 +12977,8 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
 
   return (
     <div className="page-grid">
-      <Panel title="Supplier directory" action="Spend totals">
+      <Panel title="Supplier directory" action="Active suppliers">
+        <div className="mf-filter-row"><label>Category<select value={directoryCategory} onChange={event => setDirectoryCategory(event.target.value)}><option value="">All categories</option>{[...new Set(supplierRows.map(row => row.category).filter(Boolean))].map(value => <option key={value}>{value}</option>)}</select></label></div>
         <DataTable
           columns={[
             {
@@ -12776,13 +13009,13 @@ function Suppliers({ creditNotes, invoiceDayStatusOverrides = [], invoices, perm
           ]}
           onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete supplier", message: "This supplier will be hidden and protected from being recreated by old imports or cached devices.", onConfirm: () => setSuppliers((current) => current.map((supplier) => supplier.id === id ? { ...supplier, active: false, tombstone: true, deletedAt: new Date().toISOString() } : supplier)) }) : null}
           onEdit={permissions.canEdit ? openSupplierModal : null}
-          rows={supplierRows}
+          rows={supplierRows.filter(row => !directoryCategory || row.category === directoryCategory)}
           toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openSupplierModal()}>Add Supplier</PrimaryAction> : null}
         />
       </Panel>
       {modalOpen && !editingId && (
         <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide bulk-modal" role="dialog" aria-modal="true" aria-label="Add suppliers">
+          <div className="split-modal wide bulk-modal mf-workflow-screen" role="dialog" aria-modal="true" aria-label="Add suppliers">
             <div className="modal-header">
               <div><h3>Add suppliers</h3><p>Bulk create suppliers</p></div>
               <button className="icon" onClick={() => setModalOpen(false)} type="button"><X size={16} /></button>
@@ -13266,7 +13499,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       </details>
       {modal && (
         <div className="modal-backdrop" role="presentation">
-          <div className="split-modal wide stocktake-modal" role="dialog" aria-modal="true" aria-label={modal.type}>
+          <div className="split-modal wide stocktake-modal mf-workflow-screen" role="dialog" aria-modal="true" aria-label={modal.type}>
             <div className="modal-header">
               <div><h3>{modal.type}</h3><p>{modal.department} · {modal.date}</p></div>
               <button className="icon" onClick={() => setModal(null)} type="button"><X size={16} /></button>
@@ -15635,6 +15868,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
   };
   const defaultCompareStart = toIsoDate(addDays(startOfWeek(parseDate(dateRange.start), weekStartsOn), -7));
   const [inputOpen, setInputOpen] = useState(false);
+  const [salesMetric, setSalesMetric] = useState("netSales");
   const [salesDraft, setSalesDraft] = useState(() => makeSalesDraft(today()));
   const [compareWeekStart, setCompareWeekStart] = useState(defaultCompareStart);
   const selectedTotals = salesTotalsForRange(sales, dateRange, department);
@@ -15718,6 +15952,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
     <div className={`sales-page${isActive ? "" : " page-component-hidden"}`}>
       {permissions.canAdd && <PrimaryAction className="sales-controls" onClick={openInputSales}>Input Sales</PrimaryAction>}
 
+      <div className="mf-sales-filter-bar"><DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={weekStartsOn}/><span>{formatRangeDate(dateRange.start)} – {formatRangeDate(dateRange.end)}</span></div>
       <div className="metric-grid primary-metrics">
         <Metric empty={!hasSalesInput} label="Net sales" value={moneyOrEmpty(selectedTotals.netSales, hasSalesInput)} delta={hasSalesInput ? `${selectedTotals.rows.length} sales day(s)` : "No sales logged yet"} tone="good" />
         <Metric empty={!hasSalesInput} label="Gross sales" value={moneyOrEmpty(selectedTotals.grossSales, hasSalesInput)} delta={department} />
@@ -15734,7 +15969,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
       </details>
 
       <div className="dashboard-layout secondary">
-        <Panel title="Net sales over time"><LineSeries rows={salesChartData.rows} valueKey="netSales" /></Panel>
+        <Panel className="mf-sales-report-surface" title="Sales over time"><InteractiveChart title="Daily sales" initialView="Line" rows={dailyRows.map(row=>({...row,label:formatRangeDate(row.date)}))} series={[{key:salesMetric,label:salesMetric==="netSales"?"Net sales":"Gross sales"}]} formatValue={chartMoney} controls={<label className="mf-chart-metric"><span>Metric</span><select aria-label="Sales chart metric" value={salesMetric} onChange={event=>setSalesMetric(event.target.value)}><option value="netSales">Net sales</option><option value="grossSales">Gross sales</option></select></label>}/></Panel>
         <Panel title="Comparison">
           <DataTable
             columns={[
@@ -15832,6 +16067,8 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
 }
 
 function SettingsPanel({
+  accountReadOnly = false,
+  section = "profile",
   aiSettings,
   activeUserId,
   authMembership = null,
@@ -15901,7 +16138,7 @@ function SettingsPanel({
   const [parserSampleText, setParserSampleText] = useState("");
   const [parserSampleResult, setParserSampleResult] = useState(null);
   const [userModal, setUserModal] = useState(null);
-  const [settingsSection, setSettingsSection] = useState("");
+  const settingsSection = section;
 
   const canChangeSettings = permissions.canAdd || permissions.canEdit;
   const isCompanyOwner = !authMode || String(authMembership?.role_label || "").toLowerCase() === "owner";
@@ -16326,16 +16563,9 @@ function SettingsPanel({
 
   return (
     <div className={`settings-grid settings-page${settingsSection ? ` settings-detail-view settings-section-${settingsSection}` : ""}`}>
-      {!settingsSection ? (
-        <SettingsLanding
-          cloudEnabled={cloudEnabled}
-          cloudStatus={cloudStatus}
-          demoMode={demoMode}
-          onOpen={setSettingsSection}
-        />
-      ) : (
-        <>
-          <button className="settings-back-link" onClick={() => setSettingsSection("")} type="button">Back to Settings</button>
+      <>
+      {["profile","security"].includes(settingsSection) && <PersonalAccount user={authUser} membership={authMembership} client={supabase} demoMode={demoMode} readOnly={accountReadOnly} section={settingsSection}/>}
+      {settingsSection === "billing" && <CompanySubscription membership={authMembership} client={supabase} demoMode={demoMode}/>}
       {!demoMode && (
         <Panel className="settings-cloud-section" title="Cloud sync" action={cloudStatusText[cloudStatus] || cloudStatusText.local}>
           <div className={`cloud-settings-card ${cloudStatus === "error" ? "error" : cloudStatus === "synced" ? "success" : "info"}`}>
@@ -16349,47 +16579,7 @@ function SettingsPanel({
       )}
       {demoMode && <Panel className="settings-cloud-section" title="Cloud sync" action="Demo mode"><p className="helper-text">Cloud synchronisation is unavailable while using temporary demo data.</p></Panel>}
       <Panel className="settings-users-section" title="Users & Permissions" action={demoMode ? "Demo Mode" : authMode ? "Supabase Auth" : "Local placeholders"}>
-        {demoMode ? (
-          <div className="auth-account-summary">
-            <div>
-              <span>Account</span>
-              <strong>{authUserName(authUser)}</strong>
-              <small>{authUser?.email}</small>
-            </div>
-            <div>
-              <span>Company</span>
-              <strong>{authMembership?.companies?.trading_name || authMembership?.companies?.name || "MarginFlow Demo"}</strong>
-              <small>{authMembership?.locations?.name || "Demo Location"}</small>
-            </div>
-            <div>
-              <span>Role</span>
-              <strong>Owner</strong>
-              <small>Demo permissions are read/write locally only</small>
-            </div>
-          </div>
-        ) : authMode ? (
-          <div className="auth-account-summary">
-            <div>
-              <span>Account</span>
-              <strong>{authUserName(authUser)}</strong>
-              <small>{authUser?.email}</small>
-            </div>
-            <div>
-              <span>Company</span>
-              <strong>{authMembership?.companies?.trading_name || authMembership?.companies?.name || "MarginFlow"}</strong>
-              <small>{authMembership?.locations?.name || "Company access"}</small>
-            </div>
-            <div>
-              <span>Role</span>
-              <strong>{authMembership?.role_label || "Owner"}</strong>
-              <small>Managed by Supabase Auth</small>
-            </div>
-          </div>
-        ) : (
-          <div className="form-grid six">
-            <label>Current user<select value={activeUserId || ""} onChange={(event) => setActiveUserId(event.target.value)}>{users.filter((user) => user.status !== "Disabled").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
-          </div>
-        )}
+        {!demoMode && !authMode && <label>Current user<select value={activeUserId || ""} onChange={event => setActiveUserId(event.target.value)}>{users.filter(user => user.status !== "Disabled").map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>}
         <DataTable
           columns={[
             { key: "name", label: "Name" },
@@ -16501,21 +16691,20 @@ function SettingsPanel({
       </Panel>
 
       <Panel className="settings-notifications-section" title="Notifications">
-        <p className="helper-text">Notification preferences are managed through your account and connected services.</p>
+        <p className="helper-text">Notification preferences are not configurable here yet. Open Notifications in the sidebar for current operational items.</p>
       </Panel>
 
       <Panel className="settings-datetime-section" title="Financial settings">
         <div className="form-grid six">
           <label>Currency<select value={financialSettings.currency} onChange={(event) => updateFinancial("currency", event.target.value)}><option>GBP</option><option>EUR</option><option>USD</option></select></label>
           <label>Week starts on<select value={financialSettings.weekStartsOn} onChange={(event) => updateFinancial("weekStartsOn", event.target.value)}><option>Monday</option><option>Sunday</option></select></label>
-          <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
           <Field label="Default VAT %" type="number" value={financialSettings.defaultVat} onChange={(value) => updateFinancial("defaultVat", numberValue(value))} />
           <label>Fiscal year start month<select value={financialSettings.fiscalYearStartMonth} onChange={(event) => updateFinancial("fiscalYearStartMonth", event.target.value)}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((month) => <option key={month}>{month}</option>)}</select></label>
           <Field label="Timezone" value={financialSettings.timezone} onChange={(value) => updateFinancial("timezone", value)} />
         </div>
       </Panel>
 
-      <Panel title="Labour settings">
+      <Panel className="settings-labour-section" title="Labour settings">
         <div className="form-grid six">
           <Field label="Target labour %" type="number" value={labourSettings.targetLabourPercent} onChange={(value) => updateLabourSettings("targetLabourPercent", numberValue(value))} />
           <CheckboxField checked={labourSettings.weeklyView} label="Use weekly labour control by default" onChange={(value) => updateLabourSettings("weeklyView", value)} />
@@ -16529,7 +16718,7 @@ function SettingsPanel({
         <p className="helper-text">Labour is controlled weekly. Sales and service charge should normally come from the Sales page, while Labour keeps staff hours, departments, rates and holiday rules.</p>
       </Panel>
 
-      <Panel title="POS & Sales Setup">
+      <Panel className="settings-pos-section" title="POS & Sales Setup">
         <div className="form-grid six">
           <label>POS Provider<select value={financialSettings.posProvider || defaultFinancialSettings.posProvider} onChange={(event) => updateFinancial("posProvider", event.target.value)}>{["Square", "Lightspeed", "EPOS Now", "Toast", "Zettle", "Other / Manual"].map((provider) => <option key={provider}>{provider}</option>)}</select></label>
           <label>Sales input method<select value={financialSettings.salesInputMethod || defaultFinancialSettings.salesInputMethod} onChange={(event) => updateFinancial("salesInputMethod", event.target.value)}><option>Manual Gross + Net Sales</option><option>Auto-calculate Net Sales from VAT %</option><option>CSV/POS import</option></select></label>
@@ -16548,7 +16737,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="CSV Templates / Import Guide">
+      <Panel className="settings-templates-section" title="CSV Templates / Import Guide">
         <div className="button-row left">
           <a className="file-button secondary" download="marginflow-sales-generic-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(genericSalesTemplate)}`}>Generic CSV Template</a>
           <a className="file-button secondary" download="marginflow-square-sales-template.csv" href={`data:text/csv;charset=utf-8,${encodeURIComponent(squareSalesTemplate)}`}>Square CSV Template</a>
@@ -16561,7 +16750,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel className="settings-categories-section" title="Categories">
+      <Panel className="settings-categories-section" title="Departments">
         <DataTable
           columns={[
             { key: "name", label: "Department" },
@@ -16591,8 +16780,10 @@ function SettingsPanel({
         </EditModal>
       )}
 
-      <Panel title="Menu costing settings">
+      <Panel className="settings-targets-section" title="GP targets">
         <div className="form-grid six">
+          <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
+
           <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
           <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowSubcategoryTargetOverride} label="Allow subcategory target override" onChange={(value) => updateMenu("allowSubcategoryTargetOverride", value)} />
@@ -16600,7 +16791,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Invoice settings">
+      <Panel className="settings-invoice-section" title="Invoice settings">
         <div className="form-grid six">
           <CheckboxField checked={invoiceSettings.requireApprovalBeforeGp} label="Require approval before invoice affects GP" onChange={(value) => updateInvoice("requireApprovalBeforeGp", value)} />
           <label>Default invoice department<select value={invoiceSettings.defaultInvoiceDepartment} onChange={(event) => updateInvoice("defaultInvoiceDepartment", event.target.value)}>{departmentSettings.filter((department) => department.active).map((department) => <option key={department.id}>{department.name}</option>)}</select></label>
@@ -16609,7 +16800,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="AI settings">
+      <Panel className="settings-ai-section" title="AI settings">
         <div className="form-grid six">
           <CheckboxField checked={aiSettings.enableAiInvoiceReading} label="Enable AI invoice reading" onChange={(value) => updateAi("enableAiInvoiceReading", value)} />
           <CheckboxField checked={aiSettings.enableAiProductMatching} label="Enable AI product matching" onChange={(value) => updateAi("enableAiProductMatching", value)} />
@@ -16619,7 +16810,7 @@ function SettingsPanel({
         </div>
       </Panel>
 
-      <Panel title="Supplier Parser Settings" action="Work Edition">
+      <Panel className="settings-parsers-section" title="Supplier Parser Settings" action="Work Edition">
         <DataTable
           columns={[
             { key: "name", label: "Supplier" },
@@ -16643,7 +16834,7 @@ function SettingsPanel({
         )}
       </Panel>
 
-      {showRecoveryTools && <FinalRecoveryPanel
+      {showRecoveryTools && settingsSection === "backup" && <FinalRecoveryPanel
         canWrite={permissions.canImport}
         cloudEnabled={cloudEnabled}
         onApplyAutomatic={onApplySafeRecovery}
@@ -16893,114 +17084,10 @@ function SettingsPanel({
         </div>
       )}
         </>
-      )}
     </div>
   );
 }
 
-function SettingsLanding({ cloudEnabled, cloudStatus, demoMode, onOpen }) {
-  const integrationStatus = cloudEnabled && cloudStatus === "synced" ? "Connected" : "Manage";
-
-  return (
-    <div className="settings-landing-grid">
-      <section className="settings-summary-card">
-        <h2>Business</h2>
-        <div className="settings-summary-row"><span>Business details</span><button onClick={() => onOpen("business")} type="button">Update profile</button></div>
-        <div className="settings-summary-row"><span>Locations</span><button onClick={() => onOpen("locations")} type="button">Manage</button></div>
-        <div className="settings-summary-row"><span>Users</span><button onClick={() => onOpen("users")} type="button">Team access</button></div>
-      </section>
-      <section className="settings-summary-card">
-        <h2>Integrations</h2>
-        <div className="settings-summary-row"><span>Cloud sync</span><button className={integrationStatus === "Connected" ? "success" : ""} onClick={() => onOpen("cloud")} type="button">{integrationStatus}</button></div>
-        <div className="settings-summary-row"><span>Data &amp; Time</span><button onClick={() => onOpen("datetime")} type="button">Preferences</button></div>
-        <div className="settings-summary-row"><span>Notifications</span><button onClick={() => onOpen("notifications")} type="button">Manage</button></div>
-      </section>
-      <section className="settings-summary-card">
-        <h2>Data</h2>
-        <div className="settings-summary-row"><span>Backup &amp; Restore</span><button onClick={() => onOpen("backup")} type="button">Open</button></div>
-        <div className="settings-summary-row"><span>Categories</span><button onClick={() => onOpen("categories")} type="button">Manage</button></div>
-        <div className="settings-summary-row"><span>Units</span><button onClick={() => onOpen("units")} type="button">Manage</button></div>
-      </section>
-      <section className="settings-summary-card danger-zone-card">
-        <h2>Danger Zone</h2>
-        <strong>Delete Data</strong>
-        <p>{demoMode ? "Reset this temporary demo data" : "Permanently delete saved application data"}</p>
-        <button className="danger" onClick={() => onOpen("danger")} type="button">{demoMode ? "Reset demo" : "Delete data"}</button>
-      </section>
-    </div>
-  );
-}
-
-function DataTable({ mobileSort = false, columns, rows, onEdit, onDelete, onRowClick, toolbarAction, query: controlledQuery, onQueryChange }) {
-  const [uncontrolledQuery, setUncontrolledQuery] = useState("");
-  const query = controlledQuery ?? uncontrolledQuery;
-  const [sort, setSort] = useState({ key: columns[0]?.key || "", dir: "asc" });
-  const filtered = useMemo(() => {
-    return [...tableRowsMatchingQuery(rows, query)]
-      .sort((a, b) => {
-        const av = String(a[sort.key] ?? "");
-        const bv = String(b[sort.key] ?? "");
-        return sort.dir === "asc" ? av.localeCompare(bv, undefined, { numeric: true }) : bv.localeCompare(av, undefined, { numeric: true });
-      });
-  }, [rows, query, sort]);
-
-  const toggleSort = (key) => setSort((current) => ({ key, dir: current.key === key && current.dir === "asc" ? "desc" : "asc" }));
-
-  return (
-    <>
-      <div className="table-toolbar">
-        <label><Search size={15} /><input placeholder="Search..." value={query} onChange={(event) => (onQueryChange || setUncontrolledQuery)(event.target.value)} /></label>
-        {toolbarAction}
-        {mobileSort && <label className="invoice-mobile-sort">Sort by<select aria-label="Sort by" value={`${sort.key}:${sort.dir}`} onChange={event=>{const [key,dir]=event.target.value.split(":");setSort({key,dir});}}>{columns.filter(column=>column.sortable!==false).flatMap(column=>["asc","desc"].map(dir=><option key={`${column.key}:${dir}`} value={`${column.key}:${dir}`}>{column.label} · {dir === "asc" ? "ascending" : "descending"}</option>))}</select></label>}
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              {columns.map((column) => (
-                <th key={column.key}>
-                  {column.headerRender
-                    ? column.headerRender()
-                    : column.sortable === false
-                      ? <span className="table-column-label">{column.label}</span>
-                      : <button className="sort-button" onClick={() => toggleSort(column.key)} type="button">{column.label}<ArrowDownUp size={13} /></button>}
-                </th>
-              ))}
-              {(onEdit || onDelete) && <th>Actions</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((row) => (
-              <tr
-                className={onRowClick ? "clickable-table-row" : ""}
-                key={row.id}
-                onClick={onRowClick ? () => onRowClick(row) : undefined}
-                onKeyDown={onRowClick ? (event) => {
-                  if (event.target !== event.currentTarget) return;
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  event.preventDefault();
-                  onRowClick(row);
-                } : undefined}
-                role={onRowClick ? "button" : undefined}
-                tabIndex={onRowClick ? 0 : undefined}
-              >
-                {columns.map((column) => <td key={column.key}>{column.render ? column.render(row[column.key], row) : row[column.key]}</td>)}
-                {(onEdit || onDelete) && (
-                  <td>
-                    <div className="row-actions" onClick={onRowClick ? (event) => event.stopPropagation() : undefined}>
-                      {onEdit && <button className="icon" onClick={() => onEdit(row)} type="button"><Edit3 size={15} /></button>}
-                      {onDelete && <button className="icon danger" onClick={() => onDelete(row.id)} type="button"><Trash2 size={15} /></button>}
-                    </div>
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </>
-  );
-}
 
 function ConfirmDeleteModal({
   open,
@@ -17031,45 +17118,15 @@ function ConfirmDeleteModal({
 }
 
 function EditModal({ title, children, onCancel, onSave, saveLabel = "Save Changes" }) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="split-modal wide" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header">
-          <div>
-            <h3>{title}</h3>
-            <p>Review details before saving changes.</p>
-          </div>
-          <button className="icon" onClick={onCancel} type="button"><X size={16} /></button>
-        </div>
-        {children}
-        <div className="button-row left">
-          <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-          <button onClick={onSave} type="button"><Save size={16} />{saveLabel}</button>
-        </div>
-      </div>
-    </div>
-  );
+  return <InvoiceModal title={title} open onClose={onCancel} className="mf-workflow-screen" footer={<><button className="ghost" onClick={onCancel} type="button">Cancel</button><button onClick={onSave} type="button"><Save size={16}/>{saveLabel}</button></>}><p className="mf-editor-intro">Review the details below, then save your changes.</p>{children}</InvoiceModal>;
 }
 
 function AppModal({ title, open, onClose, footer, children, wide = false, className = "" }) {
-  if (!open) return null;
-  return createPortal(
-    <div className="modal-backdrop" role="presentation">
-      <div className={`app-modal ${wide ? "wide" : ""} ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-head">
-          <h2>{title}</h2>
-          <button className="icon" onClick={onClose} type="button"><X size={17} /></button>
-        </div>
-        <div className="modal-body">{children}</div>
-        {footer && <div className="modal-footer">{footer}</div>}
-      </div>
-    </div>,
-    document.body
-  );
+  return <InvoiceModal title={title} open={open} onClose={onClose} footer={footer} wide={wide} className={`${wide ? "mf-workflow-screen" : "mf-compact-dialog"} ${className}`}>{children}</InvoiceModal>;
 }
 
 function PrimaryAction({ children, className = "", ...props }) {
-  return <button {...props} className={`page-primary-action ${className}`.trim()} type="button"><Plus size={16} />{children}</button>;
+  return <button {...props} className={`page-primary-action ${className}`.trim()} type="button"><Plus size={16} aria-hidden="true" /><span>{children}</span></button>;
 }
 
 function Field({ label, value, onChange, type = "text", readOnly = false }) {
@@ -17095,9 +17152,9 @@ function Metric({ label, value, delta, tone = "default", empty = false }) {
   );
 }
 
-function Panel({ title, action, centerAction = null, children, className = "" }) {
+function Panel({ id, title, action, centerAction = null, children, className = "" }) {
   return (
-    <section className={`panel ${className}`.trim()}>
+    <section id={id} className={`panel ${className}`.trim()}>
       <div className={`panel-head ${centerAction ? "with-centered-action" : ""}`}>
         <h2>{title}</h2>
         {centerAction && <div className="panel-center-action">{centerAction}</div>}
@@ -17113,65 +17170,12 @@ function EmptyState() {
 }
 
 function DailyGpChart({ rows, targetGp }) {
-  // GP is only meaningful on days with sales. Purchases-only days used to create a flat 0% line with large-looking markers.
-  const validRows = rows.filter((row) => numberValue(row.netSales) > 0);
-  if (!validRows.length) return <EmptyState />;
-  const values = validRows.flatMap((row) => [row.invoiceGp, targetGp]);
-  const min = Math.min(0, ...values);
-  const max = Math.max(100, ...values);
-  const y = (value) => 90 - (((numberValue(value) - min) / Math.max(max - min, 1)) * 78);
-  const x = (index) => 8 + (index / Math.max(validRows.length - 1, 1)) * 84;
-  const points = validRows.map((row, index) => ({ x: x(index), y: y(row.invoiceGp) }));
-  const smoothPath = points.reduce((path, point, index) => {
-    if (!index) return `M ${point.x} ${point.y}`;
-    const previous = points[index - 1];
-    const controlOffset = (point.x - previous.x) / 2;
-    return `${path} C ${previous.x + controlOffset} ${previous.y}, ${point.x - controlOffset} ${point.y}, ${point.x} ${point.y}`;
-  }, "");
-  const targetY = y(targetGp);
-
-  return (
-    <div className="performance-chart">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="gpLineGradient" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" stopColor="#38bdf8" />
-            <stop offset="100%" stopColor="#60a5fa" />
-          </linearGradient>
-        </defs>
-        <line className="target-line" x1="8" x2="92" y1={targetY} y2={targetY} />
-        <path className="actual-line smooth-line" d={smoothPath} stroke="url(#gpLineGradient)" />
-        {validRows.map((row, index) => (
-          <line className="chart-hover-line" key={row.id} x1={x(index)} x2={x(index)} y1="8" y2="92">
-            <title>{`${row.label || formatRangeDate(row.date)}\nGross Sales: ${money(row.grossSales)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nGP: ${percent(row.invoiceGp)}\nVariance vs target: ${percent(row.invoiceGp - targetGp)}`}</title>
-          </line>
-        ))}
-      </svg>
-      <div className="chart-legend"><span><i className="legend-actual" />Actual GP %</span><span><i className="legend-target" />Target GP %</span></div>
-      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${validRows.length}, 1fr)` }}>{validRows.map((row) => <span key={row.id}>{row.label || formatRangeDate(row.date)}</span>)}</div>
-    </div>
-  );
+  const validRows = rows.filter(row => numberValue(row.netSales) > 0).map(row => ({...row,targetGp}));
+  return <InteractiveChart title="Gross profit trend" initialView="Line" rows={validRows} series={[{key:"invoiceGp",label:"Invoice GP"},{key:"targetGp",label:"Target GP",dashed:true}]} formatValue={value=>percent(value)} />;
 }
 
 function SalesPurchasesChart({ rows }) {
-  const validRows = rows.filter((row) => row.netSales || row.purchases);
-  if (!validRows.length) return <EmptyState />;
-  const max = Math.max(...validRows.flatMap((row) => [Math.abs(row.netSales), Math.abs(row.purchases)]), 1);
-
-  return (
-    <div className="grouped-bars">
-      {validRows.map((row) => (
-        <div className="grouped-bar" key={row.id}>
-          <div className="group-track">
-            <span className="sales-bar" style={{ height: `${(row.netSales / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-            <span className="purchase-bar" style={{ height: `${(Math.abs(row.purchases) / max) * 100}%` }} title={`${row.label || formatRangeDate(row.date)}\nNet Sales: ${money(row.netSales)}\nPurchases: ${money(row.purchases)}\nDifference: ${money(row.netSales - row.purchases)}`} />
-          </div>
-          <small>{row.label || formatRangeDate(row.date)}</small>
-        </div>
-      ))}
-      <div className="chart-legend"><span><i className="legend-sales" />Net Sales</span><span><i className="legend-purchases" />Purchases</span></div>
-    </div>
-  );
+  return <InteractiveChart title="Sales versus purchases" rows={rows.filter(row=>row.netSales||row.purchases)} series={[{key:"netSales",label:"Net sales"},{key:"purchases",label:"Purchases"}]} formatValue={chartMoney} />;
 }
 
 function DepartmentBreakdown({ rows }) {

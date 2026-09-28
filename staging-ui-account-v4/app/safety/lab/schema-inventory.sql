@@ -1,7 +1,0 @@
-BEGIN READ ONLY;
-SELECT 'public_table_acl',md5(string_agg(c.relname||':'||coalesce((SELECT string_agg(CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END||':'||pg_get_userbyid(a.grantor)||':'||a.privilege_type||':'||a.is_grantable::text, ',' ORDER BY a.grantee,a.grantor,a.privilege_type,a.is_grantable) FROM aclexplode(c.relacl) a),'')||':'||c.relrowsecurity::text, E'\n' ORDER BY c.relname)) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r';
-SELECT 'policies',md5(string_agg(schemaname||'.'||tablename||'.'||policyname||':'||roles::text||':'||cmd||':'||coalesce(qual,'')||':'||coalesce(with_check,''), E'\n' ORDER BY schemaname,tablename,policyname)) FROM pg_policies WHERE schemaname IN ('public','auth','storage');
-SELECT 'migration_history',count(*),md5(string_agg(to_jsonb(t)::text,E'\n' ORDER BY version)) FROM supabase_migrations.schema_migrations t;
-SELECT 'extensions',md5(string_agg(extname||':'||extversion,E'\n' ORDER BY extname)) FROM pg_extension;
-SELECT 'function_acl',md5(string_agg(p.proname||pg_get_function_identity_arguments(p.oid)||':'||coalesce((SELECT string_agg(CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END||':'||a.privilege_type||':'||a.is_grantable::text, ',' ORDER BY a.grantee,a.privilege_type,a.is_grantable) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a),''), E'\n' ORDER BY p.proname,pg_get_function_identity_arguments(p.oid))) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public';
-COMMIT;

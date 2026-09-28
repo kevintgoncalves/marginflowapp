@@ -3,7 +3,7 @@ import {createPortal} from 'react-dom';
 
 // Invoice-only modal stack: retain underlying workflow state without overlapping dialogs.
 const stack = [];
-export default function InvoiceModal({title,open,onClose,footer,children,wide=false,className=''}) {
+export default function InvoiceModal({title,open,onClose,footer,children,wide=false,className='',closeOnBackdrop=false}) {
   const ref=useRef(null), close=useRef(onClose); close.current=onClose;
   useEffect(()=>{
     if(!open)return;
@@ -27,7 +27,7 @@ export default function InvoiceModal({title,open,onClose,footer,children,wide=fa
     return()=>{document.removeEventListener('keydown',keys,true);stack.splice(stack.indexOf(entry),1);refresh();if(opener?.isConnected)opener.focus();};
   },[open]);
   if(!open)return null;
-  return createPortal(<div ref={ref} tabIndex={-1} className="modal-backdrop unified-invoice-overlay">
+  return createPortal(<div ref={ref} tabIndex={-1} className="modal-backdrop unified-invoice-overlay" onClick={event=>{if(closeOnBackdrop && event.target===event.currentTarget)onClose?.();}}>
     <div className={`app-modal unified-invoice-modal ${wide?'wide':''} ${className}`} role="dialog" aria-modal="true" aria-label={title}>
       <div className="modal-head"><h2>{title}</h2><button className="icon" aria-label={`Close ${title}`} onClick={onClose} type="button">×</button></div>
       <div className="modal-body">{children}</div>{footer&&<div className="modal-footer">{footer}</div>}
