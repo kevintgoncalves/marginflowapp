@@ -187,7 +187,7 @@ export async function persistRelationalSupplierProductMappings(client, mappings 
   for (const mapping of mappings) {
     const payload = persistencePayload(mapping, scope);
     if (!payload) {
-      skipped.push({ mappingId: mapping.id || "", reason: "Learning references are not canonical relational UUIDs." });
+      skipped.push({ mappingId: mapping.id || "", reason: "Select an active department and saved supplier/product before saving a reusable match." });
       continue;
     }
     const { data, error } = await client.rpc("persist_supplier_product_learning_v2", payload);

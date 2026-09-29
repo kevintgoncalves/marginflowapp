@@ -1,0 +1,7 @@
+{
+  "20260929230000_scoped_learning_confirmation.sql": {
+    "sha256": "8558304a81cc04ad51f439532b793ae22f15757c5b7838ffddeb90f603951723",
+    "review": "docs/reviews/approved-ui-session/preview-validation/PERSISTENCE_FIX.md",
+    "test": "scripts/test-learning-postgres.py"
+  }
+}

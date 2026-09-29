@@ -3,6 +3,11 @@ import { numberValue } from "./numberUtils.js";
 const DEFAULT_DEPARTMENT = "Kitchen Made";
 const SPLIT_TOLERANCE = 0.01;
 
+// Defaults apply to new lines only; unknown existing allocations need review.
+export function configuredInvoiceDepartment(preferred, departmentNames = []) {
+  return departmentNames.find(name => name === preferred) || departmentNames[0] || "";
+}
+
 export function canonicalDepartmentName(value = "", fallback = DEFAULT_DEPARTMENT, departmentNames = []) {
   const text = String(value || "").trim();
   const fallbackText = String(fallback || DEFAULT_DEPARTMENT).trim() || DEFAULT_DEPARTMENT;

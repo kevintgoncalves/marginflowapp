@@ -5,18 +5,31 @@ import { resolve } from "node:path";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const expected = JSON.parse(readFileSync(resolve(root, "safety/migration-checksums.json"), "utf8"));
+const reviewed = JSON.parse(readFileSync(resolve(root, "safety/reviewed-additive-migrations.json"), "utf8"));
 const actualFiles = readdirSync(resolve(root, "supabase/migrations")).filter((name) => name.endsWith(".sql")).sort();
 const failures = [];
 for (const name of actualFiles) {
   const digest = createHash("sha256").update(readFileSync(resolve(root, "supabase/migrations", name))).digest("hex");
-  if (!Object.hasOwn(expected, name)) failures.push(`Unreviewed migration: ${name}`);
-  else if (expected[name] !== digest) failures.push(`Existing migration changed: ${name}`);
+  if (Object.hasOwn(expected, name)) {
+    if (expected[name] !== digest) failures.push(`Existing migration changed: ${name}`);
+  } else if (!Object.hasOwn(reviewed, name)) failures.push(`Unreviewed migration: ${name}`);
+  else {
+    const review = reviewed[name];
+    if (review.sha256 !== digest) failures.push(`Reviewed migration changed: ${name}`);
+    for (const field of ["review", "test"]) {
+      if (!review[field] || !readFileSync(resolve(root, review[field]), "utf8").trim()) failures.push(`Missing ${field} evidence: ${name}`);
+    }
+  }
 }
 for (const name of Object.keys(expected)) if (!actualFiles.includes(name)) failures.push(`Migration removed: ${name}`);
+for (const name of Object.keys(reviewed)) {
+  if (Object.hasOwn(expected, name)) failures.push(`Original migration must not be reclassified: ${name}`);
+  if (!actualFiles.includes(name)) failures.push(`Reviewed migration removed: ${name}`);
+}
 if (failures.length) {
   console.error(failures.join("\n"));
   console.error("Data safety check FAILED. Review the migration and its preservation tests; do not regenerate the baseline just to bypass this check.");
   process.exitCode = 1;
 } else {
-  console.log(`Data safety check passed: ${actualFiles.length} original migrations unchanged; no new migration. This does not verify live backups or production configuration.`);
+  console.log(`Data safety check passed: ${Object.keys(expected).length} original migrations unchanged; ${Object.keys(reviewed).length} reviewed additive migration(s) match their recorded hashes. This does not verify live application, backups or production configuration.`);
 }

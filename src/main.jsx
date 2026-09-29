@@ -144,6 +144,7 @@ import InternalAdmin from "./components/InternalAdmin.jsx";
 import { comparisonRangesForChosenWeek } from "./domain/salesComparison.js";
 import { MENU_STATUS_OPTIONS, MENU_STATUSES, isMenuArchived, updateMenuStatus, visibleMenus } from "./domain/menuLifecycle.js";
 import {
+  configuredInvoiceDepartment,
   departmentAllocationRows,
   departmentAssignmentForLine,
   departmentAssignmentForResolvedLine,
@@ -1729,7 +1730,7 @@ function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
   return departmentAllocationRows(item, { fallbackDepartment }).map((split) => ({
     id: split.id || uid(),
     departmentId: split.departmentId || split.department_id || "",
-    department: canonicalDepartmentName(split.department, fallbackDepartment),
+    department: split.department || fallbackDepartment,
     percentage: numberValue(split.percentage, 0),
   }));
 }
@@ -7990,7 +7991,8 @@ function useImmediateInvoiceLearning({ supplierProductMappings, products, suppli
         departments: departmentSettings });
       const outcome = await persistInvoiceLearning(result.learned);
       if (!result.learned.length || outcome?.persisted?.length !== result.learned.length) {
-        setLearningNotice("Match kept on this invoice. Reusable rule not confirmed by the database. Check the connection and select the product again to retry.");
+        const reason = outcome?.skipped?.[0]?.reason || "Review the product and department, then retry.";
+        setLearningNotice(`Match kept on this invoice. Reusable rule not confirmed by the database. ${reason}`);
         return;
       }
       const ids = new Map(outcome.persisted.map(row => [row.mappingId, row.relationalId]));
@@ -8101,7 +8103,7 @@ function Invoices({
   }, [supplierProductMappings, products, companyId, locationId]);
   const visibleSuppliers = activeSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
-  const defaultManualDepartment = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+  const defaultManualDepartment = configuredInvoiceDepartment(invoiceSettings.defaultInvoiceDepartment, departmentNames);
   const createManualDraft = () => ({
     supplier: defaultManualSupplier,
     documentType: PURCHASING_DOCUMENT_TYPES.INVOICE,
@@ -8943,7 +8945,7 @@ function Invoices({
 
   const addDraftInvoiceLine = () => {
     const supplier = draft.supplier || visibleSuppliers[0]?.name || "";
-    const department = invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made";
+    const department = defaultManualDepartment;
     setDraft((current) => ({
       ...current,
       items: [...current.items, { ...emptyInvoiceLine(supplier, department), source: current.items.length ? "Manual review line" : "Manual line" }],
@@ -10929,6 +10931,7 @@ function DepartmentSplitEditor({ item, departmentNames, lineTotalValue, setMode,
           <option value="Split">Split</option>
         </select>
         <select value={item.department || splits[0]?.department || departmentNames[0]} onChange={(event) => updateDepartment(event.target.value)}>
+          {item.department && !departmentNames.includes(item.department) && <option value={item.department}>{item.department} — select an active department</option>}
           {departmentNames.map((dept) => <option key={dept}>{dept}</option>)}
         </select>
       </div>
