@@ -15,6 +15,7 @@ import {
 export { findProductDuplicateCandidates, packSizesCompatible, productAliases, unitsCompatible } from "./productMatching.js";
 
 export const PRODUCT_MATCH_SOURCES = {
+  EXACT_CATALOGUE: "exact_supplier_catalogue",
   SUPPLIER_CODE: "supplier_code",
   LEARNED_RULE: "learned_rule",
   SUPPLIER_MAPPING: "supplier_mapping",
@@ -176,7 +177,7 @@ export function matchInvoiceLineToExistingProduct({
   }
   const products = existingProducts.filter((product) => sameOrganisation(product, organisationId) && product.active !== false);
   const mappings = supplierMappings.filter((mapping) => (
-    sameRuleScope(mapping, organisationId, supplierId)
+    !mapping.catalogueEntry && sameRuleScope(mapping, organisationId, supplierId)
     && mapping.active !== false
     && sameLocation(mapping, locationId)
   )).map(mapping => ({ ...mapping, conversionRule: reusableConversion(mapping, packSize) })).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
@@ -223,6 +224,21 @@ export function matchInvoiceLineToExistingProduct({
     if (mapping && product) {
       return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.LEARNED_RULE, confidence: 0.98, mapping }), context);
     }
+  }
+
+  const catalogue = supplierMappings.filter(row => row.catalogueEntry && row.active !== false
+    && sameRuleScope(row, organisationId, supplierId) && sameLocation(row, locationId)
+    && normalizedDescription && normalizeSupplierDescription(row.supplierDescription) === normalizedDescription
+    && packSignature(packSize) && samePack(row));
+  if (catalogue.length) {
+    const row = catalogue[0];
+    const conversion = row.conversionRule;
+    const product = mappingProduct(row, products);
+    if (catalogue.length !== 1 || !product || !conversion?.confirmed || !(conversion.baseQuantity > 0)
+      || !conversion.purchaseUnit || !conversion.baseUnit) {
+      return resultFromProduct({source:PRODUCT_MATCH_SOURCES.NONE,needsReview:true,reviewReasons:['ambiguous_product_match']});
+    }
+    return {...resultFromProduct({product,source:PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE,confidence:1}), conversionRule:conversion};
   }
 
   const genericMatch = matchProductName(productName || rawDescription, products, {

@@ -117,20 +117,20 @@ export function learnSupplierProductMappings({
     const packSize = normalizeHeader(line.packSize || "");
     const allocation = lineAllocation(line, departments);
     const product = availableProducts.find((candidate) => candidate.id === productId) || {};
-    const existingIndex = next.findIndex((mapping) => mapping.mappingKey === key || (
+    const existingIndex = next.findIndex((mapping) => !mapping.catalogueEntry && (mapping.mappingKey === key || (
       sameScope(mapping, { companyId, locationId, supplierId: resolvedSupplierId, supplierName: supplier })
       && (code
         ? normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode) === code
         : normalizeSupplierDescription(mapping.normalizedSupplierDescription || mapping.supplierDescription) === description
           && normalizeHeader(mapping.unitOfMeasure || mapping.unit || mapping.unit_of_measure || "") === unit
           && normalizeHeader(mapping.packSize || mapping.pack_size || "") === packSize)
-    ));
+    )));
     const existing = existingIndex >= 0 ? next[existingIndex] : null;
     const sameDecision = existing
       && existing.productId === productId
       && sameAllocation(existing, allocation);
     const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + (invoice.id && existing.lastConfirmedInvoiceId === invoice.id ? 0 : 1) : 1;
-    const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, "user_selected"].includes(line.productMatchSource)
+    const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE, "user_selected"].includes(line.productMatchSource)
       || ["manual_match", "manually_matched"].includes(line.productResolution);
     const autoApply = code ? true : manualProductSelection || confirmationCount >= 2 || line.rememberSupplierMapping === true;
     invoiceLearningDebug("save-start", {

@@ -2056,6 +2056,7 @@ function productMatchSourceText(source = "") {
     supplier_code: "Supplier code",
     supplier_mapping: "Supplier mapping",
     learned_rule: "Learned supplier rule",
+    exact_supplier_catalogue: "Exact supplier catalogue match",
     barcode: "Barcode / SKU",
     exact_name: "Exact product name",
     alias: "Exact product alias",

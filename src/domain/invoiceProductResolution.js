@@ -23,6 +23,7 @@ export const PRODUCT_RESOLUTION_MODES = Object.freeze({
 
 const productMatchReviewReasons = new Set(["no_confirmed_product_match", "ambiguous_product_match"]);
 const automaticMatchSources = new Set([
+  PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE,
   PRODUCT_MATCH_SOURCES.SUPPLIER_CODE,
   PRODUCT_MATCH_SOURCES.LEARNED_RULE,
   PRODUCT_MATCH_SOURCES.SUPPLIER_MAPPING,

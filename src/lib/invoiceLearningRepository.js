@@ -107,12 +107,13 @@ function latestRelationalMappings(rows = []) {
 }
 
 export function mergeRelationalSupplierProductMappings(snapshotMappings = [], relationalMappings = []) {
-  const relationalByIdentity = latestRelationalMappings(relationalMappings);
+  const catalogue = relationalMappings.filter(row => row.catalogueEntry);
+  const relationalByIdentity = latestRelationalMappings(relationalMappings.filter(row => !row.catalogueEntry));
   const fallback = snapshotMappings.filter((mapping) => {
     const identity = supplierProductMappingIdentity(mapping);
     return !identity || !relationalByIdentity.has(identity);
   });
-  return [...relationalByIdentity.values(), ...fallback];
+  return [...relationalByIdentity.values(), ...fallback.filter(row => !row.catalogueEntry), ...catalogue];
 }
 
 export async function loadRelationalSupplierProductMappings(client, {
@@ -134,10 +135,15 @@ export async function loadRelationalSupplierProductMappings(client, {
   };
   const splitRules = await related("supplier_product_split_rules", "supplier_product_mapping_id", mappingRows.map(row => row.id));
   const splitLines = await related("supplier_product_split_rule_lines", "split_rule_id", splitRules.map(row => row.id));
-  const formats = mappingRows.length ? await readAllPages((head = false) => client.from("product_supplier_formats")
-    .select("*", { count: "exact", head }).eq("company_id", companyId), { label: "supplier conversions" }) : [];
-  return mappingRows.map(row => ({ ...relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }),
-    conversionRule: conversionForMapping(row, formats) }));
+  const formats = await readAllPages((head = false) => client.from("product_supplier_formats")
+    .select("*", { count: "exact", head }).eq("company_id", companyId), { label: "supplier conversions" });
+  const catalogueProducts = await related("products", "id", [...new Set(formats.map(row => row.product_id))]);
+  const catalogue = formats.filter(row => row.active !== false).flatMap(row => {
+    const product = catalogueProducts.find(p => p.id === row.product_id && p.company_id === companyId && p.active !== false);
+    return product ? [{id: `catalogue:${row.id}`, catalogueEntry:true, companyId:row.company_id, supplierId:row.supplier_id, locationId:row.location_id || "", productId:row.product_id, supplierDescription:product.name, packSize:row.pack_size, conversionRule:conversionForMapping(row, formats)}] : [];
+  });
+  return [...catalogue, ...mappingRows.map(row => ({ ...relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }),
+    conversionRule: conversionForMapping(row, formats) }))];
 }
 
 function persistencePayload(mapping = {}, scope = {}) {
