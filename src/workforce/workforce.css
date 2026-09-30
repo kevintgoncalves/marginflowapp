@@ -14,7 +14,7 @@
   height: 100vh;
   padding: 24px 18px;
   border-right: 1px solid var(--line);
-  background: #111827;
+  background: #181818;
   overflow: auto;
 }
 
@@ -29,7 +29,7 @@
   padding: 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #172033;
+  background: #1f1f1f;
 }
 
 .workforce-company-card span,
@@ -210,7 +210,7 @@
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #142035;
+  background: #1f1f1f;
 }
 
 .permission-set-card strong,
@@ -237,7 +237,7 @@
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #111c31;
+  background: #1b1b1b;
 }
 
 .permission-check-list label {
@@ -260,7 +260,7 @@
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: #10192b;
+  background: #181818;
 }
 
 .rota-grid {
@@ -273,7 +273,7 @@
   padding: 10px;
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  background: #10192b;
+  background: #181818;
 }
 
 .rota-head {
@@ -281,7 +281,7 @@
   top: 0;
   z-index: 2;
   min-height: 58px;
-  background: #172033;
+  background: #1f1f1f;
   color: var(--text);
   font-weight: 900;
 }
@@ -296,7 +296,7 @@
   position: sticky;
   left: 0;
   z-index: 3;
-  background: #172033;
+  background: #1f1f1f;
 }
 
 .rota-head.sticky-col {
@@ -335,7 +335,7 @@
   border: 1px solid var(--line);
   border-left: 4px solid var(--primary);
   border-radius: 8px;
-  background: #1c2a42;
+  background: #292929;
   color: var(--text);
   text-align: left;
 }
@@ -359,7 +359,7 @@
 }
 
 .shift-card.informational {
-  border-color: rgba(59, 130, 246, 0.65);
+  border-color: rgba(123, 123, 123, 0.65);
 }
 
 .availability-grid {
@@ -377,13 +377,13 @@
   padding: 10px;
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  background: #10192b;
+  background: #181818;
 }
 
 .availability-head {
   position: sticky;
   top: 0;
-  background: #172033;
+  background: #1f1f1f;
   font-weight: 900;
 }
 
@@ -391,7 +391,7 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  background: #172033;
+  background: #1f1f1f;
   font-weight: 900;
 }
 
@@ -433,7 +433,7 @@
   padding: 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #142035;
+  background: #1f1f1f;
 }
 
 .request-card strong,
@@ -457,7 +457,7 @@
   padding: 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #142035;
+  background: #1f1f1f;
 }
 
 .holiday-list span,

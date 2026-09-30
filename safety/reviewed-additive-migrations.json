@@ -18,5 +18,10 @@
     "sha256": "65e9d5f5b95ca7cecd8b8a17694e1a6e2d49fd6a8c39eae6a647146342e85b8e",
     "review": "scripts/scoped-supplier-formats.test.mjs",
     "test": "scripts/scoped-supplier-formats.test.mjs"
+  },
+  "20261001120000_authenticated_catalogue_learning.sql": {
+    "sha256": "7be2ec8cb46d9af9c9474379cdfeb33d1b8f11516271fa9751362fa18b89b6ff",
+    "review": "scripts/catalogue-learning-access.test.mjs",
+    "test": "scripts/catalogue-learning-access.test.mjs"
   }
 }

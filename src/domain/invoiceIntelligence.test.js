@@ -182,7 +182,7 @@ test("confirmed description mapping waits for repeated confirmation", () => {
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 1 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", packSize: "4kg", productId: "p3", active: true, autoApply: true, confirmationCount: 1 }],
   });
   const twoConfirmations = matchInvoiceLineToExistingProduct({
     organisationId: "c1", supplierId: "supplier-tg-fruits",
@@ -190,7 +190,7 @@ test("confirmed description mapping waits for repeated confirmation", () => {
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", packSize: "4kg", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
   });
   assert.equal(oneConfirmation.productMatchSource, "no_product_match");
   assert.equal(twoConfirmations.productMatchSource, "learned_rule");
@@ -203,7 +203,7 @@ test("learned supplier rules auto-resolve product validation", () => {
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", packSize: "4kg", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
   });
   const line = lineWithAutoMatchedProductResolution({
     rawDescription: "LIMES 4KG",
@@ -370,6 +370,7 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
     supplierProductCode: "HRS123",
     rawDescription: "horseradish",
     productName: "horseradish",
+    packSize: resolved.items[0].packSize,
     existingProducts: resolved.products,
     supplierMappings: learned,
   });

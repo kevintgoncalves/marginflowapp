@@ -1,3 +1,4 @@
+import { learnedDepartment } from './domain/supplierDepartments.js';
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
 import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
@@ -1954,7 +1955,7 @@ function setInvoiceLineDepartmentMode(item, mode, departmentNames = defaultDepar
   }
 
   const department = item.department || normalizeDepartmentSplits(item, fallbackDepartment)[0]?.department || fallbackDepartment || departmentNames[0] || "Kitchen Made";
-  return withCalculatedSplitAmounts({ ...item, allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Single", department, departmentId: "", departmentSplits: [] }, departmentNames);
+  return withCalculatedSplitAmounts({ ...item, originalDepartment: item.originalDepartment || item.department || "", allocationSource: "user_selected", forgetLearnedRule: false, departmentMode: "Single", department, departmentId: "", departmentSplits: [] }, departmentNames);
 }
 
 function updateInvoiceLineSplit(item, splitIndex, field, value, departmentNames = defaultDepartments) {
@@ -2347,6 +2348,8 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
     supplierMappings,
     autoMatchThreshold,
   });
+  const departmentLearning = !line.departmentId && learnedDepartment(line, {supplierId: line.supplierId, locationId}, supplierMappings, organisationId);
+  if (departmentLearning) line = {...line, ...departmentLearning};
   const matchedProduct = products.find((product) => product.id === match.matchedProductId);
   if (matchedProduct) {
     const assignment = departmentAssignmentForResolvedLine({
@@ -5679,6 +5682,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   });
   const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This week", financialSettings.weekStartsOn));
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createEmptyLabourData())));
+  const [pendingLearning, setPendingLearningState] = useState(() => safeReadLocalStorageArray("marginflow.pendingLearning", []));
+  const [learningError, setLearningError] = useState("");
   const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
   const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
   const [salesInputRequest, setSalesInputRequest] = useState(null);
@@ -5686,6 +5691,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const recoveryToolsEnabled = import.meta.env.VITE_INTERNAL_RECOVERY_TOOLS === "true"
     || (import.meta.env.DEV && new URLSearchParams(window.location.search).get("internalRecovery") === "true");
   const makeStateUpdater = demoMode || readOnly ? transientStateUpdater : storedStateUpdater;
+  const setPendingLearning = makeStateUpdater(setPendingLearningState, "marginflow.pendingLearning");
   const salesRowKey = (row = {}) => row.relationalId || row.id || "";
   const syncRelationalSalesChange = async (previousRows = [], nextRows = []) => {
     if (!cloudEnabled || readOnly) return;
@@ -6067,6 +6073,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
 
   const persistConfirmedLearning = async (learnedMappings = []) => {
     if (!cloudEnabled || readOnly || !learnedMappings.length) return { persisted: [], skipped: [] };
+    setPendingLearning(current => [...current.filter(row => !learnedMappings.some(next => next.id === row.id)), ...learnedMappings]);
     try {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
       const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope);
@@ -6086,9 +6093,13 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           relationalIds.has(mapping.id) ? { ...mapping, ...resolvedById.get(mapping.id), relationalId: relationalIds.get(mapping.id), persistenceSource: "relational+snapshot" } : mapping
         )));
       }
+      const savedIds = new Set(result.persisted.map(row => row.mappingId));
+      setPendingLearning(current => current.filter(row => !savedIds.has(row.id)));
+      setLearningError(result.skipped.length ? result.skipped[0].reason : "");
       invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
       return result;
     } catch (error) {
+      setLearningError(error.message || "Reusable learning failed; retry preserved.");
       invoiceLearningDebug("relational-mappings-save-failed", { message: error.message || "Unknown relational learning error" });
       return { persisted: [], skipped: learnedMappings.map((mapping) => ({ mappingId: mapping.id, reason: error.message || "Relational save failed" })) };
     }
@@ -6404,7 +6415,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     }
     const result = await persistInvoiceWithLocalFallback({
       client: cloudEnabled ? supabase : null,
-      invoice: invoiceForPersistence,
+      invoice: { ...invoiceForPersistence, items: (invoiceForPersistence.items || []).map(line => ({...line, conversionRule: purchaseDetails(line)})) },
       scope: { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" },
       storeLocal: (storedInvoice) => setInvoices((current) => forceUpdate
         ? replaceInvoiceInCollection(current, sourceInvoiceId, storedInvoice)
@@ -6982,6 +6993,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
           <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
+        {!demoMode && pendingLearning.length > 0 && <div className="invoice-safety-banner" role="alert">Reusable matches/conversions pending ({pendingLearning.length}). {learningError || "Your retry is preserved on this device."}<button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
         {!demoMode && active !== "invoiceControl" && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoice Control Centre.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
@@ -10912,11 +10924,11 @@ function InvoiceLineEditor({
                 </td>
                 <td>
                   <label>Pack description original<input value={item.packSize || ""} readOnly /></label>
-                  <label>Purchase unit<select aria-label="Purchase unit" value={purchaseDetails(item).purchaseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), purchaseUnit:event.target.value, confirmed:false})}>
+                  <label className="purchase-conversion-field">Purchase unit<select aria-label="Purchase unit" value={purchaseDetails(item).purchaseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), purchaseUnit:event.target.value, confirmed:false})}>
                     <option value="">Confirm purchase unit</option>{PURCHASE_UNITS.map(unit => <option key={unit}>{unit}</option>)}
                   </select></label>
-                  <label>Content per purchase unit<input aria-label="Content per purchase unit" type="number" min="0" step="any" value={purchaseDetails(item).baseQuantity || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseQuantity:Number(event.target.value), confirmed:false})} /></label>
-                  <label>Comparison unit<select aria-label="Comparison unit" value={purchaseDetails(item).baseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseUnit:event.target.value, confirmed:false})}>
+                  <label className="purchase-conversion-field">Content per purchase unit<input aria-label="Content per purchase unit" type="number" min="0" step="any" value={purchaseDetails(item).baseQuantity || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseQuantity:Number(event.target.value), confirmed:false})} /></label>
+                  <label className="purchase-conversion-field">Comparison unit<select aria-label="Comparison unit" value={purchaseDetails(item).baseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseUnit:event.target.value, confirmed:false})}>
                     <option value="">Needs conversion</option>{['kg','l','each','punnet'].map(unit => <option key={unit} value={unit}>{unit === 'l' ? 'litre' : unit}</option>)}
                   </select></label>
                   <small>{purchaseDetails(item).baseUnit === 'punnet' ? 'Weight unknown · excluded from kg comparison. Confirm equivalent punnets before comparison.' : ''}</small>

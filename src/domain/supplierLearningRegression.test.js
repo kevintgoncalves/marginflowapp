@@ -106,7 +106,7 @@ test("description aliases stay supplier scoped and do not create duplicate activ
   assert.equal(otherSupplierMatch.matchedProductId, null);
 });
 
-test("AI import reuses a confirmed description despite extracted pack wording changes", () => {
+test("AI import requires review when a confirmed description has a different pack", () => {
   const companyId = uuid(21);
   const supplierId = uuid(22);
   const productId = uuid(23);
@@ -132,10 +132,9 @@ test("AI import reuses a confirmed description despite extracted pack wording ch
     supplierMappings: [rule],
   });
 
-  assert.equal(match.matchedProductId, productId);
-  assert.equal(match.productMatchSource, "learned_rule");
-  assert.equal(match.learnedMappingId, rule.id);
-  assert.equal(match.needsReview, false);
+  assert.equal(match.matchedProductId, null);
+  assert.equal(match.needsReview, true);
+  assert.deepEqual(match.reviewReasons, ["pack_changed"]);
 });
 
 test("supplier description normalization is shared across plurals, punctuation and pack units", () => {
@@ -155,7 +154,7 @@ test("supplier description normalization is shared across plurals, punctuation a
 
   const match = matchInvoiceLineToExistingProduct({
     organisationId: companyId, supplierId, supplierName: "Test Produce",
-    rawDescription: "pearl barley, 1 x 5kg", unitOfMeasure: "kg", packSize: "1 x 5kg",
+    rawDescription: "pearl barley, 3kg", unitOfMeasure: "kg", packSize: "3 KG",
     existingProducts: products, supplierMappings: learned,
   });
   assert.equal(match.matchedProductId, productId);
@@ -192,7 +191,7 @@ const scopedProduct = uuid(53);
 const scopedRule = {
   id: uuid(54), company_id: scopedCompany, supplier_id: scopedSupplier,
   product_id: scopedProduct, supplierDescription: "PEARL BARLEY TRIPPLE LION",
-  supplierProductCode: "PB-001", mappingSource: "manual_selection", active: true,
+  packSize: "5kg", supplierProductCode: "PB-001", mappingSource: "manual_selection", active: true,
 };
 const scopedInput = {
   organisationId: scopedCompany, supplierId: scopedSupplier,

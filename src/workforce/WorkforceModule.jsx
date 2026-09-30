@@ -151,7 +151,7 @@ function blankShift({ weekStart, scheduleWeekId, employees, departments, setting
     job_role: employees[0]?.job_title || "",
     department_id: departments[0]?.id || "",
     notes: "",
-    colour: "#3b82f6",
+    colour: "#7b7b7b",
     status: "draft",
     is_open_shift: false,
     ...overrides,
@@ -643,7 +643,7 @@ function RotaGrid({ data, dates, employees, onOpenShift, settings, shifts }) {
                     const warnings = buildShiftWarnings({ shift, allShifts: shifts, availabilityRows: data.availability, timeOffRequests: data.timeOffRequests, employee: { ...employee, scheduledHours: rowTotals[employee.id]?.hours }, settings });
                     const severity = warnings.find((warning) => warning.severity === "blocking")?.severity || warnings.find((warning) => warning.severity === "warning")?.severity || warnings[0]?.severity;
                     return (
-                      <button className={`shift-card ${severity || ""}`} key={shift.id} onClick={() => onOpenShift(shift)} style={{ borderLeftColor: shift.colour || "#3b82f6" }} type="button">
+                      <button className={`shift-card ${severity || ""}`} key={shift.id} onClick={() => onOpenShift(shift)} style={{ borderLeftColor: shift.colour || "#7b7b7b" }} type="button">
                         <strong>{String(shift.start_time).slice(0, 5)} - {String(shift.end_time).slice(0, 5)}</strong>
                         <span>{shift.job_role || data.departments.find((item) => item.id === shift.department_id)?.name || "Turno"}</span>
                         <small>{formatHours(shiftDurationHours(shift))}{Number(compensationByEmployee[employee.id]?.hourly_wage) ? ` · ${currency(shift.estimated_cost)}` : ""}</small>
@@ -678,7 +678,7 @@ function ShiftModal({ data, onCancel, onChange, onSave, shift }) {
         <Field label="Pausa (min)" type="number" value={fieldValue(shift.break_minutes)} onChange={(value) => update("break_minutes", value)} />
         <label>Departamento<select value={fieldValue(shift.department_id)} onChange={(event) => update("department_id", event.target.value)}><option value="">Sem departamento</option>{data.departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <Field label="Função" value={fieldValue(shift.job_role)} onChange={(value) => update("job_role", value)} />
-        <Field label="Cor" type="color" value={shift.colour || "#3b82f6"} onChange={(value) => update("colour", value)} />
+        <Field label="Cor" type="color" value={shift.colour || "#7b7b7b"} onChange={(value) => update("colour", value)} />
         <label>Estado<select value={shift.status || "draft"} onChange={(event) => update("status", event.target.value)}><option value="draft">Rascunho</option><option value="published">Publicado</option><option value="updated">Atualizado</option><option value="cancelled">Cancelado</option></select></label>
         <label className="checkbox-field"><input checked={Boolean(shift.end_next_day)} onChange={(event) => update("end_next_day", event.target.checked)} type="checkbox" /><span>Termina no dia seguinte</span></label>
         <label className="checkbox-field"><input checked={Boolean(shift.break_paid)} onChange={(event) => update("break_paid", event.target.checked)} type="checkbox" /><span>Pausa paga</span></label>

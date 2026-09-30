@@ -75,6 +75,7 @@ export function relationalMappingFromRow(row = {}, {
     allocationMode,
     departmentId: row.department_id || "",
     department: department?.name || metadata.department_name || "",
+    departmentAliases: metadata.department_aliases || [],
     departmentSplits,
     autoApply: row.auto_apply !== false,
     confirmationCount: numberValue(row.confirmation_count, 0),
@@ -199,6 +200,14 @@ export async function persistRelationalSupplierProductMappings(client, mappings 
     const relationalId = Array.isArray(data) ? data[0]?.mapping_id : data?.mapping_id || data;
     if (!isUuid(relationalId)) throw new Error("The database did not acknowledge the saved match. Retry this decision.");
     await saveSupplierConversion(client, mapping, payload.p_company_id, payload.p_location_id || "");
+    if (mapping.originalDepartment && payload.p_department_id) {
+      const alias = await client.rpc('persist_supplier_department_alias_v1', {
+        p_company_id: payload.p_company_id, p_location_id: payload.p_location_id,
+        p_mapping_id: relationalId, p_department_id: payload.p_department_id,
+        p_original_department: mapping.originalDepartment,
+      });
+      if (alias.error || alias.data !== relationalId) throw alias.error || new Error('Department learning not confirmed. Retry retained.');
+    }
     persisted.push({ mappingId: mapping.id || "", relationalId });
   }
   return { persisted, skipped };

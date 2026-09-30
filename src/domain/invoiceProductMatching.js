@@ -1,4 +1,4 @@
-import { reusableConversion } from './purchaseUnits.js';
+import { reusableConversion, packSignature } from './purchaseUnits.js';
 import { numberValue } from "./numberUtils.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 import { normalizeDepartmentSplitRows, validDepartmentSplitRows } from "./departmentAssignment.js";
@@ -181,14 +181,17 @@ export function matchInvoiceLineToExistingProduct({
     && sameLocation(mapping, locationId)
   )).map(mapping => ({ ...mapping, conversionRule: reusableConversion(mapping, packSize) })).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
   const normalizedCode = normalizeSupplierProductCode(supplierProductCode);
+  const samePack = rule => packSignature(rule.packSize || rule.pack_size) === packSignature(packSize);
+  const packReview = () => resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ['pack_changed'] });
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
 
   if (normalizedCode) {
     const candidates = mappings.filter(candidate => candidate.autoApply !== false
       && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode);
     if (candidates.length) {
+      if (!candidates.some(samePack)) return packReview();
       const productIds = new Set(candidates.map(row => row.productId || row.product_id).filter(Boolean));
-      const mapping = candidates[0];
+      const mapping = candidates.find(samePack);
       const product = mapping && mappingProduct(mapping, products);
       if (!product || productIds.size !== 1) {
         return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
@@ -199,7 +202,7 @@ export function matchInvoiceLineToExistingProduct({
   }
 
   if (normalizedDescription) {
-    const descriptionMappings = mappings.filter((candidate) => {
+    const allDescriptionMappings = mappings.filter((candidate) => {
       const mappingDescription = normalizeSupplierDescription(candidate.normalizedSupplierDescription || candidate.supplierDescription || candidate.supplier_description);
       if (!mappingDescription || mappingDescription !== normalizedDescription) return false;
       if (candidate.autoApply === false) return false;
@@ -208,6 +211,8 @@ export function matchInvoiceLineToExistingProduct({
       const mappingSource = candidate.mappingSource || candidate.source || candidate.metadata?.mapping_source || "";
       return hasCode || confirmationCount >= 2 || candidate.descriptionAutoApply === true || mappingSource === PRODUCT_MATCH_SOURCES.MANUAL_SELECTION;
     });
+    const descriptionMappings = allDescriptionMappings.filter(samePack);
+    if (allDescriptionMappings.length && !descriptionMappings.length) return packReview();
     const productIds = new Set(descriptionMappings.map(row => row.productId || row.product_id).filter(Boolean));
     if (productIds.size > 1) {
       return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,

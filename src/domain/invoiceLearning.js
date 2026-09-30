@@ -167,6 +167,8 @@ export function learnSupplierProductMappings({
       mappingSource: manualProductSelection ? PRODUCT_MATCH_SOURCES.MANUAL_SELECTION : (existing?.mappingSource || "confirmed_invoice"),
       descriptionAutoApply: manualProductSelection || existing?.descriptionAutoApply === true,
       conversionRule: line.conversionRule,
+      originalDepartment: line.originalDepartment || line.originalExtraction?.department || existing?.originalDepartment || "",
+      departmentAliases: [...new Set([...(existing?.departmentAliases || []), ...((line.originalDepartment || line.originalExtraction?.department) ? [line.originalDepartment || line.originalExtraction?.department] : [])])],
       packSize: line.packSize || existing?.packSize || "",
       unitOfMeasure: line.unitOfMeasure || line.unit || existing?.unitOfMeasure || "",
       ...allocation,

@@ -17,6 +17,8 @@ export function purchaseDetails(line = {}) {
   return interpretPurchasePack(line.packSize, line.purchaseUnit);
 }
 export function reusableConversion(rule, pack) {
-  const key = value => String(value || '').toLowerCase().replace(/\s+/g, '');
+  const key = packSignature;
   return rule?.conversionRule && key(rule.packSize) === key(pack) ? rule.conversionRule : undefined;
 }
+
+export const packSignature = value => String(value || '').toLowerCase().replace(/kilograms?|kilos?/g,'kg').replace(/litres?|liters?/g,'l').replace(/(\d)\s+(kg|g|ml|l)\b/g,'$1$2').replace(/[^a-z0-9.]+/g,' ').trim();
