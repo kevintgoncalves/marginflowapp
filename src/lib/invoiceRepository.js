@@ -1,3 +1,4 @@
+import { invoiceWithVerifiedDepartments } from '../domain/invoiceDepartmentScope.js';
 import { compareInvoiceCollections } from "../domain/emergencyRecovery.js";
 import { withCanonicalInvoiceFinancials } from "../domain/invoiceFinancials.js";
 import { readAllPages } from "./paginatedRead.js";
@@ -148,6 +149,11 @@ export async function persistRelationalInvoice(client, invoice = {}, scope = {},
   if (!client || !validScope(scope)) {
     throw new Error("Relational invoice persistence needs canonical company and invoice identifiers.");
   }
+  if (client?.from && validScope(scope)) {
+    const {data:departments,error} = await client.from("departments").select("id,name,company_id,active").eq("company_id",scope.companyId).eq("active",true);
+    if (error || !departments) throw error || new Error("Could not verify departments. Draft preserved.");
+    invoice = invoiceWithVerifiedDepartments(invoice, departments, scope.companyId);
+  }
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
   const invoicePayload = { ...canonicalInvoice };
   delete invoicePayload.syncRetryContext;
@@ -172,6 +178,7 @@ export async function persistRelationalInvoice(client, invoice = {}, scope = {},
       ...canonicalInvoice,
       id: result?.invoice_id || canonicalInvoice.id,
       relationalId: result?.invoice_id || canonicalInvoice.id,
+      supplierId: result?.supplier_id || canonicalInvoice.supplierId,
     },
   };
 }

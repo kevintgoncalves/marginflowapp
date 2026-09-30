@@ -156,7 +156,7 @@ export function learnSupplierProductMappings({
       mappingKey: key,
       companyId: companyId || existing?.companyId || "",
       locationId: locationId || existing?.locationId || "",
-      supplierId: line.supplierId || resolvedSupplierId || existing?.supplierId || "",
+      supplierId: resolvedSupplierId || line.supplierId || existing?.supplierId || "",
       supplierName: supplier,
       supplierProductCode: line.supplierProductCode || existing?.supplierProductCode || "",
       normalizedSupplierProductCode: code,

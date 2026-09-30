@@ -13,5 +13,10 @@
     "sha256": "dd8fea0f4d0bef602e63f1877951e02569f1695e482f029e585452a727231ffc",
     "review": "scripts/atomic-invoice-catalogue.test.mjs",
     "test": "scripts/atomic-invoice-catalogue.test.mjs"
+  },
+  "20261001010000_scoped_supplier_formats_access.sql": {
+    "sha256": "65e9d5f5b95ca7cecd8b8a17694e1a6e2d49fd6a8c39eae6a647146342e85b8e",
+    "review": "scripts/scoped-supplier-formats.test.mjs",
+    "test": "scripts/scoped-supplier-formats.test.mjs"
   }
 }

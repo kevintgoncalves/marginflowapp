@@ -1,3 +1,4 @@
+import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
 import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
 import { refreshPendingInvoice, purchaseConversion } from "./domain/reusablePurchasing.js";
@@ -6067,14 +6068,22 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const persistConfirmedLearning = async (learnedMappings = []) => {
     if (!cloudEnabled || readOnly || !learnedMappings.length) return { persisted: [], skipped: [] };
     try {
-      const result = await persistRelationalSupplierProductMappings(supabase, learnedMappings, {
+      const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+      const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope);
+      const result = await persistRelationalSupplierProductMappings(supabase, resolvedMappings, {
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
       });
       if (result.persisted.length) {
+        const resolvedById = new Map(resolvedMappings.map(mapping => [mapping.id, mapping]));
+        result.persisted = result.persisted.map(entry => ({ ...entry, mapping: resolvedById.get(entry.mappingId) }));
         const relationalIds = new Map(result.persisted.map((entry) => [entry.mappingId, entry.relationalId]));
+        setSuppliers(current => current.map(supplier => {
+          const resolved = resolvedMappings.find(mapping => sameSupplierIdentity(mapping.supplierName, supplier.name));
+          return resolved ? { ...supplier, relationalId: resolved.supplierId } : supplier;
+        }));
         setSupplierProductMappings((current) => current.map((mapping) => (
-          relationalIds.has(mapping.id) ? { ...mapping, relationalId: relationalIds.get(mapping.id), persistenceSource: "relational+snapshot" } : mapping
+          relationalIds.has(mapping.id) ? { ...mapping, ...resolvedById.get(mapping.id), relationalId: relationalIds.get(mapping.id), persistenceSource: "relational+snapshot" } : mapping
         )));
       }
       invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
@@ -6409,6 +6418,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       setCloudError(`${result.error.message || "Invoice sync failed"} Cloud saving is not confirmed. Keep this page open and review pending invoices.`);
     } else if (result.persisted) {
       rememberCloudInvoice(result.invoice);
+      if (result.invoice.supplierId) setSuppliers(current => current.map(supplier =>
+        sameSupplierIdentity(supplier.name, result.invoice.supplier)
+          ? {...supplier, relationalId:result.invoice.supplierId} : supplier));
       setCloudStatus("synced");
       setCloudError("");
     }
@@ -6865,7 +6877,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         products: productsForLearning,
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
-        supplierId: supplierScopeId(supplierRecord),
+        supplierId: savedInvoice.supplierId || supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: cloudEnabled ? "relational+snapshot" : "snapshot",
@@ -8001,8 +8013,9 @@ function useImmediateInvoiceLearning({ supplierProductMappings, products, suppli
         setLearningNotice(`Match kept on this invoice. Reusable rule not confirmed by the database. ${reason}`);
         return;
       }
-      const ids = new Map(outcome.persisted.map(row => [row.mappingId, row.relationalId]));
-      const rules = result.mappings.map(rule => ids.has(rule.id) ? { ...rule, relationalId: ids.get(rule.id), persistenceSource: "relational" } : rule);
+      const receipts = new Map(outcome.persisted.map(row => [row.mappingId, row]));
+      const rules = result.mappings.map(rule => receipts.has(rule.id) ? { ...rule, ...receipts.get(rule.id).mapping,
+        relationalId: receipts.get(rule.id).relationalId, persistenceSource: "relational" } : rule);
       learningRef.current = rules;
       setSupplierProductMappings(rules);
       setInvoiceLineCorrections(current => correctionHistoryForInvoice({ existingCorrections: current, invoice: { ...invoice, items: [line] } }));
@@ -9241,7 +9254,7 @@ function Invoices({
       products: learningProducts,
       companyId,
       locationId,
-      supplierId: supplierScopeId(supplierRecord) || invoice.supplierId || "",
+      supplierId: invoice.supplierId || supplierScopeId(supplierRecord) || "",
       supplierName: supplierRecord?.name || invoice.supplier || "",
       departments: departmentSettings,
       storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -9590,7 +9603,7 @@ function Invoices({
         products: productsForLearning,
         companyId,
         locationId,
-        supplierId: supplierScopeId(supplierRecord),
+        supplierId: savedInvoice.supplierId || supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -10448,7 +10461,10 @@ function Invoices({
                 if (syncStatus === "demo") return <Badge tone="gray">Demo data</Badge>;
                 if (["pending_sync", "sync_failed", "local_only"].includes(syncStatus)) {
                   return (
-                    <button className="match-hint" onClick={() => persistInvoiceDocument(row, { retry: true })} title={row.syncError || "Retry relational invoice sync"} type="button">
+                    <button className="match-hint" onClick={async () => {
+                      const result = await persistInvoiceDocument(row, { retry: true });
+                      if (result.persisted && !result.cancelled) await learnFromCommittedInvoice(result.invoice);
+                    }} title={row.syncError || "Retry relational invoice sync"} type="button">
                       {syncStatus === "pending_sync" ? "Saving…" : "Sync failed — Retry"}
                     </button>
                   );
@@ -11469,7 +11485,7 @@ function InvoiceControlCentre({
     const invoiceForReview = {
       ...invoice,
       supplier,
-      supplierId: supplierScopeId(supplierRecord) || invoice.supplierId || "",
+      supplierId: invoice.supplierId || supplierScopeId(supplierRecord) || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -11594,7 +11610,7 @@ function InvoiceControlCentre({
         products: productsForLearning,
         companyId,
         locationId,
-        supplierId: supplierScopeId(supplierRecord),
+        supplierId: savedInvoice.supplierId || supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -11857,7 +11873,7 @@ function InvoiceControlCentre({
         products,
         companyId,
         locationId,
-        supplierId: supplierScopeId(supplierRecord),
+        supplierId: savedInvoice.supplierId || supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -12332,7 +12348,19 @@ function InvoiceControlCentre({
             <>
               <button className="ghost" disabled={viewInvoiceSaving} onClick={closeControlInvoice} type="button">Close</button>
               {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={()=>{const dirty=viewOriginalRef.current!==JSON.stringify(viewInvoice);openReviewDetail(viewInvoice);if(dirty)reviewOriginalRef.current="unsaved-editor-changes";setViewInvoice(null);setReviewModalOpen(true);}} type="button">Review / Invoice is correct</button>}
-              {permissions.canEdit && ["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus) && <button disabled={viewInvoiceSaving || viewOriginalRef.current!==JSON.stringify(viewInvoice)} onClick={async()=>{setViewInvoiceSaving(true);try{const result=await persistInvoiceDocument(viewInvoice,{retry:true});const next=invoiceForControlEditor(result.invoice||viewInvoice,departmentNames);viewOriginalRef.current=JSON.stringify(next);setViewInvoice(next);setViewInvoiceStatus(!result.persisted || result.error?"Save not confirmed. Pending work is preserved; review the conflict before retrying.":"Saved to cloud.");}catch(error){setViewInvoiceStatus(error.message);}finally{setViewInvoiceSaving(false);}}} type="button">Retry pending save</button>}
+              {permissions.canEdit && ["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus) && <button disabled={viewInvoiceSaving || viewOriginalRef.current!==JSON.stringify(viewInvoice)} onClick={async()=>{setViewInvoiceSaving(true);try{const result=await persistInvoiceDocument(viewInvoice,{retry:true});
+                if (result.persisted && !result.cancelled) {
+                  const saved = result.invoice;
+                  const learning = learnSupplierProductMappings({ mappings: supplierProductMappings, invoice: saved,
+                    products, companyId, locationId, supplierId: saved.supplierId,
+                    supplierName: saved.supplier, departments: departmentSettings });
+                  const outcome = await persistInvoiceLearning(learning.learned);
+                  const receipts = new Map((outcome.persisted || []).map(row => [row.mappingId, row]));
+                  setSupplierProductMappings(learning.mappings.map(rule => receipts.has(rule.id)
+                    ? { ...rule, ...receipts.get(rule.id).mapping, relationalId: receipts.get(rule.id).relationalId, persistenceSource: "relational" } : rule));
+                  if (outcome.skipped?.length) throw new Error("Invoice saved. Reusable learning pending: " + outcome.skipped[0].reason);
+                }
+                const next=invoiceForControlEditor(result.invoice||viewInvoice,departmentNames);viewOriginalRef.current=JSON.stringify(next);setViewInvoice(next);setViewInvoiceStatus(!result.persisted || result.error?"Save not confirmed. Pending work is preserved; review the conflict before retrying.":"Saved to cloud.");}catch(error){setViewInvoiceStatus(error.message);}finally{setViewInvoiceSaving(false);}}} type="button">Retry pending save</button>}
               {permissions.canDelete && <button className="ghost" disabled={viewInvoiceSaving} onClick={()=>{const request=()=>{requestInvoiceDelete(viewInvoice);setViewInvoice(null);setSelectedCell(null);setBrowserOpen(false);};if(viewOriginalRef.current!==JSON.stringify(viewInvoice)){setLeaveAction(()=>request);return;}request();}} type="button">Delete document…</button>}
               {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={saveControlInvoice} type="button"><Save size={16} />{viewInvoiceSaving ? "Saving..." : "Save changes"}</button>}
             </>
