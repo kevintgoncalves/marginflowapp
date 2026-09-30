@@ -94,12 +94,20 @@ Logs: `.local-review/mf_learning_test_20260929225433/` (excluded from commit).
 Original changed source copies and hashes:
 `.local-review/2026-09-29-persistence/original/` and `original-hashes.txt`.
 
-## Still required before a main integration decision
+## Main integration decision
 
-Remote migration application and authenticated post-fix browser tests are pending.
-They must cover a second pending invoice, reload, fresh import, duplicate-rule
-counts, invoice-only override, confirmed-price comparison, Excel/RFQ and tenant
-isolation. A local SQL result or demo preview is not remote validation.
+The migration application, database acknowledgement, confirmed invoice, reload,
+duplicate-rule count, single-supplier comparison, Excel/RFQ and transactional
+tenant-isolation checks passed remotely. A read-only query found exactly one active
+mapping and one distinct ID after two confirmations. The confirmed invoice is
+independently readable in `invoices`; the older pending draft is absent there and
+remains separate in the client.
+
+The fresh-file reuse and invoice-only override sequence is still blocked before
+upload because the Chrome extension cannot access the synthetic PDF until file-URL
+access is enabled. Remote multi-supplier pack comparison also remains unproven in
+the one-product tenant. This is therefore still a NO-GO for main. A local SQL
+result or a manual selection does not substitute for that acceptance path.
 
 Production backup/attachment protection, tested restoration, reconciliation,
 concurrency and deployment controls remain separate unverified release gates.
@@ -114,4 +122,6 @@ applied there (not production), with editor content SHA-256
 A separate read-only query verified all seven function bodies, the two authenticated
 SELECT grants and three restrictive policies. The first post-fix manual match
 returned a persisted rule and QA-20260929-MATCH-B was confirmed in the application.
-Full remote acceptance remains in progress; see RESULTS.md for current status.
+The project overview reported Healthy on 30 September. The earlier Unhealthy root
+cause remains unknown; no code or configuration change is credited for the health
+transition. See RESULTS.md for the completed checks and remaining acceptance gates.

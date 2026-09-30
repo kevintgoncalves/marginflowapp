@@ -1,6 +1,7 @@
-> Update 29 September: the scoped persistence migration has been applied only to
-> staging with explicit approval. First post-fix rule/invoice save succeeded.
-> Full acceptance is still in progress; NO-GO remains until RESULTS.md is complete.
+> Update 30 September: the scoped persistence migration is applied only to staging.
+> Rule acknowledgement, invoice commit, reload, duplicate count, tenant isolation,
+> confirmed-price Products export and RFQ passed. Fresh-file reuse and remote
+> multi-supplier comparison remain incomplete, so the decision is still NO-GO.
 
 # Main integration and recovery plan — not executed
 
@@ -25,7 +26,7 @@ No reset, migration, merge or production deployment occurred.
 
 ## Candidate and deployment boundaries
 
-Candidate source commit: `13a5f84e0a7b5793d52d31f13ec87ae2ed44f773` on `codex/integrate-approved-interface`.
+Candidate source commit before this report update: `e93ba2b86e7ef53316ab4ad24dc676e6249eddfb` on `codex/integrate-approved-interface`.
 Base before integration: `a9fdf57668b7dbc2a7694955789af4232e9e8caa` on `staging/schema-baseline`.
 Main reference last checked: `9a801ca3f01a9664e2e7d3138b52f213ca2a7b7a`.
 
@@ -35,9 +36,9 @@ No merge, promotion or production deployment is authorized yet. Pushing main req
 
 1. Confirm Preview is built from the candidate commit and reads the verified staging Supabase project. Confirm a synthetic test tenant/account; do not use real customer records.
 2. Execute `backend-contract.sql` read-only against staging. Inspect the actual RPC argument names/types, `mapping_id` return, grants and RLS; compare with `022_invoice_learning.sql`, `027_manual_match_product_merge.sql` and the invoice/entitlement migrations. Check migration ledger separately. Missing contracts require a reviewed additive migration plan; do not replay all migrations or run recovery functions blindly.
-3. Authenticated acceptance: login and data load; save a uniquely tagged synthetic supplier/product match and record acknowledgement; reload and confirm relational persisted mapping; import/review another synthetic invoice from the same supplier/code/pack and verify reuse. Invoice-only exception must not become a reusable rule. Retain test fixture IDs for audit.
-4. Compare confirmed purchases with different packs: 3 kg at £9 and 5 kg at £13.25 must produce £3/kg and £2.65/kg, saving £0.35/kg. Confirm latest invoice date supersedes an older cheap promotion. Incompatible/unknown conversions remain for review.
-5. Download Products Excel and RFQ in the authenticated Preview. Confirm exact selected canonical IDs/no duplicates, numeric normalized prices/units/dates and matching panel values. RFQ omits prices/competitor names by default. Confirm browser draft reload; do not claim cross-device storage.
+3. Authenticated login/data load, persisted rule acknowledgement, reload and relational read have passed. Still import a fresh synthetic PDF from the same supplier/code/pack and prove automatic reuse. Then apply an invoice-only exception and verify the reusable rule ID, scope and department remain unchanged.
+4. The local different-pack calculation passed. Still create the remote synthetic 5 kg at £13.25 case and verify £3/kg versus £2.65/kg, saving £0.35/kg. Confirm latest invoice date supersedes an older cheap promotion. Incompatible/unknown conversions must remain for review.
+5. Products Excel and RFQ passed for the single-supplier tenant, including matching numeric price/date, exact canonical ID, recorded 3 kg volume, default omission and reload persistence. Repeat the export after the second supplier is confirmed so list, panel and both sheets reconcile the price difference.
 6. Re-run CI, safety check and staging build for the exact final candidate. Confirm no unwanted archives/copies/secrets in the commit. Reconcile all preserved local-copy hashes. Re-check fresh main head and test the combined history without changing main. Resolve any divergence in an isolated branch and repeat affected tests.
 7. Only after acceptance, prepare a draft PR describing final behavior, backend compatibility evidence, deployment mapping, known limits and this recovery plan. Do not merge it or enable auto-merge. Production remains explicitly gated by fresh backup/restoration and release evidence.
 
@@ -56,4 +57,8 @@ If an old client cannot safely understand new records, restrict the affected wor
 
 ## Status recorded before authenticated validation (28 September)
 
-Source changes introduce no new migration in the repository, but remote schema/API compatibility is **not yet proven**. A successful build or unchanged migration count is not evidence that the target database has the required objects/permissions. Both Supabase browser variables were copied from the existing `ui/unified-invoices` Preview configuration into a separate `codex/integrate-approved-interface` Preview scope. Their values are intentionally omitted from this report. An uncached rebuild of candidate `13a5f84` was requested in Preview; production and the existing staging domain association were not changed. Authenticated tests still require a signed-in synthetic test tenant, and catalog verification requires staging administration access. Production controls and existing `.ai/DATA_SAFETY.md` audit findings remain unverified.
+This historical paragraph predates the explicitly approved staging migration. The
+repository now contains one reviewed additive migration; the original 44 migration
+hashes remain unchanged. Preview variables remain branch-scoped and omitted here.
+Production and the existing staging-domain association were not changed. Production
+controls and existing `.ai/DATA_SAFETY.md` audit findings remain unverified.
