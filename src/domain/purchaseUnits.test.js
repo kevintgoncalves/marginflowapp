@@ -48,3 +48,30 @@ test('persist and reload Supplier Product conversion idempotently with strict sc
  assert.equal(matchInvoiceLineToExistingProduct({...input,organisationId:'company-b'}).matchedProductId,null);
  assert.equal(matchInvoiceLineToExistingProduct({...input,packSize:'X10KG NET'}).conversionRule,undefined);
 });
+
+test('direct KILO and litre purchases preserve invoice inputs and reusable unit definitions', async () => {
+  for (const packSize of ['KILO', 'KG', 'LITRE', 'L', 'LTR']) {
+    const weight = ['KILO', 'KG'].includes(packSize);
+    const conversionRule = interpretPurchasePack(packSize);
+    assert.equal(conversionRule.purchaseUnit, weight ? 'kg' : 'litre');
+    assert.equal(conversionRule.baseQuantity, 1);
+    assert.equal(conversionRule.baseUnit, weight ? 'kg' : 'l');
+    const line = { productName: 'SWEET POTATO', packSize, quantity: 1.85, unitCost: 2.50 };
+    const before = JSON.stringify(line);
+    const result = purchaseConversion(line);
+    assert.equal(result.valid, true);
+    assert.equal(result.price, 2.50);
+    assert.equal(result.volume, 1.85);
+    assert.equal(new Intl.NumberFormat('en-GB', {style:'currency',currency:'GBP'}).format(result.net), '£4.63');
+    assert.equal(JSON.stringify(line), before);
+    let stored;
+    const client = { from() { const query = { select() { return query; }, eq() { return query; }, is() { return query; },
+      insert(row) { stored = {id:'format', ...row}; return query; },
+      then(resolve) { return Promise.resolve({data: stored ? [stored] : [], error:null}).then(resolve); }
+    }; return query; } };
+    await saveSupplierConversion(client, {supplierId:'s',productId:'p',packSize,conversionRule}, 'c');
+    const loaded = conversionForMapping({company_id:'c',supplier_id:'s',product_id:'p',pack_size:packSize}, [JSON.parse(JSON.stringify(stored))]);
+    assert.equal(loaded.purchaseUnit, conversionRule.purchaseUnit);
+    assert.equal(purchaseConversion({...line,conversionRule:loaded}).price, 2.50);
+  }
+});

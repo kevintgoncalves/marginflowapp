@@ -26,7 +26,7 @@ export function refreshPendingInvoice(invoice,rules,products,companyId='',locati
 }
 export function purchaseConversion(line){
  const quantity=Number(line.quantity);const cost=Number(line.unitCost);const billing=unitKey(line.purchaseUnit||line.unitOfMeasure||line.billingUnit||'');
- const rule=line.conversionRule || (line.purchaseUnit || /^\s*x\s*\d|^\s*\d+\s*x\s*\d|^\s*single\s+pnt/i.test(line.packSize || '') ? interpretPurchasePack(line.packSize, line.purchaseUnit) : null);
+ const rule=line.conversionRule || (line.purchaseUnit || /^\s*(?:kilo|kg|litre|l|ltr)\s*$|^\s*x\s*\d|^\s*\d+\s*x\s*\d|^\s*single\s+pnt/i.test(line.packSize || '') ? interpretPurchasePack(line.packSize, line.purchaseUnit) : null);
  let factor=null,unit=null;
  if(rule?.confirmed&&Number(rule.baseQuantity)>0&&['kg','l','each','punnet'].includes(rule.baseUnit)){factor=Number(rule.baseQuantity);unit=rule.baseUnit;}
  else if(rule){factor=null;}

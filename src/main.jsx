@@ -10901,7 +10901,7 @@ function InvoiceLineEditor({
                   </select></label>
                   <label>Content per purchase unit<input aria-label="Content per purchase unit" type="number" min="0" step="any" value={purchaseDetails(item).baseQuantity || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseQuantity:Number(event.target.value), confirmed:false})} /></label>
                   <label>Comparison unit<select aria-label="Comparison unit" value={purchaseDetails(item).baseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseUnit:event.target.value, confirmed:false})}>
-                    <option value="">Needs conversion</option>{['kg','l','each','punnet'].map(unit => <option key={unit}>{unit}</option>)}
+                    <option value="">Needs conversion</option>{['kg','l','each','punnet'].map(unit => <option key={unit} value={unit}>{unit === 'l' ? 'litre' : unit}</option>)}
                   </select></label>
                   <small>{purchaseDetails(item).baseUnit === 'punnet' ? 'Weight unknown · excluded from kg comparison. Confirm equivalent punnets before comparison.' : ''}</small>
                   <small>{(() => { const conversion = purchaseConversion({...item, conversionRule:purchaseDetails(item)}); return conversion.valid ? `${item.quantity} × ${money(item.unitCost)} = ${money(Number(item.quantity)*Number(item.unitCost))} · ${conversion.volume} ${conversion.unit} · ${money(conversion.price)}/${conversion.unit}` : 'Confirm conversion for comparison · invoice can still be saved'; })()}</small>

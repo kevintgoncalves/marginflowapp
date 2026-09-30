@@ -1,7 +1,8 @@
 // Invoice quantity and unit cost are immutable inputs to conversion.
-export const PURCHASE_UNITS = ['box', 'case', 'bag', 'sack', 'bottle', 'pack', 'punnet', 'each'];
+export const PURCHASE_UNITS = ['kg', 'litre', 'box', 'case', 'bag', 'sack', 'bottle', 'pack', 'punnet', 'each'];
 export function interpretPurchasePack(pack = '', purchaseUnit = '') {
   const text = String(pack).trim().toLowerCase().replace(/×/g, 'x');
+  if (/^(kilo|kg|litre|l|ltr)$/.test(text)) return { purchaseUnit: /^(kilo|kg)$/.test(text) ? 'kg' : 'litre', baseQuantity: 1, baseUnit: /^(kilo|kg)$/.test(text) ? 'kg' : 'l', confirmed: true, inferred: true };
   const container = text.match(/\b(box|case|bag|sack|bottle|pack|punnet|pnt)\b/)?.[1];
   if (/^(single\s+)?(pnt|punnet)$/.test(text)) return { purchaseUnit: 'punnet', baseQuantity: 1, baseUnit: 'punnet', weightUnknown: true, confirmed: false };
   // Accept only unambiguous measures and explicitly recognised trailing descriptors.
