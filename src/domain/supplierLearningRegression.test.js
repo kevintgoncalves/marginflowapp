@@ -185,3 +185,32 @@ test("same learned SKU does not cross supplier or company boundaries", () => {
   assert.equal(forOtherSupplier.matchedProductId, null);
   assert.equal(forOtherCompany.matchedProductId, null);
 });
+
+const scopedCompany = uuid(51);
+const scopedSupplier = uuid(52);
+const scopedProduct = uuid(53);
+const scopedRule = {
+  id: uuid(54), company_id: scopedCompany, supplier_id: scopedSupplier,
+  product_id: scopedProduct, supplierDescription: "PEARL BARLEY TRIPPLE LION",
+  supplierProductCode: "PB-001", mappingSource: "manual_selection", active: true,
+};
+const scopedInput = {
+  organisationId: scopedCompany, supplierId: scopedSupplier,
+  rawDescription: " Pearl-Barley Tripple Lion ", packSize: "5kg",
+  existingProducts: [{ id: scopedProduct, company_id: scopedCompany, name: "PEARL BARLEY TRIPPLE LION", packSize: "3kg" }],
+  supplierMappings: [scopedRule],
+};
+test("scope A: same company and supplier reuses confirmed normalized description", () => {
+  const result = matchInvoiceLineToExistingProduct(scopedInput);
+  assert.equal(result.matchedProductId, scopedProduct);
+  assert.equal(result.learnedMappingId, scopedRule.id);
+  assert.equal(result.needsReview, false);
+});
+test("scope B: different supplier with identical description and SKU requires review", () => {
+  const result = matchInvoiceLineToExistingProduct({ ...scopedInput,
+    supplierId: uuid(55), supplierName: "Woods Foodservice Limited", supplierProductCode: "PB-001" });
+  assert.equal(result.matchedProductId, null);
+  assert.equal(result.learnedMappingId ?? null, null);
+  assert.equal(result.needsReview, true);
+  assert.equal(result.productMatchSource, "no_product_match");
+});

@@ -74,14 +74,14 @@ test("confirmed learned allocation stays ahead of a matched product default", ()
 
 test("exact supplier code mapping returns the confirmed product", () => {
   const result = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     supplierProductCode: "4587",
     rawDescription: "TOM CHERRY RED 250G",
     existingProducts: products,
     supplierMappings: [{
       companyId: "c1",
-      supplierName: "TG Fruits",
+      supplierName: "TG Fruits", supplierId: "supplier-tg-fruits",
       supplierProductCode: "4587",
       productId: "p1",
       active: true,
@@ -96,14 +96,14 @@ test("exact supplier code mapping returns the confirmed product", () => {
 
 test("auto-matched supplier code lines validate without a manual click for invoices and credit notes", () => {
   const match = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     supplierProductCode: "4587",
     rawDescription: "TOM CHERRY RED 250G",
     existingProducts: products,
     supplierMappings: [{
       companyId: "c1",
-      supplierName: "TG Fruits",
+      supplierName: "TG Fruits", supplierId: "supplier-tg-fruits",
       supplierProductCode: "4587",
       productId: "p1",
       active: true,
@@ -131,7 +131,7 @@ test("auto-matched supplier code lines validate without a manual click for invoi
   assert.equal(line.matchedProductId, "p1");
 
   const invoiceReview = validateInvoiceExtraction({
-    invoice: { supplier: "TG Fruits", documentNumber: "INV-1", invoiceDate: "2026-07-23", documentType: "invoice" },
+    invoice: { supplier: "TG Fruits", supplierId: "supplier-tg-fruits", documentNumber: "INV-1", invoiceDate: "2026-07-23", documentType: "invoice" },
     lines: [line],
   });
   assert.equal(invoiceReview.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
@@ -139,7 +139,7 @@ test("auto-matched supplier code lines validate without a manual click for invoi
 
   const creditReview = validateInvoiceExtraction({
     invoice: {
-      supplier: "TG Fruits",
+      supplier: "TG Fruits", supplierId: "supplier-tg-fruits",
       documentNumber: "CN-1",
       invoiceDate: "2026-07-23",
       documentType: "credit_note",
@@ -177,20 +177,20 @@ test("same supplier code from a different supplier or organisation does not matc
 
 test("confirmed description mapping waits for repeated confirmation", () => {
   const oneConfirmation = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 1 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 1 }],
   });
   const twoConfirmations = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
   });
   assert.equal(oneConfirmation.productMatchSource, "no_product_match");
   assert.equal(twoConfirmations.productMatchSource, "learned_rule");
@@ -198,12 +198,12 @@ test("confirmed description mapping waits for repeated confirmation", () => {
 
 test("learned supplier rules auto-resolve product validation", () => {
   const match = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     rawDescription: "LIMES 4KG",
     packSize: "4kg",
     existingProducts: products,
-    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
+    supplierMappings: [{ companyId: "c1", supplierName: "TG Fruits", supplierId: "supplier-tg-fruits", supplierDescription: "LIMES 4KG", productId: "p3", active: true, autoApply: true, confirmationCount: 2 }],
   });
   const line = lineWithAutoMatchedProductResolution({
     rawDescription: "LIMES 4KG",
@@ -220,7 +220,7 @@ test("learned supplier rules auto-resolve product validation", () => {
   });
 
   const reviewed = validateInvoiceExtraction({
-    invoice: { supplier: "TG Fruits", invoiceNumber: "LR-1", invoiceDate: "2026-07-23" },
+    invoice: { supplier: "TG Fruits", supplierId: "supplier-tg-fruits", invoiceNumber: "LR-1", invoiceDate: "2026-07-23" },
     lines: [line],
   });
   assert.equal(line.productResolution, PRODUCT_RESOLUTION_MODES.LEARNED_MATCH);
@@ -229,16 +229,15 @@ test("learned supplier rules auto-resolve product validation", () => {
   assert.equal(reviewed.invoiceHasBlockingReview, false);
 });
 
-test("exact existing product and aliases match without creating products", () => {
-  const exact = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName: "Chicken Breast", existingProducts: products });
-  const alias = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName: "Cherry Toms", existingProducts: products });
-  const none = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName: "Purple Carrots", existingProducts: products });
-  assert.equal(exact.matchedProductId, "p2");
-  assert.equal(exact.productMatchSource, "exact_name");
-  assert.equal(alias.matchedProductId, "p1");
-  assert.equal(alias.productMatchSource, "alias");
-  assert.equal(none.matchedProductId, null);
-  assert.equal(none.productMatchSource, "no_product_match");
+test("unresolved supplier prevents automatic product and alias matches", () => {
+  for (const productName of ["Chicken Breast", "Cherry Toms", "Purple Carrots"]) {
+    const result = matchInvoiceLineToExistingProduct({ organisationId: "c1", productName, existingProducts: products });
+    assert.equal(result.matchedProductId, null);
+    assert.equal(result.productMatchSource, "no_product_match");
+    assert.equal(result.needsReview, true);
+    assert.equal(result.learnedMappingId, null);
+    assert.equal(result.allocationSource, null);
+  }
 });
 
 test("pack-size conflicts prevent unsafe automatic mapping", () => {
@@ -259,7 +258,7 @@ test("ambiguous fuzzy product suggestions require review", () => {
     { id: "yellow", companyId: "c1", name: "Cherry Tomato Yellow" },
   ];
   const match = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     productName: "Cherry Tomato",
     existingProducts: ambiguousProducts,
   });
@@ -267,7 +266,7 @@ test("ambiguous fuzzy product suggestions require review", () => {
   assert.ok(match.reviewReasons.includes("ambiguous_product_match"));
 
   const reviewed = validateInvoiceExtraction({
-    invoice: { supplier: "TG Fruits", invoiceNumber: "AMB-1", invoiceDate: "2026-07-23" },
+    invoice: { supplier: "TG Fruits", supplierId: "supplier-tg-fruits", invoiceNumber: "AMB-1", invoiceDate: "2026-07-23" },
     lines: [{
       productName: "Cherry Tomato",
       quantity: 1,
@@ -296,7 +295,7 @@ test("duplicate protection finds similar explicit product creations", () => {
 test("explicit create-new product decision overrides fuzzy suggestions without changing the product name", () => {
   const radishProducts = [{ id: "radish", companyId: "c1", name: "RADISH", packSize: "kg", supplier: "TG Fruits" }];
   const match = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     supplierProductCode: "HRS123",
     rawDescription: "horseradish",
@@ -309,7 +308,7 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
 
   const createNewLine = lineWithCreateNewProductResolution({
     id: "line-horseradish",
-    supplier: "TG Fruits",
+    supplier: "TG Fruits", supplierId: "supplier-tg-fruits",
     supplierProductCode: "HRS123",
     rawDescription: "horseradish",
     productName: "horseradish",
@@ -329,7 +328,7 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
   assert.deepEqual(createNewLine.suggestedProducts, []);
 
   const reviewed = validateInvoiceExtraction({
-    invoice: { supplier: "TG Fruits", invoiceNumber: "H-1", invoiceDate: "2026-07-23" },
+    invoice: { supplier: "TG Fruits", supplierId: "supplier-tg-fruits", invoiceNumber: "H-1", invoiceDate: "2026-07-23" },
     lines: [createNewLine],
   });
   assert.equal(reviewed.lines[0].reviewReasons.includes("no_confirmed_product_match"), false);
@@ -339,8 +338,8 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
   const resolved = resolveExplicitNewProductLines({
     products: radishProducts,
     items: [createNewLine],
-    supplier: "TG Fruits",
-    organisationId: "c1",
+    supplier: "TG Fruits", supplierId: "supplier-tg-fruits",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     idFactory: () => "horseradish-product",
     createProductFromLine: (line, productId) => ({
       id: productId,
@@ -357,16 +356,16 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
   assert.equal(resolved.items[0].matchedProductId, "horseradish-product");
   assert.equal(radishProducts[0].name, "RADISH");
 
-  const invoice = { id: "invoice-h", supplier: "TG Fruits", items: resolved.items };
+  const invoice = { id: "invoice-h", supplier: "TG Fruits", supplierId: "supplier-tg-fruits", items: resolved.items };
   const learned = learnSupplierProductMappings({
     mappings: [],
     invoice,
     products: resolved.products,
     companyId: "c1",
-    supplierName: "TG Fruits",
+    supplierName: "TG Fruits", supplierId: "supplier-tg-fruits",
   }).mappings;
   const future = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     supplierProductCode: "HRS123",
     rawDescription: "horseradish",
@@ -381,7 +380,7 @@ test("explicit create-new product decision overrides fuzzy suggestions without c
 test("existing product suggestions can be manually selected and persist through confirmation", () => {
   const radishProducts = [{ id: "radish", companyId: "c1", name: "RADISH", packSize: "kg", supplier: "TG Fruits" }];
   const match = matchInvoiceLineToExistingProduct({
-    organisationId: "c1",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     supplierName: "TG Fruits",
     rawDescription: "horseradish",
     productName: "horseradish",
@@ -393,7 +392,7 @@ test("existing product suggestions can be manually selected and persist through 
 
   const unresolvedLine = {
     id: "line-horseradish",
-    supplier: "TG Fruits",
+    supplier: "TG Fruits", supplierId: "supplier-tg-fruits",
     rawDescription: "horseradish",
     productName: "horseradish",
     packSize: "kg",
@@ -418,7 +417,7 @@ test("existing product suggestions can be manually selected and persist through 
   assert.deepEqual(selected.suggestedProducts, []);
 
   const reviewed = validateInvoiceExtraction({
-    invoice: { supplier: "TG Fruits", invoiceNumber: "H-2", invoiceDate: "2026-07-23" },
+    invoice: { supplier: "TG Fruits", supplierId: "supplier-tg-fruits", invoiceNumber: "H-2", invoiceDate: "2026-07-23" },
     lines: [selected],
   });
   assert.equal(reviewed.lines[0].matchedProductId, "radish");
@@ -427,8 +426,8 @@ test("existing product suggestions can be manually selected and persist through 
   const resolved = resolveExplicitNewProductLines({
     products: radishProducts,
     items: [reviewed.lines[0]],
-    supplier: "TG Fruits",
-    organisationId: "c1",
+    supplier: "TG Fruits", supplierId: "supplier-tg-fruits",
+    organisationId: "c1", supplierId: "supplier-tg-fruits",
     idFactory: () => "should-not-create",
   });
   assert.equal(resolved.conflicts.length, 0);

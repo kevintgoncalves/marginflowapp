@@ -1,5 +1,4 @@
-import { normalizeHeader, numberValue } from "./numberUtils.js";
-import { sameSupplierIdentity } from "./supplierIdentity.js";
+import { numberValue } from "./numberUtils.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 import { normalizeDepartmentSplitRows, validDepartmentSplitRows } from "./departmentAssignment.js";
 import {
@@ -76,13 +75,11 @@ function locationMatchPriority(row = {}, locationId = "") {
   return locationId && rowLocationId === locationId ? 1 : 0;
 }
 
-function sameSupplier(row = {}, supplierId = "", supplierName = "") {
-  if (!supplierId && !supplierName) return true;
-  const rowSupplierId = row.supplierId || row.supplier_id || "";
-  if (supplierId && rowSupplierId) return rowSupplierId === supplierId;
-  const rowSupplierName = normalizeHeader(row.supplierName || row.supplier || "");
-  const rowDisplayName = row.supplierName || row.supplier || "";
-  return Boolean(supplierName && rowSupplierName && (rowSupplierName === normalizeHeader(supplierName) || sameSupplierIdentity(rowDisplayName, supplierName)));
+function sameRuleScope(row = {}, organisationId = "", supplierId = "") {
+  const rowOrganisationId = row.company_id ?? row.restaurant_id ?? row.companyId ?? row.restaurantId ?? row.organisationId ?? row.organizationId;
+  const rowSupplierId = row.supplier_id ?? row.supplierId;
+  return Boolean(organisationId && supplierId
+    && rowOrganisationId === organisationId && rowSupplierId === supplierId);
 }
 
 function mappingProduct(mapping = {}, products = []) {
@@ -171,12 +168,15 @@ export function matchInvoiceLineToExistingProduct({
   suggestThreshold = 0.75,
 } = {}) {
   const context = { supplierId, supplierName, supplierProductCode, rawDescription, productName };
+  if (!organisationId || !supplierId) {
+    return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
+      reviewReasons: ["no_confirmed_product_match"] });
+  }
   const products = existingProducts.filter((product) => sameOrganisation(product, organisationId) && product.active !== false);
   const mappings = supplierMappings.filter((mapping) => (
-    mapping.active !== false
-    && sameOrganisation(mapping, organisationId)
+    sameRuleScope(mapping, organisationId, supplierId)
+    && mapping.active !== false
     && sameLocation(mapping, locationId)
-    && sameSupplier(mapping, supplierId, supplierName)
   )).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
   const normalizedCode = normalizeSupplierProductCode(supplierProductCode);
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
@@ -226,13 +226,6 @@ export function matchInvoiceLineToExistingProduct({
     suggestThreshold,
     autoSelectFuzzy: false,
   });
-  if (!supplierId && genericMatch.match && [PRODUCT_NAME_MATCH_TYPES.EXACT_NAME, PRODUCT_NAME_MATCH_TYPES.ALIAS].includes(genericMatch.matchType)) {
-    return withMatchDebug(resultFromProduct({
-      product: genericMatch.match,
-      source: genericMatch.matchType === PRODUCT_NAME_MATCH_TYPES.ALIAS ? PRODUCT_MATCH_SOURCES.ALIAS : PRODUCT_MATCH_SOURCES.EXACT_NAME,
-      confidence: genericMatch.confidence,
-    }), context);
-  }
 
   const scored = genericMatch.candidates || [];
   const best = scored[0];
