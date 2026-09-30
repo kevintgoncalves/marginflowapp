@@ -8,5 +8,10 @@
     "sha256": "9d8ce8e987f5884a4ecbf4dc39441ae7019efccaf576e5eb97fac63c6d003408",
     "review": "scripts/atomic-invoice-catalogue.test.mjs",
     "test": "scripts/atomic-invoice-catalogue.test.mjs"
+  },
+  "20260930153000_fix_uuid_catalogue_resolution.sql": {
+    "sha256": "dd8fea0f4d0bef602e63f1877951e02569f1695e482f029e585452a727231ffc",
+    "review": "scripts/atomic-invoice-catalogue.test.mjs",
+    "test": "scripts/atomic-invoice-catalogue.test.mjs"
   }
 }

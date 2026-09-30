@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 
 const sql=readFileSync(new URL('../supabase/migrations/20260930150000_atomic_invoice_catalogue_persistence.sql',import.meta.url),'utf8');
+const uuidFixSql=readFileSync(new URL('../supabase/migrations/20260930153000_fix_uuid_catalogue_resolution.sql',import.meta.url),'utf8');
 const main=readFileSync(new URL('../src/main.jsx',import.meta.url),'utf8');
 
 test('atomic invoice catalogue migration preserves scoped authorization and the archive boundary',()=>{
@@ -35,4 +36,13 @@ test('originals are archived only after database persistence is confirmed',()=>{
   assert.equal((main.match(/&& persistence\.persisted &&/g)||[]).length,2);
   assert.doesNotMatch(main,/cloudEnabled && draft\.files\?\.length \? await archiveOriginals/);
   assert.doesNotMatch(main,/companyId && source\?\.originalFiles\?\.length \? await archiveOriginals/);
+});
+
+test('catalogue UUID resolution is deterministic without UUID aggregates',()=>{
+  assert.doesNotMatch(uuidFixSql,/\bmin\s*\(/i);
+  assert.equal((uuidFixSql.match(/order by (supplier|product|department)\.created_at, \1\.id/g)||[]).length,3);
+  assert.equal((uuidFixSql.match(/limit 1;/g)||[]).length,3);
+  assert.match(uuidFixSql,/supplier\.normalized_name = v_supplier_key/);
+  assert.match(uuidFixSql,/product\.supplier_id is not distinct from v_supplier_id/);
+  assert.match(uuidFixSql,/department\.company_id = p_company_id/);
 });

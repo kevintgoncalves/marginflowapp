@@ -219,6 +219,7 @@ import {
   sameSupplierIdentity,
   supplierExistsByIdentity,
   supplierIdentityKey,
+  supplierScopeId,
   supplierSortKey,
 } from "./domain/supplierIdentity.js";
 import { propagateInvoiceSupplierToLines, validateInvoiceLinesForApproval } from "./domain/invoiceWorkflow.js";
@@ -6786,7 +6787,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         items: normalizedItems,
         supplierMappings: supplierProductMappings,
         supplier,
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         organisationId: cloudScope.companyId,
         idFactory: uid,
         createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
@@ -6806,7 +6807,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       }
       const invoice = prepareApprovedInvoice({
         id: invoiceId,
-        supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         documentType,
         document_type: documentType,
         documentNumber,
@@ -6862,7 +6863,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         products: productsForLearning,
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: cloudEnabled ? "relational+snapshot" : "snapshot",
@@ -7986,9 +7987,10 @@ function useImmediateInvoiceLearning({ supplierProductMappings, products, suppli
     setLearningNotice("Saving reusable match…");
     learningQueue.current = learningQueue.current.catch(() => {}).then(async () => {
       const supplierRecord = canonicalSupplierForName(suppliers, invoice.supplier || line.supplier);
+      const resolvedSupplierId = supplierScopeId(supplierRecord) || invoice.supplierId || line.supplierId || "";
       const result = learnSupplierProductMappings({ mappings: learningRef.current,
         invoice: { ...invoice, items: [line] }, products: productsRef.current, companyId, locationId,
-        supplierId: supplierRecord?.id || invoice.supplierId || "",
+        supplierId: resolvedSupplierId,
         supplierName: supplierRecord?.name || invoice.supplier || line.supplier,
         departments: departmentSettings });
       const outcome = await persistInvoiceLearning(result.learned);
@@ -8558,12 +8560,12 @@ function Invoices({
       mapping.active !== false
       && (!companyId || !mapping.companyId || mapping.companyId === companyId)
       && (!locationId || !mapping.locationId || mapping.locationId === locationId)
-      && (supplierRecord?.id && mapping.supplierId
-        ? mapping.supplierId === supplierRecord.id
+      && (supplierScopeId(supplierRecord) && mapping.supplierId
+        ? mapping.supplierId === supplierScopeId(supplierRecord)
         : sameSupplierIdentity(mapping.supplierName || mapping.supplier || "", supplier))
     ));
     invoiceLearningDebug("mappings-loaded", {
-      supplierId: supplierRecord?.id || "",
+      supplierId: supplierScopeId(supplierRecord),
       supplierName: supplier,
       mappingCount: supplierScopedMappings.length,
     });
@@ -8589,7 +8591,7 @@ function Invoices({
           unit: line.unit || line.unitOfMeasure || "",
           unitOfMeasure: line.unitOfMeasure || line.unit || "",
           supplier,
-          supplierId: supplierRecord?.id || "",
+          supplierId: supplierScopeId(supplierRecord),
           currency: payload.currency || financialSettings.currency || "GBP",
           departmentId: line.departmentId || "",
           department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
@@ -8767,12 +8769,12 @@ function Invoices({
         mapping.active !== false
         && (!companyId || !mapping.companyId || mapping.companyId === companyId)
         && (!locationId || !mapping.locationId || mapping.locationId === locationId)
-        && (supplierRecord?.id && mapping.supplierId
-          ? mapping.supplierId === supplierRecord.id
+        && (supplierScopeId(supplierRecord) && mapping.supplierId
+          ? mapping.supplierId === supplierScopeId(supplierRecord)
           : sameSupplierIdentity(mapping.supplierName || mapping.supplier || "", supplier))
       ));
       invoiceLearningDebug("mappings-loaded", {
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         supplierName: supplier,
         mappingCount: supplierScopedMappings.length,
       });
@@ -8798,7 +8800,7 @@ function Invoices({
             unit: line.unit || line.unitOfMeasure || "",
             unitOfMeasure: line.unitOfMeasure || line.unit || "",
             supplier,
-            supplierId: supplierRecord?.id || "",
+            supplierId: supplierScopeId(supplierRecord),
             currency: payload.currency || financialSettings.currency || "GBP",
             departmentId: line.departmentId || "",
             department: line.department || line.suggested_department || departmentForProduct(line.productName, departmentNames, invoiceSettings.defaultInvoiceDepartment),
@@ -9167,14 +9169,27 @@ function Invoices({
   };
 
   const updateManualLine = (id, field, value) => {
+    const sourceLine = manualDraft.items.find((item) => item.id === id);
+    const manualSourceLine = sourceLine && field === "productName" && !sourceLine.originalExtraction?.rawDescription
+      ? { ...sourceLine, rawDescription: value }
+      : sourceLine;
+    const updatedLine = sourceLine
+      ? updateInvoiceLineForEditor(manualSourceLine, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId })
+      : null;
     setManualDraft((current) => ({
       ...current,
       items: current.items.map((item) => {
         if (item.id !== id) return item;
-        const updated = updateInvoiceLineForEditor(item, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
+        const manualLine = field === "productName" && !item.originalExtraction?.rawDescription ? { ...item, rawDescription: value } : item;
+        const updated = updateInvoiceLineForEditor(manualLine, field, value, { products, matchingSettings: aiSettings, departmentNames, supplierMappings: supplierProductMappings, organisationId: companyId, locationId });
         return isCreditNoteDocument(current.documentType) ? normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(updated, current.documentType), departmentNames) : updated;
       }),
     }));
+    if (updatedLine && field === "productName"
+      && isManuallyMatchedProductResolution(updatedLine)
+      && (!isManuallyMatchedProductResolution(sourceLine) || sourceLine.matchedProductId !== updatedLine.matchedProductId)) {
+      saveExplicitDecision({ ...manualDraft, items: [updatedLine] }, updatedLine);
+    }
   };
 
   const setManualDepartmentMode = (id, mode) => {
@@ -9224,7 +9239,7 @@ function Invoices({
       products: learningProducts,
       companyId,
       locationId,
-      supplierId: supplierRecord?.id || "",
+      supplierId: supplierScopeId(supplierRecord) || invoice.supplierId || "",
       supplierName: supplierRecord?.name || invoice.supplier || "",
       departments: departmentSettings,
       storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -9496,7 +9511,7 @@ function Invoices({
       items: normalizedItems,
       supplierMappings: supplierProductMappings,
       supplier,
-      supplierId: supplierRecord?.id || "",
+      supplierId: supplierScopeId(supplierRecord),
       organisationId: companyId,
       idFactory: uid,
       createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
@@ -9512,7 +9527,7 @@ function Invoices({
     const prepared = prepareApprovedInvoice({
       ...sourceInvoice,
       supplier,
-      supplierId: supplierRecord?.relationalId || supplierRecord?.id || sourceInvoice.supplierId || "",
+      supplierId: supplierScopeId(supplierRecord) || sourceInvoice.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -9573,7 +9588,7 @@ function Invoices({
         products: productsForLearning,
         companyId,
         locationId,
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -9793,7 +9808,7 @@ function Invoices({
 
       const invoice = prepareApprovedInvoice({
         id: uid(),
-        supplierId: supplierRecord?.relationalId || supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         documentType,
         document_type: documentType,
         documentNumber,
@@ -9997,7 +10012,7 @@ function Invoices({
     const cleaned = prepareApprovedInvoice({
       ...editDraft,
       supplier,
-      supplierId: supplierRecord?.relationalId || supplierRecord?.id || editDraft.supplierId || "",
+      supplierId: supplierScopeId(supplierRecord) || editDraft.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -11445,7 +11460,7 @@ function InvoiceControlCentre({
     const invoiceForReview = {
       ...invoice,
       supplier,
-      supplierId: supplierRecord?.relationalId || supplierRecord?.id || invoice.supplierId || "",
+      supplierId: supplierScopeId(supplierRecord) || invoice.supplierId || "",
       documentType,
       document_type: documentType,
       documentNumber,
@@ -11508,7 +11523,7 @@ function InvoiceControlCentre({
         items: normalizedItems,
         supplierMappings: supplierProductMappings,
         supplier,
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         organisationId: companyId,
         idFactory: uid,
         createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
@@ -11529,7 +11544,7 @@ function InvoiceControlCentre({
       const prepared = prepareApprovedInvoice({
         ...reviewDetailDraft,
         supplier,
-        supplierId: supplierRecord?.relationalId || supplierRecord?.id || reviewDetailDraft.supplierId || "",
+        supplierId: supplierScopeId(supplierRecord) || reviewDetailDraft.supplierId || "",
         documentType,
         document_type: documentType,
         documentNumber,
@@ -11570,7 +11585,7 @@ function InvoiceControlCentre({
         products: productsForLearning,
         companyId,
         locationId,
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",
@@ -11799,7 +11814,7 @@ function InvoiceControlCentre({
       const cleaned = prepareApprovedInvoice({
         ...viewInvoice,
         supplier,
-        supplierId: supplierRecord?.relationalId || supplierRecord?.id || viewInvoice.supplierId || "",
+        supplierId: supplierScopeId(supplierRecord) || viewInvoice.supplierId || "",
         documentType,
         document_type: documentType,
         documentNumber,
@@ -11833,7 +11848,7 @@ function InvoiceControlCentre({
         products,
         companyId,
         locationId,
-        supplierId: supplierRecord?.id || "",
+        supplierId: supplierScopeId(supplierRecord),
         supplierName: supplier,
         departments: departmentSettings,
         storageTarget: companyId ? "relational+snapshot" : "snapshot",

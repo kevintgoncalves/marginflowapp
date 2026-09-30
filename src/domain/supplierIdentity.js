@@ -19,6 +19,10 @@ export function supplierDisplayName(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+export function supplierScopeId(supplier = {}) {
+  return supplier?.relationalId || supplier?.relational_id || supplier?.id || "";
+}
+
 export function sameSupplierIdentity(left = "", right = "") {
   const leftKey = supplierIdentityKey(left);
   const rightKey = supplierIdentityKey(right);
