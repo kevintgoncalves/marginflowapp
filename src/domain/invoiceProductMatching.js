@@ -7,6 +7,7 @@ import {
   matchProductName,
   normalizeProductName,
   packSizesCompatible,
+  productTokens,
   productAliases,
   unitsCompatible,
 } from "./productMatching.js";
@@ -39,7 +40,24 @@ export function normalizeSupplierProductCode(value = "") {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]+/g, "");
 }
 
-export const normalizeSupplierDescription = normalizeProductName;
+const packagingUnitTokens = new Set([
+  "g", "gram", "kg", "kilogram", "ml", "millilitre", "cl", "centilitre", "l", "litre",
+  "each", "unit", "pack", "case", "box", "bag", "bottle", "tin", "jar", "tray", "carton",
+]);
+
+export function normalizeSupplierDescription(value = "") {
+  const tokens = productTokens(value);
+  return tokens.filter((token, index) => {
+    if (packagingUnitTokens.has(token) || token === "x") return false;
+    if (/^\d+(?:\.\d+)?(?:g|kg|ml|cl|l)$/.test(token)) return false;
+    if (/^\d+(?:\.\d+)?$/.test(token)) {
+      const previous = tokens[index - 1] || "";
+      const next = tokens[index + 1] || "";
+      return previous !== "x" && next !== "x" && !packagingUnitTokens.has(next);
+    }
+    return true;
+  }).join(" ") || normalizeProductName(value);
+}
 
 function sameOrganisation(row = {}, organisationId = "") {
   if (!organisationId) return true;
@@ -167,20 +185,19 @@ export function matchInvoiceLineToExistingProduct({
     const candidates = mappings.filter(candidate => candidate.autoApply !== false
       && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode);
     if (candidates.length) {
-      const compatible = candidates.filter(mapping => unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure)
-        && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size));
-      const mapping = compatible[0];
+      const productIds = new Set(candidates.map(row => row.productId || row.product_id).filter(Boolean));
+      const mapping = candidates[0];
       const product = mapping && mappingProduct(mapping, products);
-      if (!product || new Set(compatible.map(row => row.productId || row.product_id)).size !== 1) {
+      if (!product || productIds.size !== 1) {
         return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
-          reviewReasons: [compatible.length ? "ambiguous_product_match" : "pack_changed"] });
+          reviewReasons: [productIds.size > 1 ? "ambiguous_product_match" : "no_confirmed_product_match"] });
       }
       return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.SUPPLIER_CODE, confidence: 1, mapping }), context);
     }
   }
 
   if (normalizedDescription) {
-    const mapping = mappings.find((candidate) => {
+    const descriptionMappings = mappings.filter((candidate) => {
       const mappingDescription = normalizeSupplierDescription(candidate.normalizedSupplierDescription || candidate.supplierDescription || candidate.supplier_description);
       if (!mappingDescription || mappingDescription !== normalizedDescription) return false;
       if (candidate.autoApply === false) return false;
@@ -189,8 +206,14 @@ export function matchInvoiceLineToExistingProduct({
       const mappingSource = candidate.mappingSource || candidate.source || candidate.metadata?.mapping_source || "";
       return hasCode || confirmationCount >= 2 || candidate.descriptionAutoApply === true || mappingSource === PRODUCT_MATCH_SOURCES.MANUAL_SELECTION;
     });
+    const productIds = new Set(descriptionMappings.map(row => row.productId || row.product_id).filter(Boolean));
+    if (productIds.size > 1) {
+      return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
+        reviewReasons: ["ambiguous_product_match"] });
+    }
+    const mapping = descriptionMappings[0];
     const product = mappingProduct(mapping, products);
-    if (mapping && product && unitsCompatible(unitOfMeasure, mapping.unitOfMeasure || mapping.unit_of_measure) && packSizesCompatible(packSize, mapping.packSize || mapping.pack_size)) {
+    if (mapping && product) {
       return withMatchDebug(resultFromProduct({ product, source: PRODUCT_MATCH_SOURCES.LEARNED_RULE, confidence: 0.98, mapping }), context);
     }
   }
@@ -203,7 +226,7 @@ export function matchInvoiceLineToExistingProduct({
     suggestThreshold,
     autoSelectFuzzy: false,
   });
-  if (genericMatch.match && [PRODUCT_NAME_MATCH_TYPES.EXACT_NAME, PRODUCT_NAME_MATCH_TYPES.ALIAS].includes(genericMatch.matchType)) {
+  if (!supplierId && genericMatch.match && [PRODUCT_NAME_MATCH_TYPES.EXACT_NAME, PRODUCT_NAME_MATCH_TYPES.ALIAS].includes(genericMatch.matchType)) {
     return withMatchDebug(resultFromProduct({
       product: genericMatch.match,
       source: genericMatch.matchType === PRODUCT_NAME_MATCH_TYPES.ALIAS ? PRODUCT_MATCH_SOURCES.ALIAS : PRODUCT_MATCH_SOURCES.EXACT_NAME,

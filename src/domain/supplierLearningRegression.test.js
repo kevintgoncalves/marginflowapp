@@ -105,3 +105,83 @@ test("description aliases stay supplier scoped and do not create duplicate activ
   });
   assert.equal(otherSupplierMatch.matchedProductId, null);
 });
+
+test("AI import reuses a confirmed description despite extracted pack wording changes", () => {
+  const companyId = uuid(21);
+  const supplierId = uuid(22);
+  const productId = uuid(23);
+  const products = [{ id: productId, companyId, name: "Pearl Barley", active: true }];
+  const rule = relationalMappingFromRow({
+    id: uuid(24), company_id: companyId, location_id: null, supplier_id: supplierId,
+    product_id: productId, supplier_description: "PEARL BARLEY TRIPPLE LION",
+    normalized_supplier_description: "pearl barley tripple lion",
+    unit_of_measure: "kg", normalized_unit_of_measure: "kg",
+    pack_size: "3KG", normalized_pack_size: "3kg",
+    source: "manual_selection", auto_apply: true, confirmation_count: 1, active: true,
+  }, { suppliers: [{ id: supplierId, name: "Staging Produce Ltd" }], products });
+
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: companyId,
+    supplierId,
+    supplierName: "Staging Produce Ltd",
+    supplierProductCode: "PB-TL-001",
+    rawDescription: "PEARL BARLEY TRIPPLE LION",
+    unitOfMeasure: "kg",
+    packSize: "1 x 1 kg",
+    existingProducts: products,
+    supplierMappings: [rule],
+  });
+
+  assert.equal(match.matchedProductId, productId);
+  assert.equal(match.productMatchSource, "learned_rule");
+  assert.equal(match.learnedMappingId, rule.id);
+  assert.equal(match.needsReview, false);
+});
+
+test("supplier description normalization is shared across plurals, punctuation and pack units", () => {
+  const companyId = uuid(31);
+  const supplierId = uuid(32);
+  const productId = uuid(33);
+  const products = [{ id: productId, companyId, name: "Pearl Barley", active: true }];
+  const learned = learnSupplierProductMappings({
+    mappings: [],
+    invoice: { id: "invoice-normalized", supplier: "Test Produce", items: [{
+      id: "line-normalized", rawDescription: "PEARL-BARLEYS 3 KG", productName: "Pearl Barley",
+      matchedProductId: productId, productResolution: "manual_match", productMatchSource: "manual_selection",
+      department: "Food", departmentMode: "Single", unitOfMeasure: "kg", packSize: "3kg",
+    }] },
+    products, companyId, supplierId, supplierName: "Test Produce",
+  }).mappings;
+
+  const match = matchInvoiceLineToExistingProduct({
+    organisationId: companyId, supplierId, supplierName: "Test Produce",
+    rawDescription: "pearl barley, 1 x 5kg", unitOfMeasure: "kg", packSize: "1 x 5kg",
+    existingProducts: products, supplierMappings: learned,
+  });
+  assert.equal(match.matchedProductId, productId);
+  assert.equal(match.productMatchSource, "learned_rule");
+});
+
+test("same learned SKU does not cross supplier or company boundaries", () => {
+  const companyId = uuid(41);
+  const supplierId = uuid(42);
+  const productId = uuid(43);
+  const products = [{ id: productId, companyId, name: "Pearl Barley", active: true }];
+  const rule = {
+    id: uuid(44), companyId, supplierId, supplierName: "Test Produce",
+    supplierProductCode: "PB-100", normalizedSupplierProductCode: "PB100",
+    productId, active: true, autoApply: true, mappingSource: "manual_selection",
+  };
+  const forOtherSupplier = matchInvoiceLineToExistingProduct({
+    organisationId: companyId, supplierId: uuid(45), supplierName: "Other Produce",
+    supplierProductCode: "PB-100", rawDescription: "PEARL BARLEY",
+    existingProducts: products, supplierMappings: [rule],
+  });
+  const forOtherCompany = matchInvoiceLineToExistingProduct({
+    organisationId: uuid(46), supplierId, supplierName: "Test Produce",
+    supplierProductCode: "PB-100", rawDescription: "PEARL BARLEY",
+    existingProducts: products, supplierMappings: [rule],
+  });
+  assert.equal(forOtherSupplier.matchedProductId, null);
+  assert.equal(forOtherCompany.matchedProductId, null);
+});
