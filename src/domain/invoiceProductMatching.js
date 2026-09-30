@@ -231,13 +231,22 @@ export function matchInvoiceLineToExistingProduct({
     && normalizedDescription && normalizeSupplierDescription(row.supplierDescription) === normalizedDescription
     && packSignature(packSize) && samePack(row));
   if (catalogue.length) {
-    const row = catalogue[0];
-    const conversion = row.conversionRule;
-    const product = mappingProduct(row, products);
-    if (catalogue.length !== 1 || !product || !conversion?.confirmed || !(conversion.baseQuantity > 0)
-      || !conversion.purchaseUnit || !conversion.baseUnit) {
+    // Only distinct exact catalogue identities determine ambiguity, never fuzzy suggestions
+    // or duplicate format rows. Conversion availability does not change product identity.
+    const identities = new Map();
+    for (const row of catalogue) {
+      const id = row.productId || row.product_id;
+      if (id) identities.set(`${id}:${packSignature(row.packSize || row.pack_size)}`, row);
+    }
+    const row = identities.values().next().value;
+    const product = row && mappingProduct(row, products);
+    if (identities.size !== 1 || !product) {
       return resultFromProduct({source:PRODUCT_MATCH_SOURCES.NONE,needsReview:true,reviewReasons:['ambiguous_product_match']});
     }
+    const conversions = catalogue.map(entry => entry.conversionRule).filter(value => value?.confirmed
+      && value.baseQuantity > 0 && value.purchaseUnit && value.baseUnit);
+    const conversionKeys = new Set(conversions.map(value => JSON.stringify([value.purchaseUnit, Number(value.baseQuantity), value.baseUnit])));
+    const conversion = conversionKeys.size === 1 ? conversions[0] : undefined;
     return {...resultFromProduct({product,source:PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE,confidence:1}), conversionRule:conversion};
   }
 
