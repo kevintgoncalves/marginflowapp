@@ -1,3 +1,4 @@
+import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
 import { refreshPendingInvoice, purchaseConversion } from "./domain/reusablePurchasing.js";
 import ProductSupplierComparison from "./components/ProductSupplierComparison.jsx";
@@ -2367,6 +2368,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       departmentMode: assignment.departmentMode,
       departmentSplits: assignment.departmentSplits,
       allocationSource: match.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : ""),
+      conversionRule: match.conversionRule || line.conversionRule || purchaseDetails(line),
       learnedMappingId: match.learnedMappingId || line.learnedMappingId || "",
       needsReview: false,
       reviewReasons: [],
@@ -8994,7 +8996,7 @@ function Invoices({
     const sourceLine = draft?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(draft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(draft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     setDraft((current) => ({
       ...current,
@@ -9428,7 +9430,7 @@ function Invoices({
     const sourceLine = selectedBatchInvoice?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(selectedBatchInvoice, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(selectedBatchInvoice, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     updateSelectedBatchInvoice((base) => ({
       ...base,
@@ -10892,11 +10894,18 @@ function InvoiceLineEditor({
                     )}
                   </div>
                 </td>
-                <td><label>Pack size<input value={item.packSize || ""} onChange={event => updateLine(item.id, "packSize", event.target.value)} /></label>
-                  <label>Billed per<select aria-label="Billing unit" value={item.unitOfMeasure || ""} onChange={event => updateLine(item.id, "unitOfMeasure", event.target.value)}>
-                    <option value="">Needs conversion</option>{[...new Set([item.unitOfMeasure, "kg", "l", "each", "bag", "sack", "pack", "case", "box", "bottle"].filter(Boolean))].map(unit => <option key={unit}>{unit}</option>)}
+                <td>
+                  <label>Pack description original<input value={item.packSize || ""} readOnly /></label>
+                  <label>Purchase unit<select aria-label="Purchase unit" value={purchaseDetails(item).purchaseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), purchaseUnit:event.target.value, confirmed:false})}>
+                    <option value="">Confirm purchase unit</option>{PURCHASE_UNITS.map(unit => <option key={unit}>{unit}</option>)}
                   </select></label>
-                  <small>{purchaseConversion(item).valid ? `${purchaseConversion(item).volume} ${purchaseConversion(item).unit} · ${money(purchaseConversion(item).price)}/${purchaseConversion(item).unit}` : "Needs conversion · excluded from price comparison"}</small>
+                  <label>Content per purchase unit<input aria-label="Content per purchase unit" type="number" min="0" step="any" value={purchaseDetails(item).baseQuantity || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseQuantity:Number(event.target.value), confirmed:false})} /></label>
+                  <label>Comparison unit<select aria-label="Comparison unit" value={purchaseDetails(item).baseUnit || ""} onChange={event => updateLine(item.id, "conversionRule", {...purchaseDetails(item), baseUnit:event.target.value, confirmed:false})}>
+                    <option value="">Needs conversion</option>{['kg','l','each','punnet'].map(unit => <option key={unit}>{unit}</option>)}
+                  </select></label>
+                  <small>{purchaseDetails(item).baseUnit === 'punnet' ? 'Weight unknown · excluded from kg comparison. Confirm equivalent punnets before comparison.' : ''}</small>
+                  <small>{(() => { const conversion = purchaseConversion({...item, conversionRule:purchaseDetails(item)}); return conversion.valid ? `${item.quantity} × ${money(item.unitCost)} = ${money(Number(item.quantity)*Number(item.unitCost))} · ${conversion.volume} ${conversion.unit} · ${money(conversion.price)}/${conversion.unit}` : 'Confirm conversion for comparison · invoice can still be saved'; })()}</small>
+                  <button type="button" className="ghost mini-button" disabled={!purchaseDetails(item).purchaseUnit || !(purchaseDetails(item).baseQuantity > 0) || !purchaseDetails(item).baseUnit} onClick={() => updateLine(item.id, "conversionRule", {...purchaseDetails(item), confirmed:true})}>Confirm conversion</button>
                   {applyExistingProduct && item.matchedProductId && <button type="button" className="ghost mini-button" onClick={() => applyExistingProduct(item.id, item.matchedProductId)}>Save match and conversion</button>}
                 </td>
                 <td><input min="0" step="0.01" type="number" value={item.quantity ?? 0} onChange={(event) => updateLine(item.id, "quantity", event.target.value)} /></td>
@@ -11383,7 +11392,7 @@ function InvoiceControlCentre({
     const sourceLine = reviewDetailDraft?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(reviewDetailDraft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(reviewDetailDraft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     setReviewDetailDraft((current) => {
       if (!current) return current;

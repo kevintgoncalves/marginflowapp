@@ -1,3 +1,4 @@
+import { saveSupplierConversion, conversionForMapping } from './supplierConversionRepository.js';
 import { readAllPages } from "./paginatedRead.js";
 import { normalizeSupplierDescription, normalizeSupplierProductCode } from "../domain/invoiceProductMatching.js";
 import { normalizeHeader, numberValue } from "../domain/numberUtils.js";
@@ -132,7 +133,10 @@ export async function loadRelationalSupplierProductMappings(client, {
   };
   const splitRules = await related("supplier_product_split_rules", "supplier_product_mapping_id", mappingRows.map(row => row.id));
   const splitLines = await related("supplier_product_split_rule_lines", "split_rule_id", splitRules.map(row => row.id));
-  return mappingRows.map(row => relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }));
+  const formats = mappingRows.length ? await readAllPages((head = false) => client.from("product_supplier_formats")
+    .select("*", { count: "exact", head }).eq("company_id", companyId), { label: "supplier conversions" }) : [];
+  return mappingRows.map(row => ({ ...relationalMappingFromRow(row, { suppliers, products, departments, splitRules, splitLines }),
+    conversionRule: conversionForMapping(row, formats) }));
 }
 
 function persistencePayload(mapping = {}, scope = {}) {
@@ -194,6 +198,7 @@ export async function persistRelationalSupplierProductMappings(client, mappings 
     if (error) throw error;
     const relationalId = Array.isArray(data) ? data[0]?.mapping_id : data?.mapping_id || data;
     if (!isUuid(relationalId)) throw new Error("The database did not acknowledge the saved match. Retry this decision.");
+    await saveSupplierConversion(client, mapping, payload.p_company_id, payload.p_location_id || "");
     persisted.push({ mappingId: mapping.id || "", relationalId });
   }
   return { persisted, skipped };

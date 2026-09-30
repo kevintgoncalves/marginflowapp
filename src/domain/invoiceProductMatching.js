@@ -1,3 +1,4 @@
+import { reusableConversion } from './purchaseUnits.js';
 import { numberValue } from "./numberUtils.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 import { normalizeDepartmentSplitRows, validDepartmentSplitRows } from "./departmentAssignment.js";
@@ -127,6 +128,7 @@ function resultFromProduct({
     reviewReasons,
     allocationSource,
     learnedMappingId: mapping?.id || null,
+    conversionRule: mapping?.conversionRule,
     ...allocation,
   };
 }
@@ -177,7 +179,7 @@ export function matchInvoiceLineToExistingProduct({
     sameRuleScope(mapping, organisationId, supplierId)
     && mapping.active !== false
     && sameLocation(mapping, locationId)
-  )).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
+  )).map(mapping => ({ ...mapping, conversionRule: reusableConversion(mapping, packSize) })).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
   const normalizedCode = normalizeSupplierProductCode(supplierProductCode);
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
 

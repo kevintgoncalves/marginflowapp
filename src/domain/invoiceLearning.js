@@ -166,6 +166,7 @@ export function learnSupplierProductMappings({
       productName: product.name || line.productName || existing?.productName || "",
       mappingSource: manualProductSelection ? PRODUCT_MATCH_SOURCES.MANUAL_SELECTION : (existing?.mappingSource || "confirmed_invoice"),
       descriptionAutoApply: manualProductSelection || existing?.descriptionAutoApply === true,
+      conversionRule: line.conversionRule,
       packSize: line.packSize || existing?.packSize || "",
       unitOfMeasure: line.unitOfMeasure || line.unit || existing?.unitOfMeasure || "",
       ...allocation,

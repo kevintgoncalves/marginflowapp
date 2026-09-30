@@ -1,3 +1,4 @@
+import { interpretPurchasePack } from './purchaseUnits.js';
 import {normalizeSupplierDescription,normalizeSupplierProductCode} from './invoiceProductMatching.js';
 import {sameSupplierIdentity} from './supplierIdentity.js';
 import {lineWithAutoMatchedProductResolution,isManuallyMatchedProductResolution} from './invoiceProductResolution.js';
@@ -24,11 +25,12 @@ export function refreshPendingInvoice(invoice,rules,products,companyId='',locati
  });return changed?{...invoice,items}:invoice;
 }
 export function purchaseConversion(line){
- const quantity=Number(line.quantity);const cost=Number(line.unitCost);const billing=unitKey(line.unitOfMeasure||line.billingUnit||'');
- const rule=line.conversionRule;
+ const quantity=Number(line.quantity);const cost=Number(line.unitCost);const billing=unitKey(line.purchaseUnit||line.unitOfMeasure||line.billingUnit||'');
+ const rule=line.conversionRule || (line.purchaseUnit || /^\s*x\s*\d|^\s*\d+\s*x\s*\d|^\s*single\s+pnt/i.test(line.packSize || '') ? interpretPurchasePack(line.packSize, line.purchaseUnit) : null);
  let factor=null,unit=null;
- if(rule?.confirmed&&Number(rule.baseQuantity)>0&&['kg','l','each'].includes(rule.baseUnit)){factor=Number(rule.baseQuantity);unit=rule.baseUnit;}
- else if(['kg','l','each'].includes(billing)){factor=1;unit=billing;}
+ if(rule?.confirmed&&Number(rule.baseQuantity)>0&&['kg','l','each','punnet'].includes(rule.baseUnit)){factor=Number(rule.baseQuantity);unit=rule.baseUnit;}
+ else if(rule){factor=null;}
+ else if(['kg','l','each','punnet'].includes(billing)){factor=1;unit=billing;}
  else if(['bag','sack','pack','case','box','bottle'].includes(billing)){
   const pack=String(line.packSize||'').toLowerCase().replace(/sacks?|bags?|packs?|cases?|boxes|bottles?/g,'').trim();
   const match=pack.match(/^(?:(\d+(?:\.\d+)?)\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*(kg|g|l|ml)$/);
@@ -40,5 +42,5 @@ export function purchaseConversion(line){
  const net=explicitNet===undefined?gross-discount:Number(explicitNet);
  if(!(factor>0)||line.quantity===""||line.unitCost===""||!Number.isFinite(quantity)||!Number.isFinite(cost))return {valid:false,status:'Needs conversion',net:Number.isFinite(net)?net:null};
  const volume=quantity*factor;
- return {valid:volume!==0&&Number.isFinite(net),status:'Comparable',unit,factor,volume,net,price:volume?net/volume:null};
+ return {valid:volume!==0&&Number.isFinite(net),status:'Comparable',unit,factor,volume,net,weightUnknown:unit==='punnet',price:volume?net/volume:null};
 }
