@@ -3,5 +3,10 @@
     "sha256": "8558304a81cc04ad51f439532b793ae22f15757c5b7838ffddeb90f603951723",
     "review": "docs/reviews/approved-ui-session/preview-validation/PERSISTENCE_FIX.md",
     "test": "scripts/test-learning-postgres.py"
+  },
+  "20260930150000_atomic_invoice_catalogue_persistence.sql": {
+    "sha256": "9d8ce8e987f5884a4ecbf4dc39441ae7019efccaf576e5eb97fac63c6d003408",
+    "review": "scripts/atomic-invoice-catalogue.test.mjs",
+    "test": "scripts/atomic-invoice-catalogue.test.mjs"
   }
 }

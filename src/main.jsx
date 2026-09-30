@@ -6871,7 +6871,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistConfirmedLearning(learningResult.learned);
       setDraft(current=>({...current,editingInvoiceId:savedInvoice.id}));
-      const archive = cloudEnabled && draft.files?.length ? await archiveOriginals(supabase,savedInvoice.id,cloudScope,draft.files) : null;
+      const archive = cloudEnabled && persistence.persisted && draft.files?.length
+        ? await archiveOriginals(supabase,savedInvoice.id,cloudScope,draft.files)
+        : null;
       setDraft({...emptyInvoiceDraft(),status:archive ? `${persistence.persisted ? "Invoice confirmed." : "Invoice pending cloud confirmation."} ${archive.message}` : (persistence.error ? "Invoice pending cloud confirmation." : "Invoice confirmed.")});
     } catch (error) {
       const message = error?.message || "Unexpected invoice save error.";
@@ -9580,7 +9582,9 @@ function Invoices({
       setInvoiceLineCorrections((current) => correctionHistoryForInvoice({ existingCorrections: current, invoice: savedInvoice }));
       await persistInvoiceLearning(learningResult.learned);
       const source = batchUploadDocumentsRef.current.get(item.documentId) || await loadInvoiceBatchDocument(invoiceBatchRef.current.id,item.documentId || item.id);
-      const archive = companyId && source?.originalFiles?.length ? await archiveOriginals(supabase,savedInvoice.id,{companyId,locationId},source.originalFiles) : null;
+      const archive = companyId && persistence.persisted && source?.originalFiles?.length
+        ? await archiveOriginals(supabase,savedInvoice.id,{companyId,locationId},source.originalFiles)
+        : null;
       const persistenceStatus = batchItemStatusAfterPersistence(persistence);
       persistenceStatus.originalArchiveStatus=archive ? (archive.archived ? "Archived" : "Pending — retry in details") : "No original source";
       if(archive && !archive.archived)persistenceStatus.error=archive.message;
