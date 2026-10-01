@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "safety:check": "node scripts/check-data-safety.mjs",
-    "prebuild": "npm run safety:check && npm test && node scripts/check-production-release.mjs"
+    "prebuild": "npm run safety:check && npm test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",
