@@ -150,9 +150,9 @@ export async function persistRelationalInvoice(client, invoice = {}, scope = {},
     throw new Error("Relational invoice persistence needs canonical company and invoice identifiers.");
   }
   if (client?.from && validScope(scope)) {
-    const {data:departments,error} = await client.from("departments").select("id,name,company_id,active").eq("company_id",scope.companyId).eq("active",true);
+    const {data:departments,error} = await client.from("departments").select("id,name,company_id,location_id,active").eq("company_id",scope.companyId).eq("active",true);
     if (error || !departments) throw error || new Error("Could not verify departments. Draft preserved.");
-    invoice = invoiceWithVerifiedDepartments(invoice, departments, scope.companyId);
+    invoice = invoiceWithVerifiedDepartments(invoice, departments, scope);
   }
   const canonicalInvoice = await ensureInvoicePersistenceIds(invoice, scope);
   const invoicePayload = { ...canonicalInvoice };

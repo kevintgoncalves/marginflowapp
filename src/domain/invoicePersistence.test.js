@@ -52,13 +52,15 @@ test("confirmed invoice persistence sends the full document to one atomic RPC", 
   assert.equal(result.line_count, 1);
 });
 
-test("a header and 25 lines use the sole active remote department and are confirmed before pending is removed", async () => {
-  const department = { id: "44444444-4444-4444-8444-444444444444", company_id: companyId, name: "Operations", active: true };
+test("a header and 25 name-only lines use the active department in the current location before pending is removed", async () => {
+  const locationId = "66666666-6666-4666-8666-666666666666";
+  const department = { id: "44444444-4444-4444-8444-444444444444", company_id: companyId, location_id: locationId, name: "Operations", active: true };
+  const otherLocation = { ...department, id: "77777777-7777-4777-8777-777777777777", location_id: "88888888-8888-4888-8888-888888888888" };
   const states = [];
   const calls = [];
   const query = {
     select() { return this; }, eq() { return this; },
-    then(resolve, reject) { return Promise.resolve({ data: [department], error: null }).then(resolve, reject); },
+    then(resolve, reject) { return Promise.resolve({ data: [otherLocation, department], error: null }).then(resolve, reject); },
   };
   const client = {
     from(table) { assert.equal(table, "departments"); return query; },
@@ -76,11 +78,12 @@ test("a header and 25 lines use the sole active remote department and are confir
       department: "Legacy local label", departmentId: "", departmentSplits: [],
     })),
   };
-  const result = await persistInvoiceWithLocalFallback({ client, invoice, scope: { companyId }, storeLocal: state => states.push(state) });
+  const result = await persistInvoiceWithLocalFallback({ client, invoice, scope: { companyId, locationId }, storeLocal: state => states.push(state) });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.p_invoice.documentNumber, "DOC-25");
   assert.equal(calls[0].payload.p_invoice.items.length, 25);
   assert.ok(calls[0].payload.p_invoice.items.every(line => line.departmentId === department.id));
+  assert.equal(calls[0].payload.p_location_id, locationId);
   assert.equal(states[0].syncStatus, "pending_sync");
   assert.equal(states.at(-1).syncStatus, "synced");
   assert.equal(result.persisted, true);
