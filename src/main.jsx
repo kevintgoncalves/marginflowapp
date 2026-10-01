@@ -5586,7 +5586,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const invoiceCommitGenerationRef = useRef(0);
   const [confirmedInvoices, setConfirmedInvoices] = useState([]);
   const [confirmedInvoicesLoaded, setConfirmedInvoicesLoaded] = useState(false);
-  const [invoicePageState, setInvoicePageState] = useState({ nextOffset: 0, hasMore: false, loading: false, error: "" });
+  const [invoicePageState, setInvoicePageState] = useState({ nextOffset: 0, total: 0, filters: {}, hasMore: false, loading: false, error: "" });
   const [reportInvoices, setReportInvoices] = useState([]);
   const [reportLoadState, setReportLoadState] = useState({ loading: false, error: "" });
   const [cloudStatus, setCloudStatus] = useState("local");
@@ -5667,7 +5667,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [supplierProductMappings, setSupplierProductMappingsState] = useState(() => demoInitialData?.supplierProductMappings || safeReadLocalStorageArray("marginflow.supplierProductMappings", []));
   const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
   const [invoices, setInvoicesState] = useState(() => normalizeInvoiceCollectionForRuntime(
-    demoInitialData?.invoices || safeReadLocalStorageArray("marginflow.invoices", []),
+    demoInitialData?.invoices || mergeInvoiceCollectionsPreservingAll(
+      safeReadLocalStorageArray("marginflow.invoices", []),
+      safeReadLocalStorageArray("marginflow.pendingInvoices", []),
+    ).invoices,
   ));
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || []);
@@ -5757,7 +5760,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     setInvoicesState((current) => {
       const nextValue = typeof value === "function" ? value(current) : value;
       const next = normalizeInvoiceCollectionForRuntime(nextValue);
-      if (!demoMode && !readOnly) saveLocalStorage("marginflow.invoices", next);
+      // Confirmed history is authoritative in Supabase. Keep only work that is
+      // genuinely not cloud-confirmed in a separate recovery key, never rewrite
+      // the legacy full-history key that may need an explicit export/review.
+      if (!demoMode && !readOnly) saveLocalStorage("marginflow.pendingInvoices", next.filter((invoice) => invoice.syncStatus !== "synced"));
       return next;
     });
   };
@@ -6040,7 +6046,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     try {
       const page = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
       relationalInvoices = page.invoices;
-      setInvoicePageState({ nextOffset: page.nextOffset, hasMore: page.hasMore, loading: false, error: "" });
+      setInvoicePageState({ nextOffset: page.nextOffset, total: page.total, filters: {}, hasMore: page.hasMore, loading: false, error: "" });
     } catch (error) {
       throw new Error(`Relational invoice hydration failed [operation=loadRelationalInvoices company=${scope.companyId} location=${scope.locationId || "company"}]: ${error.message || "Unknown error"}`);
     }
@@ -6055,19 +6061,6 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     // Write only in applyCloudSnapshot, after its caller checks cancellation
     // and that no new invoice work arrived while this read was in flight.
     return { ...snapshot, invoices: operationalInvoices, confirmedInvoices: relationalInvoices };
-  };
-
-  const withRelationalSales = async (snapshot) => {
-    if (!cloudEnabled) return snapshot;
-    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-    const currentMonthStart = `${today().slice(0, 7)}-01`;
-    try {
-      const relationalSales = await loadRelationalSales(supabase, scope, { startDate: currentMonthStart, endDate: today() });
-      return { ...snapshot, sales: relationalSales };
-    } catch (error) {
-      setReportLoadState({ loading: false, error: `Sales report: ${error.message || "query failed"}` });
-      return snapshot;
-    }
   };
 
   const withCompletedOnboardingSetup = async (snapshot) => {
@@ -6223,9 +6216,6 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           if (cancelled) return;
           if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(nextSnapshot);
-          withRelationalSales(nextSnapshot).then(salesSnapshot => {
-            if (!cancelled) { salesRef.current = salesSnapshot.sales || []; setSalesState(salesSnapshot.sales || []); }
-          });
           if (!readOnly) withRelationalLearning(nextSnapshot).then(learned => {
             if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
           });
@@ -6239,9 +6229,6 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           if (cancelled) return;
           if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(firstSnapshot);
-          withRelationalSales(firstSnapshot).then(salesSnapshot => {
-            if (!cancelled) { salesRef.current = salesSnapshot.sales || []; setSalesState(salesSnapshot.sales || []); }
-          });
           if (!readOnly) withRelationalLearning(firstSnapshot).then(learned => {
             if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
           });
@@ -6273,10 +6260,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
         const readGeneration = invoiceCommitGenerationRef.current;
-        const currentMonthStart = `${today().slice(0, 7)}-01`;
         const invoicePage = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
         const freshInvoices = invoicePage.invoices;
-        setInvoicePageState({ nextOffset: invoicePage.nextOffset, hasMore: invoicePage.hasMore, loading: false, error: "" });
+        setInvoicePageState({ nextOffset: invoicePage.nextOffset, total: invoicePage.total, filters: {}, hasMore: invoicePage.hasMore, loading: false, error: "" });
         if (cancelled || readGeneration !== invoiceCommitGenerationRef.current) return;
         setConfirmedInvoices(freshInvoices);
         setConfirmedInvoicesLoaded(true);
@@ -6288,12 +6274,6 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           readOnly,
         }));
         setLegacyInvoiceArchive([]);
-        try {
-          const freshSales = await loadRelationalSales(supabase, scope, { startDate: currentMonthStart, endDate: today() });
-          if (!cancelled) { salesRef.current = freshSales; setSalesState(freshSales); }
-        } catch (salesError) {
-          if (!cancelled) setReportLoadState({ loading: false, error: `Sales report: ${salesError.message || "query failed"}` });
-        }
       } catch (error) {
         if (!cancelled) setCloudError(error.message || "Could not refresh relational operating data.");
       } finally {
@@ -7046,15 +7026,17 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         onNavigate={page => {setUtilityPanel("");setActive(page);}} />
 
       <main className="workspace" id="workspace-content" tabIndex={-1}>
-        {!demoMode && localStorage.hasLegacyData() && <div className="invoice-safety-banner" role="status">Older browser data is preserved separately because its account ownership is unverified. It has not been imported into this account. Ask your administrator to review recovery before removing any browser data.</div>}
-        {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
-          <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
-        {!demoMode && pendingLearning.length > 0 && <div className="invoice-safety-banner" role="alert">Reusable matches/conversions pending ({pendingLearning.length}). {learningError || "Your retry is preserved on this device."}<button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></div>}
-        {!demoMode && learningNotice && <div className="invoice-safety-banner" role="status">{learningNotice}</div>}
-        {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
-        {!demoMode && reportLoadState.loading && <div className="invoice-safety-banner" role="status">Loading the selected reporting period…</div>}
-        {!demoMode && reportLoadState.error && <div className="invoice-safety-banner" role="alert">{reportLoadState.error} Invoice browsing remains available.</div>}
-        {!demoMode && active !== "invoiceControl" && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoice Control Centre.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
+        {!demoMode && (localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || !confirmedInvoicesLoaded || reportLoadState.loading || reportLoadState.error || pendingInvoiceCount > 0 || learningNotice) && <details className="invoice-safety-banner" open={Boolean(localStorageError || cloudError || reportLoadState.error || pendingInvoiceCount)}>
+          <summary>Sync attention needed</summary>
+          {localStorage.hasLegacyData() && <p>Older browser data is preserved separately because its ownership has not been verified. It has not been imported.</p>}
+          {localStorageError && <p>Recent browser work could not be stored. Export it before closing this page. <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export recovery file</button></p>}
+          {pendingLearning.length > 0 && <p>{pendingLearning.length} reusable match or conversion update(s) await confirmation. {learningError || ""} <button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></p>}
+          {learningNotice && <p>{learningNotice}</p>}
+          {!confirmedInvoicesLoaded && <p>{cloudError ? "Cloud records could not be verified; confirmed totals are unavailable." : "Loading confirmed cloud records."} <button type="button" onClick={retryCloudSync}>Retry</button></p>}
+          {reportLoadState.loading && <p>Loading the selected reporting period…</p>}
+          {reportLoadState.error && <p>{reportLoadState.error} Invoice browsing remains available.</p>}
+          {pendingInvoiceCount > 0 && <p>{pendingInvoiceCount} invoice(s) await cloud confirmation. Reports use the last confirmed version. <button type="button" onClick={() => setActive("invoices")}>View invoices</button></p>}
+        </details>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
         {displayRecoveryMode && (
           <div className="display-recovery-banner">
@@ -7181,12 +7163,30 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
               if (invoicePageState.loading || !invoicePageState.hasMore) return;
               setInvoicePageState(current => ({ ...current, loading: true, error: "" }));
               try {
-                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { offset: invoicePageState.nextOffset, limit: 50 });
-                setConfirmedInvoices(current => [...current, ...page.invoices.filter(row => !current.some(existing => existing.id === row.id))]);
-                setInvoices(current => relationalOperationalInvoiceCollection({ localInvoices: current, relationalInvoices: page.invoices, companyId: cloudScope.companyId, locationId: cloudScope.locationId || "", readOnly }));
-                setInvoicePageState({ nextOffset: page.nextOffset, hasMore: page.hasMore, loading: false, error: "" });
+                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { offset: invoicePageState.nextOffset, limit: 50, filters: invoicePageState.filters || {} });
+                const combinedHeaders = [...confirmedInvoices, ...page.invoices.filter(row => !confirmedInvoices.some(existing => existing.id === row.id))];
+                setConfirmedInvoices(combinedHeaders);
+                setInvoices(current => relationalOperationalInvoiceCollection({ localInvoices: current, relationalInvoices: combinedHeaders, companyId: cloudScope.companyId, locationId: cloudScope.locationId || "", readOnly }));
+                setInvoicePageState(current => ({ ...current, nextOffset: page.nextOffset, total: page.total, hasMore: page.hasMore, loading: false, error: "" }));
               } catch (error) {
                 setInvoicePageState(current => ({ ...current, loading: false, error: error.message || "Could not load older invoices." }));
+              }
+            }}
+            onSearchInvoices={async (filters) => {
+              setInvoicePageState(current => ({ ...current, loading: true, error: "" }));
+              try {
+                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { limit: 50, filters });
+                setConfirmedInvoices(page.invoices);
+                setInvoices(current => relationalOperationalInvoiceCollection({
+                  localInvoices: current.filter(invoice => invoice.syncStatus !== "synced"),
+                  relationalInvoices: page.invoices,
+                  companyId: cloudScope.companyId,
+                  locationId: cloudScope.locationId || "",
+                  readOnly,
+                }));
+                setInvoicePageState({ nextOffset: page.nextOffset, total: page.total, filters, hasMore: page.hasMore, loading: false, error: "" });
+              } catch (error) {
+                setInvoicePageState(current => ({ ...current, loading: false, error: error.message || "Could not search invoices." }));
               }
             }}
             onAddInvoice={prepareInvoiceUploadFromControl}
@@ -11184,8 +11184,9 @@ function InvoiceControlCentre({
   client = null,
   locationId = "",
   loadInvoiceDetails = async (invoice) => invoice,
-  invoicePageState = { hasMore: false, loading: false, error: "" },
+  invoicePageState = { total: 0, filters: {}, hasMore: false, loading: false, error: "" },
   onLoadMoreInvoices = async () => {},
+  onSearchInvoices = async () => {},
   onAddInvoice,
   onWeekRangeChange,
   persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
@@ -12435,6 +12436,7 @@ function InvoiceControlCentre({
           <label>To<input aria-label="To" type="date" value={browseTo} onChange={e=>setBrowseTo(e.target.value)} /></label>
           <label>Type<select aria-label="Type" value={browseType} onChange={e=>setBrowseType(e.target.value)}>{["All","Invoices","Credit notes"].map(x=><option key={x}>{x}</option>)}</select></label>
           <label>Status<select aria-label="Status" value={browseStatus} onChange={e=>setBrowseStatus(e.target.value)}>{["All","Confirmed","Pending","Review"].map(x=><option key={x}>{x}</option>)}</select></label>
+          <button onClick={() => onSearchInvoices({ search: browseQuery, startDate: browseFrom, endDate: browseTo })} type="button">Search all invoices</button>
         </div>
         {!recordsReady && <p role="alert">Cloud records are not verified. Retained documents and pending work are shown; absence is not confirmed.</p>}
         <div className="unified-document-list"><DataTable mobileSort query={browseQuery} onQueryChange={setBrowseQuery} columns={[
@@ -12442,6 +12444,7 @@ function InvoiceControlCentre({
           {key:"type",label:"Type"},{key:"total",label:"Amount",render:money},{key:"review",label:"Review"},{key:"sync",label:"Cloud status"},
           {key:"open",label:"Details",sortable:false,render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">{isCreditNoteDocument(documentTypeFor(row.invoice)) ? "Open credit note" : "Open invoice"}</button>}
         ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoice.persistenceSource === "relational" && !(invoice.items||[]).length ? invoice.status||"Approved" : invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} />
+          {invoicePageState.total > 0 && <p className="helper-text">Showing {browseDocuments.length} of {invoicePageState.total} confirmed invoices.</p>}
           {invoicePageState.error && <p role="alert">{invoicePageState.error}</p>}
           {invoicePageState.hasMore && <button disabled={invoicePageState.loading} onClick={onLoadMoreInvoices} type="button">{invoicePageState.loading ? "Loading older invoices…" : "Load more invoices"}</button>}
         </div>

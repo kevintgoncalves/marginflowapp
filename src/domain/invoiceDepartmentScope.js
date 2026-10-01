@@ -18,10 +18,13 @@ export function invoiceWithVerifiedDepartments(invoice, departments, companyOrSc
     ? companyActive.filter(d => !String(d.location_id || d.locationId || '') || (d.location_id || d.locationId) === scope.locationId)
     : companyActive;
   const resolve = (id, name) => {
-    let candidates = id
-      ? active.filter(d => d.id === id)
-      : active.filter(d => departmentNameKey(d.name) === departmentNameKey(name));
-    if (!id && scope.locationId) {
+    // A pending browser draft can retain a previous local department ID. Prefer
+    // the current remote UUID, but if it is no longer valid resolve the exact
+    // active name within this company and location. Do not use name matching
+    // across scopes or as a substitute for an ambiguous choice.
+    let candidates = id ? active.filter(d => d.id === id) : [];
+    if (!candidates.length && name) candidates = active.filter(d => departmentNameKey(d.name) === departmentNameKey(name));
+    if ((!id || !active.some(d => d.id === id)) && scope.locationId) {
       const locationCandidates = candidates.filter(d => (d.location_id || d.locationId) === scope.locationId);
       if (locationCandidates.length) candidates = locationCandidates;
     }

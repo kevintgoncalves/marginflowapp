@@ -314,6 +314,14 @@ function applyInvoiceFilters(query, filters = {}) {
   if (filters.endDate) query = query.lte("invoice_date", filters.endDate);
   if (filters.supplierId) query = query.eq("supplier_id", filters.supplierId);
   if (filters.status) query = query.eq("status", filters.status);
+  const search = String(filters.search || "").trim();
+  if (search) {
+    // PostgREST `.or` uses a filter expression rather than a parameter object.
+    // Keep only text that can be part of a literal ILIKE pattern so a search can
+    // never broaden the company/location scope above.
+    const pattern = search.replace(/[(),]/g, " ").replace(/[%_\\]/g, "\\$&").replace(/\s+/g, " ");
+    query = query.or(`invoice_number.ilike.%${pattern}%,document_number.ilike.%${pattern}%`);
+  }
   return query;
 }
 

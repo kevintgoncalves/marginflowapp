@@ -17,19 +17,19 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
   return {
     requests,
     from(table) {
-      let filters = [], predicates = [], options = {}, start = 0, end = Infinity;
+      let filters = [], predicates = [], options = {}, orExpression = "", start = 0, end = Infinity;
       const query = {
         select(columns, config = {}) { options = config; return this; },
         eq(key, value) { filters.push([key, value]); return this; },
         in(key, values) { predicates.push((row) => values.includes(row[key])); return this; },
         gte(key, value) { predicates.push((row) => row[key] >= value); return this; },
         lte(key, value) { predicates.push((row) => row[key] <= value); return this; },
-        or() { predicates.push((row) => !row.location_id || row.location_id === locationId); return this; },
+        or(expression = "") { orExpression = expression; predicates.push((row) => !row.location_id || row.location_id === locationId); return this; },
         order() { return this; },
         limit(value) { start = 0; end = value - 1; return this; },
         range(first, last) { start = first; end = last; return this; },
         then(resolve, reject) {
-          const request = { table, filters, head: options.head, start, end };
+          const request = { table, filters, orExpression, head: options.head, start, end };
           requests.push(request);
           const error = intercept(request, requests);
           const filtered = (tables[table] || []).filter((row) => filters.every(([key, value]) => row[key] === value) && predicates.every((p) => p(row))).sort((a,b) => a.id.localeCompare(b.id));
@@ -59,6 +59,17 @@ test("invoice pagination loads the next headers without duplicate IDs", async ()
   const second = await loadRelationalInvoicePage(client, scope, { offset: first.nextOffset });
   assert.equal(new Set([...first.invoices, ...second.invoices].map(invoice => invoice.id)).size, 100);
   assert.equal(second.nextOffset, 100);
+});
+
+test("invoice search remains company and location scoped on the server", async () => {
+  const client = cappedClient(invoiceDataset(), { cap: 1000 });
+  await loadRelationalInvoicePage(client, scope, { filters: { search: "INV-835412" } });
+  const request = client.requests[0];
+  assert.equal(request.table, "invoices");
+  assert.ok(request.filters.some(([key, value]) => key === "company_id" && value === companyId));
+  assert.ok(request.filters.some(([key, value]) => key === "location_id" && value === locationId));
+  assert.match(request.orExpression, /invoice_number\.ilike/);
+  assert.match(request.orExpression, /document_number\.ilike/);
 });
 
 test("invoice page timeout rejects instead of being represented as no invoices", async () => {
@@ -108,13 +119,16 @@ test("current-month sales use a separate company and location scoped query", asy
   assert.ok(client.requests.every(request => request.filters.some(([key, value]) => key === "company_id" && value === companyId)));
 });
 
-test("workspace refresh never schedules the old 30-second full invoice-history load", () => {
+test("workspace refresh keeps reports period-scoped and stores only unsaved invoice recovery work", () => {
   const source = readFileSync(new URL("../main.jsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /setInterval\(refreshRelationalOperations,\s*30000\)/);
   assert.match(source, /loadRelationalInvoicePage\(supabase, scope, \{ limit: 50 \}\)/);
   assert.match(source, /calculateMetrics\(analyticsInvoices,/);
   assert.match(source, /spendBySupplier\(analyticsInvoices,/);
   assert.doesNotMatch(source, /calculateMetrics\(operationalInvoices,/);
+  assert.match(source, /saveLocalStorage\("marginflow\.pendingInvoices", next\.filter/);
+  assert.doesNotMatch(source, /saveLocalStorage\("marginflow\.invoices", next\)/);
+  assert.match(source, /Sync attention needed/);
 });
 
 function invoiceDataset() {
