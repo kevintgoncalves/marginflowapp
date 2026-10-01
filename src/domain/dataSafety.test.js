@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { readAllPages } from "../lib/paginatedRead.js";
-import { loadRelationalInvoices } from "../lib/invoiceRepository.js";
+import { loadRelationalInvoiceDetails, loadRelationalInvoicePage, loadRelationalInvoiceReportRange, loadRelationalInvoices } from "../lib/invoiceRepository.js";
 import { loadRelationalSales } from "../lib/salesRepository.js";
 import { confirmedInvoicesForScope, rememberConfirmedInvoice } from "./confirmedInvoices.js";
 import { relationalOperationalInvoiceCollection } from "./emergencyRecovery.js";
@@ -25,6 +26,7 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
         lte(key, value) { predicates.push((row) => row[key] <= value); return this; },
         or() { predicates.push((row) => !row.location_id || row.location_id === locationId); return this; },
         order() { return this; },
+        limit(value) { start = 0; end = value - 1; return this; },
         range(first, last) { start = first; end = last; return this; },
         then(resolve, reject) {
           const request = { table, filters, head: options.head, start, end };
@@ -38,6 +40,82 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
     },
   };
 }
+
+test("initial invoice page fetches only 50 headers and no invoice lines", async () => {
+  const tables = invoiceDataset();
+  const client = cappedClient(tables, { cap: 1000 });
+  const page = await loadRelationalInvoicePage(client, scope);
+  assert.equal(page.invoices.length, 50);
+  assert.equal(page.total, 1005);
+  assert.equal(page.hasMore, true);
+  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoices"]);
+  assert.equal(page.invoices.every(invoice => invoice.items.length === 0), true);
+});
+
+test("invoice pagination loads the next headers without duplicate IDs", async () => {
+  const tables = invoiceDataset();
+  const client = cappedClient(tables, { cap: 1000 });
+  const first = await loadRelationalInvoicePage(client, scope);
+  const second = await loadRelationalInvoicePage(client, scope, { offset: first.nextOffset });
+  assert.equal(new Set([...first.invoices, ...second.invoices].map(invoice => invoice.id)).size, 100);
+  assert.equal(second.nextOffset, 100);
+});
+
+test("invoice page timeout rejects instead of being represented as no invoices", async () => {
+  const client = cappedClient(invoiceDataset(), { intercept: request => request.table === "invoices" ? new Error("canceling statement due to statement timeout") : null });
+  await assert.rejects(loadRelationalInvoicePage(client, scope), /statement timeout/);
+});
+
+test("opening one invoice fetches only its scoped lines and splits", async () => {
+  const invoiceId = "33333333-3333-4333-8333-333333333333";
+  const lineId = "44444444-4444-4444-8444-444444444444";
+  const tables = {
+    invoices: [{ id: invoiceId, company_id: companyId, location_id: locationId, invoice_date: "2026-09-11", metadata: {} }],
+    invoice_lines: [{ id: lineId, invoice_id: invoiceId, company_id: companyId, location_id: locationId, active: true, quantity: 1, unit_cost: 3 }],
+    invoice_line_department_splits: [{ id: "55555555-5555-4555-8555-555555555555", invoice_line_id: lineId, company_id: companyId, location_id: locationId, active: true }],
+  };
+  const client = cappedClient(tables, { cap: 1000 });
+  const invoice = await loadRelationalInvoiceDetails(client, scope, invoiceId);
+  assert.equal(invoice.items.length, 1);
+  assert.equal(invoice.items[0].departmentSplits.length, 1);
+  assert.ok(client.requests.filter(request => request.table !== "invoices").every(request => request.filters.some(([key, value]) => key === "company_id" && value === companyId)));
+  assert.ok(client.requests.find(request => request.table === "invoice_lines").filters.some(([key, value]) => key === "invoice_id" && value === invoiceId));
+});
+
+test("department reports use a separate date-scoped invoice and line query", async () => {
+  const tables = invoiceDataset();
+  tables.invoices[0].invoice_date = "2026-08-31";
+  const client = cappedClient(tables, { cap: 10000 });
+  const report = await loadRelationalInvoiceReportRange(client, scope, { startDate: "2026-09-01", endDate: "2026-09-30" });
+  assert.equal(report.length, 1004);
+  assert.equal(report.some(invoice => invoice.id === tables.invoices[0].id), false);
+  assert.equal(report.every(invoice => invoice.items.length === 3), true);
+  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoices", "invoice_lines", "invoice_line_department_splits"]);
+});
+
+test("current-month sales use a separate company and location scoped query", async () => {
+  const tables = {
+    departments: [],
+    sales_entries: [
+      { id: "sale-current", company_id: companyId, location_id: locationId, sales_date: "2026-10-01", net_sales: 10 },
+      { id: "sale-old", company_id: companyId, location_id: locationId, sales_date: "2026-09-30", net_sales: 20 },
+    ],
+    sales_department_lines: [],
+  };
+  const client = cappedClient(tables, { cap: 1000 });
+  const rows = await loadRelationalSales(client, scope, { startDate: "2026-10-01", endDate: "2026-10-31" });
+  assert.deepEqual(rows.map(row => row.id), ["sale-current"]);
+  assert.ok(client.requests.every(request => request.filters.some(([key, value]) => key === "company_id" && value === companyId)));
+});
+
+test("workspace refresh never schedules the old 30-second full invoice-history load", () => {
+  const source = readFileSync(new URL("../main.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /setInterval\(refreshRelationalOperations,\s*30000\)/);
+  assert.match(source, /loadRelationalInvoicePage\(supabase, scope, \{ limit: 50 \}\)/);
+  assert.match(source, /calculateMetrics\(analyticsInvoices,/);
+  assert.match(source, /spendBySupplier\(analyticsInvoices,/);
+  assert.doesNotMatch(source, /calculateMetrics\(operationalInvoices,/);
+});
 
 function invoiceDataset() {
   const invoices = Array.from({ length: 1005 }, (_, i) => ({

@@ -307,6 +307,103 @@ export async function loadLegacyInvoiceArchive(client, scope = {}) {
   }));
 }
 
+const invoiceHeaderColumns = "id,company_id,location_id,supplier_id,invoice_number,document_number,document_type,invoice_date,status,subtotal,tax_amount,total_amount,sync_revision,content_fingerprint,metadata,created_at,updated_at";
+
+function applyInvoiceFilters(query, filters = {}) {
+  if (filters.startDate) query = query.gte("invoice_date", filters.startDate);
+  if (filters.endDate) query = query.lte("invoice_date", filters.endDate);
+  if (filters.supplierId) query = query.eq("supplier_id", filters.supplierId);
+  if (filters.status) query = query.eq("status", filters.status);
+  return query;
+}
+
+export async function loadRelationalInvoicePage(client, scope = {}, { offset = 0, limit = 50, filters = {} } = {}) {
+  if (!client || !validScope(scope)) return { invoices: [], total: 0, hasMore: false, nextOffset: 0 };
+  const pageSize = Math.min(50, Math.max(1, Number(limit) || 50));
+  let query = client.from("invoices")
+    .select(invoiceHeaderColumns, { count: "exact" })
+    .eq("company_id", scope.companyId);
+  if (scope.locationId) query = query.eq("location_id", scope.locationId);
+  query = applyInvoiceFilters(query, filters)
+    .order("invoice_date", { ascending: false })
+    .order("id", { ascending: false })
+    .range(offset, offset + pageSize - 1);
+  const { data, count, error } = await query;
+  if (error) throw error;
+  const invoices = (data || []).map(row => invoiceFromRelationalRow({ ...row, invoice_lines: [] }));
+  const total = Number.isFinite(Number(count)) ? Number(count) : offset + invoices.length;
+  return { invoices, total, hasMore: offset + invoices.length < total, nextOffset: offset + invoices.length };
+}
+
+export async function loadRelationalInvoiceDetails(client, scope = {}, invoiceId = "") {
+  if (!client || !validScope(scope) || !uuidPattern.test(invoiceId)) throw new Error("Invoice details need a canonical scoped invoice ID.");
+  let headerQuery = client.from("invoices").select(invoiceHeaderColumns).eq("company_id", scope.companyId).eq("id", invoiceId);
+  if (scope.locationId) headerQuery = headerQuery.eq("location_id", scope.locationId);
+  const { data: headerRows, error: headerError } = await headerQuery.limit(1);
+  if (headerError) throw headerError;
+  const header = headerRows?.[0];
+  if (!header) throw new Error("Invoice was not found in the active company and location.");
+
+  let lineQuery = client.from("invoice_lines").select("*").eq("company_id", scope.companyId).eq("invoice_id", invoiceId).eq("active", true);
+  if (scope.locationId) lineQuery = lineQuery.eq("location_id", scope.locationId);
+  const { data: lines, error: lineError } = await lineQuery.order("created_at", { ascending: true });
+  if (lineError) throw lineError;
+  const lineIds = (lines || []).map(line => line.id);
+  let splits = [];
+  if (lineIds.length) {
+    let splitQuery = client.from("invoice_line_department_splits").select("*").eq("company_id", scope.companyId).in("invoice_line_id", lineIds).eq("active", true);
+    if (scope.locationId) splitQuery = splitQuery.eq("location_id", scope.locationId);
+    const splitResult = await splitQuery.order("created_at", { ascending: true });
+    if (splitResult.error) throw splitResult.error;
+    splits = splitResult.data || [];
+  }
+  const splitsByLine = new Map();
+  splits.forEach(split => splitsByLine.set(split.invoice_line_id, [...(splitsByLine.get(split.invoice_line_id) || []), split]));
+  return invoiceFromRelationalRow({
+    ...header,
+    invoice_lines: (lines || []).map(line => ({ ...line, invoice_line_department_splits: splitsByLine.get(line.id) || [] })),
+  });
+}
+
+export async function loadRelationalInvoiceReportRange(client, scope = {}, { startDate, endDate } = {}) {
+  if (!startDate || !endDate) throw new Error("Invoice reports require an explicit date range.");
+  if (!client || !validScope(scope)) return [];
+  const headers = await readAllPages((head = false) => {
+    let query = client.from("invoices").select(head ? "id" : invoiceHeaderColumns, { count: "exact", head })
+      .eq("company_id", scope.companyId).gte("invoice_date", startDate).lte("invoice_date", endDate);
+    if (scope.locationId) query = query.eq("location_id", scope.locationId);
+    return query;
+  }, { pageSize: 500, label: "invoice report headers" });
+  if (!(headers || []).length) return [];
+  const invoiceIds = headers.map(row => row.id);
+  const lines = [];
+  for (let offset = 0; offset < invoiceIds.length; offset += 100) {
+    const invoiceIdChunk = invoiceIds.slice(offset, offset + 100);
+    lines.push(...await readAllPages((head = false) => {
+      let query = client.from("invoice_lines").select(head ? "id" : "*", { count: "exact", head })
+        .eq("company_id", scope.companyId).in("invoice_id", invoiceIdChunk).eq("active", true);
+      if (scope.locationId) query = query.eq("location_id", scope.locationId);
+      return query;
+    }, { pageSize: 500, label: "invoice report lines" }));
+  }
+  const lineIds = lines.map(row => row.id);
+  const splits = [];
+  for (let offset = 0; offset < lineIds.length; offset += 100) {
+    const lineIdChunk = lineIds.slice(offset, offset + 100);
+    splits.push(...await readAllPages((head = false) => {
+      let query = client.from("invoice_line_department_splits").select(head ? "id" : "*", { count: "exact", head })
+        .eq("company_id", scope.companyId).in("invoice_line_id", lineIdChunk).eq("active", true);
+      if (scope.locationId) query = query.eq("location_id", scope.locationId);
+      return query;
+    }, { pageSize: 500, label: "invoice report department splits" }));
+  }
+  const splitsByLine = new Map();
+  splits.forEach(split => splitsByLine.set(split.invoice_line_id, [...(splitsByLine.get(split.invoice_line_id) || []), split]));
+  const linesByInvoice = new Map();
+  lines.forEach(line => linesByInvoice.set(line.invoice_id, [...(linesByInvoice.get(line.invoice_id) || []), { ...line, invoice_line_department_splits: splitsByLine.get(line.id) || [] }]));
+  return headers.map(header => invoiceFromRelationalRow({ ...header, invoice_lines: linesByInvoice.get(header.id) || [] }));
+}
+
 export async function loadRelationalInvoices(client, scope = {}) {
   if (!client || !validScope(scope)) return [];
   const scopedQuery = (table, head = false) => {
