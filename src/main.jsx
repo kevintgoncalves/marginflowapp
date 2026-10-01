@@ -127,6 +127,9 @@ import {
 } from "./domain/emergencyRecovery.js";
 import {
   invoiceCanRetrySyncAutomatically,
+  loadRelationalInvoiceDetails,
+  loadRelationalInvoicePage,
+  loadRelationalInvoiceReportRange,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
   replaceInvoiceInCollection,
@@ -5583,6 +5586,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const invoiceCommitGenerationRef = useRef(0);
   const [confirmedInvoices, setConfirmedInvoices] = useState([]);
   const [confirmedInvoicesLoaded, setConfirmedInvoicesLoaded] = useState(false);
+  const [invoicePageState, setInvoicePageState] = useState({ nextOffset: 0, hasMore: false, loading: false, error: "" });
+  const [reportInvoices, setReportInvoices] = useState([]);
+  const [reportLoadState, setReportLoadState] = useState({ loading: false, error: "" });
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
@@ -5853,6 +5859,27 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   }, [allowedDepartmentNames, departmentNames]);
   const effectiveDepartment = visibleDepartmentOptions.includes(department) ? department : (visibleDepartmentOptions[0] || "All departments");
   const dateRange = useMemo(() => resolveDateRange(dateRangeState, financialSettings.weekStartsOn), [dateRangeState, financialSettings.weekStartsOn]);
+  useEffect(() => {
+    if (!cloudEnabled || demoMode) return undefined;
+    const reportPages = new Set(["dashboard", "reports", "gp", "suppliers", "ai"]);
+    if (!reportPages.has(active)) return undefined;
+    let cancelled = false;
+    setReportLoadState({ loading: true, error: "" });
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    Promise.allSettled([
+      loadRelationalInvoiceReportRange(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end }),
+      loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end }),
+    ]).then(([invoiceResult, salesResult]) => {
+      if (cancelled) return;
+      const errors = [];
+      if (invoiceResult.status === "fulfilled") setReportInvoices(invoiceResult.value);
+      else errors.push(`Purchasing report: ${invoiceResult.reason?.message || "query failed"}`);
+      if (salesResult.status === "fulfilled") { salesRef.current = salesResult.value; setSalesState(salesResult.value); }
+      else errors.push(`Sales report: ${salesResult.reason?.message || "query failed"}`);
+      setReportLoadState({ loading: false, error: errors.join(" ") });
+    });
+    return () => { cancelled = true; };
+  }, [active, cloudEnabled, cloudScope.companyId, cloudScope.locationId, dateRange.end, dateRange.start, demoMode]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const workingInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
   const operationalInvoices = useMemo(() => demoMode ? invoices : confirmedInvoicesForScope(confirmedInvoices, cloudScope), [demoMode, invoices, confirmedInvoices, cloudScope]);
@@ -5875,9 +5902,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     invoiceCommitGenerationRef.current += 1;
     setConfirmedInvoices((current) => rememberConfirmedInvoice(current, invoice));
   };
-  const metrics = useMemo(() => calculateMetrics(operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData), [operationalInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData]);
-  const supplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, legacyInvoiceArchive]);
-  const departmentSupplierSpend = useMemo(() => spendBySupplier(operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive), [operationalInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive]);
+  const analyticsInvoices = demoMode ? operationalInvoices : reportInvoices;
+  const metrics = useMemo(() => calculateMetrics(analyticsInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData), [analyticsInvoices, sales, effectiveDepartment, stocktakes, wasteItems, dateRange, allowedDepartmentNames, financialSettings, labourData]);
+  const supplierSpend = useMemo(() => spendBySupplier(analyticsInvoices, suppliers, dateRange, "All departments", legacyInvoiceArchive), [analyticsInvoices, suppliers, dateRange, legacyInvoiceArchive]);
+  const departmentSupplierSpend = useMemo(() => spendBySupplier(analyticsInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive), [analyticsInvoices, suppliers, dateRange, effectiveDepartment, legacyInvoiceArchive]);
   const gpTarget = targetForDepartment(departmentSettings, effectiveDepartment, financialSettings.targetGp);
   const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
   const pageSubtitle = useMemo(() => contextualPageSubtitle(active, {
@@ -6010,7 +6038,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
     let relationalInvoices;
     try {
-      relationalInvoices = await loadRelationalInvoices(supabase, scope);
+      const page = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
+      relationalInvoices = page.invoices;
+      setInvoicePageState({ nextOffset: page.nextOffset, hasMore: page.hasMore, loading: false, error: "" });
     } catch (error) {
       throw new Error(`Relational invoice hydration failed [operation=loadRelationalInvoices company=${scope.companyId} location=${scope.locationId || "company"}]: ${error.message || "Unknown error"}`);
     }
@@ -6030,8 +6060,14 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const withRelationalSales = async (snapshot) => {
     if (!cloudEnabled) return snapshot;
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-    const relationalSales = await loadRelationalSales(supabase, scope);
-    return { ...snapshot, sales: relationalSales };
+    const currentMonthStart = `${today().slice(0, 7)}-01`;
+    try {
+      const relationalSales = await loadRelationalSales(supabase, scope, { startDate: currentMonthStart, endDate: today() });
+      return { ...snapshot, sales: relationalSales };
+    } catch (error) {
+      setReportLoadState({ loading: false, error: `Sales report: ${error.message || "query failed"}` });
+      return snapshot;
+    }
   };
 
   const withCompletedOnboardingSetup = async (snapshot) => {
@@ -6182,23 +6218,33 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const configuredSnapshot = hasPersistedSetup || readOnly
             ? baseSnapshot
             : await withCompletedOnboardingSetup(baseSnapshot);
-          const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
-          const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
-          const nextSnapshot = await withRelationalSales(invoiceSnapshot);
+          const invoiceSnapshot = await withRelationalInvoices(configuredSnapshot);
+          const nextSnapshot = invoiceSnapshot;
           if (cancelled) return;
           if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(nextSnapshot);
+          withRelationalSales(nextSnapshot).then(salesSnapshot => {
+            if (!cancelled) { salesRef.current = salesSnapshot.sales || []; setSalesState(salesSnapshot.sales || []); }
+          });
+          if (!readOnly) withRelationalLearning(nextSnapshot).then(learned => {
+            if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
+          });
           if (cancelled) return;
           setCloudStatus("synced");
         } else {
           const baseSnapshot = hasLocalMarginFlowData ? cloudSnapshotFromStorage(localStorageData) : cloudSnapshot;
           const configuredSnapshot = readOnly ? baseSnapshot : await withCompletedOnboardingSetup(baseSnapshot);
-          const learnedSnapshot = readOnly ? configuredSnapshot : await withRelationalLearning(configuredSnapshot);
-          const invoiceSnapshot = await withRelationalInvoices(learnedSnapshot);
-          const firstSnapshot = await withRelationalSales(invoiceSnapshot);
+          const invoiceSnapshot = await withRelationalInvoices(configuredSnapshot);
+          const firstSnapshot = invoiceSnapshot;
           if (cancelled) return;
           if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
           applyCloudSnapshot(firstSnapshot);
+          withRelationalSales(firstSnapshot).then(salesSnapshot => {
+            if (!cancelled) { salesRef.current = salesSnapshot.sales || []; setSalesState(salesSnapshot.sales || []); }
+          });
+          if (!readOnly) withRelationalLearning(firstSnapshot).then(learned => {
+            if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
+          });
           if (cancelled) return;
           setCloudStatus("synced");
         }
@@ -6227,10 +6273,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
         const readGeneration = invoiceCommitGenerationRef.current;
-        const [freshInvoices, freshSales] = await Promise.all([
-          loadRelationalInvoices(supabase, scope),
-          loadRelationalSales(supabase, scope),
-        ]);
+        const currentMonthStart = `${today().slice(0, 7)}-01`;
+        const invoicePage = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
+        const freshInvoices = invoicePage.invoices;
+        setInvoicePageState({ nextOffset: invoicePage.nextOffset, hasMore: invoicePage.hasMore, loading: false, error: "" });
         if (cancelled || readGeneration !== invoiceCommitGenerationRef.current) return;
         setConfirmedInvoices(freshInvoices);
         setConfirmedInvoicesLoaded(true);
@@ -6242,8 +6288,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           readOnly,
         }));
         setLegacyInvoiceArchive([]);
-        salesRef.current = freshSales;
-        setSalesState(freshSales);
+        try {
+          const freshSales = await loadRelationalSales(supabase, scope, { startDate: currentMonthStart, endDate: today() });
+          if (!cancelled) { salesRef.current = freshSales; setSalesState(freshSales); }
+        } catch (salesError) {
+          if (!cancelled) setReportLoadState({ loading: false, error: `Sales report: ${salesError.message || "query failed"}` });
+        }
       } catch (error) {
         if (!cancelled) setCloudError(error.message || "Could not refresh relational operating data.");
       } finally {
@@ -6253,7 +6303,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const onVisibility = () => {
       if (document.visibilityState === "visible") refreshRelationalOperations();
     };
-    const interval = window.setInterval(refreshRelationalOperations, 30000);
+    const interval = window.setInterval(refreshRelationalOperations, 300000);
     window.addEventListener("focus", refreshRelationalOperations);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
@@ -6462,7 +6512,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     let cancelled = false;
     const retryPendingInvoices = async () => {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-      let freshInvoices = await loadRelationalInvoices(supabase, scope);
+      let freshInvoices = (await loadRelationalInvoicePage(supabase, scope, { limit: 50 })).invoices;
       for (const invoice of retryCandidates) {
         if (cancelled) return;
         const retryContext = invoice.syncRetryContext && typeof invoice.syncRetryContext === "object"
@@ -7002,6 +7052,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {!demoMode && pendingLearning.length > 0 && <div className="invoice-safety-banner" role="alert">Reusable matches/conversions pending ({pendingLearning.length}). {learningError || "Your retry is preserved on this device."}<button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></div>}
         {!demoMode && learningNotice && <div className="invoice-safety-banner" role="status">{learningNotice}</div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
+        {!demoMode && reportLoadState.loading && <div className="invoice-safety-banner" role="status">Loading the selected reporting period…</div>}
+        {!demoMode && reportLoadState.error && <div className="invoice-safety-banner" role="alert">{reportLoadState.error} Invoice browsing remains available.</div>}
         {!demoMode && active !== "invoiceControl" && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoice Control Centre.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
         {displayRecoveryMode && (
@@ -7052,7 +7104,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
-            invoices={operationalInvoices}
+            invoices={analyticsInvoices}
             metrics={metrics}
             permissions={permissionsByPage.dashboard}
             sales={sales}
@@ -7123,6 +7175,20 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             requestInvoiceDelete={invoice=>setInvoiceActionRequest({id:uid(),invoiceId:invoice.id})}
             client={cloudEnabled ? supabase : null}
             locationId={cloudScope.locationId || ""}
+            loadInvoiceDetails={invoice => loadRelationalInvoiceDetails(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, invoice.id)}
+            invoicePageState={invoicePageState}
+            onLoadMoreInvoices={async () => {
+              if (invoicePageState.loading || !invoicePageState.hasMore) return;
+              setInvoicePageState(current => ({ ...current, loading: true, error: "" }));
+              try {
+                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { offset: invoicePageState.nextOffset, limit: 50 });
+                setConfirmedInvoices(current => [...current, ...page.invoices.filter(row => !current.some(existing => existing.id === row.id))]);
+                setInvoices(current => relationalOperationalInvoiceCollection({ localInvoices: current, relationalInvoices: page.invoices, companyId: cloudScope.companyId, locationId: cloudScope.locationId || "", readOnly }));
+                setInvoicePageState({ nextOffset: page.nextOffset, hasMore: page.hasMore, loading: false, error: "" });
+              } catch (error) {
+                setInvoicePageState(current => ({ ...current, loading: false, error: error.message || "Could not load older invoices." }));
+              }
+            }}
             onAddInvoice={prepareInvoiceUploadFromControl}
             onWeekRangeChange={setInvoiceControlWeekRange}
             persistInvoiceDocument={persistInvoiceDocument}
@@ -7153,7 +7219,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           <Suppliers
             creditNotes={creditNotes}
             invoiceDayStatusOverrides={invoiceDayStatusOverrides}
-            invoices={operationalInvoices}
+            invoices={analyticsInvoices}
             permissions={permissionsByPage.suppliers}
             products={products}
             requestDelete={requestDelete}
@@ -7197,7 +7263,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             departmentSettings={departmentSettings}
             financialSettings={financialSettings}
             gpTarget={gpTarget}
-            invoices={operationalInvoices}
+            invoices={analyticsInvoices}
             metrics={metrics}
             permissions={permissionsByPage.gp}
             requestDelete={requestDelete}
@@ -11117,6 +11183,9 @@ function InvoiceControlCentre({
   requestInvoiceDelete = () => {},
   client = null,
   locationId = "",
+  loadInvoiceDetails = async (invoice) => invoice,
+  invoicePageState = { hasMore: false, loading: false, error: "" },
+  onLoadMoreInvoices = async () => {},
   onAddInvoice,
   onWeekRangeChange,
   persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
@@ -11145,7 +11214,7 @@ function InvoiceControlCentre({
   const [settingsOpen,setSettingsOpen]=useState(false),[scheduleQuery,setScheduleQuery]=useState("");
   const [browserOpen,setBrowserOpen]=useState(false),[browseSupplier,setBrowseSupplier]=useState(""),[browseQuery,setBrowseQuery]=useState("");
   const [browseFrom,setBrowseFrom]=useState(""),[browseTo,setBrowseTo]=useState(""),[browseType,setBrowseType]=useState("All"),[browseStatus,setBrowseStatus]=useState("All");
-  const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null);
+  const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null), invoiceDetailCacheRef=useRef(new Map());
   useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");setBrowseStatus(browseRequest.status || "All");setBrowseType(browseRequest.type || "All");}},[browseRequest?.id]);
   const pendingDocuments=workingDocuments.filter(row=>["pending_sync","sync_failed","local_only"].includes(row.syncStatus));
   const browseDocuments=documentsForInvoiceBrowser(invoices,workingDocuments);
@@ -11220,7 +11289,9 @@ function InvoiceControlCentre({
   const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
   const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
   const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
-  const reviewDocumentRows = browseDocuments.filter(invoice=>dateInRange(invoice.date,weekRange))
+  const reviewDocumentRows = browseDocuments
+    .filter(invoice=>dateInRange(invoice.date,weekRange))
+    .filter(invoice=>invoice.persistenceSource !== "relational" || (invoice.items || []).length > 0)
     .map((invoice) => {
       const documentType = documentTypeFor(invoice);
       const validation = validateInvoiceExtraction({ invoice, lines: invoice.items || [], historicalPrices: productPriceHistory });
@@ -11272,11 +11343,27 @@ function InvoiceControlCentre({
     setSelectedCell(null);
   };
 
-  const openControlInvoice = (invoice) => {
+  const openControlInvoice = async (invoice, { fresh = false } = {}) => {
     if (!invoice) return;
-    setViewInvoiceStatus("");
-    const draft=invoiceForControlEditor(invoice, departmentNames);
-    viewOriginalRef.current=JSON.stringify(draft);setViewInvoice(draft);
+    setViewInvoiceStatus("Loading invoice lines…");
+    const headerDraft = invoiceForControlEditor(invoice, departmentNames);
+    viewOriginalRef.current = JSON.stringify(headerDraft);
+    setViewInvoice(headerDraft);
+    try {
+      const needsDetails = invoice.persistenceSource === "relational" && !(invoice.items || []).length;
+      let complete = invoice;
+      if (needsDetails) {
+        if (!fresh && invoiceDetailCacheRef.current.has(invoice.id)) complete = invoiceDetailCacheRef.current.get(invoice.id);
+        else {
+          complete = await loadInvoiceDetails(invoice);
+          invoiceDetailCacheRef.current.set(invoice.id, complete);
+        }
+      }
+      const draft=invoiceForControlEditor(complete, departmentNames);
+      viewOriginalRef.current=JSON.stringify(draft);setViewInvoice(draft);setViewInvoiceStatus("");
+    } catch (error) {
+      setViewInvoiceStatus(`Invoice lines could not be loaded: ${error.message || "Unknown error"}. Retry from the invoice list.`);
+    }
   };
 
   const handledBrowseRequest=useRef(null);
@@ -12354,7 +12441,10 @@ function InvoiceControlCentre({
           {key:"number",label:"Document"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},
           {key:"type",label:"Type"},{key:"total",label:"Amount",render:money},{key:"review",label:"Review"},{key:"sync",label:"Cloud status"},
           {key:"open",label:"Details",sortable:false,render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">{isCreditNoteDocument(documentTypeFor(row.invoice)) ? "Open credit note" : "Open invoice"}</button>}
-        ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} /></div>
+        ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoice.persistenceSource === "relational" && !(invoice.items||[]).length ? invoice.status||"Approved" : invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} />
+          {invoicePageState.error && <p role="alert">{invoicePageState.error}</p>}
+          {invoicePageState.hasMore && <button disabled={invoicePageState.loading} onClick={onLoadMoreInvoices} type="button">{invoicePageState.loading ? "Loading older invoices…" : "Load more invoices"}</button>}
+        </div>
         {legacyInvoiceArchive.length>0 && <details><summary>Archived historical documents · {legacyInvoiceArchive.length} read-only</summary>
           <DataTable columns={[{key:"documentNumber",label:"Document number"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},{key:"sourceInvoiceTotal",label:"Total",render:money},{key:"archiveReason",label:"Archive reason"},{key:"financialHeaderReliable",label:"Supplier spend",render:value=>value?"Included":"Excluded"}]} rows={legacyInvoiceArchive}/>
         </details>}
