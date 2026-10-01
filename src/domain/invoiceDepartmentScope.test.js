@@ -35,14 +35,23 @@ test('a name-only draft resolves the active department for the current company a
  const invoice={items:[{department:'  PREP\u00a0KITCHEN  ',departmentId:'',quantity:1,unitCost:2}]};
  const resolved=invoiceWithVerifiedDepartments(invoice,[otherLocation,companyDefault,current],{companyId,locationId});
  assert.equal(resolved.items[0].departmentId,current.id);
- assert.equal(resolved.items[0].department,current.name);
+  assert.equal(resolved.items[0].department,current.name);
 });
-test('department IDs and names cannot cross company or location boundaries',()=>{
+test('a stale local department ID falls back to the exact active department name in the current location',()=>{
+ const locationId='a8b61b09-9680-4858-b1c5-733ccc3ba1e5';
+ const current={...food,id:'b8b61b09-9680-4858-b1c5-733ccc3ba1e6',name:'Kitchen Made',location_id:locationId};
+ const staleDraft={items:[{department:' kitchen made ',departmentId:'local-settings-id',quantity:1,unitCost:2}]};
+ const resolved=invoiceWithVerifiedDepartments(staleDraft,[current],{companyId,locationId});
+ assert.equal(resolved.items[0].departmentId,current.id);
+ assert.equal(resolved.items[0].department,'Kitchen Made');
+});
+test('department IDs never cross company or location boundaries and stale IDs resolve only to the current scoped name',()=>{
  const locationId='a8b61b09-9680-4858-b1c5-733ccc3ba1e9';
  const current={...food,id:'b8b61b09-9680-4858-b1c5-733ccc3ba1ea',name:'Production',location_id:locationId};
  const foreignLocation={...current,id:'c8b61b09-9680-4858-b1c5-733ccc3ba1eb',location_id:'foreign-location'};
  const byName={items:[{department:'Production',departmentId:'',quantity:1,unitCost:2}]};
  const byForeignId={items:[{...byName.items[0],departmentId:foreignLocation.id}]};
  assert.throws(()=>invoiceWithVerifiedDepartments(byName,[foreignLocation],{companyId,locationId}),/Select an active company department/);
- assert.throws(()=>invoiceWithVerifiedDepartments(byForeignId,[current,foreignLocation],{companyId,locationId}),/Select an active company department/);
+ const resolved=invoiceWithVerifiedDepartments(byForeignId,[current,foreignLocation],{companyId,locationId});
+ assert.equal(resolved.items[0].departmentId,current.id);
 });
