@@ -1,4 +1,5 @@
 import { learnedDepartment } from './domain/supplierDepartments.js';
+import { completeInvoiceSaveLearning, invoiceSaveFailureMessage } from './domain/invoiceSaveCompletion.js';
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
 import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
@@ -5685,6 +5686,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createEmptyLabourData())));
   const [pendingLearning, setPendingLearningState] = useState(() => safeReadLocalStorageArray("marginflow.pendingLearning", []));
   const [learningError, setLearningError] = useState("");
+  const [learningNotice, setLearningNotice] = useState("");
   const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
   const [invoiceUploadRequest, setInvoiceUploadRequest] = useState(null);
   const [salesInputRequest, setSalesInputRequest] = useState(null);
@@ -6075,6 +6077,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const persistConfirmedLearning = async (learnedMappings = []) => {
     if (!cloudEnabled || readOnly || !learnedMappings.length) return { persisted: [], skipped: [] };
     setPendingLearning(current => [...current.filter(row => !learnedMappings.some(next => next.id === row.id)), ...learnedMappings]);
+    setLearningNotice("");
     try {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
       const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope);
@@ -6097,10 +6100,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       const savedIds = new Set(result.persisted.map(row => row.mappingId));
       setPendingLearning(current => current.filter(row => !savedIds.has(row.id)));
       setLearningError(result.skipped.length ? result.skipped[0].reason : "");
+      if (!result.skipped.length && result.persisted.length) setLearningNotice(`Reusable matches/conversions saved (${result.persisted.length}).`);
       invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
       return result;
     } catch (error) {
       setLearningError(error.message || "Reusable learning failed; retry preserved.");
+      setLearningNotice("");
       invoiceLearningDebug("relational-mappings-save-failed", { message: error.message || "Unknown relational learning error" });
       return { persisted: [], skipped: learnedMappings.map((mapping) => ({ mappingId: mapping.id, reason: error.message || "Relational save failed" })) };
     }
@@ -6995,6 +7000,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {localStorageError && <div className="invoice-safety-banner" role="alert">This browser could not save the latest changes ({localStorageError.error}). Changes not confirmed in the cloud may exist only in this page and can be lost if you close, reload or sign out. Export now before leaving.
           <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export work still in this page</button></div>}
         {!demoMode && pendingLearning.length > 0 && <div className="invoice-safety-banner" role="alert">Reusable matches/conversions pending ({pendingLearning.length}). {learningError || "Your retry is preserved on this device."}<button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></div>}
+        {!demoMode && learningNotice && <div className="invoice-safety-banner" role="status">{learningNotice}</div>}
         {!demoMode && !confirmedInvoicesLoaded && <div className="invoice-safety-banner" role="status">{cloudError ? "Cloud records could not be verified. Do not use the displayed totals yet. Your saved work has not been deleted." : "Loading confirmed cloud records. Totals are not ready yet."}<button type="button" onClick={retryCloudSync}>Retry</button></div>}
         {!demoMode && active !== "invoiceControl" && pendingInvoiceCount > 0 && <div className="invoice-safety-banner" role="status"><span>{pendingInvoiceCount} invoice(s) have changes awaiting cloud confirmation. Reports use the last confirmed version. Pending work remains in Invoice Control Centre.</span><button type="button" onClick={() => setActive("invoices")}>View invoices</button></div>}
         {supportMode && <div className="support-mode-banner"><div><strong>Support Mode</strong><span>Viewing {effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "customer workspace"} as MarginFlow Support</span></div><span className="support-mode-readonly">Read-only</span><button onClick={onExitSupport} type="button">Exit Support Mode</button></div>}
@@ -12362,8 +12368,8 @@ function InvoiceControlCentre({
               <button className="ghost" disabled={viewInvoiceSaving} onClick={closeControlInvoice} type="button">Close</button>
               {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={()=>{const dirty=viewOriginalRef.current!==JSON.stringify(viewInvoice);openReviewDetail(viewInvoice);if(dirty)reviewOriginalRef.current="unsaved-editor-changes";setViewInvoice(null);setReviewModalOpen(true);}} type="button">Review / Invoice is correct</button>}
               {permissions.canEdit && ["pending_sync","sync_failed","local_only"].includes(viewInvoice.syncStatus) && <button disabled={viewInvoiceSaving || viewOriginalRef.current!==JSON.stringify(viewInvoice)} onClick={async()=>{setViewInvoiceSaving(true);try{const result=await persistInvoiceDocument(viewInvoice,{retry:true});
-                if (result.persisted && !result.cancelled) {
-                  const saved = result.invoice;
+                const completion = await completeInvoiceSaveLearning(result, async (saved) => {
+                  if (result.cancelled) return { persisted: [], skipped: [] };
                   const learning = learnSupplierProductMappings({ mappings: supplierProductMappings, invoice: saved,
                     products, companyId, locationId, supplierId: saved.supplierId,
                     supplierName: saved.supplier, departments: departmentSettings });
@@ -12371,9 +12377,9 @@ function InvoiceControlCentre({
                   const receipts = new Map((outcome.persisted || []).map(row => [row.mappingId, row]));
                   setSupplierProductMappings(learning.mappings.map(rule => receipts.has(rule.id)
                     ? { ...rule, ...receipts.get(rule.id).mapping, relationalId: receipts.get(rule.id).relationalId, persistenceSource: "relational" } : rule));
-                  if (outcome.skipped?.length) throw new Error("Invoice saved. Reusable learning pending: " + outcome.skipped[0].reason);
-                }
-                const next=invoiceForControlEditor(result.invoice||viewInvoice,departmentNames);viewOriginalRef.current=JSON.stringify(next);setViewInvoice(next);setViewInvoiceStatus(!result.persisted || result.error?"Save not confirmed. Pending work is preserved; review the conflict before retrying.":"Saved to cloud.");}catch(error){setViewInvoiceStatus(error.message);}finally{setViewInvoiceSaving(false);}}} type="button">Retry pending save</button>}
+                  return outcome;
+                });
+                const next=invoiceForControlEditor(completion.invoice||viewInvoice,departmentNames);viewOriginalRef.current=JSON.stringify(next);setViewInvoice(next);setViewInvoiceStatus(completion.message || invoiceSaveFailureMessage(completion));}catch(error){setViewInvoiceStatus(error.message);}finally{setViewInvoiceSaving(false);}}} type="button">Retry pending save</button>}
               {permissions.canDelete && <button className="ghost" disabled={viewInvoiceSaving} onClick={()=>{const request=()=>{requestInvoiceDelete(viewInvoice);setViewInvoice(null);setSelectedCell(null);setBrowserOpen(false);};if(viewOriginalRef.current!==JSON.stringify(viewInvoice)){setLeaveAction(()=>request);return;}request();}} type="button">Delete document…</button>}
               {permissions.canEdit && <button disabled={viewInvoiceSaving} onClick={saveControlInvoice} type="button"><Save size={16} />{viewInvoiceSaving ? "Saving..." : "Save changes"}</button>}
             </>

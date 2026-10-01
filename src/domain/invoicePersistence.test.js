@@ -52,6 +52,54 @@ test("confirmed invoice persistence sends the full document to one atomic RPC", 
   assert.equal(result.line_count, 1);
 });
 
+test("a header and 25 lines use the sole active remote department and are confirmed before pending is removed", async () => {
+  const department = { id: "44444444-4444-4444-8444-444444444444", company_id: companyId, name: "Operations", active: true };
+  const states = [];
+  const calls = [];
+  const query = {
+    select() { return this; }, eq() { return this; },
+    then(resolve, reject) { return Promise.resolve({ data: [department], error: null }).then(resolve, reject); },
+  };
+  const client = {
+    from(table) { assert.equal(table, "departments"); return query; },
+    async rpc(name, payload) {
+      calls.push({ name, payload });
+      return { data: { invoice_id: payload.p_invoice.id, supplier_id: "55555555-5555-4555-8555-555555555555", line_count: 25, split_count: 0, sync_revision: 1 }, error: null };
+    },
+  };
+  const invoice = {
+    ...sampleInvoice,
+    documentNumber: "DOC-25",
+    sourceInvoiceTotal: 235.60,
+    items: Array.from({ length: 25 }, (_, index) => ({
+      id: "", productName: `Product ${index + 1}`, quantity: 1, unitCost: index + 1,
+      department: "Legacy local label", departmentId: "", departmentSplits: [],
+    })),
+  };
+  const result = await persistInvoiceWithLocalFallback({ client, invoice, scope: { companyId }, storeLocal: state => states.push(state) });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.p_invoice.documentNumber, "DOC-25");
+  assert.equal(calls[0].payload.p_invoice.items.length, 25);
+  assert.ok(calls[0].payload.p_invoice.items.every(line => line.departmentId === department.id));
+  assert.equal(states[0].syncStatus, "pending_sync");
+  assert.equal(states.at(-1).syncStatus, "synced");
+  assert.equal(result.persisted, true);
+});
+
+test("cloud refusal retains the complete 25-line pending invoice and concrete error", async () => {
+  const department = { id: "44444444-4444-4444-8444-444444444444", company_id: companyId, name: "Operations", active: true };
+  const states = [];
+  const query = { select() { return this; }, eq() { return this; }, then(resolve, reject) { return Promise.resolve({ data: [department], error: null }).then(resolve, reject); } };
+  const client = { from() { return query; }, async rpc() { return { data: null, error: new Error("Cloud write refused by policy") }; } };
+  const invoice = { ...sampleInvoice, items: Array.from({ length: 25 }, (_, index) => ({ id: "", productName: `Item ${index}`, quantity: 1, unitCost: 1, department: "Operations", departmentId: "" })) };
+  const result = await persistInvoiceWithLocalFallback({ client, invoice, scope: { companyId }, storeLocal: state => states.push(state) });
+  assert.equal(result.persisted, false);
+  assert.equal(states[0].syncStatus, "pending_sync");
+  assert.equal(states.at(-1).syncStatus, "sync_failed");
+  assert.equal(states.at(-1).items.length, 25);
+  assert.match(states.at(-1).syncError, /Cloud write refused by policy/);
+});
+
 test("legacy financial aliases are normalized into the v2 RPC header fields", async () => {
   const calls = [];
   const client = {
