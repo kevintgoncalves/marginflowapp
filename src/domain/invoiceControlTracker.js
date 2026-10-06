@@ -41,8 +41,9 @@ export function invoicesForSupplierDate(supplier, date, invoices = []) {
     .filter((invoice) => (
       invoice.date === date
       && (
-        (supplierId && invoiceSupplierId(invoice) === supplierId)
-        || sameSupplierIdentity(invoiceSupplierName(invoice), supplierName)
+        supplierId && invoiceSupplierId(invoice)
+          ? invoiceSupplierId(invoice) === supplierId
+          : sameSupplierIdentity(invoiceSupplierName(invoice), supplierName)
       )
     ))
     .sort(compareDocumentsByNumber);
@@ -55,6 +56,7 @@ export function invoiceGroupForSupplierDate(supplier, date, invoices = [], { tot
     invoice: matchingInvoices[0] || null,
     invoices: matchingInvoices,
     invoiceCount: matchingInvoices.length,
+    amountVerified: matchingInvoices.every(invoice => !invoice.financialSummaryMissing),
     dailyTotal,
     total: dailyTotal,
   };

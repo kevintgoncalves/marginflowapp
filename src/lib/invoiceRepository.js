@@ -1,6 +1,7 @@
 import { invoiceWithVerifiedDepartments } from '../domain/invoiceDepartmentScope.js';
 import { compareInvoiceCollections } from "../domain/emergencyRecovery.js";
 import { withCanonicalInvoiceFinancials } from "../domain/invoiceFinancials.js";
+import { firstInvoiceAmount } from "../domain/invoiceFinancials.js";
 import { readAllPages } from "./paginatedRead.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -308,12 +309,23 @@ export async function loadLegacyInvoiceArchive(client, scope = {}) {
 }
 
 const invoiceHeaderColumns = "id,company_id,location_id,supplier_id,invoice_number,document_number,document_type,invoice_date,status,subtotal,tax_amount,total_amount,sync_revision,content_fingerprint,metadata,created_at,updated_at";
+// The embedded snapshot may contain every line and the source document. Lists
+// deliberately project only its supplier label; the editor loads the rest later.
+const invoiceListColumns = "id,company_id,location_id,supplier_id,invoice_number,document_number,document_type,invoice_date,status,subtotal,tax_amount,total_amount,sync_revision,updated_at,supplier_name:metadata->marginflow_snapshot->>supplier,absoluteNetTotal:metadata->marginflow_snapshot->>absoluteNetTotal,absolute_net_total:metadata->marginflow_snapshot->>absolute_net_total,finalInvoiceTotal:metadata->marginflow_snapshot->>finalInvoiceTotal,total:metadata->marginflow_snapshot->>total,snapshot_total_amount:metadata->marginflow_snapshot->>total_amount,suppliers(name)";
+
+function invoiceListRow(row) {
+  // Preserve the existing schedule/list net amount precedence, without fetching
+  // the entire snapshot. Never silently substitute a gross header for a net value.
+  const amount = firstInvoiceAmount(row, ["absoluteNetTotal", "absolute_net_total", "finalInvoiceTotal", "total", "snapshot_total_amount"]);
+  return { ...invoiceFromRelationalRow({ ...row, metadata: { supplier_name: row.suppliers?.name || row.supplier_name || row.metadata?.supplier_name || row.metadata?.marginflow_snapshot?.supplier || "" }, invoice_lines: [] }), absoluteNetTotal: amount, financialSummaryMissing: amount === null };
+}
 
 function applyInvoiceFilters(query, filters = {}) {
   if (filters.startDate) query = query.gte("invoice_date", filters.startDate);
   if (filters.endDate) query = query.lte("invoice_date", filters.endDate);
   if (filters.supplierId) query = query.eq("supplier_id", filters.supplierId);
   if (filters.status) query = query.eq("status", filters.status);
+  if (filters.documentType) query = query.eq("document_type", filters.documentType);
   const search = String(filters.search || "").trim();
   if (search) {
     // PostgREST `.or` uses a filter expression rather than a parameter object.
@@ -325,11 +337,11 @@ function applyInvoiceFilters(query, filters = {}) {
   return query;
 }
 
-export async function loadRelationalInvoicePage(client, scope = {}, { offset = 0, limit = 50, filters = {} } = {}) {
+export async function loadRelationalInvoicePage(client, scope = {}, { offset = 0, limit = 25, filters = {} } = {}) {
   if (!client || !validScope(scope)) return { invoices: [], total: 0, hasMore: false, nextOffset: 0 };
-  const pageSize = Math.min(50, Math.max(1, Number(limit) || 50));
+  const pageSize = Math.min(25, Math.max(1, Number(limit) || 25));
   let query = client.from("invoices")
-    .select(invoiceHeaderColumns, { count: "exact" })
+    .select(invoiceListColumns, { count: "exact" })
     .eq("company_id", scope.companyId);
   if (scope.locationId) query = query.eq("location_id", scope.locationId);
   query = applyInvoiceFilters(query, filters)
@@ -338,9 +350,33 @@ export async function loadRelationalInvoicePage(client, scope = {}, { offset = 0
     .range(offset, offset + pageSize - 1);
   const { data, count, error } = await query;
   if (error) throw error;
-  const invoices = (data || []).map(row => invoiceFromRelationalRow({ ...row, invoice_lines: [] }));
-  const total = Number.isFinite(Number(count)) ? Number(count) : offset + invoices.length;
+  if (!Array.isArray(data) || !Number.isSafeInteger(count)) throw new Error("Invoice page count could not be verified. Retry; previous records are retained.");
+  const invoices = data.map(invoiceListRow);
+  const total = count;
   return { invoices, total, hasMore: offset + invoices.length < total, nextOffset: offset + invoices.length };
+}
+
+export async function loadRelationalInvoiceCount(client, scope, filters = {}) {
+  if (!client || !validScope(scope)) throw new Error("Invoice count requires an authenticated company scope.");
+  let query = client.from("invoices").select("id", { count: "exact", head: true }).eq("company_id", scope.companyId);
+  if (scope.locationId) query = query.eq("location_id", scope.locationId);
+  const { count, error } = await applyInvoiceFilters(query, filters);
+  if (error) throw error;
+  if (!Number.isSafeInteger(count)) throw new Error("Invoice count could not be verified.");
+  return count;
+}
+
+// A schedule is a complete week, never the current list page. Count-checked
+// pagination handles server caps without falsely declaring historical cells missing.
+export async function loadRelationalInvoiceSchedule(client, scope, { startDate, endDate }) {
+  if (!client || !validScope(scope) || !startDate || !endDate) throw new Error("Schedule requires company, location and week boundaries.");
+  const rows = await readAllPages((head = false) => {
+    let query = client.from("invoices").select(head ? "id" : invoiceListColumns, { count: "exact", head })
+      .eq("company_id", scope.companyId).gte("invoice_date", startDate).lte("invoice_date", endDate);
+    if (scope.locationId) query = query.eq("location_id", scope.locationId);
+    return query;
+  }, { label: "delivery schedule", pageSize: 500 });
+  return rows.map(invoiceListRow);
 }
 
 export async function loadRelationalInvoiceDetails(client, scope = {}, invoiceId = "") {

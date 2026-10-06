@@ -41,11 +41,11 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
   };
 }
 
-test("initial invoice page fetches only 50 headers and no invoice lines", async () => {
+test("initial invoice page fetches only 25 headers and no invoice lines", async () => {
   const tables = invoiceDataset();
   const client = cappedClient(tables, { cap: 1000 });
   const page = await loadRelationalInvoicePage(client, scope);
-  assert.equal(page.invoices.length, 50);
+  assert.equal(page.invoices.length, 25);
   assert.equal(page.total, 1005);
   assert.equal(page.hasMore, true);
   assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoices"]);
@@ -57,8 +57,8 @@ test("invoice pagination loads the next headers without duplicate IDs", async ()
   const client = cappedClient(tables, { cap: 1000 });
   const first = await loadRelationalInvoicePage(client, scope);
   const second = await loadRelationalInvoicePage(client, scope, { offset: first.nextOffset });
-  assert.equal(new Set([...first.invoices, ...second.invoices].map(invoice => invoice.id)).size, 100);
-  assert.equal(second.nextOffset, 100);
+  assert.equal(new Set([...first.invoices, ...second.invoices].map(invoice => invoice.id)).size, 50);
+  assert.equal(second.nextOffset, 50);
 });
 
 test("invoice search remains company and location scoped on the server", async () => {
@@ -122,7 +122,7 @@ test("current-month sales use a separate company and location scoped query", asy
 test("workspace refresh keeps reports period-scoped and stores only unsaved invoice recovery work", () => {
   const source = readFileSync(new URL("../main.jsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /setInterval\(refreshRelationalOperations,\s*30000\)/);
-  assert.match(source, /loadRelationalInvoicePage\(supabase, scope, \{ limit: 50 \}\)/);
+  assert.match(source, /loadRelationalInvoicePage\(supabase, scope, \{ limit: 25 \}\)/);
   assert.match(source, /calculateMetrics\(analyticsInvoices,/);
   assert.match(source, /spendBySupplier\(analyticsInvoices,/);
   assert.doesNotMatch(source, /calculateMetrics\(operationalInvoices,/);

@@ -3,6 +3,9 @@ import { completeInvoiceSaveLearning, invoiceSaveFailureMessage } from './domain
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
 import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
+import InvoiceBrowser from "./components/InvoiceBrowser.jsx";
+import DailySalesPage from "./components/DailySalesPage.jsx";
+import { invoiceNavigationRequest } from "./domain/invoiceNavigation.js";
 import { refreshPendingInvoice, purchaseConversion } from "./domain/reusablePurchasing.js";
 import ProductSupplierComparison from "./components/ProductSupplierComparison.jsx";
 import { latestProductComparisons, comparisonMoney, comparisonUnit } from "./domain/latestProductComparison.js";
@@ -129,6 +132,8 @@ import {
   invoiceCanRetrySyncAutomatically,
   loadRelationalInvoiceDetails,
   loadRelationalInvoicePage,
+  loadRelationalInvoiceCount,
+  loadRelationalInvoiceSchedule,
   loadRelationalInvoiceReportRange,
   loadRelationalInvoices,
   persistInvoiceWithLocalFallback,
@@ -5620,7 +5625,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   }, []);
   const setActive = (page, section = "profile") => {
     const destination = page === "invoices" ? "invoiceControl" : page;
-    if (page === "invoices") setInvoiceBrowseRequest({id:uid()});
+    setInvoiceBrowseRequest(invoiceNavigationRequest(page, uid()));
     const href = workspaceUrl(window.location.href, destination, section);
     if (href !== window.location.href) window.history.pushState({}, "", href);
     setActiveState(destination);
@@ -5631,6 +5636,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   useEffect(() => {
     const restore = () => {
       const page = appPageFromUrl("dashboard");
+      setInvoiceBrowseRequest(invoiceNavigationRequest(page, uid()));
       setActiveState(page === "invoices" ? "invoiceControl" : page);
       setSettingsSection(settingsSectionFromUrl(window.location.href));
     };
@@ -5668,7 +5674,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [invoiceLineCorrections, setInvoiceLineCorrectionsState] = useState(() => demoInitialData?.invoiceLineCorrections || safeReadLocalStorageArray("marginflow.invoiceLineCorrections", []));
   const [invoices, setInvoicesState] = useState(() => normalizeInvoiceCollectionForRuntime(
     demoInitialData?.invoices || mergeInvoiceCollectionsPreservingAll(
-      safeReadLocalStorageArray("marginflow.invoices", []),
+      safeReadLocalStorageArray("marginflow.invoices", []).filter(invoice => invoice.syncStatus !== "synced"),
       safeReadLocalStorageArray("marginflow.pendingInvoices", []),
     ).invoices,
   ));
@@ -5725,7 +5731,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         ...deletedRows.map((row) => deleteRelationalSalesEntry(supabase, row, scope)),
         ...changedRows.map((row) => persistRelationalSalesEntry(supabase, row, scope)),
       ]);
-      const freshSales = await loadRelationalSales(supabase, scope);
+      const freshSales = await loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end });
       salesRef.current = freshSales;
       setSalesState(freshSales);
       setCloudStatus("synced");
@@ -6044,7 +6050,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
     let relationalInvoices;
     try {
-      const page = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
+      const page = await loadRelationalInvoicePage(supabase, scope, { limit: 25 });
       relationalInvoices = page.invoices;
       setInvoicePageState({ nextOffset: page.nextOffset, total: page.total, filters: {}, hasMore: page.hasMore, loading: false, error: "" });
     } catch (error) {
@@ -6260,7 +6266,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
         const readGeneration = invoiceCommitGenerationRef.current;
-        const invoicePage = await loadRelationalInvoicePage(supabase, scope, { limit: 50 });
+        const invoicePage = await loadRelationalInvoicePage(supabase, scope, { limit: 25 });
         const freshInvoices = invoicePage.invoices;
         setInvoicePageState({ nextOffset: invoicePage.nextOffset, total: invoicePage.total, filters: {}, hasMore: invoicePage.hasMore, loading: false, error: "" });
         if (cancelled || readGeneration !== invoiceCommitGenerationRef.current) return;
@@ -6492,7 +6498,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     let cancelled = false;
     const retryPendingInvoices = async () => {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-      let freshInvoices = (await loadRelationalInvoicePage(supabase, scope, { limit: 50 })).invoices;
+      let freshInvoices = (await loadRelationalInvoicePage(supabase, scope, { limit: 25 })).invoices;
       for (const invoice of retryCandidates) {
         if (cancelled) return;
         const retryContext = invoice.syncRetryContext && typeof invoice.syncRetryContext === "object"
@@ -7019,7 +7025,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       <WorkspaceNavigation active={active} items={visibleNavItems} logo={marginflowLogo}
         company={effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || companySettings.tradingName || companySettings.companyName || "Your workspace"}
         department={effectiveDepartment} departments={visibleDepartmentOptions} onDepartment={setDepartment} user={{...currentUser, email: effectiveAuthUser?.email || currentUser.email, role: effectiveAuthMembership?.role_label || currentUser.role}} location={effectiveAuthMembership?.locations?.name} settingsSection={settingsSection} onSettings={section => setActive("settings", section)}
-        onNavigate={setActive} onInvoices={({status,type}) => { setInvoiceBrowseRequest({id:uid(),status,type}); setActive("invoiceControl"); }}
+        onNavigate={setActive} onInvoices={({status,type}) => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),status,type}); }}
         onUtility={setUtilityPanel} onReport={anchor => {setActive("dashboard");setReportAnchor(anchor);document.getElementById(anchor)?.scrollIntoView({block:"start"});}} onSignOut={onSignOut} />
       <WorkspaceUtility title={utilityPanel} onClose={() => setUtilityPanel("")} department={effectiveDepartment} period={rangeLabel(dateRangeState,dateRange,financialSettings.weekStartsOn)}
         pendingCount={demoMode ? 0 : pendingInvoiceCount} cloudError={cloudError} availablePages={visibleNavItems.map(item => item.id)}
@@ -7159,36 +7165,6 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             locationId={cloudScope.locationId || ""}
             loadInvoiceDetails={invoice => loadRelationalInvoiceDetails(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, invoice.id)}
             invoicePageState={invoicePageState}
-            onLoadMoreInvoices={async () => {
-              if (invoicePageState.loading || !invoicePageState.hasMore) return;
-              setInvoicePageState(current => ({ ...current, loading: true, error: "" }));
-              try {
-                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { offset: invoicePageState.nextOffset, limit: 50, filters: invoicePageState.filters || {} });
-                const combinedHeaders = [...confirmedInvoices, ...page.invoices.filter(row => !confirmedInvoices.some(existing => existing.id === row.id))];
-                setConfirmedInvoices(combinedHeaders);
-                setInvoices(current => relationalOperationalInvoiceCollection({ localInvoices: current, relationalInvoices: combinedHeaders, companyId: cloudScope.companyId, locationId: cloudScope.locationId || "", readOnly }));
-                setInvoicePageState(current => ({ ...current, nextOffset: page.nextOffset, total: page.total, hasMore: page.hasMore, loading: false, error: "" }));
-              } catch (error) {
-                setInvoicePageState(current => ({ ...current, loading: false, error: error.message || "Could not load older invoices." }));
-              }
-            }}
-            onSearchInvoices={async (filters) => {
-              setInvoicePageState(current => ({ ...current, loading: true, error: "" }));
-              try {
-                const page = await loadRelationalInvoicePage(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, { limit: 50, filters });
-                setConfirmedInvoices(page.invoices);
-                setInvoices(current => relationalOperationalInvoiceCollection({
-                  localInvoices: current.filter(invoice => invoice.syncStatus !== "synced"),
-                  relationalInvoices: page.invoices,
-                  companyId: cloudScope.companyId,
-                  locationId: cloudScope.locationId || "",
-                  readOnly,
-                }));
-                setInvoicePageState({ nextOffset: page.nextOffset, total: page.total, filters, hasMore: page.hasMore, loading: false, error: "" });
-              } catch (error) {
-                setInvoicePageState(current => ({ ...current, loading: false, error: error.message || "Could not search invoices." }));
-              }
-            }}
             onAddInvoice={prepareInvoiceUploadFromControl}
             onWeekRangeChange={setInvoiceControlWeekRange}
             persistInvoiceDocument={persistInvoiceDocument}
@@ -7214,7 +7190,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setInvoiceBrowseRequest({id:uid(),invoiceId}); setActive("invoiceControl"); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -7254,6 +7230,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
         {active === "waste" && <Waste department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
+          client={cloudEnabled ? supabase : null} companyId={cloudScope.companyId} locationId={cloudScope.locationId || ""}
           isActive={active === "gp"}
           inputRequest={salesInputRequest}
             dateRange={dateRange}
@@ -11175,9 +11152,9 @@ function InvoiceControlCentre({
   financialSettings = defaultFinancialSettings,
   invoiceDayStatusOverrides,
   invoiceSettings = defaultInvoiceSettings,
-  invoices,
-  workingDocuments = invoices,
-  recordsReady = true,
+  invoices: listInvoices,
+  workingDocuments = listInvoices,
+  recordsReady: listReady = true,
   browseRequest = null,
   legacyInvoiceArchive = [],
   requestInvoiceDelete = () => {},
@@ -11185,8 +11162,6 @@ function InvoiceControlCentre({
   locationId = "",
   loadInvoiceDetails = async (invoice) => invoice,
   invoicePageState = { total: 0, filters: {}, hasMore: false, loading: false, error: "" },
-  onLoadMoreInvoices = async () => {},
-  onSearchInvoices = async () => {},
   onAddInvoice,
   onWeekRangeChange,
   persistInvoiceDocument = async (invoice) => ({ invoice, persisted: false, error: null }),
@@ -11194,7 +11169,7 @@ function InvoiceControlCentre({
   permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "invoiceControl"),
   schedulePermissions = permissions,
   products = [],
-  sales,
+  sales: reportSales,
   setCreditNotes = () => {},
   setInvoiceDayStatusOverrides,
   setInvoiceLineCorrections = () => {},
@@ -11212,14 +11187,28 @@ function InvoiceControlCentre({
     persistInvoiceLearning, setSupplierProductMappings, setInvoiceLineCorrections, departmentNames,
   });
   const [leaveAction,setLeaveAction]=useState(null);
+  const [weekData, setWeekData] = useState({ invoices: [], sales: [], key: "", error: "" });
+  const [weekAttempt, setWeekAttempt] = useState(0);
+  const [creditCount, setCreditCount] = useState(null);
+  useEffect(() => {
+    if (!client) return undefined;
+    let cancelled = false;
+    setCreditCount(null);
+    loadRelationalInvoiceCount(client, { companyId, locationId }, { documentType: "credit_note" })
+      .then(count => { if (!cancelled) setCreditCount(count); })
+      .catch(() => { if (!cancelled) setCreditCount(null); });
+    return () => { cancelled = true; };
+  }, [client, companyId, locationId, weekAttempt, invoicePageState.total]);
+  const [summariesOpen, setSummariesOpen] = useState(false);
+  const [weekFinancials, setWeekFinancials] = useState({ invoices: [], key: "", error: "" });
   const [settingsOpen,setSettingsOpen]=useState(false),[scheduleQuery,setScheduleQuery]=useState("");
   const [browserOpen,setBrowserOpen]=useState(false),[browseSupplier,setBrowseSupplier]=useState(""),[browseQuery,setBrowseQuery]=useState("");
   const [browseFrom,setBrowseFrom]=useState(""),[browseTo,setBrowseTo]=useState(""),[browseType,setBrowseType]=useState("All"),[browseStatus,setBrowseStatus]=useState("All");
   const viewOriginalRef=useRef(null), reviewOriginalRef=useRef(null), invoiceDetailCacheRef=useRef(new Map());
-  useEffect(()=>{if(browseRequest?.id){setBrowserOpen(true);setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");setBrowseStatus(browseRequest.status || "All");setBrowseType(browseRequest.type || "All");}},[browseRequest?.id]);
+  useEffect(()=>{setBrowserOpen(Boolean(browseRequest?.id && browseRequest.view !== "schedule" && !browseRequest.invoiceId));setBrowseSupplier("");setBrowseFrom("");setBrowseTo("");setBrowseQuery("");setBrowseStatus(browseRequest?.status || "All");setBrowseType(browseRequest?.type || "All");setSelectedCell(null);},[browseRequest]);
   const pendingDocuments=workingDocuments.filter(row=>["pending_sync","sync_failed","local_only"].includes(row.syncStatus));
-  const browseDocuments=documentsForInvoiceBrowser(invoices,workingDocuments);
-  const openBrowse=(supplier="",range=null)=>{setBrowseSupplier(supplier);setBrowseFrom(range?.start||"");setBrowseTo(range?.end||"");setBrowserOpen(true);};
+  const browseDocuments=documentsForInvoiceBrowser(listInvoices,workingDocuments);
+  const openBrowse=(supplier="",range=null)=>{setBrowseSupplier(supplier);setBrowseFrom(range?.start||"");setBrowseTo(range?.end||"");setBrowseStatus("All");setBrowseType("All");setBrowseQuery("");setBrowserOpen(true);};
   const [weekStart, setWeekStart] = useState(mondayWeekStart(today()));
   const [statusFilter, setStatusFilter] = useState("All suppliers");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
@@ -11239,6 +11228,30 @@ function InvoiceControlCentre({
   const [reviewBulkSaving, setReviewBulkSaving] = useState(false);
   const weekDates = mondaySundayWeekDates(weekStart);
   const weekRange = { start: weekDates[0], end: weekDates[6] };
+  const weekKey = `${companyId}|${locationId}|${weekRange.start}|${weekRange.end}`;
+  const recordsReady = client ? weekData.key === weekKey && !weekData.error : listReady;
+  const invoices = client ? (weekData.key === weekKey ? weekData.invoices : []) : listInvoices;
+  const sales = client ? (weekData.key === weekKey ? weekData.sales : []) : reportSales;
+  useEffect(() => {
+    if (!client) return undefined;
+    let cancelled = false;
+    setWeekData(current => ({ ...current, key: "", error: "" }));
+    loadRelationalInvoiceSchedule(client, { companyId, locationId }, { startDate: weekRange.start, endDate: weekRange.end })
+      .then(invoices => { if (!cancelled) setWeekData({ invoices, sales: [], key: weekKey, error: "" }); })
+      .catch(error => { if (!cancelled) setWeekData(current => ({ ...current, error: error.message })); });
+    return () => { cancelled = true; };
+  }, [client, companyId, locationId, weekKey, weekAttempt]);
+  useEffect(() => {
+    if (!client || !summariesOpen) return undefined;
+    let cancelled = false;
+    setWeekFinancials(current => ({ ...current, key: "", error: "" }));
+    loadRelationalInvoiceReportRange(client, { companyId, locationId }, { startDate: weekRange.start, endDate: weekRange.end })
+      .then(invoices => { if (!cancelled) setWeekFinancials({ invoices, key: weekKey, error: "" }); })
+      .catch(error => { if (!cancelled) setWeekFinancials(current => ({ ...current, error: error.message })); });
+    return () => { cancelled = true; };
+  }, [client, companyId, locationId, weekKey, summariesOpen, weekAttempt]);
+  const financialInvoices = client ? (weekFinancials.key === weekKey ? weekFinancials.invoices : []) : listInvoices;
+  const browserRequest = useMemo(() => ({ supplierId: suppliers.find(row => row.name === browseSupplier)?.id || "", startDate: browseFrom, endDate: browseTo, status: browseStatus, type: browseType }), [suppliers, browseSupplier, browseFrom, browseTo, browseStatus, browseType]);
   useEffect(() => {
     onWeekRangeChange?.(weekRange);
   }, [onWeekRangeChange, weekRange.end, weekRange.start]);
@@ -11284,12 +11297,9 @@ function InvoiceControlCentre({
   const weeklyInvoiceSpend = weeklyDocuments.filter((invoice) => isInvoiceDocument(documentTypeFor(invoice))).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
   const weeklyCreditTotal = weeklyDocuments.filter((invoice) => isCreditNoteDocument(documentTypeFor(invoice))).reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
   const weeklySupplierSpend = weeklyInvoiceSpend + weeklyCreditTotal;
-  const weeklyFoodPurchases = departmentPurchaseTotalForDate(invoices, weekDates[0], "Kitchen Made")
-    + departmentPurchaseTotalForDate(invoices, weekDates[0], "Bought In")
-    + weekDates.slice(1).reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made") + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
-  const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Kitchen Made"), 0);
-  const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(invoices, date, "Bought In"), 0);
-  const dailySummaries = invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows: rows, scope: summaryScope });
+  const weeklyMakeInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(financialInvoices, date, "Kitchen Made"), 0);
+  const weeklyBoughtInPurchases = weekDates.reduce((sum, date) => sum + departmentPurchaseTotalForDate(financialInvoices, date, "Bought In"), 0);
+  const weeklyFoodPurchases = weeklyMakeInPurchases + weeklyBoughtInPurchases;
   const reviewDocumentRows = browseDocuments
     .filter(invoice=>dateInRange(invoice.date,weekRange))
     .filter(invoice=>invoice.persistenceSource !== "relational" || (invoice.items || []).length > 0)
@@ -11371,7 +11381,8 @@ function InvoiceControlCentre({
   useEffect(()=>{
     if(!browseRequest?.invoiceId || handledBrowseRequest.current===browseRequest.id)return;
     const target=browseDocuments.find(row=>row.id===browseRequest.invoiceId);
-    if(target){handledBrowseRequest.current=browseRequest.id;openControlInvoice(target);}
+    handledBrowseRequest.current=browseRequest.id;
+    openControlInvoice(target || { id: browseRequest.invoiceId, persistenceSource: "relational", items: [] });
   },[browseRequest,browseDocuments]);
 
   const closeControlInvoice = () => {
@@ -11382,6 +11393,7 @@ function InvoiceControlCentre({
   };
 
   const openCell = (cell) => {
+    if (!recordsReady) return;
     if(cell.documents.length===1){openControlInvoice(cell.documents[0]);return;}
     setSelectedCell(cell);
   };
@@ -12087,10 +12099,10 @@ function InvoiceControlCentre({
   return (
     <div className="page-grid invoice-control-page unified-invoices">
       <section className="mf-invoice-strip" aria-label="Invoice status summary">
-        <button type="button" onClick={() => {openBrowse();setBrowseStatus("All");setBrowseType("All");}}><span>All documents</span><strong>{recordsReady ? browseDocuments.length : "—"}</strong><small>All recorded periods</small></button>
+        <button type="button" onClick={() => {openBrowse();setBrowseStatus("All");setBrowseType("All");}}><span>All documents</span><strong>{listReady ? (client ? invoicePageState.total : browseDocuments.length) : "—"}</strong><small>All recorded periods</small></button>
         <button type="button" onClick={openReviewModal}><span>Needs review</span><strong>{recordsReady ? reviewDocuments.length : "—"}</strong><small>Selected week</small></button>
         <button type="button" onClick={() => {openBrowse();setBrowseStatus("Pending");setBrowseType("All");}}><span>Pending / failed saves</span><strong>{pendingDocuments.length}</strong><small>Working documents</small></button>
-        <button type="button" onClick={() => {openBrowse();setBrowseType("Credit notes");setBrowseStatus("All");}}><span>Credit notes</span><strong>{recordsReady ? browseDocuments.filter(invoice => isCreditNoteDocument(documentTypeFor(invoice))).length : "—"}</strong><small>All recorded periods</small></button>
+        <button type="button" onClick={() => {openBrowse();setBrowseType("Credit notes");setBrowseStatus("All");}}><span>Credit notes</span><strong>{client ? creditCount ?? "—" : browseDocuments.filter(invoice => isCreditNoteDocument(documentTypeFor(invoice))).length}</strong><small>All recorded periods</small></button>
       </section>
       <div className="unified-invoice-actions" aria-label="Invoice Control Centre actions">
         {(permissions.canImport || permissions.canAdd) && <PrimaryAction onClick={()=>onAddInvoice("",today())}>Add invoices</PrimaryAction>}
@@ -12283,8 +12295,9 @@ function InvoiceControlCentre({
         <p className="modal-copy">This resolves the current review warnings for the selected invoices. Use this only when the invoice values are correct and the warnings are false positives.</p>
       </InvoiceModal>
 
-      <details className="more-metrics invoice-control-more-metrics">
+      <details className="more-metrics invoice-control-more-metrics" onToggle={event => setSummariesOpen(event.currentTarget.open)}>
         <summary>More weekly metrics</summary>
+        {client && weekFinancials.key !== weekKey && <p role="status">{weekFinancials.error || "Loading complete weekly financial totals…"}</p>}
         <div className="metric-grid invoice-control-summary">
           <Metric label="Uploaded" value={receivedCells.length} delta="invoice day(s)" tone="good" />
           <Metric label="Expected" value={expectedCells.length} delta="awaiting upload" tone="warn" />
@@ -12295,9 +12308,9 @@ function InvoiceControlCentre({
           <Metric empty={!weeklyDocuments.length} label="Invoices" value={moneyOrEmpty(weeklyInvoiceSpend, weeklyDocuments.length > 0)} delta="weekly invoice total" />
           <Metric empty={!weeklyDocuments.length} label="Credit notes" value={moneyOrEmpty(weeklyCreditTotal, weeklyDocuments.length > 0)} delta="weekly credit total" />
           <Metric empty={!weeklyDocuments.length} label="Net purchases" value={moneyOrEmpty(weeklySupplierSpend, weeklyDocuments.length > 0)} delta="weekly total" />
-          <Metric empty={!weeklyDocuments.length} label="Food purchases" value={moneyOrEmpty(weeklyFoodPurchases, weeklyDocuments.length > 0)} delta="make-in + bought-in" />
-          <Metric empty={!weeklyDocuments.length} label="Make-in" value={moneyOrEmpty(weeklyMakeInPurchases, weeklyDocuments.length > 0)} delta="Kitchen Made" />
-          <Metric empty={!weeklyDocuments.length} label="Bought-in" value={moneyOrEmpty(weeklyBoughtInPurchases, weeklyDocuments.length > 0)} delta="Bought In" />
+          <Metric empty={!financialInvoices.length} label="Food purchases" value={moneyOrEmpty(weeklyFoodPurchases, financialInvoices.length > 0)} delta="make-in + bought-in" />
+          <Metric empty={!financialInvoices.length} label="Make-in" value={moneyOrEmpty(weeklyMakeInPurchases, financialInvoices.length > 0)} delta="Kitchen Made" />
+          <Metric empty={!financialInvoices.length} label="Bought-in" value={moneyOrEmpty(weeklyBoughtInPurchases, financialInvoices.length > 0)} delta="Bought In" />
         </div>
       </details>
 
@@ -12312,6 +12325,7 @@ function InvoiceControlCentre({
         )}
         title="Weekly supplier tracker"
       >
+        {!recordsReady && <p role={weekData.error ? "alert" : "status"}>{weekData.error ? `Schedule not verified: ${weekData.error}` : "Loading the complete selected week…"} <button type="button" onClick={() => setWeekAttempt(value => value + 1)}>Retry week</button></p>}
         {rows.length ? (
           <div className="invoice-control-grid-wrap">
             <table className="invoice-control-grid">
@@ -12430,24 +12444,7 @@ function InvoiceControlCentre({
       )}
 
       <InvoiceModal className="invoice-query-modal" title={browseSupplier ? `${browseSupplier} documents` : "View invoices"} open={browserOpen} onClose={()=>setBrowserOpen(false)} wide footer={<button onClick={()=>setBrowserOpen(false)} type="button">Close</button>}>
-        <div className="unified-query-filters">
-          <label>Supplier<select aria-label="Supplier" value={browseSupplier} onChange={e=>setBrowseSupplier(e.target.value)}><option value="">All suppliers</option>{[...new Set(browseDocuments.map(r=>r.supplier))].filter(Boolean).map(name=><option key={name}>{name}</option>)}</select></label>
-          <label>From<input aria-label="From" type="date" value={browseFrom} onChange={e=>setBrowseFrom(e.target.value)} /></label>
-          <label>To<input aria-label="To" type="date" value={browseTo} onChange={e=>setBrowseTo(e.target.value)} /></label>
-          <label>Type<select aria-label="Type" value={browseType} onChange={e=>setBrowseType(e.target.value)}>{["All","Invoices","Credit notes"].map(x=><option key={x}>{x}</option>)}</select></label>
-          <label>Status<select aria-label="Status" value={browseStatus} onChange={e=>setBrowseStatus(e.target.value)}>{["All","Confirmed","Pending","Review"].map(x=><option key={x}>{x}</option>)}</select></label>
-          <button onClick={() => onSearchInvoices({ search: browseQuery, startDate: browseFrom, endDate: browseTo })} type="button">Search all invoices</button>
-        </div>
-        {!recordsReady && <p role="alert">Cloud records are not verified. Retained documents and pending work are shown; absence is not confirmed.</p>}
-        <div className="unified-document-list"><DataTable mobileSort query={browseQuery} onQueryChange={setBrowseQuery} columns={[
-          {key:"number",label:"Document"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},
-          {key:"type",label:"Type"},{key:"total",label:"Amount",render:money},{key:"review",label:"Review"},{key:"sync",label:"Cloud status"},
-          {key:"open",label:"Details",sortable:false,render:(_,row)=><button onClick={()=>openControlInvoice(row.invoice)} type="button">{isCreditNoteDocument(documentTypeFor(row.invoice)) ? "Open credit note" : "Open invoice"}</button>}
-        ]} rows={browseDocuments.map(invoice=>({id:invoice.id,invoice,number:documentNumberFor(invoice)||"—",supplier:invoice.supplier,date:invoice.date,type:documentTypeLabel(documentTypeFor(invoice)),total:invoiceTotal(invoice),review:invoice.persistenceSource === "relational" && !(invoice.items||[]).length ? invoice.status||"Approved" : invoiceHasBlockingReview(validateInvoiceExtraction({invoice,lines:invoice.items||[],historicalPrices:productPriceHistory}))?"Review required":invoice.status||"Approved",sync:pendingDocuments.some(r=>r.id===invoice.id)?"Pending / save failed":"Confirmed"})).filter(row=>(!browseSupplier||row.supplier===browseSupplier)&&(!browseFrom||row.date>=browseFrom)&&(!browseTo||row.date<=browseTo)&&(`${row.number} ${row.supplier}`.toLowerCase().includes(browseQuery.toLowerCase()))&&(browseType==="All"||(browseType==="Credit notes")===isCreditNoteDocument(documentTypeFor(row.invoice)))&&(browseStatus==="All"||(browseStatus==="Pending"?row.sync!=="Confirmed":browseStatus==="Confirmed"?row.sync==="Confirmed":row.review==="Review required")))} />
-          {invoicePageState.total > 0 && <p className="helper-text">Showing {browseDocuments.length} of {invoicePageState.total} confirmed invoices.</p>}
-          {invoicePageState.error && <p role="alert">{invoicePageState.error}</p>}
-          {invoicePageState.hasMore && <button disabled={invoicePageState.loading} onClick={onLoadMoreInvoices} type="button">{invoicePageState.loading ? "Loading older invoices…" : "Load more invoices"}</button>}
-        </div>
+        {browserOpen && <InvoiceBrowser client={client} companyId={companyId} locationId={locationId} request={browserRequest} suppliers={suppliers} pending={pendingDocuments} demoInvoices={browseDocuments} onOpen={openControlInvoice} />}
         {legacyInvoiceArchive.length>0 && <details><summary>Archived historical documents · {legacyInvoiceArchive.length} read-only</summary>
           <DataTable columns={[{key:"documentNumber",label:"Document number"},{key:"supplier",label:"Supplier"},{key:"date",label:"Date"},{key:"sourceInvoiceTotal",label:"Total",render:money},{key:"archiveReason",label:"Archive reason"},{key:"financialHeaderReliable",label:"Supplier spend",render:value=>value?"Included":"Excluded"}]} rows={legacyInvoiceArchive}/>
         </details>}
@@ -12565,7 +12562,7 @@ function InvoiceControlCentre({
 
 function InvoiceControlCell({ cell, onClick }) {
   return <td><button className={`invoice-control-cell ${cell.state}`} aria-label={`${cell.supplier.name}, ${cell.date}: ${cell.label}${cell.pendingCount ? `, ${cell.pendingCount} pending` : ""}`} onClick={onClick} type="button">
-    <strong>{cell.invoiceCount ? `${cell.invoiceCount} document${cell.invoiceCount === 1 ? "" : "s"}` : cell.label}</strong>{cell.invoiceCount > 0 && <span className="cell-amount">{money(cell.total)} <small>confirmed</small></span>}
+    <strong>{cell.invoiceCount ? `${cell.invoiceCount} document${cell.invoiceCount === 1 ? "" : "s"}` : cell.label}</strong>{cell.invoiceCount > 0 && <span className="cell-amount">{cell.amountVerified === false ? "Open for amount" : money(cell.total)} <small>confirmed</small></span>}
     {cell.invoices?.some(invoice=>isCreditNoteDocument(documentTypeFor(invoice))) && <small className="credit-note-label">Includes credit</small>}
     {cell.pendingCount>0 && <small>{cell.pendingCount} pending / failed</small>}
   </button></td>;
@@ -16016,7 +16013,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
   );
 }
 
-function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
+function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeState, department, departmentNames, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
   const makeSalesDraft = (date = today()) => {
     const existing = sales.find((row) => row.date === date);
     const departments = salesDepartments(existing);
@@ -16170,15 +16167,7 @@ function SalesAnalysis({ dateRange, dateRangeState, department, departmentNames,
           />
         </Panel>
         <Panel title="Daily sales">
-          <DataTable
-            columns={[
-              { key: "date", label: "Date" },
-              { key: "netSales", label: "Net sales", render: money },
-              { key: "grossSales", label: "Gross sales", render: money },
-              { key: "vat", label: "VAT / tax", render: money },
-            ]}
-            rows={dailyRows}
-          />
+          {isActive && <DailySalesPage client={client} companyId={companyId} locationId={locationId} startDate={dateRange.start} endDate={dateRange.end} department={department} amountForRow={salesAmountForRow} demoRows={selectedTotals.rows} />}
         </Panel>
       </div>
 
