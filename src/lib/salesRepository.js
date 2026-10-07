@@ -142,6 +142,27 @@ export async function loadRelationalSales(client, scope = {}, { startDate = "", 
   return entries.sort((a,b) => String(a.sales_date || "").localeCompare(String(b.sales_date || "")) || a.id.localeCompare(b.id)).map((entry) => relationalSalesEntryToAppRow(entry, linesByEntryId.get(entry.id) || [], departments.byId));
 }
 
+export async function loadRelationalSalesPage(client, scope, { offset = 0, startDate, endDate, department = "All departments", search = "" } = {}) {
+  if (!client || !validScope(scope) || !startDate || !endDate) throw new Error("Daily Sales requires company, location and date range.");
+  const departments = await loadRelationalSalesDepartments(client, scope);
+  const departmentId = department === "All departments" ? "" : departments.byName.get(normalizeName(department))?.id;
+  if (department !== "All departments" && !departmentId) throw new Error("The selected sales department is not available in this company and location.");
+  const relation = departmentId ? "sales_department_lines!inner" : "sales_department_lines";
+  let query = client.from("sales_entries")
+    .select(`id,company_id,location_id,sales_date,net_sales,gross_sales,vat_amount,source,${relation}(department_id,company_id,location_id,net_sales,gross_sales,vat_amount)`, { count: "exact" })
+    .eq("company_id", scope.companyId).gte("sales_date", startDate).lte("sales_date", endDate);
+  if (scope.locationId) query = query.eq("location_id", scope.locationId);
+  if (departmentId) query = query.eq("sales_department_lines.department_id", departmentId);
+  if (search.trim()) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(search.trim())) query = query.eq("sales_date", search.trim());
+    else query = query.ilike("source", `%${search.trim().replace(/[%_\\]/g, "\\$&")}%`);
+  }
+  const { data, count, error } = await query.order("sales_date", { ascending: false }).order("id", { ascending: false }).range(offset, offset + 24);
+  if (error) throw error;
+  if (!Array.isArray(data) || !Number.isSafeInteger(count)) throw new Error("Daily Sales page count could not be verified.");
+  return { total: count, rows: data.map(row => relationalSalesEntryToAppRow(row, (row.sales_department_lines || []).filter(line => line.company_id === scope.companyId && (!scope.locationId || line.location_id === scope.locationId)), departments.byId)) };
+}
+
 async function ensureSalesEntryId(sale = {}, scope = {}) {
   const existingId = sale.relationalId || sale.id || "";
   if (isCanonicalUuid(existingId)) return existingId;
