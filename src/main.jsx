@@ -1,3 +1,4 @@
+import SupplierComparisonMatrix from './components/SupplierComparisonMatrix.jsx';
 import { learnedDepartment } from './domain/supplierDepartments.js';
 import { completeInvoiceSaveLearning, invoiceSaveFailureMessage } from './domain/invoiceSaveCompletion.js';
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
@@ -12591,6 +12592,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [productSupplier, setProductSupplier] = useState("");
   const [productDetail, setProductDetail] = useState(null);
   const [comparisonId, setComparisonId] = useState("");
+  const [matrixOpen, setMatrixOpen] = useState(false);
   const [quotationOpen, setQuotationOpen] = useState(false);
   const {draft: quotationDraft, setDraft: setQuotationDraft, message: quotationDraftMessage} = useQuotationDraft(userId, draftCompanyId);
   const quotationSelection = quotationDraft.ids;
@@ -12752,6 +12754,9 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
       <InvoiceModal title="Request quotation" open={quotationOpen} onClose={() => setQuotationOpen(false)} className="mf-product-drawer mf-comparison-drawer">
         {quotationOpen && <QuotationPanel products={products.map(product => rows.find(row => row.id === product.id) || product)} invoices={invoices} matching={productRowsForExport} draft={quotationDraft} setDraft={setQuotationDraft} message={quotationDraftMessage} />}
       </InvoiceModal>
+      <AppModal title="Compare suppliers" open={matrixOpen} onClose={() => setMatrixOpen(false)} wide>
+        {matrixOpen && <SupplierComparisonMatrix products={rows} />}
+      </AppModal>
       <ProductDetails product={productDetail} onClose={() => setProductDetail(null)} onEdit={permissions.canEdit ? openProductModal : null} />
       <InvoiceModal title={comparisonProduct ? `${comparisonProduct.name} · Supplier comparison` : "Supplier comparison"} open={Boolean(comparisonProduct)} onClose={() => setComparisonId("")} className="mf-product-drawer mf-comparison-drawer">
         {comparisonProduct && <ProductSupplierComparison product={comparisonProduct} onOpenInvoice={id => { setComparisonId(""); onOpenInvoice?.(id); }} />}
@@ -12783,6 +12788,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           onQueryChange={setProductQuery}
           toolbarAction={(
             <div className="button-row left tight">
+              <button className="ghost" type="button" onClick={() => setMatrixOpen(true)}>Compare suppliers</button>
               <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
