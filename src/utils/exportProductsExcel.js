@@ -72,3 +72,28 @@ export async function downloadProductsExcel(products, filename) {
   const workbook=await createProductsWorkbook(products);
   downloadBlob(filename,new Blob([await workbook.xlsx.writeBuffer()],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
 }
+
+// Receives the exact filtered matrix rendered by the dialog; no independent
+// filtering, ranking, supplier selection or price lookup during export.
+export async function createSupplierMatrixWorkbook(rows, suppliers) {
+  const module = await import('exceljs'); const ExcelJS = module.default || module;
+  const workbook = new ExcelJS.Workbook(); workbook.creator = 'MarginFlow';
+  const sheet = workbook.addWorksheet('Supplier comparison', { views: [{ state: 'frozen', ySplit: 1, xSplit: 2 }] });
+  const columns = [{header:'Product reference',key:'id',width:38},{header:'Product',key:'name',width:30},{header:'Category',key:'department',width:20}];
+  const fields = [['price','Comparable price'],['unit','Unit'],['currency','Currency'],['date','Price date'],['percent','Above cheapest %'],['status','Status'],['reason','Review reason'],['invoice','Invoice reference'],['invoiceId','Invoice ID'],['original','Original net unit price'],['billingUnit','Billing unit'],['pack','Original pack'],['packPrice','Net pack price']];
+  suppliers.forEach((supplier,i)=>fields.forEach(([key,label])=>columns.push({header:`${supplier.name} · ${label}`,key:`s${i}_${key}`,width:24})));
+  columns.push({header:'Cheapest supplier',key:'cheapest',width:30}); sheet.columns=columns;
+  rows.forEach(row=>{
+    const record={id:row.id,name:row.name,department:row.department,cheapest:row.cheapest.join(' / ')};
+    row.cells.forEach((cell,i)=>{const a=cell.article;const values={price:cell.status==='Comparable'?a.price:null,unit:a?comparisonUnit(a.unit || ''):'',currency:a?.currency || '',date:a?.date || '',percent:cell.percent===null?null:cell.percent/100,status:cell.status,reason:cell.reason,invoice:a?.invoiceNumber || '',invoiceId:a?.invoiceId || '',original:a?.billedNetPrice ?? null,billingUnit:a?.billingUnit || '',pack:a?.pack || '',packPrice:a?.netPackPrice ?? null};for(const [key,value] of Object.entries(values))record[`s${i}_${key}`]=value;});
+    sheet.addRow(record);
+  });
+  sheet.getRow(1).font={bold:true};sheet.getRow(1).alignment={wrapText:true};
+  sheet.autoFilter={from:{row:1,column:1},to:{row:Math.max(1,sheet.rowCount),column:columns.length}};
+  for(const column of sheet.columns){if(column.key.endsWith('_percent'))column.numFmt='0.00%';else if(/_(price|original|packPrice)$/.test(column.key))column.numFmt='#,##0.0000';}
+  return workbook;
+}
+export async function downloadSupplierMatrixExcel(rows,suppliers) {
+  const workbook=await createSupplierMatrixWorkbook(rows,suppliers);
+  downloadBlob('marginflow-supplier-comparison.xlsx',new Blob([await workbook.xlsx.writeBuffer()],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+}
