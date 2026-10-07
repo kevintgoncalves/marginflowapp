@@ -1,3 +1,4 @@
+import { isStockOriginSupplier } from './supplierIdentity.js';
 import { purchaseConversion, unitKey } from './reusablePurchasing.js';
 
 // Callers supply the confirmed financial collection. Demo rows need an explicit flag.
@@ -10,6 +11,7 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
   const seen = new Set();
   for (const invoice of invoices) {
     if (!demo && !(invoice.syncStatus === 'synced' && invoice.persistenceSource === 'relational')) continue;
+    if (isStockOriginSupplier(invoice.supplier)) continue;
     if (/credit|return/i.test(invoice.documentType || invoice.document_type || '')) continue;
     const date = String(invoice.date || invoice.invoiceDate || '').slice(0, 10);
     if (!date || (from && date < from) || (to && date > to)) continue;
@@ -26,7 +28,7 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
       const valid = conversion.valid && conversion.volume > 0 && conversion.net > 0;
       row.offers.push({ supplier: invoice.supplier || line.supplier || '', supplierId: invoice.supplierId || '',
         code: line.supplierProductCode || '', description: line.rawDescription || line.productName || '',
-        pack: line.packSize || '', packPrice: Number(line.unitCost), netPackPrice, billingUnit:line.unitOfMeasure || '', date, lineId:line.id || String(index), brand:line.brand || '', specification:line.specification || '', equivalenceStatus:line.equivalenceStatus || '', matchSource:line.productMatchSource || '',
+        pack: line.packSize || '', packPrice: Number(line.unitCost), netPackPrice, billingUnit:line.purchaseUnit || line.unitOfMeasure || '', purchaseQuantity: Number(line.quantity), billedNetPrice: billedNet, date, lineId:line.id || String(index), brand:line.brand || '', specification:line.specification || '', equivalenceStatus:line.equivalenceStatus || '', matchSource:line.productMatchSource || '',
         invoiceId: invoice.id, invoiceNumber: invoice.documentNumber || invoice.invoiceNumber || invoice.id,
         ...conversion, valid, status: valid ? 'Comparable' : 'Needs conversion',
         equivalence: 'Same canonical product', currency: invoice.currency || 'GBP' });

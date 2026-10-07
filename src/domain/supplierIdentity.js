@@ -232,3 +232,12 @@ export function supplierSortKey(supplier = {}, query = "") {
   const matchRank = term && name.startsWith(term) ? 0 : term && name.includes(term) ? 1 : 2;
   return `${deletedRank}-${activeRank}-${matchRank}-${name}`;
 }
+
+// An inventory origin is retained in stored records, but is not a purchase vendor.
+export function isStockOriginSupplier(value = {}) {
+  const name = typeof value === 'string' ? value : value.name || value.supplier || '';
+  return String(name).trim().toLowerCase().replace(/[^a-z]/g, '') === 'stocktake';
+}
+export function purchaseSupplierRows(rows = []) {
+  return activeSupplierRows(rows).filter(row => !isStockOriginSupplier(row));
+}

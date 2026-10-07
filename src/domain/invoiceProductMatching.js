@@ -191,6 +191,10 @@ export function matchInvoiceLineToExistingProduct({
       && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode);
     if (candidates.length) {
       if (!candidates.some(samePack)) return packReview();
+      const knownDescriptions = candidates.map(row => normalizeSupplierDescription(row.supplierDescription || row.supplier_description)).filter(Boolean);
+      if (knownDescriptions.length && (!normalizedDescription || !knownDescriptions.includes(normalizedDescription))) {
+        return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ['supplier_code_description_changed'] });
+      }
       const productIds = new Set(candidates.map(row => row.productId || row.product_id).filter(Boolean));
       const mapping = candidates.find(samePack);
       const product = mapping && mappingProduct(mapping, products);

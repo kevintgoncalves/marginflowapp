@@ -1,3 +1,4 @@
+import { isStockOriginSupplier } from '../domain/supplierIdentity.js';
 import React,{useMemo,useState} from 'react';
 import {quotationRows,quotationCsv,quotationEligible,selectQuotationIds,supplierQuotationCandidates,readQuotationDraft} from '../domain/quotation.js';
 import {comparisonUnit} from '../domain/latestProductComparison.js';
@@ -11,7 +12,7 @@ export default function QuotationPanel({products,invoices,matching,draft,setDraf
   const summaries=useMemo(()=>quotationRows(products,invoices,options),[products,invoices,draft.period,draft.sources]);
   const byId=new Map(summaries.map(p=>[p.id,p]));
   const selected=[...new Set(draft.ids)].map(id=>byId.get(id)||{id,name:`Unavailable product (${id})`,offers:[],volume:null,unit:'',review:'Product unavailable — review before sending'});
-  const suppliers=[...new Set([...draft.sources,...products.flatMap(p=>[p.supplier,...(p.comparison?.articles||[]).map(a=>a.supplier)]),...invoices.filter(i=>i.syncStatus==='synced'&&i.persistenceSource==='relational').map(i=>i.supplier)].filter(Boolean))].sort();
+  const suppliers=[...new Set([...draft.sources,...products.flatMap(p=>[p.supplier,...(p.comparison?.articles||[]).map(a=>a.supplier)]),...invoices.filter(i=>i.syncStatus==='synced'&&i.persistenceSource==='relational').map(i=>i.supplier)].filter(value=>value && !isStockOriginSupplier(value)))].sort();
   const candidates=supplierQuotationCandidates(products,invoices,options,fallback);
   const purchased=supplierQuotationCandidates(products,invoices,options,false);
   const add=ids=>setDraft(d=>({...d,ids:selectQuotationIds(d.ids,ids)}));

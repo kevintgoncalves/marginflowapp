@@ -10,7 +10,7 @@ const latest=invoice('new','Alternative','b','2026-09-22',13.25,'5kg');
 test('latest article price wins over old promotion and 3/5kg compare in the same unit',()=>{
  const [row]=latestProductComparisons([product],[old,current,latest]);
  assert.equal(row.comparison.articles.length,2);assert.equal(row.comparison.best.price,2.65);
- assert.ok(Math.abs(row.comparison.difference-.35)<1e-10);assert.equal(row.priceDifferenceLabel,'£0.35/kg cheaper');
+ assert.ok(Math.abs(row.comparison.difference-.35)<1e-10);assert.equal(row.priceDifferenceLabel,'£0.35/kg cheaper (11.7%)');
  assert.equal(row.comparison.best.date,'2026-09-22');assert.equal(row.comparison.comparable[0].netPackPrice,13.25);
  assert.equal(row.comparison.current.price,3);
  const [exported]=productExportRows([row]);assert.equal(exported.currentPrice,row.comparison.current.price);assert.equal(exported.difference,row.comparison.difference);
@@ -34,11 +34,11 @@ test('same coded article changing pack replaces its earlier pack and supplier co
  const [row]=latestProductComparisons([product],[current,invoice('b3','Alternative','b','2026-09-01',6,'3kg'),latest]);assert.equal(row.comparison.articles.length,2);assert.equal(row.comparison.articles.find(a=>a.supplierId==='b').pack,'5kg');
  assert.equal(supplierExportRows([row]).length,2);
 });
-test('XLSX round trip has two sheets, numeric price/difference columns and missing values are blank',async()=>{
+test('XLSX round trip has summary and article sheets, numeric price/difference columns and missing values are blank',async()=>{
  const rows=latestProductComparisons([product],[current,latest],[{productId:'p',supplierName:'No price',supplierProductCode:'empty',active:true}]);
  const workbook=await createProductsWorkbook(rows);const buffer=await workbook.xlsx.writeBuffer();
  const ExcelJS=(await import('exceljs')).default;const reopened=new ExcelJS.Workbook();await reopened.xlsx.load(buffer);
- assert.deepEqual(reopened.worksheets.map(s=>s.name),['Products','Supplier comparison']);
+ assert.deepEqual(reopened.worksheets.map(s=>s.name),['Products','Supplier comparison','Supplier articles']);
  const products=reopened.getWorksheet('Products');assert.equal(products.getCell('H2').value,3);assert.equal(products.getCell('M2').value,2.65);assert.equal(typeof products.getCell('O2').value,'number');
  const suppliers=reopened.getWorksheet('Supplier comparison');assert.equal(suppliers.rowCount,4);assert.equal(typeof suppliers.getCell('L2').value,'number');assert.equal(suppliers.getCell('L4').value,null);
  assert.equal(typeof suppliers.getCell('O2').value,'number');assert.equal(suppliers.getCell('J2').value,'kg');

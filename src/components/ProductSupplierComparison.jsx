@@ -14,6 +14,8 @@ export default function ProductSupplierComparison({ product, onOpenInvoice }) {
     <dl className="mf-detail-list">
       <dt>Brand / specification</dt><dd>{[article.brand,article.specification].filter(Boolean).join(' · ') || 'Not recorded'}</dd>
       <dt>Pack</dt><dd>{article.pack || 'Not recorded'}</dd>
+      <dt>Invoice quantity / billing unit</dt><dd>{article.purchaseQuantity ?? 'Not recorded'} · {article.billingUnit || 'Not recorded'}</dd>
+      <dt>Original net unit price</dt><dd>{money(article.billedNetPrice,article.currency)}</dd>
       <dt>Net pack price</dt><dd>{money(article.netPackPrice,article.currency)}</dd>
       <dt>Normalised price</dt><dd>{article.valid?`${money(article.price,article.currency)}/${unit(article.unit)}`:'Not comparable'}</dd>
       <dt>Against current supplier</dt><dd>{articleDifference(article)}</dd>
