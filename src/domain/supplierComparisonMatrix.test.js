@@ -20,25 +20,28 @@ test('incompatible units, ambiguous articles and a lone price never invent perce
  const ambiguous=latestProductComparisons(products,[invoice('A',2),invoice('A',1,'kg','other'),invoice('B',3)]);
  const a=supplierComparisonMatrix(ambiguous,matrixSuppliers(ambiguous));assert.equal(a[0].cells[0].status,'Não comparável');assert.ok(a[0].cells.every(c=>c.percent===null));
 });
-test('simplified Excel for 2/3 suppliers preserves displayed order, numeric values and freezes Product at B2',async()=>{
+test('one price column per selected supplier with B2 freeze and row order preserved',async()=>{
  const ExcelJS=(await import('exceljs')).default;
- for(const chosen of [[suppliers[2],suppliers[0]],[suppliers[2],suppliers[0],suppliers[1]]]){
-  const matrix=supplierComparisonMatrix(rows,chosen,{query:'lemon',department:'Food',status:'comparable'});
+ for(const count of [2,3]){
+  const chosen=suppliers.slice(0,count);const matrix=supplierComparisonMatrix(rows,chosen);
   const book=await createSupplierMatrixWorkbook(matrix,chosen);const read=new ExcelJS.Workbook();await read.xlsx.load(await book.xlsx.writeBuffer());const sheet=read.worksheets[0];
-  assert.equal(read.worksheets.length,1);assert.equal(sheet.rowCount,2);assert.equal(sheet.getCell('A2').value,'Lemon');
-  assert.deepEqual(sheet.getRow(1).values.slice(1),['Product','Comparison unit',...chosen.flatMap(s=>[`${s.name} · Price`,`${s.name} · Above cheapest %`]),'Cheapest supplier']);
-  assert.equal(sheet.views[0].state,'frozen');assert.equal(sheet.views[0].xSplit,1);assert.equal(sheet.views[0].ySplit,1);assert.equal(sheet.views[0].topLeftCell,'B2');
-  assert.equal(sheet.getCell('B2').value,'kg');
-  for(let i=0;i<chosen.length;i++){const offset=3+i*2;const cell=matrix[0].cells[i];assert.equal(sheet.getCell(2,offset).value,cell.article.price);assert.equal(sheet.getCell(2,offset+1).value,cell.percent/100);assert.equal(sheet.getCell(2,offset+1).numFmt,'0.00%');assert.ok(sheet.getColumn(offset).width>=24);}
+  assert.equal(read.worksheets.length,1);assert.equal(sheet.columnCount,count+1);
+  assert.deepEqual(sheet.getRow(1).values.slice(1),['Product',...chosen.map(s=>s.name)]);
+  assert.equal(sheet.getCell('A2').value,'Lemon');assert.equal(sheet.getCell('A3').value,'No prices');
+  assert.equal(sheet.views[0].xSplit,1);assert.equal(sheet.views[0].ySplit,1);assert.equal(sheet.views[0].topLeftCell,'B2');
+  assert.equal(sheet.getCell('B2').value,2);assert.equal(sheet.getCell('B2').numFmt,'"£"0.00##"/kg"');
+  assert.equal(sheet.getCell('B2').fill.fgColor.argb,'FFC6EFCE');assert.equal(sheet.getCell('C2').fill.fgColor.argb,'FFFFC7CE');
+  assert.equal(sheet.getCell('B3').value,'Sem preço');assert.equal(sheet.getCell('B3').fill.fgColor.argb,'FFE7E6E6');
  }
- const ordered=supplierComparisonMatrix(rows,suppliers).reverse();
- const book=await createSupplierMatrixWorkbook(ordered,suppliers);assert.deepEqual(book.worksheets[0].getColumn(1).values.slice(2),ordered.map(r=>r.name));
 });
-test('simplified Excel retains missing and incompatible statuses without numeric percentages',async()=>{
- const source=latestProductComparisons(products,[invoice('A',2),invoice('B',.5,'each')]);
- const matrix=supplierComparisonMatrix(source,matrixSuppliers(source));const book=await createSupplierMatrixWorkbook(matrix,matrixSuppliers(source));const sheet=book.worksheets[0];
- assert.equal(sheet.getCell('C2').value,'Não comparável');assert.equal(sheet.getCell('D2').value,null);
- assert.equal(sheet.getCell('C3').value,'Sem preço');assert.equal(sheet.getCell('D3').value,null);
+test('duplicates stay ambiguous and colors include ties and the 10% boundary',async()=>{
+ const source=latestProductComparisons(products,[invoice('A',2),invoice('B',2.2),invoice('C',2)]);const options=matrixSuppliers(source);
+ const book=await createSupplierMatrixWorkbook(supplierComparisonMatrix(source,options),options);const sheet=book.worksheets[0];
+ assert.equal(sheet.getCell('C2').fill.fgColor.argb,'FFFCE4D6');assert.equal(sheet.getCell('D2').fill.fgColor.argb,'FFC6EFCE');
+ const duplicate=invoice('A',3);duplicate.supplierId='duplicate-A';duplicate.id='other';
+ const entries=latestProductComparisons(products,[invoice('A',2),duplicate,invoice('B',3)]);const groups=matrixSuppliers(entries);
+ assert.equal(groups.length,2);const matrix=supplierComparisonMatrix(entries,groups);assert.equal(matrix[0].cells[0].status,'Não comparável');
+ const exported=await createSupplierMatrixWorkbook(matrix,groups);assert.equal(exported.worksheets[0].getCell('B2').value,'Não comparável');assert.equal(exported.worksheets[0].getCell('B2').fill.fgColor.argb,'FFE7E6E6');
 });
 test('comparison only considers selected suppliers and preserves tied cheapest names',()=>{
  const source=latestProductComparisons(products,[invoice('A',2),invoice('B',2),invoice('C',1,'each')]);

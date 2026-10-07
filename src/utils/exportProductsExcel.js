@@ -79,24 +79,35 @@ export async function createSupplierMatrixWorkbook(rows, suppliers) {
   const module = await import('exceljs'); const ExcelJS = module.default || module;
   const workbook = new ExcelJS.Workbook(); workbook.creator = 'MarginFlow';
   const sheet = workbook.addWorksheet('Supplier comparison', { views: [{ state: 'frozen', ySplit: 1, xSplit: 1, topLeftCell: 'B2', activeCell: 'B2' }] });
-  const columns = [{header:'Product',key:'name',width:36},{header:'Comparison unit',key:'unit',width:20}];
-  suppliers.forEach((supplier,i)=>{
-    columns.push({header:`${supplier.name} · Price`,key:`s${i}_price`,width:24});
-    columns.push({header:`${supplier.name} · Above cheapest %`,key:`s${i}_percent`,width:26});
+  const supplierGroups = new Map();
+  suppliers.forEach((supplier,index)=>{
+    const key=supplier.name.normalize('NFKC').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+    const group=supplierGroups.get(key) || {name:supplier.name,indices:[]};
+    group.indices.push(index);supplierGroups.set(key,group);
   });
-  columns.push({header:'Cheapest supplier',key:'cheapest',width:32}); sheet.columns=columns;
+  const groups=[...supplierGroups.values()];
+  sheet.columns=[{header:'Product',key:'name',width:38},...groups.map((group,i)=>({header:group.name,key:`s${i}`,width:26}))];
   rows.forEach(row=>{
-    const units = [...new Set(row.cells.map(cell=>cell.article?.unit).filter(Boolean).map(comparisonUnit))];
-    const record={name:row.name,unit:units.join(' / ') || '—',cheapest:row.cheapest.join(' / ') || '—'};
-    row.cells.forEach((cell,i)=>{
-      record[`s${i}_price`]=cell.status==='Comparable' ? cell.article.price : cell.status;
-      record[`s${i}_percent`]=cell.status==='Comparable' && cell.percent!=null ? cell.percent/100 : null;
+    const cells=groups.map(group=>group.indices.length===1 ? row.cells[group.indices[0]] : {status:'Não comparável'});
+    const valid=cells.filter(cell=>cell?.status==='Comparable' && cell.article?.price>0);
+    const minimum=valid.length ? Math.min(...valid.map(cell=>cell.article.price)) : null;
+    const record={name:row.name};
+    cells.forEach((cell,i)=>{record[`s${i}`]=cell?.status==='Comparable' ? cell.article.price : cell?.status || 'Sem preço';});
+    const excelRow=sheet.addRow(record);
+    cells.forEach((cell,i)=>{
+      const target=excelRow.getCell(i+2);let color='FFE7E6E6';
+      if(cell?.status==='Comparable'){
+        const currency=cell.article.currency==='GBP'?'£':cell.article.currency;
+        const unit=comparisonUnit(cell.article.unit);
+        target.numFmt=`"${currency}"0.00##"/${unit}"`;
+        const ratio=cell.article.price/minimum-1;
+        color=ratio<=1e-10?'FFC6EFCE':ratio<=0.1+1e-10?'FFFCE4D6':'FFFFC7CE';
+      }
+      target.fill={type:'pattern',pattern:'solid',fgColor:{argb:color}};
     });
-    sheet.addRow(record);
   });
-  sheet.getRow(1).font={bold:true};sheet.getRow(1).alignment={wrapText:true,vertical:'middle'};sheet.getRow(1).height=44;
-  sheet.autoFilter={from:{row:1,column:1},to:{row:Math.max(1,sheet.rowCount),column:columns.length}};
-  for(const column of sheet.columns){if(column.key.endsWith('_percent'))column.numFmt='0.00%';else if(column.key.endsWith('_price'))column.numFmt='#,##0.00##';}
+  sheet.getRow(1).font={bold:true};sheet.getRow(1).alignment={wrapText:true,vertical:'middle'};sheet.getRow(1).height=34;
+  sheet.autoFilter={from:{row:1,column:1},to:{row:Math.max(1,sheet.rowCount),column:sheet.columns.length}};
   return workbook;
 }
 export async function downloadSupplierMatrixExcel(rows,suppliers) {

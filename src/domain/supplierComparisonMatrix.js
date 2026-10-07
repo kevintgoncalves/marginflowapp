@@ -1,7 +1,7 @@
 import { isStockOriginSupplier } from './supplierIdentity.js';
 
-// IDs are authoritative; never collapse distinct supplier records by similar names.
-export const matrixSupplierKey = article => article.supplierId ? `id:${article.supplierId}` : `name:${article.supplier}`;
+// Group exact display-name duplicates for comparison only; stored supplier IDs remain unchanged.
+export const matrixSupplierKey = article => article.supplier ? `name:${article.supplier.normalize("NFKC").trim().replace(/\s+/g," ").toLocaleLowerCase()}` : `id:${article.supplierId}`;
 export function matrixSuppliers(products) {
   const options = new Map();
   for (const product of products) for (const article of product.comparison?.articles || []) {
