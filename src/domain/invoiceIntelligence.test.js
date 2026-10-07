@@ -983,6 +983,7 @@ test("confirming a price warning still persists and reapplies department learnin
     supplierId: "sup-tg",
     supplierName: "TG Fruits",
     supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
     existingProducts: products,
     supplierMappings: reloaded,
   });
@@ -1061,6 +1062,7 @@ test("application restart does not require reusing the in-memory mapping object"
     supplierId: "sup-tg",
     supplierName: "TG Fruits",
     supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
     existingProducts: products,
     supplierMappings: secondServiceState.supplierProductMappings,
   });
@@ -1223,6 +1225,7 @@ test("location-specific learning overrides but does not replace the company fall
     supplierId: "sup-tg",
     supplierName: "TG Fruits",
     supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
     existingProducts: products,
     supplierMappings: [...companyMappings, scopedMappings.find((mapping) => mapping.locationId === "location-a")],
   });
@@ -1232,6 +1235,7 @@ test("location-specific learning overrides but does not replace the company fall
     supplierId: "sup-tg",
     supplierName: "TG Fruits",
     supplierProductCode: "7742",
+    rawDescription: "LIMES 4KG",
     existingProducts: products,
     supplierMappings: scopedMappings,
   });
@@ -1259,7 +1263,7 @@ test("department correction updates the active mapping instead of creating a con
   const active = corrected.filter((mapping) => mapping.active !== false && mapping.normalizedSupplierProductCode === "7742");
   assert.equal(active.length, 1);
   assert.equal(active[0].department, "Kitchen Made");
-  const match = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "sup-tg", supplierName: "TG Fruits", supplierProductCode: "7742", existingProducts: products, supplierMappings: corrected });
+  const match = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "sup-tg", supplierName: "TG Fruits", supplierProductCode: "7742", rawDescription: "LIMES 4KG", existingProducts: products, supplierMappings: corrected });
   assert.equal(match.department, "Kitchen Made");
 });
 

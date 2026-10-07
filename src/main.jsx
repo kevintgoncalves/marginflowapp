@@ -1,3 +1,5 @@
+import SupplierComparisonMatrix from './components/SupplierComparisonMatrix.jsx';
+import { loadProductComparisonInvoices } from './lib/productComparisonRepository.js';
 import { learnedDepartment } from './domain/supplierDepartments.js';
 import { completeInvoiceSaveLearning, invoiceSaveFailureMessage } from './domain/invoiceSaveCompletion.js';
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
@@ -223,6 +225,7 @@ import {
 } from "./lib/finalRecoveryRepository.js";
 import {
   activeSupplierRows,
+  purchaseSupplierRows,
   canonicalSupplierForName,
   findSupplierDuplicateCandidates,
   isSupplierTombstone,
@@ -2108,6 +2111,7 @@ function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.
     price_deviation: "Price differs from recent accepted invoices",
     unaccounted_invoice_charge: "Invoice includes a non-product charge",
     unit_conflict: "Unit conflicts with the matched product",
+    supplier_code_description_changed: "Supplier code has a different description. Confirm the article before reusing this rule.",
     pack_changed: "Supplier pack changed. Confirm the match and conversion.",
     mapping_conflict: "Conflicting reusable matches. Choose the correct product.",
     pack_size_conflict: "Pack size conflicts with the matched product",
@@ -3258,16 +3262,6 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
     ];
     next[index] = {
       ...next[index],
-      supplier: item.supplier || next[index].supplier,
-      packSize: item.packSize || next[index].packSize,
-      quantity: numberValue(item.quantity, 1),
-      unitCost: invoiceUnitCost,
-      normalizedCost: supplierFormat.normalizedCost,
-      normalizedUnit: supplierFormat.baseUnit,
-      conversionReviewRequired: supplierFormat.conversionReviewRequired,
-      conversionReason: supplierFormat.conversionReason,
-      department: primaryDepartment(item),
-      departmentSplits: lineUsesSplitDepartmentMode(item) ? normalizeDepartmentSplitRows(item.departmentSplits, { fallbackDepartment: item.department }) : [],
       aliases: [...aliases],
       supplierFormats,
       supplierPrices,
@@ -7190,7 +7184,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products client={demoMode ? null : supabase} locationId={cloudScope.locationId || ""} key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -8182,7 +8176,7 @@ function Invoices({
       return changed ? { ...current, items } : current;
     });
   }, [supplierProductMappings, products, companyId, locationId]);
-  const visibleSuppliers = activeSupplierRows(suppliers);
+  const visibleSuppliers = purchaseSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = configuredInvoiceDepartment(invoiceSettings.defaultInvoiceDepartment, departmentNames);
   const createManualDraft = () => ({
@@ -10771,7 +10765,7 @@ function Invoices({
 
 
 function SupplierSelector({ id, label = "Supplier", suppliers, value, onChange }) {
-  const options = activeSupplierRows(suppliers)
+  const options = purchaseSupplierRows(suppliers)
     .filter((supplier) => {
       const term = String(value || "").trim();
       if (!term) return true;
@@ -11255,7 +11249,7 @@ function InvoiceControlCentre({
   useEffect(() => {
     onWeekRangeChange?.(weekRange);
   }, [onWeekRangeChange, weekRange.end, weekRange.start]);
-  const activeSuppliers = activeSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
+  const activeSuppliers = purchaseSupplierRows(suppliers).filter((supplier) => supplier.active !== false);
   const categoryOptions = ["All categories", ...new Set(activeSuppliers.map((supplier) => supplier.category).filter(Boolean))];
   const productPriceHistory = useMemo(() => productPriceHistoryRows(products), [products]);
 
@@ -12569,8 +12563,8 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
-  const visibleSuppliers = activeSupplierRows(suppliers);
+function Products({ client = null, locationId = "", userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+  const visibleSuppliers = purchaseSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
   const [form, setForm] = useState(empty);
@@ -12591,11 +12585,27 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [productSupplier, setProductSupplier] = useState("");
   const [productDetail, setProductDetail] = useState(null);
   const [comparisonId, setComparisonId] = useState("");
+  const [matrixOpen, setMatrixOpen] = useState(false);
   const [quotationOpen, setQuotationOpen] = useState(false);
   const {draft: quotationDraft, setDraft: setQuotationDraft, message: quotationDraftMessage} = useQuotationDraft(userId, draftCompanyId);
   const quotationSelection = quotationDraft.ids;
   const setQuotationSelection = updater => setQuotationDraft(current => ({...current, ids: updater(current.ids)}));
-  const rows = useMemo(() => latestProductComparisons(products, invoices, supplierProductMappings), [products, invoices, supplierProductMappings]);
+  const [priceRead, setPriceRead] = useState({ scope: '', rows: [], loading: Boolean(client), error: '' });
+  const [priceRetry, setPriceRetry] = useState(0);
+  const productIdsKey = JSON.stringify(products.map(product => product.id).sort());
+  const priceScope = `${companyId}:${locationId}:${productIdsKey}`;
+  useEffect(() => {
+    if (!client) return;
+    let cancelled = false;
+    setPriceRead(previous => ({ ...previous, loading: true, error: '' }));
+    loadProductComparisonInvoices(client, { companyId, locationId }, JSON.parse(productIdsKey))
+      .then(rows => { if (!cancelled) setPriceRead({ scope: priceScope, rows, loading: false, error: '' }); })
+      .catch(error => { if (!cancelled) setPriceRead(previous => ({ ...previous, loading: false, error: error.message || 'Supplier prices could not be verified.' })); });
+    return () => { cancelled = true; };
+  }, [client, companyId, locationId, productIdsKey, priceScope, priceRetry]);
+  const comparisonInvoices = client ? (priceRead.scope === priceScope ? priceRead.rows : []) : invoices;
+  const pricesUnavailable = Boolean(client && (priceRead.loading || priceRead.error || priceRead.scope !== priceScope));
+  const rows = useMemo(() => latestProductComparisons(products, comparisonInvoices, supplierProductMappings), [products, comparisonInvoices, supplierProductMappings]);
   const comparisonProduct = rows.find(row => row.id === comparisonId);
   const filteredProductRows = useMemo(() => rows.filter(row => (!productDepartment || row.department === productDepartment) && (!productSupplier || row.supplier === productSupplier || row.comparison.articles.some(article => article.supplier === productSupplier))), [rows,productDepartment,productSupplier]);
   const productRowsForExport = useMemo(() => tableRowsMatchingQuery(filteredProductRows, productQuery), [productQuery, filteredProductRows]);
@@ -12752,6 +12762,9 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
       <InvoiceModal title="Request quotation" open={quotationOpen} onClose={() => setQuotationOpen(false)} className="mf-product-drawer mf-comparison-drawer">
         {quotationOpen && <QuotationPanel products={products.map(product => rows.find(row => row.id === product.id) || product)} invoices={invoices} matching={productRowsForExport} draft={quotationDraft} setDraft={setQuotationDraft} message={quotationDraftMessage} />}
       </InvoiceModal>
+      <AppModal title="Compare suppliers" open={matrixOpen} onClose={() => setMatrixOpen(false)} wide>
+        {matrixOpen && <SupplierComparisonMatrix products={rows} unavailable={pricesUnavailable} />}
+      </AppModal>
       <ProductDetails product={productDetail} onClose={() => setProductDetail(null)} onEdit={permissions.canEdit ? openProductModal : null} />
       <InvoiceModal title={comparisonProduct ? `${comparisonProduct.name} · Supplier comparison` : "Supplier comparison"} open={Boolean(comparisonProduct)} onClose={() => setComparisonId("")} className="mf-product-drawer mf-comparison-drawer">
         {comparisonProduct && <ProductSupplierComparison product={comparisonProduct} onOpenInvoice={id => { setComparisonId(""); onOpenInvoice?.(id); }} />}
@@ -12783,7 +12796,8 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           onQueryChange={setProductQuery}
           toolbarAction={(
             <div className="button-row left tight">
-              <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
+              <button className="ghost" type="button" onClick={() => setMatrixOpen(true)}>Compare suppliers</button>
+              <button className="ghost" disabled={pricesUnavailable || !productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
               {permissions.canAdd && <PrimaryAction onClick={() => openProductModal()}>Add Product</PrimaryAction>}
@@ -12791,6 +12805,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           )}
         />
       </Panel></div>
+      {client && (priceRead.loading || priceRead.error) && <div role="status" className="invoice-status info">{priceRead.loading ? 'Loading confirmed supplier prices…' : `Prices could not be refreshed: ${priceRead.error} Previous results are retained; export is unavailable.`}{priceRead.error && <button type="button" onClick={() => setPriceRetry(value => value + 1)}>Retry prices</button>}</div>}
       {modalOpen && !editingId && (
         <div className="modal-backdrop" role="presentation">
           <div className="split-modal wide bulk-modal mf-workflow-screen" role="dialog" aria-modal="true" aria-label="Add products">
