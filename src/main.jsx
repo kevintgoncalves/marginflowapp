@@ -8178,18 +8178,6 @@ function Invoices({
       return changed ? { ...current, items } : current;
     });
   }, [supplierProductMappings, products, companyId, locationId]);
-  const [historyPreview, setHistoryPreview] = useState(null);
-  const [historyBusy, setHistoryBusy] = useState(false);
-  const [historyError, setHistoryError] = useState('');
-  const historyScope = `${companyId}:${locationId}`;
-  const reviewHistory = async () => {
-    setHistoryBusy(true); setHistoryError('');
-    try {
-      const result = await loadCatalogueHistoryPreview(client, { companyId, locationId }, { products, mappings: supplierProductMappings });
-      setHistoryPreview({ ...result, scopeKey: historyScope });
-    } catch (error) { setHistoryError(error.message || 'Historical records could not be verified.'); }
-    finally { setHistoryBusy(false); }
-  };
   const visibleSuppliers = purchaseSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = configuredInvoiceDepartment(invoiceSettings.defaultInvoiceDepartment, departmentNames);
@@ -12578,6 +12566,22 @@ function InvoiceControlCell({ cell, onClick }) {
 
 
 function Products({ client = null, locationId = "", userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+  const [historyPreview, setHistoryPreview] = useState(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const historyScope = `${companyId}:${locationId}`;
+  const reviewHistory = async () => {
+    setHistoryBusy(true);
+    setHistoryError("");
+    try {
+      const result = await loadCatalogueHistoryPreview(client, { companyId, locationId }, { products, mappings: supplierProductMappings });
+      setHistoryPreview({ ...result, scopeKey: historyScope });
+    } catch (error) {
+      setHistoryError(error.message || "Historical records could not be verified.");
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
   const visibleSuppliers = purchaseSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
