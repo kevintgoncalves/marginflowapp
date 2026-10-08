@@ -1,3 +1,4 @@
+import { loadProductMergeEvidence, mergeSelectionKey, verifiedMergePreview } from './lib/productMergePreviewRepository.js';
 import SupplierComparisonMatrix from './components/SupplierComparisonMatrix.jsx';
 import { loadProductComparisonInvoices } from './lib/productComparisonRepository.js';
 import { learnedDepartment } from './domain/supplierDepartments.js';
@@ -12617,19 +12618,38 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
       .filter((product) => !query || productAliases(product).some((name) => normalizeProductName(name).includes(query)))
       .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
   }, [activeProducts, mergeSearch]);
-  const mergePreview = useMemo(() => (
-    mergeProductIds.length >= 2 && keepProductId
-      ? analyzeProductMerge(mergeSnapshot, { companyId, keepProductId, mergeProductIds: mergeProductIds.filter((id) => id !== keepProductId) })
+  const [mergeEvidence, setMergeEvidence] = useState(null);
+  const [mergeReadError, setMergeReadError] = useState('');
+  const [mergeReadRetry, setMergeReadRetry] = useState(0);
+  const mergeReadKey = mergeSelectionKey(companyId, mergeProductIds);
+  useEffect(() => {
+    setMergeEvidence(null);
+    setMergeReadError('');
+    if (!client || !mergeOpen || mergeProductIds.length < 2) return;
+    let cancelled = false;
+    loadProductMergeEvidence(client, companyId, mergeProductIds)
+      .then(evidence => { if (!cancelled) setMergeEvidence(evidence); })
+      .catch(error => { if (!cancelled) setMergeReadError(error.message || 'Supplier links could not be verified. Merge blocked.'); });
+    return () => { cancelled = true; };
+  }, [client, companyId, mergeOpen, mergeReadKey, mergeReadRetry]);
+  const mergeAnalysis = useMemo(() => (
+    mergeProductIds.length >= 2 && mergeProductIds.includes(keepProductId)
+      ? analyzeProductMerge({ ...mergeSnapshot, products }, { companyId, keepProductId, mergeProductIds: mergeProductIds.filter((id) => id !== keepProductId) })
       : null
-  ), [companyId, keepProductId, mergeProductIds, mergeSnapshot]);
+  ), [companyId, keepProductId, mergeProductIds, mergeSnapshot, products]);
+  const mergePreview = client
+    ? verifiedMergePreview(mergeAnalysis, mergeEvidence, companyId, mergeProductIds, keepProductId)
+    : mergeAnalysis;
 
   const selectMergeProducts = (productIds = []) => {
     const selected = [...new Set(productIds)].filter((id) => activeProducts.some((product) => product.id === id));
     const initialAnalysis = selected.length >= 2
-      ? analyzeProductMerge(mergeSnapshot, { companyId, keepProductId: selected[0], mergeProductIds: selected.slice(1) })
+      ? analyzeProductMerge({ ...mergeSnapshot, products }, { companyId, keepProductId: selected[0], mergeProductIds: selected.slice(1) })
       : null;
     setMergeProductIds(selected);
-    setKeepProductId(initialAnalysis?.recommendedKeepProductId || selected[0] || "");
+    setKeepProductId(selected.includes(initialAnalysis?.recommendedKeepProductId) ? initialAnalysis.recommendedKeepProductId : selected[0] || "");
+    setMergeSearch("");
+    setMergeEvidence(null);
     setMergeStatus("");
     setMergeOpen(true);
   };
@@ -12874,6 +12894,7 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
         >
           <div className="modal-stack product-merge-workflow">
             {mergeStatus && <div className="invoice-status error">{mergeStatus}</div>}
+            {client && mergeProductIds.length >= 2 && !mergePreview && <div className="invoice-status error">{mergeReadError || 'Verifying company-wide historical links. Merge is blocked until verification completes.'}{mergeReadError && <button type="button" onClick={() => setMergeReadRetry(value => value + 1)}>Retry verification</button>}</div>}
             {duplicateSuggestions.length > 0 && (
               <section className="merge-suggestions">
                 <div className="panel-head"><div><h3>Suggested duplicates</h3><span>Suggestions only</span></div></div>
@@ -12919,7 +12940,7 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
                               <div><dt>Department</dt><dd>{product.department || "-"}</dd></div>
                               <div><dt>Current cost</dt><dd>{money(product.unitCost)}</dd></div>
                               <div><dt>Invoice / Stock Take</dt><dd>{usage.invoiceLines} / {usage.stocktakeLines}</dd></div>
-                              <div><dt>Recipes / mappings</dt><dd>{usage.recipeIngredients} / {usage.supplierMappings}</dd></div>
+                              <div><dt>Recipes / supplier links</dt><dd>{usage.recipeIngredients} / {usage.supplierMappings}</dd></div>
                               <div><dt>Created</dt><dd>{product.createdAt || product.created_at || "-"}</dd></div>
                             </dl>
                           </article>
@@ -12928,7 +12949,7 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
                     </div>
                     <div className="merge-impact-grid">
                       <span><strong>{mergePreview.totals.invoiceLines}</strong> invoice lines</span>
-                      <span><strong>{mergePreview.totals.supplierMappings}</strong> supplier mappings</span>
+                      <span><strong>{mergePreview.totals.supplierMappings}</strong> supplier links</span>
                       <span><strong>{mergePreview.totals.stocktakeLines}</strong> Stock Take lines</span>
                       <span><strong>{mergePreview.totals.recipeIngredients}</strong> recipe ingredients</span>
                       <span><strong>{mergePreview.totals.menuComponents}</strong> menu components</span>
