@@ -10,7 +10,12 @@ export async function loadCatalogueHistoryPreview(client, scope, { products = []
     if (scope.locationId) q = q.eq('location_id', scope.locationId);
     return configure(q);
   }, { label: `catalogue recovery ${table}` });
-  const invoices = await read('invoices', 'id,company_id,location_id,supplier_id,invoice_number,invoice_date,status', q => q.in('status', ['approved','confirmed','imported','saved']));
+  const invoiceRows = await read('invoices', 'id,company_id,location_id,supplier_id,invoice_number,invoice_date,status', q => q);
+  // Historical rows predate the current lower-case status convention. The SQL
+  // reconciliation normalises status before filtering, so the UI must do the
+  // same or valid `Confirmed`/`Saved` rows disappear from the preview.
+  const confirmedStatuses = new Set(['approved', 'confirmed', 'imported', 'saved']);
+  const invoices = invoiceRows.filter(row => confirmedStatuses.has(String(row.status || '').trim().toLowerCase()));
   const counts = { processed: 0, linked: 0, recoverable: 0, ambiguous: 0, errors: 0, withPrice: 0, withoutPrice: 0, safeAssociation: 0 };
   const rows = [];
   for (let start = 0; start < invoices.length; start += 100) {

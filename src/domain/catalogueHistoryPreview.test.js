@@ -19,6 +19,11 @@ test('three repeated invoices recover through the same confirmed rule without re
  assert.ok(result.rows.every(r=>r.originalUnitPrice===11&&r.date==='2026-09-01'&&r.invoiceId));
  assert.deepEqual(await loadCatalogueHistoryPreview(f.client,{companyId,locationId},f),result);
 });
+test('historical status matching is case-insensitive, consistent with the read-only SQL reconciliation',async()=>{
+ const f=fixture();f.invoices[0].status='Confirmed';f.invoices[1].status='SAVED';f.invoices[2].status='pending';
+ const result=await loadCatalogueHistoryPreview(f.client,{companyId,locationId},f);
+ assert.equal(result.counts.processed,2);assert.equal(result.counts.withPrice,2);assert.equal(result.counts.safeAssociation,2);assert.equal(result.counts.recoverable,2);
+});
 test('incompatible packs, another supplier and existing unknown IDs remain manual',async()=>{
  const f=fixture();f.lines[0].pack_size='X10KG';f.invoices[1].supplier_id=id(90);f.lines[2].product_id=id(91);
  const result=await loadCatalogueHistoryPreview(f.client,{companyId,locationId},f);
