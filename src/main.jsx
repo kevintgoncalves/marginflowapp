@@ -1,3 +1,4 @@
+import { loadCatalogueHistoryPreview } from './lib/catalogueHistoryPreview.js';
 import { loadProductMergeEvidence, mergeSelectionKey, verifiedMergePreview } from './lib/productMergePreviewRepository.js';
 import SupplierComparisonMatrix from './components/SupplierComparisonMatrix.jsx';
 import { loadProductComparisonInvoices } from './lib/productComparisonRepository.js';
@@ -8177,6 +8178,18 @@ function Invoices({
       return changed ? { ...current, items } : current;
     });
   }, [supplierProductMappings, products, companyId, locationId]);
+  const [historyPreview, setHistoryPreview] = useState(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const historyScope = `${companyId}:${locationId}`;
+  const reviewHistory = async () => {
+    setHistoryBusy(true); setHistoryError('');
+    try {
+      const result = await loadCatalogueHistoryPreview(client, { companyId, locationId }, { products, mappings: supplierProductMappings });
+      setHistoryPreview({ ...result, scopeKey: historyScope });
+    } catch (error) { setHistoryError(error.message || 'Historical records could not be verified.'); }
+    finally { setHistoryBusy(false); }
+  };
   const visibleSuppliers = purchaseSupplierRows(suppliers);
   const defaultManualSupplier = visibleSuppliers[0]?.name || draft.supplier || "";
   const defaultManualDepartment = configuredInvoiceDepartment(invoiceSettings.defaultInvoiceDepartment, departmentNames);
@@ -12579,6 +12592,7 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
   const [mergeProductIds, setMergeProductIds] = useState([]);
   const [keepProductId, setKeepProductId] = useState("");
   const [mergeSearch, setMergeSearch] = useState("");
+  const [manualMergeSelection, setManualMergeSelection] = useState(false);
   const [mergeStatus, setMergeStatus] = useState("");
   const [mergeBusy, setMergeBusy] = useState(false);
   const [productQuery, setProductQuery] = useState("");
@@ -12817,6 +12831,10 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
           toolbarAction={(
             <div className="button-row left tight">
               <button className="ghost" type="button" onClick={() => setMatrixOpen(true)}>Compare suppliers</button>
+              <button className="ghost" type="button" disabled={!client || historyBusy} onClick={reviewHistory}>{historyBusy ? 'Reading history…' : 'Preview historical recovery'}</button>
+              {historyError && <span role="alert">{historyError}</span>}
+              {historyPreview?.scopeKey === historyScope && <span role="status">Read-only: {historyPreview.counts.processed} processed · {historyPreview.counts.withPrice} with price · {historyPreview.counts.withoutPrice} without price · {historyPreview.counts.safeAssociation} safe associations · {historyPreview.counts.recoverable} recoverable prices · {historyPreview.counts.ambiguous} need review · {historyPreview.counts.errors} missing evidence. No records changed.</span>}
+
               <button className="ghost" disabled={pricesUnavailable || !productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
@@ -12899,16 +12917,20 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
               <section className="merge-suggestions">
                 <div className="panel-head"><div><h3>Suggested duplicates</h3><span>Suggestions only</span></div></div>
                 <div className="duplicate-list compact">
-                  {duplicateSuggestions.slice(0, 6).map((suggestion) => (
+                  {duplicateSuggestions.map((suggestion) => (
                     <button key={suggestion.id} onClick={() => selectMergeProducts(suggestion.productIds)} type="button">
-                      <span><strong>{suggestion.products.map((product) => product?.name).join(" + ")}</strong><small>{Math.round(suggestion.confidence * 100)}% name and format similarity</small></span>
+                      <span><strong>{suggestion.products.map((product) => product?.name).join(" + ")}</strong>
+                        {suggestion.products.map(product => <small key={product.id}>{product.name} · {product.packSize || "Unknown pack"} · {product.baseUnit || product.unit || product.unitOfMeasure || "Unknown unit"} · {product.supplier || "Supplier links require verification"}</small>)}
+                        <small>Reason: {Math.round(suggestion.confidence * 100)}% name similarity with compatible units/formats. Similarity is not approval to merge; check size, quality and variant.</small></span>
                       <Badge tone="green">Review</Badge>
                     </button>
                   ))}
                 </div>
               </section>
             )}
-            <section>
+            {!duplicateSuggestions.length && <p>No suspected duplicate groups found. No products have been selected automatically.</p>}
+            <button className="ghost" type="button" onClick={() => setManualMergeSelection(value => !value)} aria-expanded={manualMergeSelection}>Selecionar manualmente</button>
+            {manualMergeSelection && <section>
               <div className="panel-head"><div><h3>Select products</h3><span>{mergeProductIds.length} selected</span></div></div>
               <label className="merge-search"><Search size={16} /><input placeholder="Search products" value={mergeSearch} onChange={(event) => setMergeSearch(event.target.value)} /></label>
               <div className="merge-product-picker">
@@ -12919,7 +12941,7 @@ function Products({ client = null, locationId = "", userId = "", draftCompanyId 
                   </label>
                 ))}
               </div>
-            </section>
+            </section>}
             {mergeProductIds.length >= 2 && (
               <section className="merge-preview">
                 <div className="panel-head"><div><h3>Merge preview</h3><span>Review before confirming</span></div></div>

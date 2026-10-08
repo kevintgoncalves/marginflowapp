@@ -4,10 +4,11 @@ import { loadProductMergeEvidence, verifiedMergePreview } from '../lib/productMe
 import { analyzeProductMerge } from './productMerge.js';
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const company = id(1), pair = [id(2), id(3)], albion = id(4);
-function fixture({ failTable, truncate = false } = {}) {
+function fixture({ failTable, truncate = false, snapshots = [] } = {}) {
  const products = pair.map((productId,i) => ({id:productId,company_id:company,name:i?'Squish Orange Juice duplicate':'Squish Orange Juice',active:true}));
  const data = {
   products,
+  marginflow_cloud_state:snapshots,
   invoice_lines: Array.from({length:1105},(_,i)=>({id:id(100+i),company_id:company,product_id:pair[0],invoice_id:id(2000+i)})),
   invoices:Array.from({length:1105},(_,i)=>({id:id(2000+i),company_id:company,supplier_id:albion,invoice_date:'2025-01-01',location_id:id(90)})),
   product_supplier_formats:[{id:id(4000),company_id:company,product_id:pair[0],supplier_id:albion}],
@@ -43,4 +44,16 @@ test('previous pair/company evidence and canonical product outside chosen pair c
 test('missing company products block preview and unscoped queries are never issued',async()=>{
  await assert.rejects(loadProductMergeEvidence(fixture().client,company,[pair[0],id(50)]),/missing/);
  await assert.rejects(loadProductMergeEvidence(fixture().client,'',pair),/verified/);
+});
+
+test('legacy cloud snapshot references block merge rather than pretending relational counts are complete',async()=>{
+ const f=fixture({snapshots:[{id:id(9000),company_id:company,scope_key:id(90),module_key:'products',revision:7,payload:[{id:pair[0],name:'Juice',supplier:'Supplier A',priceHistory:[{id:'price-1'}]}]}]});
+ const evidence=await loadProductMergeEvidence(f.client,company,pair);
+ assert.equal(evidence.snapshotReferences.length,1);
+ const preview=verifiedMergePreview(analyzeProductMerge({products:f.products},{companyId:company,keepProductId:pair[0],mergeProductIds:[pair[1]]}),evidence,company,pair,pair[0]);
+ assert.equal(preview.canMerge,false);
+ assert.ok(preview.blockingConflicts.some(row=>row.type==='snapshot_reconciliation'));
+});
+test('a denied legacy snapshot read is not an empty catalogue',async()=>{
+ await assert.rejects(loadProductMergeEvidence(fixture({failTable:'marginflow_cloud_state'}).client,company,pair),/permission denied/);
 });
