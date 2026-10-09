@@ -10,7 +10,7 @@ const suppliers=matrixSuppliers(rows);
 test('two and three suppliers use cheapest denominator, not current supplier savings',()=>{
  for(const count of [2,3]){
   const matrix=supplierComparisonMatrix(rows,suppliers.slice(0,count));
-  assert.equal(matrix[0].cells.length,count);assert.deepEqual(matrix[0].cells.map(c=>c.percent),[0,50,100].slice(0,count));assert.deepEqual(matrix[0].cheapest,['A']);
+  assert.equal(matrix[0].cells.length,count);assert.deepEqual(matrix[0].cells.map(c=>c.percent),[0,50,100].slice(0,count));assert.deepEqual(matrix[0].cells.map(c=>c.difference),[0,1,2].slice(0,count));assert.deepEqual(matrix[0].cheapest,['A']);
   assert.ok(matrix[1].cells.every(c=>c.status==='Sem preço'&&c.percent===null));
  }
 });

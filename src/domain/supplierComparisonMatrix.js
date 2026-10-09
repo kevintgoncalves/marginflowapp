@@ -29,7 +29,10 @@ export function supplierComparisonMatrix(products, suppliers, { query = '', depa
     const minimum = comparable.length >= 2 ? Math.min(...comparable.map(c => c.article.price)) : null;
     const cheapest = minimum === null ? [] : comparable.filter(c => c.article.price === minimum).map(c => c.supplier.name);
     for (const cell of comparable) {
-      if (minimum !== null) cell.percent = (cell.article.price / minimum - 1) * 100;
+      if (minimum !== null) {
+        cell.difference = cell.article.price - minimum;
+        cell.percent = (cell.article.price / minimum - 1) * 100;
+      }
       else cell.reason = 'Only one comparable supplier';
     }
     return { id: product.id, name: product.name, department: product.department, cells, cheapest, minimum };

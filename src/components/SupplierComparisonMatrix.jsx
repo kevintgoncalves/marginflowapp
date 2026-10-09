@@ -4,9 +4,9 @@ import { comparisonMoney, comparisonUnit } from '../domain/latestProductComparis
 import { downloadSupplierMatrixExcel } from '../utils/exportProductsExcel.js';
 
 export function SupplierMatrixTable({ rows, suppliers }) {
-  return <div className="table-wrap"><table><thead><tr><th>Product</th>{suppliers.map(s=><th key={s.key}>{s.name}</th>)}<th>Cheapest supplier</th></tr></thead><tbody>{rows.map(row=><tr key={row.id}><th scope="row">{row.name}<small className="mf-price-date">{row.department}</small></th>{row.cells.map(cell=><td key={cell.supplier.key}>
+  return <div className="table-wrap"><table><thead><tr><th>Product</th>{suppliers.map(s=><th key={s.key}>{s.name}</th>)}<th>Cheapest supplier</th></tr></thead><tbody>{rows.map(row=><tr key={row.id}><th scope="row">{row.name}<small className="mf-price-date">{row.department}</small></th>{row.cells.map(cell=><td key={cell.supplier.key} style={{background:cell.status!=='Comparable'?'#e7e6e6':cell.percent<=0.0000001?'#c6efce':cell.percent<=10.0000001?'#fce4d6':'#ffc7ce'}}>
     {cell.status === 'Comparable' ? <><strong>{comparisonMoney(cell.article.price,cell.article.currency)}/{comparisonUnit(cell.article.unit)}</strong><div>{cell.article.date}</div></> : <strong>{cell.status}</strong>}
-    <div>{cell.percent === null ? '—' : `${cell.percent.toFixed(2)}% above cheapest`}</div>
+    <div>{cell.percent === null ? '—' : cell.percent <= 0.0000001 ? 'Cheapest' : `+${comparisonMoney(cell.difference,cell.article.currency)}/${comparisonUnit(cell.article.unit)} · ${cell.percent.toFixed(2)}% above cheapest`}</div>
     {cell.reason && <small>{cell.reason}</small>}
     {cell.article && <details><summary>Source invoice</summary>{cell.article.invoiceNumber} · {cell.article.date}<br/>{comparisonMoney(cell.article.billedNetPrice,cell.article.currency)}/{cell.article.billingUnit || 'unit not recorded'} · {cell.article.pack || 'pack not recorded'}</details>}
   </td>)}<td>{row.cheapest.join(' / ') || '—'}</td></tr>)}</tbody></table>{!rows.length && <p>No products match these filters.</p>}</div>;
