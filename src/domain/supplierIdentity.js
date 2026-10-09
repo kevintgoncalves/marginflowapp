@@ -81,6 +81,12 @@ export function activeSupplierRows(suppliers = []) {
   return suppliers.filter((supplier) => !isSupplierTombstone(supplier));
 }
 
+// Inventory-origin rows are retained in history but are not purchase vendors.
+export function isStockOriginSupplier(value = {}) {
+  const name = typeof value === "string" ? value : value.name || value.supplier || "";
+  return String(name).trim().toLowerCase().replace(/[^a-z]/g, "") === "stocktake";
+}
+
 export function findSupplierDuplicateCandidates(suppliers = [], name = "", { includeDeleted = true, excludeId = "" } = {}) {
   const target = supplierDisplayName(name);
   if (!target) return [];
