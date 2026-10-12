@@ -2241,7 +2241,7 @@ function invoiceMarkedAsCorrect(invoice = {}, validation = {}, userLabel = "") {
   };
 }
 
-function InvoiceFinancialSummary({ invoice = {}, currency = "GBP" }) {
+function InvoiceFinancialSummary({ invoice = {}, currency = "GBP", discountAmount = null, onDiscountChange = null }) {
   const reconciliation = invoice.reconciliation;
   if (!reconciliation) return null;
   const hasPrintedSummary = reconciliation.printedSubtotal !== null
@@ -2262,6 +2262,24 @@ function InvoiceFinancialSummary({ invoice = {}, currency = "GBP" }) {
           <div key={adjustment.id}><span>{adjustment.description}</span><strong>{moneyForCurrency(adjustment.amount, currency)}</strong></div>
         ))}
         {reconciliation.printedVat !== null && <div><span>VAT</span><strong>{moneyForCurrency(reconciliation.vatTotal, currency)}</strong></div>}
+        {onDiscountChange && (
+          <div className="invoice-discount-editor">
+            <label>
+              <span>Discount applied to line costs £</span>
+              <input
+                aria-label="Invoice discount applied to line costs"
+                min="0"
+                step="0.01"
+                type="number"
+                value={discountAmount ?? 0}
+                onChange={(event) => onDiscountChange(Math.max(0, numberValue(event.target.value, 0)))}
+              />
+            </label>
+            <small style={{ display: "block", color: "var(--muted, #6b6b6b)" }}>
+              Split across the received lines by value. Set to 0 if this invoice has no discount.
+            </small>
+          </div>
+        )}
         <div className="invoice-financial-total">
           <span>{reconciliation.printedTotal !== null ? "Invoice total" : "Calculated total"}</span>
           <strong>{moneyForCurrency(reconciliation.printedTotal ?? reconciliation.calculatedTotal, currency)}</strong>
@@ -10328,7 +10346,7 @@ function Invoices({
           ))}
         </div>
         {draft.status !== "Idle" && <div className={`invoice-status ${statusTone}`}>{draft.status}</div>}
-        <InvoiceFinancialSummary invoice={{ ...draftValidationState, documentNumber: draftDocumentNumber }} currency={draft.currency || financialSettings.currency || "GBP"} />
+        <InvoiceFinancialSummary invoice={{ ...draftValidationState, documentNumber: draftDocumentNumber }} currency={draft.currency || financialSettings.currency || "GBP"} discountAmount={draft.discountAmount} onDiscountChange={isCreditNoteDocument(draftDocumentType) ? null : (value) => setDraft((current) => ({ ...current, discountAmount: value, discountPercent: 0, discountManuallySet: true }))} />
         {blockingReviewIssues.length > 0 && (
           <div className="invoice-status error review-issue-list">
             <strong>Required corrections</strong>
@@ -10436,7 +10454,7 @@ function Invoices({
                     </div>
                   </div>
                 )}
-                <InvoiceFinancialSummary invoice={{ ...selectedBatchValidation, documentNumber: selectedBatchDocumentNumber }} currency={selectedBatchInvoice.currency || financialSettings.currency || "GBP"} />
+                <InvoiceFinancialSummary invoice={{ ...selectedBatchValidation, documentNumber: selectedBatchDocumentNumber }} currency={selectedBatchInvoice.currency || financialSettings.currency || "GBP"} discountAmount={selectedBatchInvoice.discountAmount} onDiscountChange={isCreditNoteDocument(documentTypeFor(selectedBatchInvoice)) ? null : (value) => updateSelectedBatchInvoice((base) => ({ ...base, discountAmount: value, discountPercent: 0, discountManuallySet: true }))} />
                 {selectedBatchItem.status === BATCH_INVOICE_ITEM_STATUSES.POSSIBLE_DUPLICATE && (
                   <div className="invoice-status warn review-issue-list">
                     <strong>Possible duplicate</strong>
@@ -12229,7 +12247,7 @@ function InvoiceControlCentre({
                 </div>
               </div>
             )}
-            <InvoiceFinancialSummary invoice={{ ...reviewDetailValidation, documentNumber: reviewDetailDocumentNumber }} currency={reviewDetailDraft.currency || financialSettings.currency || "GBP"} />
+            <InvoiceFinancialSummary invoice={{ ...reviewDetailValidation, documentNumber: reviewDetailDocumentNumber }} currency={reviewDetailDraft.currency || financialSettings.currency || "GBP"} discountAmount={reviewDetailDraft.discountAmount} onDiscountChange={isCreditNoteDocument(reviewDetailDocumentType) ? null : (value) => setReviewDetailDraft((current) => ({ ...invoiceWithClearedReviewConfirmation(current), discountAmount: value, discountPercent: 0, discountManuallySet: true }))} />
             {reviewDetailBlockingIssues.length > 0 && (
               <div className="invoice-status error review-issue-list">
                 <strong>Required corrections</strong>
