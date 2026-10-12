@@ -10359,6 +10359,7 @@ function Invoices({
           createProductFromLine={permissions.canAdd ? createProductFromDraftLine : null}
           departmentNames={departmentNames}
           forgetLearnedRule={forgetLearnedRuleForDraftLine}
+          invoice={draft}
           items={draft.items}
           documentType={draftDocumentType}
           products={products}
@@ -10460,6 +10461,7 @@ function Invoices({
                   createProductFromLine={permissions.canAdd ? createProductFromBatchLine : null}
                   departmentNames={departmentNames}
                   documentType={selectedBatchDocumentType}
+                  invoice={selectedBatchInvoice}
                   items={selectedBatchInvoice.items || []}
                   products={products}
                   removeLine={(id) => updateSelectedBatchInvoice((base) => ({ ...base, items: (base.items || []).filter((line) => line.id !== id) }))}
@@ -10689,6 +10691,7 @@ function Invoices({
                   addSplit={addEditSplit}
                   documentType={editDraftDocumentType}
                   departmentNames={departmentNames}
+                  invoice={editDraft}
                   items={editDraft.items || []}
                   products={products}
                   removeLine={(id) => { setEditSaveStatus(""); setEditDraft((current) => ({ ...current, items: (current.items || []).filter((line) => line.id !== id) })); }}
@@ -10779,6 +10782,7 @@ function Invoices({
                 addSplit={addManualSplit}
                 documentType={normalizeDocumentType(manualDraft.documentType)}
                 departmentNames={departmentNames}
+                invoice={manualDraft}
                 items={manualDraft.items}
                 products={products}
                 removeLine={removeManualInvoiceLine}
@@ -10848,6 +10852,7 @@ function InvoiceLineEditor({
   departmentNames,
   documentType = PURCHASING_DOCUMENT_TYPES.INVOICE,
   forgetLearnedRule,
+  invoice = null,
   items,
   products = [],
   removeLine,
@@ -10860,6 +10865,10 @@ function InvoiceLineEditor({
   wrapClassName = "table-wrap invoice-review-table-wrap",
 }) {
   const isCreditNote = isCreditNoteDocument(documentType);
+  // An invoice-level discount (e.g. a supplier's 10% taken off the total) belongs to the lines:
+  // show each line after its share so costs, department splits and GP use the real price.
+  const invoiceDiscountContext = !isCreditNote && invoice ? { ...invoice, items } : null;
+  const hasInvoiceDiscount = Boolean(invoiceDiscountContext && invoiceDiscountAmount(invoiceDiscountContext) > 0);
   const headers = ["Product", "Match", "Pack size", "Quantity", isCreditNote ? "Unit credit" : "Unit cost", "Discount £", "Discount %", "Department / split", "Status", "Supplier", isCreditNote ? "Line credit" : "Net line total", ""];
 
   return (
@@ -10872,7 +10881,8 @@ function InvoiceLineEditor({
         <tbody>
           {items.map((item) => {
             const status = invoiceLineStatus(item);
-            const netTotal = invoiceEditorNetLineTotal(item);
+            const invoiceDiscountShare = hasInvoiceDiscount && status === "Received" ? proportionalInvoiceDiscount(item, invoiceDiscountContext) : 0;
+            const netTotal = invoiceDiscountShare ? netLineTotal(item, invoiceDiscountContext) : invoiceEditorNetLineTotal(item);
             const signedNetTotal = toSignedPurchasingAmount(netTotal, documentType);
             const productListId = `invoice-product-options-${item.id}`;
             const productMatches = productAutocomplete(products, item.productName, 12);
@@ -11041,7 +11051,15 @@ function InvoiceLineEditor({
                   </select>
                 </td>
                 <td><input value={item.supplier || ""} onChange={(event) => updateLine(item.id, "supplier", event.target.value)} /></td>
-                <td>{money(isCreditNote ? signedNetTotal : netTotal)}</td>
+                <td>
+                  {money(isCreditNote ? signedNetTotal : netTotal)}
+                  {invoiceDiscountShare > 0 && (
+                    <small className="invoice-line-discount-note" style={{ display: "block", color: "var(--muted, #6b6b6b)", whiteSpace: "nowrap" }}>
+                      incl. −{money(invoiceDiscountShare)} invoice discount
+                      {numberValue(item.quantity, 0) > 0 ? ` · ${money(netTotal / numberValue(item.quantity, 1))} / unit` : ""}
+                    </small>
+                  )}
+                </td>
                 <td><button className="icon danger" onClick={() => removeLine(item.id)} type="button"><Trash2 size={15} /></button></td>
               </tr>
             );
@@ -12236,6 +12254,7 @@ function InvoiceControlCentre({
                   createProductFromLine={permissions.canAdd ? createProductFromReviewLine : null}
                   departmentNames={departmentNames}
                   documentType={reviewDetailDocumentType}
+                  invoice={reviewDetailDraft}
                   items={reviewDetailDraft.items || []}
                   products={products}
                   removeLine={(id) => setReviewDetailDraft((current) => current ? ({ ...invoiceWithClearedReviewConfirmation(current), items: (current.items || []).filter((line) => line.id !== id) }) : current)}
@@ -12561,6 +12580,7 @@ function InvoiceControlCentre({
                   addSplit={addControlSplit}
                   departmentNames={departmentNames}
                   documentType={viewInvoiceDocumentType}
+                  invoice={viewInvoice}
                   items={viewInvoice.items || []}
                   products={products}
                   removeLine={removeControlLine}
