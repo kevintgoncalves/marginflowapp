@@ -1,4 +1,4 @@
-import { reusableConversion, packSignature } from './purchaseUnits.js';
+import { interpretPurchasePack, packSignature } from './purchaseUnits.js';
 import { numberValue } from "./numberUtils.js";
 import { invoiceLearningDebug } from "./invoiceLearningDiagnostics.js";
 import { normalizeDepartmentSplitRows, validDepartmentSplitRows } from "./departmentAssignment.js";
@@ -84,6 +84,24 @@ function sameRuleScope(row = {}, organisationId = "", supplierId = "") {
     && rowOrganisationId === organisationId && rowSupplierId === supplierId);
 }
 
+// Two pack descriptions are the same purchase when their text matches, when the invoice
+// line has no pack at all (the AI did not read one), or when both resolve to the same
+// confirmed quantity, e.g. "5 kg", "5kg net" and "5KG BOX".
+export function packsEquivalent(rulePack = "", linePack = "") {
+  const ruleSignature = packSignature(rulePack);
+  const lineSignature = packSignature(linePack);
+  if (ruleSignature === lineSignature) return true;
+  if (!lineSignature) return true;
+  const rule = interpretPurchasePack(rulePack);
+  const line = interpretPurchasePack(linePack);
+  return Boolean(rule.confirmed && line.confirmed && rule.baseUnit === line.baseUnit
+    && Math.abs(Number(rule.baseQuantity) - Number(line.baseQuantity)) < 1e-9);
+}
+
+function equivalentConversion(rule, pack) {
+  return rule?.conversionRule && packsEquivalent(rule.packSize || rule.pack_size, pack) ? rule.conversionRule : undefined;
+}
+
 function mappingProduct(mapping = {}, products = []) {
   const productId = mapping.productId || mapping.product_id || "";
   return products.find((product) => product.id === productId) || null;
@@ -134,6 +152,16 @@ function resultFromProduct({
   };
 }
 
+function suggestionsFrom(scored = []) {
+  return scored.slice(0, 5).map((entry) => ({
+    id: entry.product.id,
+    name: entry.product.name || entry.product.productName,
+    score: Number(Number(entry.score || 0).toFixed(2)),
+    packSize: entry.product.packSize || "",
+    supplier: entry.product.supplier || "",
+  }));
+}
+
 function withMatchDebug(result, context = {}) {
   invoiceLearningDebug("match-attempt", {
     supplierId: context.supplierId,
@@ -172,17 +200,27 @@ export function matchInvoiceLineToExistingProduct({
 } = {}) {
   const context = { supplierId, supplierName, supplierProductCode, rawDescription, productName };
   if (!organisationId || !supplierId) {
-    return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
-      reviewReasons: ["no_confirmed_product_match"] });
+    // Without a confirmed supplier nothing is applied automatically, but the user still gets
+    // the best catalogue candidates instead of an empty search.
+    const unscopedProducts = organisationId
+      ? existingProducts.filter((product) => sameOrganisation(product, organisationId) && product.active !== false)
+      : [];
+    const unscoped = unscopedProducts.length
+      ? matchProductName(productName || rawDescription, unscopedProducts, { organisationId, unit: unitOfMeasure, packSize, suggestThreshold, autoSelectFuzzy: false })
+      : { candidates: [] };
+    return {
+      ...resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ["no_confirmed_product_match"] }),
+      suggestedProducts: suggestionsFrom(unscoped.candidates || []),
+    };
   }
   const products = existingProducts.filter((product) => sameOrganisation(product, organisationId) && product.active !== false);
   const mappings = supplierMappings.filter((mapping) => (
     !mapping.catalogueEntry && sameRuleScope(mapping, organisationId, supplierId)
     && mapping.active !== false
     && sameLocation(mapping, locationId)
-  )).map(mapping => ({ ...mapping, conversionRule: reusableConversion(mapping, packSize) })).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
+  )).map(mapping => ({ ...mapping, conversionRule: equivalentConversion(mapping, packSize) })).sort((left, right) => locationMatchPriority(right, locationId) - locationMatchPriority(left, locationId));
   const normalizedCode = normalizeSupplierProductCode(supplierProductCode);
-  const samePack = rule => packSignature(rule.packSize || rule.pack_size) === packSignature(packSize);
+  const samePack = rule => packsEquivalent(rule.packSize || rule.pack_size, packSize);
   const packReview = () => resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ['pack_changed'] });
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
 
@@ -259,6 +297,17 @@ export function matchInvoiceLineToExistingProduct({
     autoSelectFuzzy: false,
   });
 
+  // A unique exact name or alias of one of the user's products, with a compatible unit and
+  // pack, is the user's own wording: apply it. Fuzzy matches stay suggestions.
+  const exactTypes = [PRODUCT_NAME_MATCH_TYPES.EXACT_NAME, PRODUCT_NAME_MATCH_TYPES.ALIAS];
+  if (genericMatch.match && exactTypes.includes(genericMatch.matchType) && genericMatch.confidence >= 1) {
+    return withMatchDebug(resultFromProduct({
+      product: genericMatch.match,
+      source: genericMatch.matchType === PRODUCT_NAME_MATCH_TYPES.ALIAS ? PRODUCT_MATCH_SOURCES.ALIAS : PRODUCT_MATCH_SOURCES.EXACT_NAME,
+      confidence: 1,
+    }), context);
+  }
+
   const scored = genericMatch.candidates || [];
   const best = scored[0];
   if (best) {
@@ -267,13 +316,7 @@ export function matchInvoiceLineToExistingProduct({
       matchedProductName: null,
       productMatchSource: PRODUCT_MATCH_SOURCES.NONE,
       productMatchConfidence: Number(best.score.toFixed(2)),
-      suggestedProducts: scored.slice(0, 5).map((entry) => ({
-        id: entry.product.id,
-        name: entry.product.name || entry.product.productName,
-        score: Number(entry.score.toFixed(2)),
-        packSize: entry.product.packSize || "",
-        supplier: entry.product.supplier || "",
-      })),
+      suggestedProducts: suggestionsFrom(scored),
       needsReview: true,
       reviewReasons: [genericMatch.matchType === PRODUCT_NAME_MATCH_TYPES.AMBIGUOUS ? "ambiguous_product_match" : "no_confirmed_product_match"],
       allocationSource: null,

@@ -12,6 +12,9 @@ import {
   normalizeInventoryEffect,
   normalizePurchasingLineForDocument,
 } from "../src/domain/purchasingDocuments.js";
+import { INVOICE_AI_LIMITS, createRateLimiter, verifyInvoiceAiAccess } from "./_lib/invoiceAiAccess.js";
+
+const allowInvoiceAiRequest = createRateLimiter(INVOICE_AI_LIMITS);
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_PRIMARY_MODEL = "gpt-5.4-mini";
@@ -608,14 +611,29 @@ function safeLogInvoiceRun(metadata = {}) {
   });
 }
 
-async function handleReadInvoiceAi(event) {
+export async function handleReadInvoiceAi(event) {
   if (event.httpMethod !== "POST") return json(405, { error: "Method not allowed" });
+  if (Buffer.byteLength(event.body || "", "utf8") > INVOICE_AI_LIMITS.maxBodyBytes) {
+    return json(413, { error: "Invoice files are too large", detail: "Upload fewer pages at a time or a smaller PDF/photo (max 4 MB per request)." });
+  }
 
   let payload;
   try {
     payload = JSON.parse(event.body || "{}");
   } catch {
     return json(400, { error: "Request body must be valid JSON" });
+  }
+
+  const access = await verifyInvoiceAiAccess({
+    headers: event.headers || {},
+    companyId: payload.companyId || payload.organisationId || payload.organizationId || "",
+    env: event.env || process.env,
+    fetchImpl: event.fetchImpl || globalThis.fetch,
+  });
+  if (!access.ok) return json(access.statusCode, { error: access.error, detail: access.detail });
+  const limiter = event.rateLimiter || allowInvoiceAiRequest;
+  if (!limiter(access.userId)) {
+    return json(429, { error: "Too many invoice reads", detail: "Wait a few minutes and try again." });
   }
 
   const invoiceText = asString(payload.invoiceText || payload.text || payload.ocrText);
@@ -759,6 +777,7 @@ async function readBody(req) {
 export default async function handler(req, res) {
   const result = await handleReadInvoiceAi({
     httpMethod: req.method,
+    headers: req.headers || {},
     body: await readBody(req),
   });
 

@@ -63,6 +63,7 @@ import {
   X,
 } from "lucide-react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
+import { currentPriceFieldsFromEntry, isLatestInvoicePrice, latestInvoicePriceEntry, manualEditChangesPrice } from "./domain/productCurrentPrice.js";
 import {
   forgetRelationalSupplierProductMapping,
   loadRelationalSupplierProductMappings,
@@ -247,6 +248,19 @@ import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./ut
 import { downloadProductsExcel } from "./utils/exportProductsExcel.js";
 import { mondaySundayWeekDates, mondayWeekStart, shiftMondayWeek } from "./domain/weekNavigation.js";
 import "./styles.css";
+
+// The AI invoice reader only accepts signed-in users (it spends the company's OpenAI credit).
+async function invoiceAiRequestHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  try {
+    const { data } = (await supabase?.auth.getSession()) || {};
+    const token = data?.session?.access_token;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    // Without a token the server answers "Sign in required", which the UI already shows.
+  }
+  return headers;
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -2106,7 +2120,7 @@ function reviewReasonText(reason = "", documentType = PURCHASING_DOCUMENT_TYPES.
     supplier_code_product_conflict: "Supplier item code is already mapped to an existing product.",
     ambiguous_product_match: "More than one existing product may match",
     price_deviation: "Price differs from recent accepted invoices",
-    unaccounted_invoice_charge: "Invoice includes a non-product charge",
+    unaccounted_invoice_charge: "Invoice includes a non-product charge or discount",
     unit_conflict: "Unit conflicts with the matched product",
     pack_changed: "Supplier pack changed. Confirm the match and conversion.",
     mapping_conflict: "Conflicting reusable matches. Choose the correct product.",
@@ -3189,9 +3203,16 @@ function removeInvoiceProductHistory(products, invoiceId) {
   if (!invoiceId) return currentProducts;
   return currentProducts.map((product) => {
     const priceHistory = product.priceHistory.filter((entry) => entry.invoiceId !== invoiceId);
+    if (priceHistory.length === product.priceHistory.length
+      && !product.supplierPrices.some((entry) => entry.invoiceId === invoiceId)
+      && !product.supplierFormats.some((entry) => entry.invoiceId === invoiceId)) return product;
     const supplierPrices = product.supplierPrices.filter((entry) => entry.invoiceId !== invoiceId);
     const supplierFormats = product.supplierFormats.filter((entry) => entry.invoiceId !== invoiceId);
-    return { ...product, priceHistory, supplierPrices, supplierFormats };
+    // If the removed invoice was setting the current price, fall back to the most recent
+    // remaining invoice. With no invoice left the existing values are kept, never blanked.
+    const removedCurrent = priceHistory.length !== product.priceHistory.length;
+    const fallback = removedCurrent ? currentPriceFieldsFromEntry(latestInvoicePriceEntry(priceHistory)) : {};
+    return { ...product, ...fallback, priceHistory, supplierPrices, supplierFormats };
   });
 }
 
@@ -3239,6 +3260,9 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
       lineId: item.id,
     };
 
+    // Only the most recent invoice (by invoice date) sets the current supplier, pack and cost.
+    // Older invoices still add their prices to the history.
+    const isCurrentPrice = isLatestInvoicePrice(next[index].priceHistory, invoiceDate, { invoiceId: invoiceContext.id, lineId: item.id });
     const aliases = new Set(next[index].aliases);
     const existingProductName = String(next[index].name || next[index].productName || "");
     const rawDescription = item.rawDescription || item.originalExtraction?.rawDescription || "";
@@ -3258,16 +3282,20 @@ function mergeInvoiceProducts(products, items, invoiceDate, invoiceContext = { i
     ];
     next[index] = {
       ...next[index],
-      supplier: item.supplier || next[index].supplier,
-      packSize: item.packSize || next[index].packSize,
-      quantity: numberValue(item.quantity, 1),
-      unitCost: invoiceUnitCost,
-      normalizedCost: supplierFormat.normalizedCost,
-      normalizedUnit: supplierFormat.baseUnit,
-      conversionReviewRequired: supplierFormat.conversionReviewRequired,
-      conversionReason: supplierFormat.conversionReason,
-      department: primaryDepartment(item),
-      departmentSplits: lineUsesSplitDepartmentMode(item) ? normalizeDepartmentSplitRows(item.departmentSplits, { fallbackDepartment: item.department }) : [],
+      ...(isCurrentPrice ? {
+        supplier: item.supplier || next[index].supplier,
+        packSize: item.packSize || next[index].packSize,
+        quantity: numberValue(item.quantity, 1),
+        unitCost: invoiceUnitCost,
+        normalizedCost: supplierFormat.normalizedCost,
+        normalizedUnit: supplierFormat.baseUnit,
+        conversionReviewRequired: supplierFormat.conversionReviewRequired,
+        conversionReason: supplierFormat.conversionReason,
+        department: primaryDepartment(item),
+        departmentSplits: lineUsesSplitDepartmentMode(item) ? normalizeDepartmentSplitRows(item.departmentSplits, { fallbackDepartment: item.department }) : [],
+        currentPriceInvoiceId: invoiceContext.id || "",
+        currentPriceDate: invoiceDate || "",
+      } : {}),
       aliases: [...aliases],
       supplierFormats,
       supplierPrices,
@@ -8603,7 +8631,7 @@ function Invoices({
   const extractInvoiceDraftFromAi = async ({ invoiceText = "", aiFiles = [], baseDraft = draft } = {}) => {
     const response = await fetch("/api/read-invoice-ai", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await invoiceAiRequestHeaders(),
       body: JSON.stringify({
         invoiceText,
         files: aiFiles,
@@ -8812,7 +8840,7 @@ function Invoices({
     try {
       const response = await fetch("/api/read-invoice-ai", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await invoiceAiRequestHeaders(),
         body: JSON.stringify({
           invoiceText,
           files: aiFiles,
@@ -12667,14 +12695,15 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
       ...payload,
       id: editingId,
       supplierFormats: [...(product.supplierFormats || []).filter((entry) => entry.supplier !== payload.supplier), ...(payload.supplierFormats || [])],
-      priceHistory: [...(product.priceHistory || []), {
+      priceHistory: manualEditChangesPrice(product, payload) ? [...(product.priceHistory || []), {
         date: today(),
         supplier: payload.supplier,
         price: payload.unitCost,
         packSize: payload.packSize,
         normalizedCost: payload.normalizedCost,
         normalizedUnit: payload.normalizedUnit,
-      }],
+        source: "Manual edit",
+      }] : (product.priceHistory || []),
     } : product)));
     setForm(empty);
     setEditingId("");

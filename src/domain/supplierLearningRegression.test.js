@@ -181,7 +181,11 @@ test("same learned SKU does not cross supplier or company boundaries", () => {
     supplierProductCode: "PB-100", rawDescription: "PEARL BARLEY",
     existingProducts: products, supplierMappings: [rule],
   });
-  assert.equal(forOtherSupplier.matchedProductId, null);
+  // The other supplier's SKU rule must never be reused. (Since 12/10/26 the line may still
+  // link through the user's own exact product name, which is not a learned rule.)
+  assert.equal(forOtherSupplier.learnedMappingId, null);
+  assert.notEqual(forOtherSupplier.productMatchSource, "supplier_code");
+  assert.notEqual(forOtherSupplier.productMatchSource, "learned_rule");
   assert.equal(forOtherCompany.matchedProductId, null);
 });
 

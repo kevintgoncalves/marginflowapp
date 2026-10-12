@@ -224,6 +224,21 @@ function likelySmallInvoiceCharge(amount = 0, invoiceTotal = 0) {
   return absolute <= Math.max(DEFAULT_SMALL_CHARGE_LIMIT, Math.abs(numberValue(invoiceTotal, 0)) * 0.03);
 }
 
+const ROUND_DISCOUNT_PERCENTAGES = [2.5, 3, 5, 7.5, 10, 12.5, 15, 20, 25];
+
+export function inferredTotalDiscount(lineSubtotal = 0, differences = []) {
+  const subtotal = Math.abs(numberValue(lineSubtotal, 0));
+  if (!subtotal) return null;
+  for (const difference of differences) {
+    const amount = roundMoney(numberValue(difference, 0));
+    if (amount >= 0) continue;
+    const tolerance = Math.max(0.05, subtotal * 0.002);
+    const percent = ROUND_DISCOUNT_PERCENTAGES.find((candidate) => Math.abs(subtotal * candidate / 100 + amount) <= tolerance);
+    if (percent) return { percent, amount };
+  }
+  return null;
+}
+
 function totalMatchesAny(expected = 0, candidates = []) {
   return candidates
     .map(roundMoney)
@@ -249,6 +264,15 @@ export function reconcileInvoiceTotals(invoice = {}, lines = invoice.lines || in
     if (inferredAmount) {
       adjustments = [normalizedAdjustment({ type: inferredAmount < 0 ? "discount" : "other", description: "Inferred invoice adjustment", amount: inferredAmount, inferred: true })];
       adjustmentTotal = roundMoney(adjustments[0].amount);
+    } else {
+      // Some suppliers (e.g. a standing 10% account discount) only take the discount off the
+      // invoice total. When the printed total is short of the lines by a round percentage,
+      // record it as an inferred discount so it is spread across the line costs.
+      const discount = inferredTotalDiscount(lineSubtotal, [inferredFromTotal, inferredFromSubtotal]);
+      if (discount) {
+        adjustments = [normalizedAdjustment({ type: "discount", description: `Inferred ${discount.percent}% invoice discount`, amount: discount.amount, inferred: true })];
+        adjustmentTotal = roundMoney(adjustments[0].amount);
+      }
     }
   }
 

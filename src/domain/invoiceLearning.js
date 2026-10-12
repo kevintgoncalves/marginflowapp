@@ -130,8 +130,10 @@ export function learnSupplierProductMappings({
       && existing.productId === productId
       && sameAllocation(existing, allocation);
     const confirmationCount = sameDecision ? numberValue(existing.confirmationCount, 0) + (invoice.id && existing.lastConfirmedInvoiceId === invoice.id ? 0 : 1) : 1;
-    const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE, "user_selected"].includes(line.productMatchSource)
-      || ["manual_match", "manually_matched"].includes(line.productResolution);
+    // A product the user explicitly created from this invoice line is a manual decision too,
+    // so the next invoice with the same line applies it without a second review.
+    const manualProductSelection = [PRODUCT_MATCH_SOURCES.MANUAL_SELECTION, PRODUCT_MATCH_SOURCES.EXACT_CATALOGUE, PRODUCT_MATCH_SOURCES.NEW_PRODUCT, "user_selected"].includes(line.productMatchSource)
+      || ["manual_match", "manually_matched", "create_new_product"].includes(line.productResolution);
     const autoApply = code ? true : manualProductSelection || confirmationCount >= 2 || line.rememberSupplierMapping === true;
     invoiceLearningDebug("save-start", {
       companyId,
