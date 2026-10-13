@@ -71,3 +71,23 @@ test("a product created from an invoice line is learned as confirmed on the firs
   assert.equal(next.matchedProductId, "p-new");
   assert.equal(next.productMatchSource, "learned_rule");
 });
+
+test("a learned rule for another pack does not block a product whose own name and pack fit", () => {
+  const catalogue = [
+    { id: "p-spinach", companyId, name: "SPINACH", packSize: "500g", active: true },
+    { id: "p-spinach-200", companyId, name: "SPINACH 200G", packSize: "200G PKT", active: true },
+  ];
+  const oldRule = { id: "r-sp", companyId, supplierId, supplierDescription: "SPINACH", normalizedSupplierDescription: "spinach", productId: "p-spinach-200", packSize: "200G PKT", active: true, autoApply: true, confirmationCount: 3 };
+  const match = matchInvoiceLineToExistingProduct({ organisationId: companyId, supplierId, productName: "SPINACH", rawDescription: "SPINACH", packSize: "500G PACK", existingProducts: catalogue, supplierMappings: [oldRule] });
+  assert.equal(match.matchedProductId, "p-spinach");
+  assert.equal(match.productMatchSource, "exact_name");
+});
+
+test("pack change still needs review when no product fits the new pack", () => {
+  const catalogue = [{ id: "p-kale", companyId, name: "Curly Kale", packSize: "x250g pack", active: true }];
+  const oldRule = { id: "r-k", companyId, supplierId, supplierDescription: "CURLY KALE", productId: "p-kale", packSize: "x250g pack", active: true, autoApply: true, confirmationCount: 3 };
+  const match = matchInvoiceLineToExistingProduct({ organisationId: companyId, supplierId, productName: "CURLY KALE", rawDescription: "CURLY KALE", packSize: "1kg bag", existingProducts: catalogue, supplierMappings: [oldRule] });
+  assert.equal(match.matchedProductId, null);
+  assert.ok(match.reviewReasons.includes("pack_changed"));
+  assert.ok(Array.isArray(match.suggestedProducts));
+});

@@ -240,6 +240,7 @@ export function matchInvoiceLineToExistingProduct({
     }
   }
 
+  let descriptionPackChanged = false;
   if (normalizedDescription) {
     const allDescriptionMappings = mappings.filter((candidate) => {
       const mappingDescription = normalizeSupplierDescription(candidate.normalizedSupplierDescription || candidate.supplierDescription || candidate.supplier_description);
@@ -251,7 +252,9 @@ export function matchInvoiceLineToExistingProduct({
       return hasCode || confirmationCount >= 2 || candidate.descriptionAutoApply === true || mappingSource === PRODUCT_MATCH_SOURCES.MANUAL_SELECTION;
     });
     const descriptionMappings = allDescriptionMappings.filter(samePack);
-    if (allDescriptionMappings.length && !descriptionMappings.length) return packReview();
+    // The learned rule was for a different pack. Do not apply it, but still let a product
+    // whose own name and pack fit this line (checked below) resolve it.
+    if (allDescriptionMappings.length && !descriptionMappings.length) descriptionPackChanged = true;
     const productIds = new Set(descriptionMappings.map(row => row.productId || row.product_id).filter(Boolean));
     if (productIds.size > 1) {
       return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
@@ -309,6 +312,9 @@ export function matchInvoiceLineToExistingProduct({
   }
 
   const scored = genericMatch.candidates || [];
+  if (descriptionPackChanged) {
+    return withMatchDebug({ ...packReview(), suggestedProducts: suggestionsFrom(scored) }, context);
+  }
   const best = scored[0];
   if (best) {
     return withMatchDebug({
