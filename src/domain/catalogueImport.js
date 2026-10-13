@@ -217,7 +217,7 @@ export function applyCatalogueAttributes(products = [], preview, { idFactory, no
   const created = [];
   const next = products.map((product) => {
     if (deactivateIds.has(product.id)) {
-      return { ...product, active: false, archivedAt: product.archivedAt || now, archivedReason: "Removed in catalogue import (not a product)" };
+      return { ...product, active: false, archivedAt: product.archivedAt || now, archivedReason: "Archived in catalogue import" };
     }
     const group = groupsByKeep.get(product.id);
     if (!group) return product;

@@ -40,7 +40,7 @@ function reportCsv(preview, result) {
       outcome ? `Failed: ${outcome.error}` : (result ? "Done" : "Planned"),
     ]);
   });
-  preview.deactivate.forEach((product) => rows.push(["", product.name, "deactivate", "", "", "", "Not a product", result ? "Done" : "Planned"]));
+  preview.deactivate.forEach((product) => rows.push(["", product.name, "deactivate", "", "", "", "Archived (not a product or not needed)", result ? "Done" : "Planned"]));
   preview.untouched.forEach((product) => rows.push(["", product.name, "untouched", "", "", "", "Not in the plan", ""]));
   return rows.map((row) => row.map(escape).join(",")).join("\n");
 }
@@ -153,7 +153,7 @@ export default function CatalogueImport({ open, onClose, snapshot, companyId, su
             </div>
           )}
           {preview.deactivate.length > 0 && (
-            <div className="invoice-status info review-issue-list"><strong>Archived because they are not products ({preview.deactivate.length})</strong><span>{preview.deactivate.map((product) => product.name).join(", ")}</span></div>
+            <div className="invoice-status info review-issue-list"><strong>Archived — not products or not needed ({preview.deactivate.length})</strong><span>{preview.deactivate.map((product) => product.name).join(", ")}</span></div>
           )}
           {preview.untouched.length > 0 && (
             <div className="invoice-status info review-issue-list"><strong>Not in the plan — left exactly as they are ({preview.untouched.length})</strong><span>{preview.untouched.map((product) => product.name).join(", ")}</span></div>
