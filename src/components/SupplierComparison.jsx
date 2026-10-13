@@ -6,7 +6,7 @@ import { downloadSupplierPriceRequest } from "../utils/exportSupplierPriceReques
 const money = (value, currency = "GBP") => (value == null ? "—" : new Intl.NumberFormat("en-GB", { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value));
 const unitLabel = (unit) => (unit === "l" ? "L" : unit === "each" ? "unit" : unit);
 
-export default function SupplierComparison({ open, onClose, rows = [], loading = false, companyName = "" }) {
+export default function SupplierComparison({ open, onClose, rows = [], loading = false, companyName = "", onSetComparisonUnit = null }) {
   const suppliers = useMemo(() => comparableSuppliers(rows), [rows]);
   const [selected, setSelected] = useState([]);
   const [minSuppliers, setMinSuppliers] = useState(2);
@@ -33,7 +33,7 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
   return (
     <InvoiceModal open={open} onClose={onClose} title="Compare suppliers" wide className="mf-workflow-screen"
       footer={<button className="ghost" type="button" onClick={onClose}>Close</button>}>
-      <p>Choose two to four suppliers. Prices are the latest per supplier, from invoices or supplier websites, compared per kg, L or unit (ex VAT).</p>
+      <p>Choose two to four suppliers. Prices are the latest per supplier, from invoices or supplier websites, compared per kg, L or unit (ex VAT). Change a product's comparison unit in the Unit column (for example, herb bunches per unit); prices marked ≈ are worked out from the pack description.</p>
       {loading && <p role="status">Loading prices from the last 12 months…</p>}
       <div className="button-row left tight" role="group" aria-label="Suppliers">
         {suppliers.map((supplier) => (
@@ -81,14 +81,23 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
                 {visible.slice(0, 400).map((row) => (
                   <tr key={row.id}>
                     <td><strong>{row.product}</strong><br /><small>{row.department}</small></td>
-                    <td>per {unitLabel(row.unit)}</td>
+                    <td>
+                      {onSetComparisonUnit ? (
+                        <select aria-label={`Compare ${row.product} per`} value={row.comparisonUnit || ""} onChange={(event) => onSetComparisonUnit(row.id, event.target.value)}>
+                          <option value="">auto (per {unitLabel(row.unit)})</option>
+                          <option value="kg">per kg</option>
+                          <option value="l">per L</option>
+                          <option value="each">per unit</option>
+                        </select>
+                      ) : <>per {unitLabel(row.unit)}</>}
+                    </td>
                     {selected.map((supplier) => {
                       const article = row.prices[supplier];
                       const cheapest = article && row.cheapest === supplier && Object.keys(row.prices).length > 1;
                       return (
                         <td key={supplier} style={cheapest ? { fontWeight: 700, color: "var(--mf-success, #067647)" } : undefined}>
-                          {article ? money(article.price, row.currency) : "—"}
-                          {article && <><br /><small>{article.date}{article.source === "website" ? " · website" : ""}{article.pack ? ` · ${article.pack}` : ""}</small></>}
+                          {article ? `${article.estimated ? "≈ " : ""}${money(article.price, row.currency)}` : "—"}
+                          {article && <><br /><small>{article.date}{article.source === "website" ? " · website" : ""}{article.estimated ? ` · ${article.status}` : ""}{article.pack ? ` · ${article.pack}` : ""}</small></>}
                         </td>
                       );
                     })}

@@ -49,6 +49,7 @@ export function supplierComparisonTable(rows = [], suppliers = [], { minSupplier
       id: row.id,
       product: row.name,
       department: row.department || '',
+      comparisonUnit: row.comparisonUnit || '',
       unit,
       currency,
       prices,

@@ -77,3 +77,23 @@ test('website prices appear for suppliers without invoices and never hide an inv
   assert.deepEqual(suppliers, ['Albion:invoice', 'Woods:website']);
   assert.equal(row.comparison.best.supplier, 'Albion');
 });
+
+test('a product can be compared per unit, e.g. herb bunches', async () => {
+  const { itemsInPack } = await import('./latestProductComparison.js');
+  assert.equal(itemsInPack('BUNCH (12 IN BOX)'), 12);
+  assert.equal(itemsInPack('BOX X8 SMALL'), 8);
+  assert.equal(itemsInPack('100G BUNCH'), 1);
+  assert.equal(itemsInPack('X100G BAG'), 1);
+  assert.equal(itemsInPack('2 PACK'), 2);
+  assert.equal(itemsInPack('EACH'), 1);
+  assert.equal(itemsInPack('5KG'), null);
+  const product = { id: 'h', name: 'Herbs, Mint', supplier: 'TG', supplierId: 't', comparisonUnit: 'each', active: true };
+  const inv = (id, supplier, supplierId, pack, unitCost, unit = 'qty') => ({ id, supplier, supplierId, date: '2026-10-01', syncStatus: 'synced', persistenceSource: 'relational',
+    items: [{ id: `${id}l`, matchedProductId: 'h', packSize: pack, unitOfMeasure: unit, quantity: 1, unitCost }] });
+  const [row] = latestProductComparisons([product], [inv('t1', 'TG', 't', 'BUNCH (12 IN BOX)', 7.5), inv('a1', 'Albion', 'a', '100G BUNCH', 1.35), inv('k1', 'Kilo', 'k', '1kg', 9, 'kg')]);
+  const prices = Object.fromEntries(row.comparison.comparable.map(a => [a.supplier, a.price]));
+  assert.ok(Math.abs(prices.TG - 0.625) < 1e-9);
+  assert.ok(Math.abs(prices.Albion - 1.35) < 1e-9);
+  assert.equal(prices.Kilo, undefined, 'per-kg billing cannot become a per-unit price');
+  assert.equal(row.comparison.unit, 'each');
+});

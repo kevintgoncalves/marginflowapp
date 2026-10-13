@@ -13132,7 +13132,8 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
         </EditModal>
       )}
       {supplierComparisonOpen && (
-        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} />
+        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"}
+          onSetComparisonUnit={permissions.canEdit ? (productId, unit) => setProducts((current) => current.map((product) => (product.id === productId ? { ...product, comparisonUnit: unit || undefined, updatedAt: new Date().toISOString() } : product))) : null} />
       )}
       {catalogueImportOpen && (
         <CatalogueImport

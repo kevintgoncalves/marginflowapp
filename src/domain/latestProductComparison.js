@@ -11,6 +11,31 @@ export function articleIdentity(offer) {
   return `${supplier}:${code || `${normalizeSupplierDescription(offer.description)}:${packKey(offer.pack)}:${unitKey(offer.billingUnit)}`}`;
 }
 
+// Number of items in a pack description, for products compared per unit (e.g. herb bunches).
+// "BOX X8", "x12", "12 IN BOX", "2 PACK" → that number; a single item ("EACH", "SINGLE", "BUNCH",
+// "100G BUNCH", "X100G BAG") → 1. A bare weight such as "5KG" is unknown (null).
+export function itemsInPack(pack = '') {
+  const text = String(pack || '').toLowerCase();
+  const counted = text.match(/(\d+)\s*in\s*(?:a\s*)?(?:box|case|pack)/) || text.match(/(?:box|case|pack|tray)\s*(?:of\s*|x\s*)(\d+)/) || text.match(/(?:^|\s)x\s*(\d+)(?![\d.])(?!\s*(?:g|kg|ml|l|ltr|cl)\b)/) || text.match(/^(\d+)\s*(?:x\s*)?(?:pack|pk|pcs|pieces|each|bunch(?:es)?|heads?)\b/);
+  if (counted) return Number(counted[1]) > 0 ? Number(counted[1]) : null;
+  if (/\b(each|single|bunch|head|punnet|bag|unit|piece)\b/.test(text)) return 1;
+  return null;
+}
+
+// Re-expresses an article in the product's chosen comparison unit. Per-unit prices come from the
+// pack price and the item count in the pack text, flagged as estimated so they can be checked.
+function inComparisonUnit(article, unit) {
+  if (article.valid && article.unit === unit) return article;
+  if (unit === 'each' && !['kg','l'].includes(unitKey(article.billingUnit || ''))) {
+    const count = itemsInPack(article.pack);
+    const packPrice = Number(article.netPackPrice ?? article.packPrice);
+    if (count && Number.isFinite(packPrice) && packPrice > 0 && article.date) {
+      return { ...article, valid: true, unit: 'each', price: packPrice / count, estimated: true, status: count === 1 ? 'Per unit (1 item per pack)' : `Per unit (${count} per pack)` };
+    }
+  }
+  return { ...article, valid: false, status: article.valid ? 'Incompatible unit or currency' : article.status };
+}
+
 // Latest invoice date wins, including an invalid new conversion. Never fall back
 // to an older cheap/convertible offer when the newest article needs review.
 export function latestProductComparisons(products, invoices, mappings = []) {
@@ -44,12 +69,15 @@ export function latestProductComparisons(products, invoices, mappings = []) {
       const isCurrentSupplier=product.supplierId && candidate.supplierId ? product.supplierId===candidate.supplierId : sameSupplierIdentity(product.supplier || '',candidate.supplier || '');
       articles.push({...candidate,key:articleIdentity(candidate),valid:false,isCurrentSupplier,status:'No confirmed price',equivalence:'Associated canonical product; price unconfirmed',date:'',invoiceNumber:'',invoiceId:'',price:null,netPackPrice:null,currency:'GBP',unit:''});
     }
+    if (['kg','l','each'].includes(product.comparisonUnit)) {
+      for (let i = 0; i < articles.length; i += 1) articles[i] = inComparisonUnit(articles[i], product.comparisonUnit);
+    }
     let currentCandidates = articles.filter(a=>a.isCurrentSupplier);
     if (product.supplierProductCode) currentCandidates = currentCandidates.filter(a=>normalizeSupplierProductCode(a.code)===normalizeSupplierProductCode(product.supplierProductCode));
     else if (currentCandidates.length > 1 && product.packSize) currentCandidates = currentCandidates.filter(a=>packKey(a.pack)===packKey(product.packSize));
     const current = currentCandidates.length === 1 ? currentCandidates[0] : null;
     const validUnits = new Set(articles.filter(a=>a.valid).map(a=>`${a.currency}:${a.unit}`));
-    const basis = current?.valid ? `${current.currency}:${current.unit}` : validUnits.size===1 ? [...validUnits][0] : null;
+    const basis = ['kg','l','each'].includes(product.comparisonUnit) ? `GBP:${product.comparisonUnit}` : current?.valid ? `${current.currency}:${current.unit}` : validUnits.size===1 ? [...validUnits][0] : null;
     const comparable = articles.filter(a=>a.valid && `${a.currency}:${a.unit}`===basis).sort((a,b)=>a.price-b.price || a.supplier.localeCompare(b.supplier) || a.key.localeCompare(b.key));
     const review = articles.filter(a=>!comparable.includes(a)).map(a=>({...a,status:a.valid ? 'Incompatible unit or currency' : a.status}));
     const best = comparable[0] || null;
