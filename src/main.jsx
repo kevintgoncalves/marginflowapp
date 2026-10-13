@@ -66,6 +66,7 @@ import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import { currentPriceFieldsFromEntry, isLatestInvoicePrice, latestInvoicePriceEntry, manualEditChangesPrice } from "./domain/productCurrentPrice.js";
 import { applyCatalogueAttributes, catalogueArticleMappings, newCatalogueMappings } from "./domain/catalogueImport.js";
 import CatalogueImport from "./components/CatalogueImport.jsx";
+import SupplierComparison from "./components/SupplierComparison.jsx";
 import {
   forgetRelationalSupplierProductMapping,
   loadRelationalSupplierProductMappings,
@@ -12843,6 +12844,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [modalOpen, setModalOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [catalogueImportOpen, setCatalogueImportOpen] = useState(false);
+  const [supplierComparisonOpen, setSupplierComparisonOpen] = useState(false);
   const loadRelationalIdsForImport = useMemo(() => (supabase && companyId ? () => loadRelationalProductIds(supabase, companyId) : null), [companyId]);
   const [mergeProductIds, setMergeProductIds] = useState([]);
   const [keepProductId, setKeepProductId] = useState("");
@@ -13067,6 +13069,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           toolbarAction={(
             <div className="button-row left tight">
               <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
+              <button className="ghost" type="button" onClick={() => setSupplierComparisonOpen(true)}>Compare suppliers</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
               {onImportCatalogue && permissions.canEdit && permissions.canDelete && permissions.canImport && <button className="ghost" onClick={() => setCatalogueImportOpen(true)} type="button">Import product database</button>}
@@ -13127,6 +13130,9 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
             <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
           </div>
         </EditModal>
+      )}
+      {supplierComparisonOpen && (
+        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} />
       )}
       {catalogueImportOpen && (
         <CatalogueImport
