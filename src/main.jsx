@@ -6465,31 +6465,76 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       cloudSaveTimerRef.current = null;
     }
     const merges = preview.groups.filter((group) => group.action === "merge");
+    const mergeModules = ["products", "supplierProductMappings", "invoiceLineCorrections", "stocktakes", "recipes", "menus", "wasteItems"];
+    const isConnectionError = (error) => /failed to fetch|networkerror|network request failed|load failed|fetch failed|timeout|gateway|50[234]/i.test(`${error?.message || ""} ${error?.code || ""} ${error?.status || ""}`);
+    // After a dropped connection the merge may or may not have been saved. Read the cloud state
+    // back: if the merge is there, keep it; if not and nothing else changed, the caller retries.
+    // Never guesses — anything unexpected stops the import with everything done so far kept.
+    const checkMergeAfterConnectionError = async (group, expectedRevisions, attemptLabel) => {
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        onProgress({ stage: `Connection lost — checking the cloud (${attemptLabel}, try ${attempt}/6)`, done: report.merged, total: merges.length });
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(30000, 5000 * attempt)));
+        let rows;
+        try { rows = await loadCloudState(cloudScope); } catch { continue; }
+        const serverRevisions = Object.fromEntries(rows.map((row) => [row.module_key, Number(row.revision || 1)]));
+        const serverProducts = cloudSnapshotFromRows(rows).products || [];
+        const committed = group.mergeProductIds.every((id) => serverProducts.some((product) => product.id === id && product.mergedIntoProductId === group.keepProductId));
+        if (committed) {
+          cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...Object.fromEntries(mergeModules.map((key) => [key, serverRevisions[key]])) };
+          return "committed";
+        }
+        const unchanged = mergeModules.every((key) => Number(serverRevisions[key] || 0) === Number(expectedRevisions[key] || 0));
+        return unchanged ? "not_committed" : "changed_elsewhere";
+      }
+      return "unreachable";
+    };
     for (let index = 0; index < merges.length; index += 1) {
       const group = merges[index];
       onProgress({ stage: "Merging duplicate products", done: index, total: merges.length });
-      try {
-        const merged = applyProductMergeToSnapshot(working, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds });
-        if (cloudEnabled) {
+      const merged = (() => {
+        try { return applyProductMergeToSnapshot(working, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds }); } catch (error) { return { error }; }
+      })();
+      if (merged.error) {
+        report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: merged.error.message || "Merge failed" });
+        continue;
+      }
+      let saved = !cloudEnabled;
+      for (let attempt = 1; !saved && attempt <= 3; attempt += 1) {
+        const expectedRevisions = { ...cloudRevisionsRef.current };
+        try {
           const result = await persistAtomicProductMerge(supabase, {
             companyId,
             locationId: cloudScope.locationId || "",
             keepProductId: group.keepProductId,
             mergeProductIds: group.mergeProductIds,
             nextSnapshot: merged.snapshot,
-            expectedModuleRevisions: cloudRevisionsRef.current,
+            expectedModuleRevisions: expectedRevisions,
           });
           if (result?.module_revisions) cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...result.module_revisions };
-        }
-        working = merged.snapshot;
-        report.merged += 1;
-      } catch (error) {
-        report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: error.message || "Merge failed" });
-        if (/cloud_revision_conflict|Not authorised|network|fetch/i.test(error.message || "")) {
-          commit(working);
-          throw new Error(`Stopped after ${report.merged} merges: ${error.message}`);
+          saved = true;
+        } catch (error) {
+          const message = error.message || "Merge failed";
+          if (!isConnectionError(error)) {
+            report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: message });
+            if (/cloud_revision_conflict|Not authorised/i.test(message)) {
+              commit(working);
+              throw new Error(`Stopped after ${report.merged} merges: ${message}.`);
+            }
+            break;
+          }
+          const state = await checkMergeAfterConnectionError(group, expectedRevisions, `${group.catalogueId} ${group.name}`);
+          if (state === "committed") { saved = true; break; }
+          if (state !== "not_committed" || attempt === 3) {
+            report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: message });
+            commit(working);
+            const reason = state === "changed_elsewhere" ? "the data was changed somewhere else meanwhile" : state === "unreachable" ? "the cloud could not be reached" : "the connection kept dropping";
+            throw new Error(`Stopped after ${report.merged} merges because ${reason} (${message}). Reload the page before continuing.`);
+          }
         }
       }
+      if (!saved) continue;
+      working = merged.snapshot;
+      report.merged += 1;
     }
     onProgress({ stage: "Updating names, departments and supplier articles", done: 0, total: 1 });
     const attributes = applyCatalogueAttributes(working.products, preview, { idFactory: uid, companyId });
