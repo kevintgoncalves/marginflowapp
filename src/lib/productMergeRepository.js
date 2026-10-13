@@ -11,8 +11,15 @@ export const PRODUCT_MERGE_SNAPSHOT_MODULES = Object.freeze([
   "wasteItems",
 ]);
 
+// Invoices live in the relational tables; the server relinks invoice_lines itself and the
+// protect_marginflow_cloud_state_writes trigger discards every write to the "invoices" snapshot
+// module. Sending the invoice snapshot only added megabytes to every merge (and pushed large
+// workspaces past the database statement timeout), so an empty array is sent instead.
 export function productMergeSnapshotModules(snapshot = {}) {
-  return Object.fromEntries(PRODUCT_MERGE_SNAPSHOT_MODULES.map((key) => [key, Array.isArray(snapshot[key]) ? snapshot[key] : []]));
+  return Object.fromEntries(PRODUCT_MERGE_SNAPSHOT_MODULES.map((key) => [
+    key,
+    key === "invoices" ? [] : (Array.isArray(snapshot[key]) ? snapshot[key] : []),
+  ]));
 }
 
 export async function persistAtomicProductMerge(client, {

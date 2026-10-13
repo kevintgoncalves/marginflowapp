@@ -123,6 +123,8 @@ test("cloud merge uses one atomic RPC and propagates failures without applying p
   assert.deepEqual(calls[0].payload.p_merge_product_ids, [mergeProductId]);
   assert.equal(Object.hasOwn(calls[0].payload.p_snapshot_modules, "products"), true);
   assert.equal(calls[0].payload.p_expected_module_revisions.products, 0);
+  assert.deepEqual(calls[0].payload.p_snapshot_modules.invoices, [], "invoice snapshot is not sent; the server ignores it");
+  assert.equal(calls[0].payload.p_snapshot_modules.recipes.length, 1, "other modules are still sent in full");
 });
 
 test("supplier mapping conflicts preserve both rules and deterministically supersede the older one", () => {
