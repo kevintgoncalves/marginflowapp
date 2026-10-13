@@ -22,31 +22,30 @@ export function confirmedPackConversion(product = {}, line = {}, supplier = '') 
   return { purchaseUnit: 'pack', baseQuantity: Number(format.baseQuantity), baseUnit: format.baseUnit, confirmed: true, source: 'product_supplier_format', expected, byCode: byCode.length > 0 };
 }
 
-// Supplier website prices recorded on the product (normalised per kg/l/each). They are shown
-// only for suppliers with no invoice price for the product, so they never hide what was paid.
-function websiteOffers(product = {}, invoiceOffers = []) {
-  // A website price is used for a supplier only when it is newer than every invoice price from
-  // that supplier for this product; then it replaces them in the comparison (labelled as website).
+// Reviewed catalogue prices (the product database import): one per supplier article, from the
+// supplier website or the last invoice, already converted per kg / L / unit. For each supplier,
+// these are used unless an invoice is newer than the reviewed price; a newer invoice wins.
+function catalogueOffers(product = {}, invoiceOffers = []) {
   const latestInvoice = (supplier) => invoiceOffers.filter(offer => sameSupplierIdentity(offer.supplier || '', supplier || '')).map(offer => offer.date).sort().at(-1) || '';
-  return (product.priceHistory || []).filter(entry => String(entry.source || '') === 'Supplier website'
-    && Number(entry.normalizedCost) > 0 && ['kg','l','each'].includes(entry.normalizedUnit) && entry.conversionReviewRequired !== true
-    && String(entry.date || '').slice(0, 10) > latestInvoice(entry.supplier))
-    .map((entry, index) => {
-      // A per-unit website price whose pack text names more items than its conversion used
-      // (e.g. "250 x 9CM" converted as 1 unit) is re-expressed per item and marked as estimated.
-      const items = entry.normalizedUnit === 'each' ? itemsInPack(entry.packSize) : null;
-      const used = Number(entry.price) / Number(entry.normalizedCost);
-      const corrected = items > 1 && Math.abs(used - items) > 0.01 ? Number(entry.price) / items : null;
-      return { entry, index, corrected, items };
-    })
-    .map(({ entry, index, corrected, items }) => ({ supplier: entry.supplier || '', supplierId: '', code: '', description: 'Supplier website price', pack: entry.packSize || '',
-      packPrice: Number(entry.price), netPackPrice: Number(entry.price), billingUnit: 'pack', date: String(entry.date || '').slice(0, 10), lineId: `web-${index}`,
-      brand: '', specification: '', equivalenceStatus: '', matchSource: '', invoiceId: '', invoiceNumber: 'Website price', source: 'website',
-      valid: true, status: corrected != null ? `Per unit (${items} per pack)` : 'Comparable', estimated: corrected != null, unit: entry.normalizedUnit, factor: null, volume: 0, net: 0, price: corrected ?? Number(entry.normalizedCost),
-      equivalence: 'Same canonical product (supplier website)', currency: 'GBP' }));
+  return (product.supplierFormats || []).filter(format => format.source === 'catalogue_import'
+    && Number(format.baseQuantity) > 0 && Number(format.purchaseUnitCost) > 0 && ['kg','l','each'].includes(format.baseUnit) && format.conversionReviewRequired !== true
+    && String(format.date || '').slice(0, 10) >= latestInvoice(format.supplier))
+    .map((format, index) => {
+      const packPrice = Number(format.purchaseUnitCost);
+      // A per-unit price whose pack names more items than its conversion used (e.g. "250 x 9CM"
+      // converted as 1 unit) is re-expressed per item and marked as estimated.
+      const items = format.baseUnit === 'each' ? itemsInPack(format.packSize) : null;
+      const corrected = items > 1 && Math.abs(Number(format.baseQuantity) - items) > 0.01 ? packPrice / items : null;
+      const website = format.priceSource === 'supplier_website';
+      return { supplier: format.supplier || '', supplierId: '', code: format.supplierProductCode || '', description: format.description || '', pack: format.packSize || '',
+        packPrice, netPackPrice: packPrice, billingUnit: 'pack', date: String(format.date || '').slice(0, 10), lineId: `catalogue-${index}`,
+        brand: '', specification: '', equivalenceStatus: '', matchSource: '', invoiceId: '', invoiceNumber: website ? 'Website price' : 'Reviewed invoice price',
+        source: website ? 'website' : 'catalogue', valid: true, status: corrected != null ? `Per unit (${items} per pack)` : 'Comparable', estimated: corrected != null,
+        unit: format.baseUnit, factor: Number(format.baseQuantity), volume: 0, net: 0, price: corrected ?? packPrice / Number(format.baseQuantity),
+        equivalence: 'Same canonical product (reviewed product database)', currency: 'GBP' };
+    });
 }
 
-// Callers supply the confirmed financial collection. Demo rows need an explicit flag.
 export function purchaseComparison(products, invoices, { from = '', to = '', demo = false, includeWebsite = false } = {}) {
   const rows = new Map(products.filter(p => p.active !== false).map(p => [p.id, {
     id: p.id, name: p.name || p.productName, specification: p.specification || '',
@@ -95,8 +94,8 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
     }
   }
   if (includeWebsite) for (const row of rows.values()) {
-    const web = websiteOffers(productsById.get(row.id), row.offers).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to));
-    if (web.length) row.offers = [...row.offers.filter(offer => !web.some(w => sameSupplierIdentity(w.supplier || '', offer.supplier || ''))), ...web];
+    const reviewed = catalogueOffers(productsById.get(row.id), row.offers).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to));
+    if (reviewed.length) row.offers = [...row.offers.filter(offer => !reviewed.some(r => sameSupplierIdentity(r.supplier || '', offer.supplier || ''))), ...reviewed];
   }
   return [...rows.values()].map(row => {
     const valid = row.offers.filter(offer => offer.valid);

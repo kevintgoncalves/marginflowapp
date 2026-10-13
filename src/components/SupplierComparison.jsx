@@ -111,7 +111,7 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
                       return (
                         <td key={supplier} style={cheapest ? { fontWeight: 700, color: "var(--mf-success, #067647)" } : undefined}>
                           {article ? `${article.estimated ? "≈ " : ""}${money(article.price, row.currency)}` : row.comparisonUnit ? <small>no price per {unitLabel(row.comparisonUnit)}</small> : "—"}
-                          {article && <><br /><small>{article.date}{article.source === "website" ? " · website" : ""}{article.estimated ? ` · ${article.status}` : ""}{article.pack ? ` · ${article.pack}` : ""}</small></>}
+                          {article && <><br /><small>{article.date}{article.source === "website" ? " · website" : article.source === "catalogue" ? " · invoice (reviewed)" : " · invoice"}{article.estimated ? ` · ${article.status}` : ""}{article.pack ? ` · ${article.pack}` : ""}</small></>}
                         </td>
                       );
                     })}
