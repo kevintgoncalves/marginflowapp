@@ -349,7 +349,12 @@ export function newCatalogueMappings(existing = [], candidates = []) {
 export function supplierActionsStatus(plan, suppliers = []) {
   return (plan?.suppliers || []).map((action) => {
     if (action.action === "merge") {
-      const from = suppliers.find((supplier) => sameSupplierIdentity(supplier.name, action.from) && !supplier.mergedIntoSupplierId && supplier.active !== false);
+      // The source counts as still present only when a supplier carries exactly that name and is
+      // not the merge target itself ("Cheese Man" vs "The Cheese Man" share an identity key).
+      const exact = (value) => String(value || "").trim().toLowerCase();
+      const from = suppliers.find((supplier) => exact(supplier.name) === exact(action.from)
+        && exact(supplier.name) !== exact(action.into)
+        && !supplier.mergedIntoSupplierId && supplier.active !== false && !supplier.deletedAt);
       return { ...action, done: !from };
     }
     if (action.action === "delete") {

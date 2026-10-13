@@ -146,4 +146,7 @@ test("supplier actions report what is still to do", () => {
   assert.equal(status[0].done, false);
   assert.equal(status[1].done, false);
   assert.equal(supplierActionsStatus(plan, [{ name: "TG Fruits" }, { name: "Direct Seafoods" }])[1].done, true);
+  const cheese = { suppliers: [{ action: "merge", from: "Cheese Man", into: "The Cheese Man" }] };
+  assert.equal(supplierActionsStatus(cheese, [{ name: "The Cheese Man" }])[0].done, true, "the target alone does not count as the old name");
+  assert.equal(supplierActionsStatus(cheese, [{ name: "The Cheese Man" }, { name: "Cheese Man" }])[0].done, false);
 });
