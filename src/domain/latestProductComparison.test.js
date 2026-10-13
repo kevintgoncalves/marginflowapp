@@ -50,3 +50,30 @@ test('per-kg billing derives pack price without dividing the comparable price tw
  assert.equal(row.comparison.best.price,2.65);assert.equal(row.comparison.best.netPackPrice,13.25);
  assert.equal(JSON.stringify([product,current,perKg]),original);
 });
+
+test('lines without their own conversion use the confirmed pack of that supplier article', () => {
+  const product = { id: 'm', name: 'Miso, White', supplier: 'Woods', supplierId: 'w', packSize: '1KG', active: true,
+    supplierFormats: [{ supplier: 'Woods', supplierProductCode: 'MISO1', packSize: '1KG', baseQuantity: 1, baseUnit: 'kg', conversionConfidence: 'manual', conversionReviewRequired: false }] };
+  const line = { id: 'l', matchedProductId: 'm', supplierProductCode: 'MISO1', packSize: '1KG', unitOfMeasure: 'qty', quantity: 2, unitCost: 3.14 };
+  const inv = { id: 'w1', supplier: 'Woods', supplierId: 'w', date: '2026-10-01', syncStatus: 'synced', persistenceSource: 'relational', items: [line] };
+  const [row] = latestProductComparisons([product], [inv]);
+  assert.equal(row.comparison.current.valid, true);
+  assert.equal(row.comparison.current.unit, 'kg');
+  assert.ok(Math.abs(row.comparison.current.price - 3.14) < 1e-9);
+  const ruled = latestProductComparisons([product], [{ ...inv, items: [{ ...line, conversionRule: { baseQuantity: 2, baseUnit: 'kg', confirmed: false } }] }]);
+  assert.equal(ruled[0].comparison.current.valid, false, "a line's own unconfirmed rule is never replaced");
+});
+
+test('website prices appear for suppliers without invoices and never hide an invoice price', () => {
+  const product = { id: 'm', name: 'Milk', supplier: 'Albion', supplierId: 'a', packSize: '2L', active: true,
+    priceHistory: [
+      { source: 'Supplier website', supplier: 'Woods', date: '2026-10-12', price: 2.2, packSize: '2L', normalizedCost: 1.1, normalizedUnit: 'l' },
+      { source: 'Supplier website', supplier: 'Albion', date: '2026-10-12', price: 1, packSize: '2L', normalizedCost: 0.5, normalizedUnit: 'l' },
+    ] };
+  const inv = { id: 'a1', supplier: 'Albion', supplierId: 'a', date: '2026-10-01', syncStatus: 'synced', persistenceSource: 'relational',
+    items: [{ id: 'l', matchedProductId: 'm', packSize: '2L', unitOfMeasure: 'kg', quantity: 1, unitCost: 1.29, conversionRule: { baseQuantity: 2, baseUnit: 'l', confirmed: true } }] };
+  const [row] = latestProductComparisons([product], [inv]);
+  const suppliers = row.comparison.comparable.map(a => `${a.supplier}:${a.source}`).sort();
+  assert.deepEqual(suppliers, ['Albion:invoice', 'Woods:website']);
+  assert.equal(row.comparison.best.supplier, 'Albion');
+});

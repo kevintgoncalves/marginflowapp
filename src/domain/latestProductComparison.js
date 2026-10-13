@@ -14,7 +14,7 @@ export function articleIdentity(offer) {
 // Latest invoice date wins, including an invalid new conversion. Never fall back
 // to an older cheap/convertible offer when the newest article needs review.
 export function latestProductComparisons(products, invoices, mappings = []) {
-  const historical = new Map(purchaseComparison(products, invoices).map(row=>[row.id,row]));
+  const historical = new Map(purchaseComparison(products, invoices, { includeWebsite: true }).map(row=>[row.id,row]));
   return products.filter(product=>product.active !== false).map(product=>{
     const groups = new Map();
     for (const offer of historical.get(product.id)?.offers || []) {
