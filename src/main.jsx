@@ -6457,6 +6457,18 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   // Catalogue import: merges run one group at a time through the same atomic merge as the
   // Products page, then names/departments/articles are applied and article rules are saved.
   // Every finished step is kept if the import stops; running it again skips finished work.
+  // Supplier price comparison needs invoice lines; the invoice list only holds headers of the
+  // latest page. Read-only: the last 12 months of confirmed invoices with their lines.
+  const loadPriceInvoices = useMemo(() => {
+    if (!cloudEnabled || demoMode || !cloudScope.companyId) return null;
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    return () => {
+      const end = new Date();
+      const start = new Date(end.getTime() - 365 * 86400000);
+      return loadRelationalInvoiceReportRange(supabase, scope, { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) });
+    };
+  }, [cloudEnabled, demoMode, cloudScope.companyId, cloudScope.locationId]);
+
   const runCatalogueImport = async (options) => {
     if (catalogueImportRunningRef.current) throw new Error("An import is already running.");
     catalogueImportRunningRef.current = true;
@@ -7419,7 +7431,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} onImportCatalogue={cloudEnabled || demoMode ? runCatalogueImport : null} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} onImportCatalogue={cloudEnabled || demoMode ? runCatalogueImport : null} loadPriceInvoices={loadPriceInvoices} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -12818,7 +12830,7 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, onImportCatalogue = null, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, onImportCatalogue = null, loadPriceInvoices = null, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const visibleSuppliers = activeSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
@@ -12846,7 +12858,26 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const {draft: quotationDraft, setDraft: setQuotationDraft, message: quotationDraftMessage} = useQuotationDraft(userId, draftCompanyId);
   const quotationSelection = quotationDraft.ids;
   const setQuotationSelection = updater => setQuotationDraft(current => ({...current, ids: updater(current.ids)}));
-  const rows = useMemo(() => latestProductComparisons(products, invoices, supplierProductMappings), [products, invoices, supplierProductMappings]);
+  const [priceInvoices, setPriceInvoices] = useState(null);
+  const [priceInvoicesStatus, setPriceInvoicesStatus] = useState("");
+  useEffect(() => {
+    if (!loadPriceInvoices) return undefined;
+    let cancelled = false;
+    setPriceInvoicesStatus("loading");
+    loadPriceInvoices()
+      .then((loaded) => { if (!cancelled) { setPriceInvoices(loaded); setPriceInvoicesStatus(""); } })
+      .catch(() => { if (!cancelled) setPriceInvoicesStatus("error"); });
+    return () => { cancelled = true; };
+  }, [loadPriceInvoices]);
+  // Invoices with lines from the price history, plus any invoice in memory that carries its lines
+  // (e.g. one just saved). Header-only list rows never replace a version with lines.
+  const comparisonInvoices = useMemo(() => {
+    if (!priceInvoices) return invoices;
+    const byId = new Map(priceInvoices.map((invoice) => [invoice.id, invoice]));
+    invoices.forEach((invoice) => { if ((invoice.items || []).length || !byId.has(invoice.id)) byId.set(invoice.id, invoice); });
+    return [...byId.values()];
+  }, [priceInvoices, invoices]);
+  const rows = useMemo(() => latestProductComparisons(products, comparisonInvoices, supplierProductMappings), [products, comparisonInvoices, supplierProductMappings]);
   const comparisonProduct = rows.find(row => row.id === comparisonId);
   const filteredProductRows = useMemo(() => rows.filter(row => (!productDepartment || row.department === productDepartment) && (!productSupplier || row.supplier === productSupplier || row.comparison.articles.some(article => article.supplier === productSupplier))), [rows,productDepartment,productSupplier]);
   const productRowsForExport = useMemo(() => tableRowsMatchingQuery(filteredProductRows, productQuery), [productQuery, filteredProductRows]);
@@ -13022,7 +13053,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
             { key: "packSize", label: "Unit", render: (value, row) => value || row.baseUnit || "-" },
             { key: "unitCost", label: "Cost (ex)", render: (value) => money(value) },
             { key: "supplier", label: "Supplier" },
-            { key: "cheapestSupplierName", label: "Cheapest supplier", render: (value, row) => value ? <span>{value}<small className="mf-price-date">{comparisonMoney(row.comparison.best.price, row.comparison.best.currency)}/{comparisonUnit(row.comparison.best.unit)} · {row.comparison.best.date}</small></span> : row.comparison.status },
+            { key: "cheapestSupplierName", label: "Cheapest supplier", render: (value, row) => value ? <span>{value}<small className="mf-price-date">{comparisonMoney(row.comparison.best.price, row.comparison.best.currency)}/{comparisonUnit(row.comparison.best.unit)} · {row.comparison.best.date}</small></span> : priceInvoicesStatus === "loading" ? "Loading prices…" : priceInvoicesStatus === "error" ? "Prices could not be loaded" : row.comparison.status },
             { key: "priceDifferenceLabel", label: "Price difference" },
             { key: "comparisonAction", label: "Comparison", render: (_, row) => <button className="ghost mini-button" type="button" onClick={event => { event.stopPropagation(); setComparisonId(row.id); }}>View comparison</button> },
             { key: "active", label: "Status", render: (value) => <Badge tone={value === false ? "amber" : "green"}>{value === false ? "Inactive" : "Active"}</Badge> },
