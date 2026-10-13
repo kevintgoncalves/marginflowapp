@@ -12862,15 +12862,22 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const setQuotationSelection = updater => setQuotationDraft(current => ({...current, ids: updater(current.ids)}));
   const [priceInvoices, setPriceInvoices] = useState(null);
   const [priceInvoicesStatus, setPriceInvoicesStatus] = useState("");
+  const [priceReload, setPriceReload] = useState(0);
   useEffect(() => {
     if (!loadPriceInvoices) return undefined;
     let cancelled = false;
     setPriceInvoicesStatus("loading");
-    loadPriceInvoices()
+    // One automatic retry after a short pause; afterwards the user can retry from the comparison.
+    const attempt = (retry) => loadPriceInvoices()
       .then((loaded) => { if (!cancelled) { setPriceInvoices(loaded); setPriceInvoicesStatus(""); } })
-      .catch(() => { if (!cancelled) setPriceInvoicesStatus("error"); });
+      .catch(() => {
+        if (cancelled) return;
+        if (retry) window.setTimeout(() => { if (!cancelled) attempt(false); }, 3000);
+        else setPriceInvoicesStatus("error");
+      });
+    attempt(true);
     return () => { cancelled = true; };
-  }, [loadPriceInvoices]);
+  }, [loadPriceInvoices, priceReload]);
   // Invoices with lines from the price history, plus any invoice in memory that carries its lines
   // (e.g. one just saved). Header-only list rows never replace a version with lines.
   const comparisonInvoices = useMemo(() => {
@@ -13132,7 +13139,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
         </EditModal>
       )}
       {supplierComparisonOpen && (
-        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"}
+        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} loadError={priceInvoicesStatus === "error"} onRetryPrices={() => setPriceReload((value) => value + 1)}
           onSetComparisonUnit={permissions.canEdit ? (productId, unit) => setProducts((current) => current.map((product) => (product.id === productId ? { ...product, comparisonUnit: unit || undefined, updatedAt: new Date().toISOString() } : product))) : null} />
       )}
       {catalogueImportOpen && (

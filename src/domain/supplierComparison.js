@@ -41,7 +41,16 @@ export function supplierComparisonTable(rows = [], suppliers = [], { minSupplier
     const basis = bases.sort((a, b) => bases.filter((x) => x === b).length - bases.filter((x) => x === a).length)[0];
     Object.keys(prices).forEach((supplier) => { if (basisOf(prices[supplier]) !== basis) delete prices[supplier]; });
     const priced = Object.keys(prices);
-    if (priced.length < minSuppliers) return;
+    // A product whose comparison unit was chosen by hand stays visible even when too few
+    // suppliers have a price in that unit, so the choice can be seen and changed back.
+    const chosenUnit = ['kg', 'l', 'each'].includes(row.comparisonUnit) ? row.comparisonUnit : '';
+    const offeredBySelected = suppliers.filter((supplier) => [...(row.comparison?.comparable || []), ...(row.comparison?.review || [])]
+      .some((article) => sameSupplierIdentity(article.supplier || '', supplier))).length;
+    if (priced.length < minSuppliers && !(chosenUnit && offeredBySelected >= Math.min(minSuppliers, 2))) return;
+    if (!priced.length) {
+      table.push({ id: row.id, product: row.name, department: row.department || '', comparisonUnit: chosenUnit, unit: chosenUnit, currency: 'GBP', prices: {}, cheapest: '', spread: null, spreadPercent: null, missingInUnit: true });
+      return;
+    }
     const cheapest = priced.reduce((best, supplier) => (!best || prices[supplier].price < prices[best].price ? supplier : best), '');
     const dearest = priced.reduce((worst, supplier) => (!worst || prices[supplier].price > prices[worst].price ? supplier : worst), '');
     const [currency, unit] = basis.split(':');
@@ -53,7 +62,7 @@ export function supplierComparisonTable(rows = [], suppliers = [], { minSupplier
       unit,
       currency,
       prices,
-      cheapest,
+      cheapest: priced.length > 1 ? cheapest : '',
       spread: prices[dearest].price - prices[cheapest].price,
       spreadPercent: prices[cheapest].price > 0 ? (prices[dearest].price - prices[cheapest].price) / prices[cheapest].price : null,
     });

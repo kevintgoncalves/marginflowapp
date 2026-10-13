@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { latestProductComparisons } from './latestProductComparison.js';
+import { itemsInPack as itemsInPackForTest } from './packCount.js';
 import { productExportRows, supplierExportRows, createProductsWorkbook } from '../utils/exportProductsExcel.js';
 const product={id:'p',name:'Rice',supplier:'Current',supplierId:'a',packSize:'3kg',unitCost:9,department:'Food'};
 const invoice=(id,supplier,supplierId,date,price,pack='3kg',extras={})=>({id,supplier,supplierId,date,syncStatus:'synced',persistenceSource:'relational',items:[{id:`${id}-line`,matchedProductId:'p',rawDescription:'Rice article',supplierProductCode:`${supplierId}-rice`,unitOfMeasure:'bag',packSize:pack,quantity:2,unitCost:price,...extras}]});
@@ -96,4 +97,14 @@ test('a product can be compared per unit, e.g. herb bunches', async () => {
   assert.ok(Math.abs(prices.Albion - 1.35) < 1e-9);
   assert.equal(prices.Kilo, undefined, 'per-kg billing cannot become a per-unit price');
   assert.equal(row.comparison.unit, 'each');
+});
+
+test('a per-unit website price converted as one item is re-expressed per item when the pack names the count', () => {
+  assert.equal(itemsInPackForTest('250 x 9CM'), 250);
+  const product = { id: 's', name: 'Skewers', supplier: 'Albion', active: true, comparisonUnit: 'each',
+    priceHistory: [{ source: 'Supplier website', supplier: 'Woods', date: '2026-08-03', price: 3.61, packSize: '250 x 9CM', normalizedCost: 3.61, normalizedUnit: 'each' }] };
+  const [row] = latestProductComparisons([product], []);
+  const woods = row.comparison.comparable.find((a) => a.supplier === 'Woods');
+  assert.ok(Math.abs(woods.price - 3.61 / 250) < 1e-9);
+  assert.equal(woods.estimated, true);
 });

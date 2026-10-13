@@ -37,3 +37,12 @@ test('anonymous price request never names the other suppliers', () => {
   const text = JSON.stringify(request);
   assert.ok(!/Woods|Elite/.test(text), 'competitor names are not included');
 });
+
+test('a product with a hand-chosen unit stays visible when suppliers have no price in that unit', () => {
+  const vinegar = { id: 'v', name: 'Vinegar', comparisonUnit: 'kg', comparison: { comparable: [], review: [article('Woods', 1.8, { unit: 'l', valid: false }), article('Albion Fine Foods', 0.97, { unit: 'l', valid: false })] } };
+  const table = supplierComparisonTable([vinegar], ['Woods', 'Albion Fine Foods']);
+  assert.equal(table.length, 1);
+  assert.equal(table[0].missingInUnit, true);
+  assert.equal(table[0].unit, 'kg');
+  assert.equal(supplierComparisonTable([{ ...vinegar, comparisonUnit: '' }], ['Woods', 'Albion Fine Foods']).length, 0);
+});

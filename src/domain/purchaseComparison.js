@@ -1,6 +1,7 @@
 import { packKey, purchaseConversion, unitKey } from './reusablePurchasing.js';
 import { normalizeSupplierProductCode } from './invoiceProductMatching.js';
 import { sameSupplierIdentity } from './supplierIdentity.js';
+import { itemsInPack } from './packCount.js';
 
 // A pack conversion confirmed for this product and supplier article (catalogue import or manual),
 // used for invoice lines that carry no conversion of their own. Never overrides a line's own rule.
@@ -26,10 +27,18 @@ function websiteOffers(product = {}, invoiceSuppliers = []) {
   return (product.priceHistory || []).filter(entry => String(entry.source || '') === 'Supplier website'
     && Number(entry.normalizedCost) > 0 && ['kg','l','each'].includes(entry.normalizedUnit) && entry.conversionReviewRequired !== true
     && !invoiceSuppliers.some(name => sameSupplierIdentity(name || '', entry.supplier || '')))
-    .map((entry, index) => ({ supplier: entry.supplier || '', supplierId: '', code: '', description: 'Supplier website price', pack: entry.packSize || '',
+    .map((entry, index) => {
+      // A per-unit website price whose pack text names more items than its conversion used
+      // (e.g. "250 x 9CM" converted as 1 unit) is re-expressed per item and marked as estimated.
+      const items = entry.normalizedUnit === 'each' ? itemsInPack(entry.packSize) : null;
+      const used = Number(entry.price) / Number(entry.normalizedCost);
+      const corrected = items > 1 && Math.abs(used - items) > 0.01 ? Number(entry.price) / items : null;
+      return { entry, index, corrected, items };
+    })
+    .map(({ entry, index, corrected, items }) => ({ supplier: entry.supplier || '', supplierId: '', code: '', description: 'Supplier website price', pack: entry.packSize || '',
       packPrice: Number(entry.price), netPackPrice: Number(entry.price), billingUnit: 'pack', date: String(entry.date || '').slice(0, 10), lineId: `web-${index}`,
       brand: '', specification: '', equivalenceStatus: '', matchSource: '', invoiceId: '', invoiceNumber: 'Website price', source: 'website',
-      valid: true, status: 'Comparable', unit: entry.normalizedUnit, factor: null, volume: 0, net: 0, price: Number(entry.normalizedCost),
+      valid: true, status: corrected != null ? `Per unit (${items} per pack)` : 'Comparable', estimated: corrected != null, unit: entry.normalizedUnit, factor: null, volume: 0, net: 0, price: corrected ?? Number(entry.normalizedCost),
       equivalence: 'Same canonical product (supplier website)', currency: 'GBP' }));
 }
 

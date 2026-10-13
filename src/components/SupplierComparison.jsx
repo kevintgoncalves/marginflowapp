@@ -6,7 +6,7 @@ import { downloadSupplierPriceRequest } from "../utils/exportSupplierPriceReques
 const money = (value, currency = "GBP") => (value == null ? "—" : new Intl.NumberFormat("en-GB", { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value));
 const unitLabel = (unit) => (unit === "l" ? "L" : unit === "each" ? "unit" : unit);
 
-export default function SupplierComparison({ open, onClose, rows = [], loading = false, companyName = "", onSetComparisonUnit = null }) {
+export default function SupplierComparison({ open, onClose, rows = [], loading = false, loadError = false, onRetryPrices = null, companyName = "", onSetComparisonUnit = null }) {
   const suppliers = useMemo(() => comparableSuppliers(rows), [rows]);
   const [selected, setSelected] = useState([]);
   const [minSuppliers, setMinSuppliers] = useState(2);
@@ -34,7 +34,13 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
     <InvoiceModal open={open} onClose={onClose} title="Compare suppliers" wide className="mf-workflow-screen"
       footer={<button className="ghost" type="button" onClick={onClose}>Close</button>}>
       <p>Choose two to four suppliers. Prices are the latest per supplier, from invoices or supplier websites, compared per kg, L or unit (ex VAT). Change a product's comparison unit in the Unit column (for example, herb bunches per unit); prices marked ≈ are worked out from the pack description.</p>
-      {loading && <p role="status">Loading prices from the last 12 months…</p>}
+      {loading && <p role="status">Loading invoice prices from the last 12 months… Suppliers with invoice prices only (for example TG Fruits) appear when this finishes.</p>}
+      {loadError && (
+        <div className="invoice-status error" role="alert">
+          <strong>Invoice prices could not be loaded.</strong> Only supplier website prices are shown, so suppliers you only have invoices from are missing.
+          {onRetryPrices && <button type="button" className="ghost" onClick={onRetryPrices}>Try again</button>}
+        </div>
+      )}
       <div className="button-row left tight" role="group" aria-label="Suppliers">
         {suppliers.map((supplier) => (
           <button key={supplier.name} type="button" className={selected.includes(supplier.name) ? "" : "ghost"} onClick={() => toggle(supplier.name)} aria-pressed={selected.includes(supplier.name)}>
@@ -96,7 +102,7 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
                       const cheapest = article && row.cheapest === supplier && Object.keys(row.prices).length > 1;
                       return (
                         <td key={supplier} style={cheapest ? { fontWeight: 700, color: "var(--mf-success, #067647)" } : undefined}>
-                          {article ? `${article.estimated ? "≈ " : ""}${money(article.price, row.currency)}` : "—"}
+                          {article ? `${article.estimated ? "≈ " : ""}${money(article.price, row.currency)}` : row.comparisonUnit ? <small>no price per {unitLabel(row.comparisonUnit)}</small> : "—"}
                           {article && <><br /><small>{article.date}{article.source === "website" ? " · website" : ""}{article.estimated ? ` · ${article.status}` : ""}{article.pack ? ` · ${article.pack}` : ""}</small></>}
                         </td>
                       );
