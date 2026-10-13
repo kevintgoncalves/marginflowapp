@@ -64,6 +64,8 @@ import {
 } from "lucide-react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import { currentPriceFieldsFromEntry, isLatestInvoicePrice, latestInvoicePriceEntry, manualEditChangesPrice } from "./domain/productCurrentPrice.js";
+import { applyCatalogueAttributes, catalogueArticleMappings, newCatalogueMappings } from "./domain/catalogueImport.js";
+import CatalogueImport from "./components/CatalogueImport.jsx";
 import {
   forgetRelationalSupplierProductMapping,
   loadRelationalSupplierProductMappings,
@@ -6441,6 +6443,88 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     return merged.analysis;
   };
 
+  // Catalogue import: merges run one group at a time through the same atomic merge as the
+  // Products page, then names/departments/articles are applied and article rules are saved.
+  // Every finished step is kept if the import stops; running it again skips finished work.
+  const runCatalogueImport = async ({ preview, onProgress = () => {} }) => {
+    const report = { merged: 0, updated: 0, created: 0, deactivated: 0, rulesSaved: 0, rulesFailed: 0, failedGroups: [], done: false };
+    const companyId = cloudScope.companyId || "";
+    let working = cloudSnapshot;
+    const commit = (snapshot) => {
+      setProducts(snapshot.products);
+      setSupplierProductMappings(snapshot.supplierProductMappings);
+      setInvoiceLineCorrections(snapshot.invoiceLineCorrections);
+      setInvoices(snapshot.invoices);
+      setStocktakes(snapshot.stocktakes);
+      setRecipes(snapshot.recipes);
+      setMenus(snapshot.menus);
+      setWasteItems(snapshot.wasteItems);
+    };
+    if (cloudSaveTimerRef.current) {
+      window.clearTimeout(cloudSaveTimerRef.current);
+      cloudSaveTimerRef.current = null;
+    }
+    const merges = preview.groups.filter((group) => group.action === "merge");
+    for (let index = 0; index < merges.length; index += 1) {
+      const group = merges[index];
+      onProgress({ stage: "Merging duplicate products", done: index, total: merges.length });
+      try {
+        const merged = applyProductMergeToSnapshot(working, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds });
+        if (cloudEnabled) {
+          const result = await persistAtomicProductMerge(supabase, {
+            companyId,
+            locationId: cloudScope.locationId || "",
+            keepProductId: group.keepProductId,
+            mergeProductIds: group.mergeProductIds,
+            nextSnapshot: merged.snapshot,
+            expectedModuleRevisions: cloudRevisionsRef.current,
+          });
+          if (result?.module_revisions) cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...result.module_revisions };
+        }
+        working = merged.snapshot;
+        report.merged += 1;
+      } catch (error) {
+        report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: error.message || "Merge failed" });
+        if (/cloud_revision_conflict|Not authorised|network|fetch/i.test(error.message || "")) {
+          commit(working);
+          throw new Error(`Stopped after ${report.merged} merges: ${error.message}`);
+        }
+      }
+    }
+    onProgress({ stage: "Updating names, departments and supplier articles", done: 0, total: 1 });
+    const attributes = applyCatalogueAttributes(working.products, preview, { idFactory: uid, companyId });
+    const candidates = catalogueArticleMappings({
+      preview,
+      products: attributes.products,
+      suppliers,
+      created: attributes.created,
+      companyId,
+      locationId: cloudScope.locationId || "",
+      idFactory: uid,
+    });
+    const freshRules = newCatalogueMappings(working.supplierProductMappings || [], candidates);
+    working = { ...working, products: attributes.products, supplierProductMappings: [...(working.supplierProductMappings || []), ...freshRules] };
+    commit(working);
+    report.updated = preview.groups.filter((group) => group.keepProductId && group.action !== "skip").length;
+    report.created = attributes.created.length;
+    report.deactivated = preview.deactivate.length;
+
+    const unsaved = working.supplierProductMappings.filter((mapping) => mapping.importSource === "catalogue_import" && !mapping.relationalId);
+    if (cloudEnabled && unsaved.length) {
+      const batchSize = 10;
+      for (let start = 0; start < unsaved.length; start += batchSize) {
+        onProgress({ stage: "Saving invoice matching rules", done: start, total: unsaved.length });
+        const outcome = await persistConfirmedLearning(unsaved.slice(start, start + batchSize));
+        report.rulesSaved += outcome.persisted?.length || 0;
+        report.rulesFailed += outcome.skipped?.length || 0;
+      }
+    } else {
+      report.rulesSaved = unsaved.length;
+    }
+    report.done = true;
+    return report;
+  };
+
   const requestDuplicateDecision = (assessment, invoice) => new Promise((resolve) => {
     setDuplicatePrompt({ assessment, invoice, resolve });
   });
@@ -7236,7 +7320,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} onImportCatalogue={cloudEnabled || demoMode ? runCatalogueImport : null} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -12635,7 +12719,7 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, onImportCatalogue = null, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const visibleSuppliers = activeSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
@@ -12647,6 +12731,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [editingId, setEditingId] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [catalogueImportOpen, setCatalogueImportOpen] = useState(false);
   const [mergeProductIds, setMergeProductIds] = useState([]);
   const [keepProductId, setKeepProductId] = useState("");
   const [mergeSearch, setMergeSearch] = useState("");
@@ -12853,6 +12938,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
               <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
+              {onImportCatalogue && permissions.canEdit && permissions.canDelete && permissions.canImport && <button className="ghost" onClick={() => setCatalogueImportOpen(true)} type="button">Import product database</button>}
               {permissions.canAdd && <PrimaryAction onClick={() => openProductModal()}>Add Product</PrimaryAction>}
             </div>
           )}
@@ -12910,6 +12996,17 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
             <Field label="Aliases" value={form.aliases} onChange={(value) => setForm({ ...form, aliases: value })} />
           </div>
         </EditModal>
+      )}
+      {catalogueImportOpen && (
+        <CatalogueImport
+          open={catalogueImportOpen}
+          onClose={() => setCatalogueImportOpen(false)}
+          snapshot={mergeSnapshot}
+          companyId={companyId}
+          suppliers={suppliers}
+          departmentNames={departmentNames}
+          onApply={onImportCatalogue}
+        />
       )}
       {mergeOpen && (
         <AppModal
