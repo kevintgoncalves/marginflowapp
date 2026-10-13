@@ -120,7 +120,7 @@ import {
 } from "./domain/invoiceBatchUpload.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
-import { persistAtomicProductMerge } from "./lib/productMergeRepository.js";
+import { loadRelationalProductIds, persistAtomicProductMerge } from "./lib/productMergeRepository.js";
 import {
   buildEmergencyBackup,
   compareInvoiceCollections,
@@ -6492,7 +6492,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     }
     const merges = preview.groups.filter((group) => group.action === "merge");
     const mergeModules = ["products", "supplierProductMappings", "invoiceLineCorrections", "stocktakes", "recipes", "menus", "wasteItems"];
-    const isConnectionError = (error) => /failed to fetch|networkerror|network request failed|load failed|fetch failed|timeout|gateway|50[234]/i.test(`${error?.message || ""} ${error?.code || ""} ${error?.status || ""}`);
+    // Only transport failures count; database errors (e.g. code 23503) must not look like them.
+    const isConnectionError = (error) => [502, 503, 504].includes(Number(error?.status))
+      || /failed to fetch|networkerror|network request failed|load failed|fetch failed|statement timeout|gateway/i.test(String(error?.message || ""));
     // After a dropped connection the merge may or may not have been saved. Read the cloud state
     // back: if the merge is there, keep it; if not and nothing else changed, the caller retries.
     // Never guesses — anything unexpected stops the import with everything done so far kept.
@@ -12806,6 +12808,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [modalOpen, setModalOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [catalogueImportOpen, setCatalogueImportOpen] = useState(false);
+  const loadRelationalIdsForImport = useMemo(() => (supabase && companyId ? () => loadRelationalProductIds(supabase, companyId) : null), [companyId]);
   const [mergeProductIds, setMergeProductIds] = useState([]);
   const [keepProductId, setKeepProductId] = useState("");
   const [mergeSearch, setMergeSearch] = useState("");
@@ -13080,6 +13083,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           suppliers={suppliers}
           departmentNames={departmentNames}
           onApply={onImportCatalogue}
+          loadRelationalProductIds={loadRelationalIdsForImport}
         />
       )}
       {mergeOpen && (

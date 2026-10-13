@@ -48,3 +48,17 @@ export async function persistAtomicProductMerge(client, {
   if (error) throw error;
   return Array.isArray(data) ? data[0] : data;
 }
+
+// Ids of the company's products stored in the relational "products" table (read-only).
+export async function loadRelationalProductIds(client, companyId = "") {
+  if (!client || !uuidPattern.test(companyId)) return null;
+  const ids = new Set();
+  const pageSize = 1000;
+  for (let from = 0; from < 50000; from += pageSize) {
+    const { data, error } = await client.from("products").select("id").eq("company_id", companyId).range(from, from + pageSize - 1);
+    if (error) throw error;
+    (data || []).forEach((row) => ids.add(row.id));
+    if (!data || data.length < pageSize) break;
+  }
+  return ids;
+}

@@ -84,6 +84,16 @@ test("preview classifies merges, updates, creations, removals and untouched prod
   assert.ok(preview.groups[2].warnings.some((warning) => /Coburn/.test(warning)), "unknown supplier is flagged");
 });
 
+test("the kept product is one stored in the database when the recommendation is snapshot-only", () => {
+  const withOnlyA = buildCatalogueImportPreview({ plan, snapshot: snapshot(), companyId, suppliers, departmentNames, relationalProductIds: new Set([ids.milkA]) });
+  assert.equal(withOnlyA.groups[0].keepProductId, ids.milkA);
+  assert.deepEqual(withOnlyA.groups[0].mergeProductIds, [ids.milkB]);
+  const withOnlyB = buildCatalogueImportPreview({ plan, snapshot: snapshot(), companyId, suppliers, departmentNames, relationalProductIds: new Set([ids.milkB]) });
+  assert.equal(withOnlyB.groups[0].keepProductId, ids.milkB);
+  const neither = buildCatalogueImportPreview({ plan, snapshot: snapshot(), companyId, suppliers, departmentNames, relationalProductIds: new Set() });
+  assert.ok([ids.milkA, ids.milkB].includes(neither.groups[0].keepProductId), "no stored product: recommendation stands");
+});
+
 function runImport(state) {
   const preview = buildCatalogueImportPreview({ plan, snapshot: state, companyId, suppliers, departmentNames });
   let current = state;

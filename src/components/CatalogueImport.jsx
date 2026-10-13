@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import InvoiceModal from "./InvoiceModal.jsx";
 import {
   buildCatalogueImportPreview,
@@ -45,7 +45,20 @@ function reportCsv(preview, result) {
   return rows.map((row) => row.map(escape).join(",")).join("\n");
 }
 
-export default function CatalogueImport({ open, onClose, snapshot, companyId, suppliers = [], departmentNames = [], onApply }) {
+export default function CatalogueImport({ open, onClose, snapshot, companyId, suppliers = [], departmentNames = [], onApply, loadRelationalProductIds = null }) {
+  // undefined = still checking the database, null = not applicable (demo), Set = stored product ids.
+  const [relationalIds, setRelationalIds] = useState(loadRelationalProductIds ? undefined : null);
+  const [relationalError, setRelationalError] = useState("");
+  useEffect(() => {
+    if (!open || !loadRelationalProductIds) return undefined;
+    let cancelled = false;
+    setRelationalIds(undefined);
+    setRelationalError("");
+    loadRelationalProductIds()
+      .then((ids) => { if (!cancelled) setRelationalIds(ids); })
+      .catch((error) => { if (!cancelled) setRelationalError(error.message || "Could not check the products stored in the database."); });
+    return () => { cancelled = true; };
+  }, [open, loadRelationalProductIds]);
   const [plan, setPlan] = useState(null);
   const [fileName, setFileName] = useState("");
   const [errors, setErrors] = useState([]);
@@ -55,9 +68,9 @@ export default function CatalogueImport({ open, onClose, snapshot, companyId, su
   const [progress, setProgress] = useState(null);
   const [result, setResult] = useState(null);
 
-  const preview = useMemo(() => (plan && !errors.length
-    ? buildCatalogueImportPreview({ plan, snapshot, companyId, suppliers, departmentNames })
-    : null), [plan, errors, snapshot, companyId, suppliers, departmentNames]);
+  const preview = useMemo(() => (plan && !errors.length && relationalIds !== undefined
+    ? buildCatalogueImportPreview({ plan, snapshot, companyId, suppliers, departmentNames, relationalProductIds: relationalIds })
+    : null), [plan, errors, snapshot, companyId, suppliers, departmentNames, relationalIds]);
   const supplierStatus = useMemo(() => (plan ? supplierActionsStatus(plan, suppliers) : []), [plan, suppliers]);
   const pendingSupplierActions = supplierStatus.filter((action) => !action.done);
 
@@ -127,6 +140,8 @@ export default function CatalogueImport({ open, onClose, snapshot, companyId, su
         <input accept=".json,application/json" disabled={running} onChange={(event) => readFile(event.target.files?.[0])} type="file" />
       </label>
       {fileName && <p><strong>{fileName}</strong></p>}
+      {plan && !errors.length && relationalIds === undefined && !relationalError && <p role="status">Checking the products stored in the database…</p>}
+      {relationalError && <div className="invoice-status error" role="alert"><strong>Could not prepare the import.</strong> {relationalError} Close this window and try again.</div>}
       {errors.length > 0 && (
         <div className="invoice-status error review-issue-list"><strong>This plan cannot be used</strong>{errors.slice(0, 8).map((error) => <span key={error}>{error}</span>)}</div>
       )}

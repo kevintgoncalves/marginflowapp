@@ -66,7 +66,10 @@ function departmentFor(entry, departmentNames = []) {
 }
 
 // Preview: what will happen to each product in the plan, computed against the live snapshot.
-export function buildCatalogueImportPreview({ plan, snapshot = {}, companyId = "", suppliers = [], departmentNames = [] } = {}) {
+// relationalProductIds: ids present in the database "products" table (null = unknown, e.g. demo).
+// Invoice, stocktake and recipe lines reference that table, so the product kept by a merge must
+// exist there; a product that only lives in the workspace snapshot cannot receive those links.
+export function buildCatalogueImportPreview({ plan, snapshot = {}, companyId = "", suppliers = [], departmentNames = [], relationalProductIds = null } = {}) {
   const products = Array.isArray(snapshot.products) ? snapshot.products : [];
   const productMap = byId(products);
   const groups = [];
@@ -109,6 +112,10 @@ export function buildCatalogueImportPreview({ plan, snapshot = {}, companyId = "
     } else {
       const first = analyzeProductMerge(snapshot, { companyId, keepProductId: activeIds[0], mergeProductIds: activeIds.slice(1) });
       group.keepProductId = first.recommendedKeepProductId || activeIds[0];
+      if (relationalProductIds && !relationalProductIds.has(group.keepProductId)) {
+        const stored = activeIds.find((id) => relationalProductIds.has(id));
+        if (stored) group.keepProductId = stored;
+      }
       group.mergeProductIds = activeIds.filter((id) => id !== group.keepProductId);
       const blocking = analyzeProductMerge(snapshot, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds }).blockingConflicts;
       if (blocking.length) {
