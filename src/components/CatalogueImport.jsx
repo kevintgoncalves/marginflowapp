@@ -219,6 +219,7 @@ export default function CatalogueImport({ open, onClose, snapshot, companyId, su
           {result.error && <span>{result.error} Everything completed before this point is saved. Load the same plan again to continue; finished steps are skipped.</span>}
           {!result.error && <span>{result.merged || 0} groups merged, {result.updated || 0} products updated, {result.created || 0} created, {result.deactivated || 0} archived.</span>}
           {!result.error && <span>{result.rulesSaved || 0} invoice matching rules saved{result.rulesFailed ? `, ${result.rulesFailed} not saved yet (run the import again to retry)` : ""}.</span>}
+          {result.ruleErrors?.slice(0, 5).map((entry) => <span key={entry.reason}>Rules not saved ({entry.count}): {entry.reason}{entry.examples?.length ? ` — e.g. ${entry.examples.join("; ")}` : ""}</span>)}
           {result.failedGroups?.slice(0, 10).map((entry) => <span key={entry.catalogueId}>{entry.catalogueId} {entry.name}: {entry.error}</span>)}
         </div>
       )}

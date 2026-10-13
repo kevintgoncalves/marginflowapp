@@ -6587,13 +6587,36 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
 
     const unsaved = working.supplierProductMappings.filter((mapping) => mapping.importSource === "catalogue_import" && !mapping.relationalId);
     if (cloudEnabled && unsaved.length) {
+      // Batches of 10; if a batch fails, its rules are retried one by one so a single bad rule
+      // does not hold back the others. Reasons are counted and shown in the report.
+      const reasons = new Map();
+      const countSkipped = (skipped = []) => skipped.forEach((entry) => {
+        const reason = String(entry.reason || "Unknown reason");
+        const current = reasons.get(reason) || { reason, count: 0, examples: [] };
+        current.count += 1;
+        const mapping = unsaved.find((row) => row.id === entry.mappingId);
+        if (mapping && current.examples.length < 3) current.examples.push(`${mapping.supplierName}: ${mapping.supplierDescription || mapping.supplierProductCode} → ${mapping.productName}`);
+        reasons.set(reason, current);
+      });
       const batchSize = 10;
       for (let start = 0; start < unsaved.length; start += batchSize) {
         onProgress({ stage: "Saving invoice matching rules", done: start, total: unsaved.length });
-        const outcome = await persistConfirmedLearning(unsaved.slice(start, start + batchSize));
+        const batch = unsaved.slice(start, start + batchSize);
+        const outcome = await persistConfirmedLearning(batch);
         report.rulesSaved += outcome.persisted?.length || 0;
-        report.rulesFailed += outcome.skipped?.length || 0;
+        if (outcome.skipped?.length && !outcome.persisted?.length && batch.length > 1) {
+          for (const mapping of batch) {
+            const single = await persistConfirmedLearning([mapping]);
+            report.rulesSaved += single.persisted?.length || 0;
+            report.rulesFailed += single.skipped?.length || 0;
+            countSkipped(single.skipped);
+          }
+        } else {
+          report.rulesFailed += outcome.skipped?.length || 0;
+          countSkipped(outcome.skipped);
+        }
       }
+      report.ruleErrors = [...reasons.values()].sort((a, b) => b.count - a.count);
     } else {
       report.rulesSaved = unsaved.length;
     }
