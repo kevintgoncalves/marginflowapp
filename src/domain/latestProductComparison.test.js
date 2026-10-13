@@ -65,11 +65,11 @@ test('lines without their own conversion use the confirmed pack of that supplier
   assert.equal(ruled[0].comparison.current.valid, false, "a line's own unconfirmed rule is never replaced");
 });
 
-test('website prices appear for suppliers without invoices and never hide an invoice price', () => {
+test('website prices appear for suppliers without invoices and replace only older invoice prices', () => {
   const product = { id: 'm', name: 'Milk', supplier: 'Albion', supplierId: 'a', packSize: '2L', active: true,
     priceHistory: [
       { source: 'Supplier website', supplier: 'Woods', date: '2026-10-12', price: 2.2, packSize: '2L', normalizedCost: 1.1, normalizedUnit: 'l' },
-      { source: 'Supplier website', supplier: 'Albion', date: '2026-10-12', price: 1, packSize: '2L', normalizedCost: 0.5, normalizedUnit: 'l' },
+      { source: 'Supplier website', supplier: 'Albion', date: '2026-09-12', price: 1, packSize: '2L', normalizedCost: 0.5, normalizedUnit: 'l' },
     ] };
   const inv = { id: 'a1', supplier: 'Albion', supplierId: 'a', date: '2026-10-01', syncStatus: 'synced', persistenceSource: 'relational',
     items: [{ id: 'l', matchedProductId: 'm', packSize: '2L', unitOfMeasure: 'kg', quantity: 1, unitCost: 1.29, conversionRule: { baseQuantity: 2, baseUnit: 'l', confirmed: true } }] };
@@ -107,4 +107,24 @@ test('a per-unit website price converted as one item is re-expressed per item wh
   const woods = row.comparison.comparable.find((a) => a.supplier === 'Woods');
   assert.ok(Math.abs(woods.price - 3.61 / 250) < 1e-9);
   assert.equal(woods.estimated, true);
+});
+
+test('a newer website price replaces an older invoice price for that supplier', () => {
+  const product = { id: 'm', name: 'Milk', supplier: 'Albion', supplierId: 'a', active: true,
+    priceHistory: [{ source: 'Supplier website', supplier: 'Albion', date: '2026-10-12', price: 1, packSize: '2L', normalizedCost: 0.5, normalizedUnit: 'l' }] };
+  const inv = { id: 'a1', supplier: 'Albion', supplierId: 'a', date: '2026-07-01', syncStatus: 'synced', persistenceSource: 'relational',
+    items: [{ id: 'l', matchedProductId: 'm', packSize: '2L', unitOfMeasure: 'qty', quantity: 1, unitCost: 1.29, conversionRule: { baseQuantity: 2, baseUnit: 'l', confirmed: true } }] };
+  const [row] = latestProductComparisons([product], [inv]);
+  assert.deepEqual(row.comparison.comparable.map(a => a.source), ['website']);
+});
+
+test('an invoice printing the case size for a per-item price uses the confirmed article format', () => {
+  const product = { id: 'f', name: 'Anchovies', supplier: 'Elite', supplierId: 'e', active: true,
+    supplierFormats: [{ supplier: 'Elite', supplierProductCode: '1232', packSize: '365G', baseQuantity: 0.365, baseUnit: 'kg', normalizedCost: 20.1370, conversionConfidence: 'manual', conversionReviewRequired: false }] };
+  const line = (cost) => ({ id: 'l' + cost, matchedProductId: 'f', supplierProductCode: '1232', packSize: '24 x 365G', unitOfMeasure: 'case', quantity: 1, unitCost: cost });
+  const inv = (cost, date) => ({ id: 'e' + cost, supplier: 'Elite', supplierId: 'e', date, syncStatus: 'synced', persistenceSource: 'relational', items: [line(cost)] });
+  const [each] = latestProductComparisons([product], [inv(7.35, '2026-08-21')]);
+  assert.ok(Math.abs(each.comparison.comparable[0].price - 7.35 / 0.365) < 1e-6, 'per-item price');
+  const [cased] = latestProductComparisons([product], [inv(176.43, '2026-08-21')]);
+  assert.ok(Math.abs(cased.comparison.comparable[0].price - 176.43 / 8.76) < 1e-6, 'a real case price keeps the case conversion');
 });

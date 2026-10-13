@@ -6469,6 +6469,28 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       return loadRelationalInvoiceReportRange(supabase, scope, { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) });
     };
   }, [cloudEnabled, demoMode, cloudScope.companyId, cloudScope.locationId]);
+  // Loaded once per session in the background after the workspace is ready, so supplier prices
+  // are available when Products opens instead of arriving minutes later.
+  const [priceLoadStarted, setPriceLoadStarted] = useState(false);
+  useEffect(() => { if (cloudStatus === "synced" || cloudStatus === "error") setPriceLoadStarted(true); }, [cloudStatus]);
+  const [priceInvoices, setPriceInvoices] = useState(null);
+  const [priceInvoicesStatus, setPriceInvoicesStatus] = useState("");
+  const [priceReload, setPriceReload] = useState(0);
+  useEffect(() => {
+    if (!loadPriceInvoices || !priceLoadStarted) return undefined;
+    let cancelled = false;
+    setPriceInvoicesStatus("loading");
+    // One automatic retry after a short pause; afterwards the user can retry from the comparison.
+    const attempt = (retry) => loadPriceInvoices()
+      .then((loaded) => { if (!cancelled) { setPriceInvoices(loaded); setPriceInvoicesStatus(""); } })
+      .catch(() => {
+        if (cancelled) return;
+        if (retry) window.setTimeout(() => { if (!cancelled) attempt(false); }, 3000);
+        else setPriceInvoicesStatus("error");
+      });
+    attempt(true);
+    return () => { cancelled = true; };
+  }, [loadPriceInvoices, priceReload, priceLoadStarted]);
 
   const runCatalogueImport = async (options) => {
     if (catalogueImportRunningRef.current) throw new Error("An import is already running.");
@@ -7432,7 +7454,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);
         })} />}
-        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} onImportCatalogue={cloudEnabled || demoMode ? runCatalogueImport : null} loadPriceInvoices={loadPriceInvoices} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
+        {active === "products" && <Products key={`${effectiveAuthUser?.id}:${cloudScope.companyId || (demoMode ? "demo" : "")}`} userId={effectiveAuthUser?.id || ""} draftCompanyId={cloudScope.companyId || (demoMode ? "demo" : "")} supplierProductMappings={supplierProductMappings} onOpenInvoice={invoiceId => { setActive("invoiceControl"); setInvoiceBrowseRequest({id:uid(),invoiceId}); }} invoices={operationalInvoices} companyId={cloudScope.companyId || ""} departmentNames={allowedDepartmentNames} mergeSnapshot={cloudSnapshot} onMergeProducts={mergeDuplicateProducts} onImportCatalogue={cloudEnabled || demoMode ? runCatalogueImport : null} priceInvoices={priceInvoices} priceInvoicesStatus={priceInvoicesStatus} onRetryPrices={() => setPriceReload((value) => value + 1)} permissions={permissionsByPage.products} products={products} requestDelete={requestDelete} setProducts={setProducts} suppliers={suppliers} />}
         {active === "suppliers" && (
           <Suppliers
             creditNotes={creditNotes}
@@ -12831,7 +12853,7 @@ function InvoiceControlCell({ cell, onClick }) {
 }
 
 
-function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, onImportCatalogue = null, loadPriceInvoices = null, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
+function Products({ userId = "", draftCompanyId = "", supplierProductMappings = [], onOpenInvoice, invoices = [], companyId = "", departmentNames, mergeSnapshot = {}, onMergeProducts = async () => {}, onImportCatalogue = null, priceInvoices = null, priceInvoicesStatus = "", onRetryPrices = null, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "products"), products, requestDelete, setProducts, suppliers }) {
   const visibleSuppliers = activeSupplierRows(suppliers);
   const empty = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "", baseQuantity: "", baseUnit: "" };
   const emptyBulkRow = () => ({ ...empty, id: uid() });
@@ -12860,24 +12882,6 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const {draft: quotationDraft, setDraft: setQuotationDraft, message: quotationDraftMessage} = useQuotationDraft(userId, draftCompanyId);
   const quotationSelection = quotationDraft.ids;
   const setQuotationSelection = updater => setQuotationDraft(current => ({...current, ids: updater(current.ids)}));
-  const [priceInvoices, setPriceInvoices] = useState(null);
-  const [priceInvoicesStatus, setPriceInvoicesStatus] = useState("");
-  const [priceReload, setPriceReload] = useState(0);
-  useEffect(() => {
-    if (!loadPriceInvoices) return undefined;
-    let cancelled = false;
-    setPriceInvoicesStatus("loading");
-    // One automatic retry after a short pause; afterwards the user can retry from the comparison.
-    const attempt = (retry) => loadPriceInvoices()
-      .then((loaded) => { if (!cancelled) { setPriceInvoices(loaded); setPriceInvoicesStatus(""); } })
-      .catch(() => {
-        if (cancelled) return;
-        if (retry) window.setTimeout(() => { if (!cancelled) attempt(false); }, 3000);
-        else setPriceInvoicesStatus("error");
-      });
-    attempt(true);
-    return () => { cancelled = true; };
-  }, [loadPriceInvoices, priceReload]);
   // Invoices with lines from the price history, plus any invoice in memory that carries its lines
   // (e.g. one just saved). Header-only list rows never replace a version with lines.
   const comparisonInvoices = useMemo(() => {
@@ -13139,7 +13143,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
         </EditModal>
       )}
       {supplierComparisonOpen && (
-        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} loadError={priceInvoicesStatus === "error"} onRetryPrices={() => setPriceReload((value) => value + 1)}
+        <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} loadError={priceInvoicesStatus === "error"} onRetryPrices={onRetryPrices}
           onSetComparisonUnit={permissions.canEdit ? (productId, unit) => setProducts((current) => current.map((product) => (product.id === productId ? { ...product, comparisonUnit: unit || undefined, updatedAt: new Date().toISOString() } : product))) : null} />
       )}
       {catalogueImportOpen && (

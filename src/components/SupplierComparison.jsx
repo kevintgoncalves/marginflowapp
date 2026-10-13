@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import InvoiceModal from "./InvoiceModal.jsx";
 import { comparableSuppliers, comparisonSummary, supplierComparisonTable } from "../domain/supplierComparison.js";
 import { downloadSupplierPriceRequest } from "../utils/exportSupplierPriceRequest.js";
@@ -14,10 +14,18 @@ export default function SupplierComparison({ open, onClose, rows = [], loading =
   const [message, setMessage] = useState("");
   const table = useMemo(() => (selected.length ? supplierComparisonTable(rows, selected, { minSuppliers: Math.min(minSuppliers, selected.length) }) : []), [rows, selected, minSuppliers]);
   const summary = useMemo(() => comparisonSummary(table, selected), [table, selected]);
+  // Row order is fixed when the supplier selection or filter changes, so editing a product's unit
+  // does not move it away while it is being looked at. New rows go to the end.
+  const orderRef = useRef({ key: "", order: new Map() });
+  const orderKey = `${selected.join("|")}::${minSuppliers}`;
   const visible = useMemo(() => {
+    if (orderRef.current.key !== orderKey) orderRef.current = { key: orderKey, order: new Map(table.map((row, index) => [row.id, index])) };
+    const order = orderRef.current.order;
+    table.forEach((row) => { if (!order.has(row.id)) order.set(row.id, order.size); });
     const text = query.trim().toLowerCase();
-    return text ? table.filter((row) => row.product.toLowerCase().includes(text)) : table;
-  }, [table, query]);
+    const rowsInOrder = [...table].sort((a, b) => order.get(a.id) - order.get(b.id));
+    return text ? rowsInOrder.filter((row) => row.product.toLowerCase().includes(text)) : rowsInOrder;
+  }, [table, query, orderKey]);
 
   const toggle = (name) => setSelected((current) => (current.includes(name) ? current.filter((item) => item !== name) : current.length >= 4 ? current : [...current, name]));
   const download = async (supplier) => {

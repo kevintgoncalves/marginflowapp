@@ -18,15 +18,19 @@ export function confirmedPackConversion(product = {}, line = {}, supplier = '') 
   const distinct = new Set(matches.map(format => `${Number(format.baseQuantity)}:${format.baseUnit}`));
   if (distinct.size !== 1) return null;
   const format = matches[0];
-  return { purchaseUnit: 'pack', baseQuantity: Number(format.baseQuantity), baseUnit: format.baseUnit, confirmed: true, source: 'product_supplier_format' };
+  const expected = Number(format.normalizedCost) > 0 ? Number(format.normalizedCost) : null;
+  return { purchaseUnit: 'pack', baseQuantity: Number(format.baseQuantity), baseUnit: format.baseUnit, confirmed: true, source: 'product_supplier_format', expected, byCode: byCode.length > 0 };
 }
 
 // Supplier website prices recorded on the product (normalised per kg/l/each). They are shown
 // only for suppliers with no invoice price for the product, so they never hide what was paid.
-function websiteOffers(product = {}, invoiceSuppliers = []) {
+function websiteOffers(product = {}, invoiceOffers = []) {
+  // A website price is used for a supplier only when it is newer than every invoice price from
+  // that supplier for this product; then it replaces them in the comparison (labelled as website).
+  const latestInvoice = (supplier) => invoiceOffers.filter(offer => sameSupplierIdentity(offer.supplier || '', supplier || '')).map(offer => offer.date).sort().at(-1) || '';
   return (product.priceHistory || []).filter(entry => String(entry.source || '') === 'Supplier website'
     && Number(entry.normalizedCost) > 0 && ['kg','l','each'].includes(entry.normalizedUnit) && entry.conversionReviewRequired !== true
-    && !invoiceSuppliers.some(name => sameSupplierIdentity(name || '', entry.supplier || '')))
+    && String(entry.date || '').slice(0, 10) > latestInvoice(entry.supplier))
     .map((entry, index) => {
       // A per-unit website price whose pack text names more items than its conversion used
       // (e.g. "250 x 9CM" converted as 1 unit) is re-expressed per item and marked as estimated.
@@ -64,9 +68,19 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
       seen.add(key);
       let conversion = purchaseConversion(line);
       let conversionSource = line.conversionRule ? 'invoice line' : '';
-      if (!conversion.valid && !line.conversionRule) {
+      const ownRule = line.conversionRule;
+      if ((!ownRule || ownRule.confirmed) && !['kg','l'].includes(unitKey(line.purchaseUnit || line.unitOfMeasure || ''))) {
         const rule = confirmedPackConversion(productsById.get(id), line, invoice.supplier || line.supplier || '');
-        if (rule) { const fallback = purchaseConversion({ ...line, conversionRule: rule }); if (fallback.valid) { conversion = fallback; conversionSource = 'confirmed product format'; } }
+        const fallback = rule ? purchaseConversion({ ...line, conversionRule: rule }) : null;
+        if (fallback?.valid) {
+          if (!conversion.valid && !ownRule) { conversion = fallback; conversionSource = 'confirmed product format'; }
+          else if (rule.byCode && rule.expected && fallback.unit === conversion.unit) {
+            // Some invoices print the case size ("24 x 365G") while the price is per item. When the
+            // article's confirmed format explains the price far better, use it instead.
+            const distance = (price) => Math.abs(Math.log(price / rule.expected));
+            if (distance(fallback.price) + Math.log(1.5) < distance(conversion.price)) { conversion = fallback; conversionSource = 'confirmed product format'; }
+          }
+        }
       }
       const packConversion = purchaseConversion({...line, conversionRule:undefined, unitOfMeasure:'pack', quantity:1, unitCost:1, netLineTotal:undefined, net_line_total:undefined, lineTotal:undefined, lineDiscountAmount:0, discountAmount:0, lineDiscountPercent:0, discountPercent:0});
       const billedNet = Number(line.quantity)>0 && conversion.net!=null ? conversion.net/Number(line.quantity) : null;
@@ -81,8 +95,8 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
     }
   }
   if (includeWebsite) for (const row of rows.values()) {
-    const invoiceSuppliers = [...new Set(row.offers.map(offer => offer.supplier))];
-    row.offers.push(...websiteOffers(productsById.get(row.id), invoiceSuppliers).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to)));
+    const web = websiteOffers(productsById.get(row.id), row.offers).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to));
+    if (web.length) row.offers = [...row.offers.filter(offer => !web.some(w => sameSupplierIdentity(w.supplier || '', offer.supplier || ''))), ...web];
   }
   return [...rows.values()].map(row => {
     const valid = row.offers.filter(offer => offer.valid);
