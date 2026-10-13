@@ -5631,6 +5631,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const cloudEnabled = !demoMode && Boolean(supabase && cloudScope.companyId);
   const cloudReadyRef = useRef(false);
   const cloudSaveTimerRef = useRef(null);
+  const cloudSaveInFlightRef = useRef(false);
+  const catalogueImportRunningRef = useRef(false);
   const cloudRevisionsRef = useRef({});
   const cloudFingerprintsRef = useRef({});
   const invoiceApprovalRef = useRef(false);
@@ -6052,6 +6054,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     if (!cloudEnabled || readOnly) return;
     setCloudLoading(true);
     setCloudError("");
+    cloudSaveInFlightRef.current = true;
     try {
       const result = await saveCloudState(cloudScope, snapshot, {
         revisions: cloudRevisionsRef.current,
@@ -6068,6 +6071,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       setCloudError(error.message || "Cloud sync failed.");
       throw error;
     } finally {
+      cloudSaveInFlightRef.current = false;
       setCloudLoading(false);
     }
   };
@@ -6309,7 +6313,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     if (!cloudEnabled) return undefined;
     let cancelled = false;
     const refreshRelationalOperations = async () => {
-      if (!cloudReadyRef.current || invoiceRefreshRef.current || cancelled) return;
+      if (!cloudReadyRef.current || invoiceRefreshRef.current || catalogueImportRunningRef.current || cancelled) return;
       invoiceRefreshRef.current = true;
       try {
         const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
@@ -6351,11 +6355,18 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   useEffect(() => {
     if (!cloudEnabled || readOnly || !cloudReadyRef.current) return undefined;
     if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
-    cloudSaveTimerRef.current = window.setTimeout(() => {
+    // While the catalogue import runs, automatic saves wait: they would move the module
+    // revisions under the import and make its next merge fail with a revision conflict.
+    const attemptSave = () => {
+      if (catalogueImportRunningRef.current || cloudSaveInFlightRef.current) {
+        cloudSaveTimerRef.current = window.setTimeout(attemptSave, 1500);
+        return;
+      }
       saveSnapshotToCloud(cloudSnapshot).catch(() => {
         // Error state is surfaced through the cloud status banner.
       });
-    }, 900);
+    };
+    cloudSaveTimerRef.current = window.setTimeout(attemptSave, 900);
     return () => {
       if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
     };
@@ -6446,7 +6457,22 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   // Catalogue import: merges run one group at a time through the same atomic merge as the
   // Products page, then names/departments/articles are applied and article rules are saved.
   // Every finished step is kept if the import stops; running it again skips finished work.
-  const runCatalogueImport = async ({ preview, onProgress = () => {} }) => {
+  const runCatalogueImport = async (options) => {
+    if (catalogueImportRunningRef.current) throw new Error("An import is already running.");
+    catalogueImportRunningRef.current = true;
+    try {
+      for (let waited = 0; cloudSaveInFlightRef.current && waited < 60; waited += 1) {
+        options.onProgress?.({ stage: "Waiting for the last automatic save to finish", done: 0, total: 1 });
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      if (cloudSaveInFlightRef.current) throw new Error("An automatic save is still running. Wait a moment and try again.");
+      return await runCatalogueImportSteps(options);
+    } finally {
+      catalogueImportRunningRef.current = false;
+    }
+  };
+
+  const runCatalogueImportSteps = async ({ preview, onProgress = () => {} }) => {
     const report = { merged: 0, updated: 0, created: 0, deactivated: 0, rulesSaved: 0, rulesFailed: 0, failedGroups: [], done: false };
     const companyId = cloudScope.companyId || "";
     let working = cloudSnapshot;
@@ -6518,7 +6544,10 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: message });
             if (/cloud_revision_conflict|Not authorised/i.test(message)) {
               commit(working);
-              throw new Error(`Stopped after ${report.merged} merges: ${message}.`);
+              const hint = /cloud_revision_conflict/i.test(message)
+                ? " The data was saved from somewhere else meanwhile (usually another open MarginFlow tab). Close other MarginFlow tabs, reload this page and wait until it shows synced before importing again."
+                : "";
+              throw new Error(`Stopped after ${report.merged} merges: ${message}.${hint}`);
             }
             break;
           }
