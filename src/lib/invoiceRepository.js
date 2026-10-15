@@ -58,7 +58,7 @@ export async function ensureInvoicePersistenceIds(invoice = {}, scope = {}) {
   }, items);
 }
 
-function invoiceFromRelationalRow(row = {}) {
+export function invoiceFromRelationalRow(row = {}) {
   const metadata = row.metadata || {};
   const storedSnapshot = metadata.marginflow_snapshot && typeof metadata.marginflow_snapshot === "object"
     ? metadata.marginflow_snapshot
