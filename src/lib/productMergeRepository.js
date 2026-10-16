@@ -49,6 +49,49 @@ export async function persistAtomicProductMerge(client, {
   return Array.isArray(data) ? data[0] : data;
 }
 
+// Several merge groups in one request and one transaction (catalogue import). `groups` are in the
+// order they were applied to `nextSnapshot`, which is the snapshot after all of them.
+// All groups are saved together or none are.
+export const PRODUCT_MERGE_BATCH_SIZE = 25;
+
+export async function persistAtomicProductMergeBatch(client, {
+  companyId = "",
+  locationId = "",
+  groups = [],
+  nextSnapshot = {},
+  expectedModuleRevisions = {},
+} = {}) {
+  const clean = groups.map((group) => ({
+    keep: group.keepProductId,
+    sources: [...new Set((group.mergeProductIds || []).filter((id) => id && id !== group.keepProductId))],
+  }));
+  const ids = clean.flatMap((group) => [group.keep, ...group.sources]);
+  if (!client || !uuidPattern.test(companyId) || !clean.length || clean.length > 100
+    || clean.some((group) => !group.sources.length) || ids.some((id) => !uuidPattern.test(id))
+    || new Set(ids).size !== ids.length || (locationId && !uuidPattern.test(locationId))) {
+    throw new Error("Batch product merge needs canonical, distinct company and product identifiers.");
+  }
+  const revisions = Object.fromEntries(PRODUCT_MERGE_SNAPSHOT_MODULES
+    .filter((key) => key !== "invoices")
+    .map((key) => [key, Number(expectedModuleRevisions[key] || 0)]));
+  const { data, error } = await client.rpc("merge_products_batch", {
+    p_company_id: companyId,
+    p_location_id: locationId || null,
+    p_groups: clean,
+    p_snapshot_modules: productMergeSnapshotModules(nextSnapshot),
+    p_expected_module_revisions: revisions,
+  });
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+// True when the database does not have merge_products_batch yet (migration not applied), so
+// the caller falls back to one merge per request.
+export function isMissingBatchMergeFunction(error) {
+  const text = `${error?.code || ""} ${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`;
+  return /PGRST202|42883/.test(text) || /merge_products_batch/i.test(text) && /could not find|does not exist/i.test(text);
+}
+
 // Ids of the company's products stored in the relational "products" table (read-only).
 export async function loadRelationalProductIds(client, companyId = "") {
   if (!client || !uuidPattern.test(companyId)) return null;

@@ -121,7 +121,7 @@ import {
 } from "./domain/invoiceBatchUpload.js";
 import { productRecordFromInput } from "./domain/productCreation.js";
 import { analyzeProductMerge, applyProductMergeToSnapshot, suggestProductDuplicateGroups } from "./domain/productMerge.js";
-import { loadRelationalProductIds, persistAtomicProductMerge } from "./lib/productMergeRepository.js";
+import { isMissingBatchMergeFunction, loadRelationalProductIds, persistAtomicProductMerge, persistAtomicProductMergeBatch, PRODUCT_MERGE_BATCH_SIZE } from "./lib/productMergeRepository.js";
 import {
   buildEmergencyBackup,
   compareInvoiceCollections,
@@ -6533,7 +6533,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     // After a dropped connection the merge may or may not have been saved. Read the cloud state
     // back: if the merge is there, keep it; if not and nothing else changed, the caller retries.
     // Never guesses — anything unexpected stops the import with everything done so far kept.
-    const checkMergeAfterConnectionError = async (group, expectedRevisions, attemptLabel) => {
+    const checkMergeAfterConnectionError = async (groupOrGroups, expectedRevisions, attemptLabel) => {
+      const checkedGroups = Array.isArray(groupOrGroups) ? groupOrGroups : [groupOrGroups];
       for (let attempt = 1; attempt <= 6; attempt += 1) {
         onProgress({ stage: `Connection lost — checking the cloud (${attemptLabel}, try ${attempt}/6)`, done: report.merged, total: merges.length });
         await new Promise((resolve) => window.setTimeout(resolve, Math.min(30000, 5000 * attempt)));
@@ -6541,7 +6542,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         try { rows = await loadCloudState(cloudScope); } catch { continue; }
         const serverRevisions = Object.fromEntries(rows.map((row) => [row.module_key, Number(row.revision || 1)]));
         const serverProducts = cloudSnapshotFromRows(rows).products || [];
-        const committed = group.mergeProductIds.every((id) => serverProducts.some((product) => product.id === id && product.mergedIntoProductId === group.keepProductId));
+        const committed = checkedGroups.every((group) => group.mergeProductIds.every((id) => serverProducts.some((product) => product.id === id && product.mergedIntoProductId === group.keepProductId)));
         if (committed) {
           cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...Object.fromEntries(mergeModules.map((key) => [key, serverRevisions[key]])) };
           return "committed";
@@ -6551,15 +6552,19 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       }
       return "unreachable";
     };
-    for (let index = 0; index < merges.length; index += 1) {
-      const group = merges[index];
-      onProgress({ stage: "Merging duplicate products", done: index, total: merges.length });
+    const revisionConflictHint = (message) => (/cloud_revision_conflict/i.test(message)
+      ? " The data was saved from somewhere else meanwhile (usually another open MarginFlow tab). Close other MarginFlow tabs, reload this page and wait until it shows synced before importing again."
+      : "");
+    // One merge group per request: used when the database has no batch merge yet, in demo mode,
+    // and to find which group a batch refused (a batch saves all its groups or none).
+    const mergeGroupSingly = async (group) => {
+      onProgress({ stage: "Merging duplicate products", done: report.merged + report.failedGroups.length, total: merges.length });
       const merged = (() => {
         try { return applyProductMergeToSnapshot(working, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds }); } catch (error) { return { error }; }
       })();
       if (merged.error) {
         report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: merged.error.message || "Merge failed" });
-        continue;
+        return;
       }
       let saved = !cloudEnabled;
       for (let attempt = 1; !saved && attempt <= 3; attempt += 1) {
@@ -6581,10 +6586,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: message });
             if (/cloud_revision_conflict|Not authorised/i.test(message)) {
               commit(working);
-              const hint = /cloud_revision_conflict/i.test(message)
-                ? " The data was saved from somewhere else meanwhile (usually another open MarginFlow tab). Close other MarginFlow tabs, reload this page and wait until it shows synced before importing again."
-                : "";
-              throw new Error(`Stopped after ${report.merged} merges: ${message}.${hint}`);
+              throw new Error(`Stopped after ${report.merged} merges: ${message}.${revisionConflictHint(message)}`);
             }
             break;
           }
@@ -6598,9 +6600,69 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           }
         }
       }
-      if (!saved) continue;
+      if (!saved) return;
       working = merged.snapshot;
       report.merged += 1;
+    };
+    // Batches of groups, one request and one transaction each. The snapshot sent is the result of
+    // applying every group of the batch in order, exactly as the single merges would have.
+    let batchAvailable = cloudEnabled;
+    for (let start = 0; start < merges.length; start += PRODUCT_MERGE_BATCH_SIZE) {
+      const slice = merges.slice(start, start + PRODUCT_MERGE_BATCH_SIZE);
+      if (!batchAvailable) {
+        for (const group of slice) await mergeGroupSingly(group);
+        continue;
+      }
+      onProgress({ stage: "Merging duplicate products", done: report.merged + report.failedGroups.length, total: merges.length });
+      let next = working;
+      const chunk = [];
+      for (const group of slice) {
+        try {
+          next = applyProductMergeToSnapshot(next, { companyId, keepProductId: group.keepProductId, mergeProductIds: group.mergeProductIds }).snapshot;
+          chunk.push(group);
+        } catch (error) {
+          report.failedGroups.push({ catalogueId: group.catalogueId, name: group.name, error: error.message || "Merge failed" });
+        }
+      }
+      if (!chunk.length) continue;
+      let outcome = "";
+      for (let attempt = 1; !outcome && attempt <= 3; attempt += 1) {
+        const expectedRevisions = { ...cloudRevisionsRef.current };
+        try {
+          const result = await persistAtomicProductMergeBatch(supabase, {
+            companyId,
+            locationId: cloudScope.locationId || "",
+            groups: chunk,
+            nextSnapshot: next,
+            expectedModuleRevisions: expectedRevisions,
+          });
+          if (result?.module_revisions) cloudRevisionsRef.current = { ...cloudRevisionsRef.current, ...result.module_revisions };
+          outcome = "saved";
+        } catch (error) {
+          const message = error.message || "Merge failed";
+          if (isMissingBatchMergeFunction(error)) { batchAvailable = false; outcome = "single"; break; }
+          if (/cloud_revision_conflict|Not authorised/i.test(message)) {
+            commit(working);
+            throw new Error(`Stopped after ${report.merged} merges: ${message}.${revisionConflictHint(message)}`);
+          }
+          // A group the database refused: nothing in this batch was saved, so merge its groups one
+          // by one to save the others and report the one that fails.
+          if (!isConnectionError(error)) { outcome = "single"; break; }
+          const state = await checkMergeAfterConnectionError(chunk, expectedRevisions, `batch of ${chunk.length} from ${chunk[0].catalogueId}`);
+          if (state === "committed") { outcome = "saved"; break; }
+          if (state !== "not_committed" || attempt === 3) {
+            commit(working);
+            const reason = state === "changed_elsewhere" ? "the data was changed somewhere else meanwhile" : state === "unreachable" ? "the cloud could not be reached" : "the connection kept dropping";
+            throw new Error(`Stopped after ${report.merged} merges because ${reason} (${message}). Reload the page before continuing.`);
+          }
+        }
+      }
+      if (outcome === "saved") {
+        working = next;
+        report.merged += chunk.length;
+      } else {
+        for (const group of chunk) await mergeGroupSingly(group);
+      }
     }
     onProgress({ stage: "Updating names, departments and supplier articles", done: 0, total: 1 });
     const attributes = applyCatalogueAttributes(working.products, preview, { idFactory: uid, companyId });
