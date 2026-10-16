@@ -6,6 +6,7 @@
 //  - implausible: an invoice price far from the reviewed price for the same article (kept aside).
 //  - outlier: a converted price 3x above or below the other suppliers (usually case vs item).
 //  - choose: several articles from the current supplier and none chosen as the current one.
+//  - unit: the product card's unit differs from the unit its suppliers sell in.
 import { interpretPurchasePack } from './purchaseUnits.js';
 import { itemsInPack } from './packCount.js';
 import { normalizeSupplierProductCode, normalizeSupplierDescription } from './invoiceProductMatching.js';
@@ -23,6 +24,7 @@ const median = (values) => {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
 const round = (value, digits = 4) => Number(Number(value).toFixed(digits));
+const unitName = (unit) => (unit === 'l' ? 'L' : unit === 'each' ? 'unit' : unit);
 const packPriceOf = (article) => {
   const value = Number(article.netPackPrice ?? article.packPrice);
   return Number.isFinite(value) && value > 0 ? value : null;
@@ -94,15 +96,42 @@ export function priceCheckItems(rows = []) {
   for (const row of rows) {
     if (row.active === false) continue;
     const articles = (row.comparison?.articles || []).filter((article) => article.date);
-    const unit = UNITS.includes(row.comparisonUnit) ? row.comparisonUnit : UNITS.includes(row.baseUnit) ? row.baseUnit
-      : row.comparison?.unit || '';
-    const othersPrice = (article) => median(articles.filter((other) => other !== article && other.valid && other.unit === unit && !other.estimated
-      && !sameSupplierIdentity(other.supplier || '', article.supplier || '')).map((other) => other.price));
+    // The unit the comparison actually uses; the product card's unit can be wrong (checked below).
+    const unit = UNITS.includes(row.comparisonUnit) ? row.comparisonUnit
+      : row.comparison?.best?.unit || row.comparison?.current?.unit || (UNITS.includes(row.baseUnit) ? row.baseUnit : row.comparison?.unit || '');
+    const solid = articles.filter((article) => article.valid && article.unit === unit && !article.estimated);
+    const typical = median(solid.map((article) => article.price));
+    const outliers = new Set();
+    if (solid.length >= 3) {
+      // Three or more prices: away from the median of all of them.
+      solid.forEach((article) => { const ratio = article.price / typical; if (ratio >= OUTLIER_RATIO || ratio <= 1 / OUTLIER_RATIO) outliers.add(article); });
+    } else if (solid.length === 2) {
+      // Two prices far apart: flag the one a different pack reading explains; if that does not
+      // decide it, the one that is not from the current supplier.
+      const [a, b] = solid;
+      const ratio = a.price / b.price;
+      if (ratio >= OUTLIER_RATIO || ratio <= 1 / OUTLIER_RATIO) {
+        const fixable = (article, other) => {
+          const pick = recommendedOption(conversionOptions(article.pack, packPriceOf(article), unit), other.price);
+          return Boolean(pick && Math.abs(pick.unitPrice - article.price) / article.price > 0.01);
+        };
+        const fixA = fixable(a, b);
+        const fixB = fixable(b, a);
+        if (fixA !== fixB) outliers.add(fixA ? a : b);
+        else [a, b].filter((article) => !article.isCurrentSupplier).forEach((article) => outliers.add(article));
+        if (!outliers.size) { outliers.add(a); outliers.add(b); }
+      }
+    }
+    articles.filter((article) => article.valid && article.unit === unit && article.estimated && typical > 0).forEach((article) => {
+      const ratio = article.price / typical;
+      if (ratio >= OUTLIER_RATIO || ratio <= 1 / OUTLIER_RATIO) outliers.add(article);
+    });
     for (const article of [...(row.comparison?.setAside || []), ...articles]) {
       const key = priceCheckKey(row.id, article);
       if (checked(row, key, article)) continue;
       const packPrice = packPriceOf(article);
-      const reference = article.reviewedPrice > 0 && (!unit || article.reviewedUnit === unit) ? article.reviewedPrice : othersPrice(article);
+      const others = median(solid.filter((other) => other !== article && !sameSupplierIdentity(other.supplier || '', article.supplier || '')).map((other) => other.price));
+      const reference = article.reviewedPrice > 0 && (!unit || article.reviewedUnit === unit) ? article.reviewedPrice : (solid.length >= 3 ? typical : others);
       let kind = '';
       let reason = '';
       if (article.implausible) {
@@ -110,13 +139,11 @@ export function priceCheckItems(rows = []) {
         reason = article.status;
       } else if (!article.valid && /conversion|incompatible/i.test(article.status || '') && packPrice) {
         kind = 'conversion';
-        reason = article.status === 'Incompatible unit or currency' ? `Priced per ${article.unit === 'l' ? 'L' : article.unit === 'each' ? 'unit' : article.unit}, product compared per ${unit === 'each' ? 'unit' : unit || '—'}` : 'No conversion to kg / L / unit';
-      } else if (article.valid && article.unit === unit && reference > 0) {
+        reason = article.status === 'Incompatible unit or currency' ? `Priced per ${article.unit === 'l' ? 'L' : article.unit === 'each' ? 'unit' : article.unit}, the others per ${unit === 'each' ? 'unit' : unit === 'l' ? 'L' : unit || '—'} — maybe a different product` : 'No conversion to kg / L / unit';
+      } else if (outliers.has(article)) {
         const ratio = article.price / reference;
-        if (ratio >= OUTLIER_RATIO || ratio <= 1 / OUTLIER_RATIO) {
-          kind = 'outlier';
-          reason = `${ratio >= 1 ? round(ratio, 1) + '× above' : round(1 / ratio, 1) + '× below'} the other suppliers`;
-        }
+        kind = 'outlier';
+        reason = reference > 0 ? `${ratio >= 1 ? round(ratio, 1) + '× above' : round(1 / ratio, 1) + '× below'} the other suppliers` : 'Far from the other suppliers';
       }
       if (!kind) continue;
       const options = conversionOptions(article.pack, packPrice, unit);
@@ -127,6 +154,15 @@ export function priceCheckItems(rows = []) {
         currentPrice: article.valid || article.implausible ? article.price : null, currentUnit: article.valid || article.implausible ? article.unit : '', reference,
         options, recommended: recommendedOption(options, reference), article,
       });
+    }
+    // The product card says one unit, the suppliers sell in another (e.g. butter "per L").
+    if (UNITS.includes(row.baseUnit) && !UNITS.includes(row.comparisonUnit) && unit && unit !== row.baseUnit && solid.length) {
+      const key = `${row.id}|unit`;
+      if (!(row.priceChecks || []).some((check) => check.key === key && check.unit === unit)) {
+        items.push({ id: key, key, kind: 'unit', reason: `The product is set up per ${unitName(row.baseUnit)}, but its suppliers sell per ${unitName(unit)}`,
+          productId: row.id, productName: row.name, department: row.department || '', unit, fromUnit: row.baseUnit, supplier: '',
+          options: [], recommended: null });
+      }
     }
     if (row.comparison?.status === 'Select current article') {
       const candidates = articles.filter((article) => article.isCurrentSupplier);
@@ -140,7 +176,7 @@ export function priceCheckItems(rows = []) {
       }
     }
   }
-  const order = { implausible: 0, conversion: 1, outlier: 2, choose: 3 };
+  const order = { implausible: 0, unit: 1, conversion: 2, outlier: 3, choose: 4 };
   return items.sort((a, b) => order[a.kind] - order[b.kind] || a.productName.localeCompare(b.productName) || a.supplier.localeCompare(b.supplier));
 }
 
@@ -191,4 +227,15 @@ export function markPriceChecked(product, item, now = new Date().toISOString()) 
 export function chooseCurrentArticle(product, item, candidate, now = new Date().toISOString()) {
   const next = { ...product, supplierProductCode: candidate.code || '', packSize: candidate.pack || product.packSize };
   return recordCheck(next, item, now, { count: (item.candidates || []).length, chosen: candidate.key });
+}
+
+// Sets the product's own unit to the one its suppliers sell in (used for stock and recipes too).
+export function applyProductUnit(product, item, now = new Date().toISOString()) {
+  if (!UNITS.includes(item.unit)) throw new Error('Choose kg, L or unit.');
+  return recordCheck({ ...product, baseUnit: item.unit }, item, now, { unit: item.unit });
+}
+
+// Keeps the product's unit as it is; asked again only if the suppliers' unit changes.
+export function keepProductUnit(product, item, now = new Date().toISOString()) {
+  return recordCheck(product, item, now, { unit: item.unit, kept: true });
 }

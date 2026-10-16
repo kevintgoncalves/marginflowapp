@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { latestProductComparisons } from './latestProductComparison.js';
-import { applyPriceCheckConversion, chooseCurrentArticle, conversionOptions, markPriceChecked, priceCheckItems, recommendedOption } from './priceCheck.js';
+import { applyPriceCheckConversion, applyProductUnit, chooseCurrentArticle, conversionOptions, keepProductUnit, markPriceChecked, priceCheckItems, recommendedOption } from './priceCheck.js';
 
 const reviewed = (supplier, description, code, packSize, price, baseQuantity, baseUnit, date, priceSource = 'supplier_website') => ({
   supplier, description, supplierProductCode: code, packSize, purchaseUnitCost: price, quantity: 1, date,
@@ -36,7 +36,7 @@ test('a case price read as an item price is flagged against the other suppliers 
   const [item] = itemsFor([beans()]);
   assert.equal(item.kind, 'outlier');
   assert.equal(item.supplier, 'Elite Fine Foods');
-  assert.match(item.reason, /6.3× below/);
+  assert.match(item.reason, /6.2× below/);
   assert.equal(item.recommended.baseQuantity, 2.5);
   const fixed = applyPriceCheckConversion(beans(), item, item.recommended, '2026-10-16T20:00:00Z');
   const elite = fixed.supplierFormats.find((format) => format.supplier === 'Elite Fine Foods');
@@ -114,4 +114,40 @@ test('impossible conversions are refused', () => {
   const [item] = itemsFor([beans()]);
   assert.throws(() => applyPriceCheckConversion(beans(), item, { baseQuantity: 0, baseUnit: 'kg' }), /kg, litres or units/);
   assert.throws(() => applyPriceCheckConversion(beans(), item, { baseQuantity: 1, baseUnit: 'box' }));
+});
+
+test('with three suppliers only the one away from the median is flagged (piping bags)', () => {
+  const bags = { id: 'bags', name: 'Disposables, Piping Bags', baseUnit: 'each', supplier: 'Elite Fine Foods', active: true, supplierFormats: [
+    reviewed('Albion Fine Foods', 'Piping Bags 46cm', 'A2', 'x 100', 15.99, 100, 'each', '2026-10-14'),
+    reviewed('Elite Fine Foods', 'PIPING BAGS BLUE 21 INCH', 'E2', '100SGL', 12.25, 100, 'each', '2026-07-02'),
+    reviewed('Woods Foodservice Limited', 'Piping Bags Blue (100 Pack)', 'W2', '100', 7.78, 1, 'each', '2026-10-12'),
+  ] };
+  const items = itemsFor([bags]);
+  assert.deepEqual(items.map((item) => [item.kind, item.supplier]), [['outlier', 'Woods Foodservice Limited']]);
+  assert.equal(items[0].recommended.baseQuantity, 100);
+});
+
+test('two prices far apart: only the one a pack reading explains is flagged (dill bunch)', () => {
+  const dill = { id: 'dill', name: 'Herbs, Dill', baseUnit: 'each', comparisonUnit: 'each', supplier: 'TG Fruits', active: true, supplierFormats: [
+    reviewed('TG Fruits', 'DILL', '', 'BUNCH (20 IN BOX)', 1.8, 20, 'each', '2026-10-01', 'invoice'),
+    reviewed('Albion Fine Foods', 'Dill bunch', 'D1', 'bunch', 1.43, 1, 'each', '2026-10-12'),
+  ] };
+  const items = itemsFor([dill]);
+  assert.deepEqual(items.map((item) => [item.kind, item.supplier]), [['outlier', 'TG Fruits']]);
+  assert.equal(items[0].recommended.baseQuantity, 1);
+  assert.equal(items[0].recommended.unitPrice, 1.8);
+});
+
+test('a product set up per L whose suppliers sell per kg gets a unit fix, not article errors (butter)', () => {
+  const butter = { id: 'butter', name: 'Butter, Unsalted (Arla)', baseUnit: 'l', supplier: 'Woods Foodservice Limited', active: true, supplierFormats: [
+    reviewed('Woods Foodservice Limited', 'Arla Butter Unsalted', 'W3', '40 x 250G', 45.29, 10, 'kg', '2026-07-13'),
+    reviewed('Elite Fine Foods', 'ARLA UNSALTED BUTTER', 'E3', '20 x 250G', 22.78, 5, 'kg', '2026-09-04'),
+  ] };
+  const items = itemsFor([butter]);
+  assert.deepEqual(items.map((item) => item.kind), ['unit']);
+  assert.equal(items[0].unit, 'kg');
+  const fixed = applyProductUnit(butter, items[0], '2026-10-16T22:00:00Z');
+  assert.equal(fixed.baseUnit, 'kg');
+  assert.deepEqual(itemsFor([fixed]), []);
+  assert.deepEqual(itemsFor([keepProductUnit(butter, items[0])]), [], 'keeping the unit is remembered too');
 });

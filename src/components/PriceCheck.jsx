@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from "react";
 import InvoiceModal from "./InvoiceModal.jsx";
-import { applyPriceCheckConversion, chooseCurrentArticle, markPriceChecked, priceCheckItems } from "../domain/priceCheck.js";
+import { applyPriceCheckConversion, applyProductUnit, chooseCurrentArticle, keepProductUnit, markPriceChecked, priceCheckItems } from "../domain/priceCheck.js";
 
 const money = (value) => (value == null ? "—" : new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value));
 const unitLabel = (unit) => (unit === "l" ? "L" : unit === "each" ? "unit" : unit || "—");
 const KINDS = [
   ["implausible", "Price looks wrong", "A new invoice is far from the reviewed price for the same article. The reviewed price is kept until you check it."],
+  ["unit", "Product unit", "The product is set up in one unit but its suppliers sell in another (for example butter per L)."],
   ["conversion", "No conversion", "The price cannot be turned into a price per kg, L or unit yet."],
   ["outlier", "Far from other suppliers", "The price per kg, L or unit is 3× above or below the other suppliers — usually a case read as one item."],
   ["choose", "Choose the article", "Several articles from the current supplier; choose the one you buy now."],
@@ -48,8 +49,17 @@ function ConversionFix({ item, canEdit, onSave, onAccept }) {
         <button type="button" disabled={!canEdit || !selected || !(selected.baseQuantity > 0)} onClick={() => onSave(item, selected)}>
           Save{preview != null ? ` (${money(preview)}/${unitLabel(selected.baseUnit)})` : ""}
         </button>
-        {item.kind === "outlier" && <button type="button" className="ghost" disabled={!canEdit} onClick={() => onAccept(item)}>Price is right</button>}
+        <button type="button" className="ghost" disabled={!canEdit} onClick={() => onAccept(item)}>{item.kind === "outlier" ? "Price is right" : "Ignore"}</button>
       </div>
+    </div>
+  );
+}
+
+function UnitFix({ item, canEdit, onUnit }) {
+  return (
+    <div className="button-row left tight">
+      <button type="button" disabled={!canEdit} onClick={() => onUnit(item, true)}>Use {unitLabel(item.unit)}</button>
+      <button type="button" className="ghost" disabled={!canEdit} onClick={() => onUnit(item, false)}>Keep {unitLabel(item.fromUnit)}</button>
     </div>
   );
 }
@@ -92,8 +102,10 @@ export default function PriceCheck({ open, onClose, rows = [], loading = false, 
   };
   const onSave = (item, conversion) => save(`Saved: ${item.productName} (${item.supplier}) — ${conversion.baseQuantity} ${unitLabel(conversion.baseUnit)} per pack.`,
     { productId: item.productId, apply: (product) => applyPriceCheckConversion(product, item, conversion) });
-  const onAccept = (item) => save(`Marked as right: ${item.productName} (${item.supplier}). It comes back if the price changes.`,
+  const onAccept = (item) => save(`${item.kind === "outlier" ? "Marked as right" : "Ignored"}: ${item.productName} (${item.supplier}). It comes back if the price changes.`,
     { productId: item.productId, apply: (product) => markPriceChecked(product, item) });
+  const onUnit = (item, use) => save(use ? `${item.productName} is now set up per ${unitLabel(item.unit)}.` : `${item.productName} stays per ${unitLabel(item.fromUnit)}.`,
+    { productId: item.productId, apply: (product) => (use ? applyProductUnit(product, item) : keepProductUnit(product, item)) });
   const onChoose = (item, candidate) => save(`Current article for ${item.productName}: ${candidate.description || candidate.code}.`,
     { productId: item.productId, apply: (product) => chooseCurrentArticle(product, item, candidate) });
 
@@ -137,13 +149,13 @@ export default function PriceCheck({ open, onClose, rows = [], loading = false, 
             {visible.slice(0, limit).map((item) => (
               <tr key={item.id}>
                 <td><strong>{item.productName}</strong><br /><small>{item.department}{item.unit ? ` · per ${unitLabel(item.unit)}` : ""}</small></td>
-                <td>{item.supplier}{item.kind !== "choose" && <><br /><small>{item.description || item.code}{item.pack ? ` · ${item.pack}` : ""}</small></>}</td>
-                <td>{item.kind === "choose" ? "—" : <>{money(item.packPrice)} <small>per pack</small>
+                <td>{item.supplier}{!["choose", "unit"].includes(item.kind) && <><br /><small>{item.description || item.code}{item.pack ? ` · ${item.pack}` : ""}</small></>}</td>
+                <td>{["choose", "unit"].includes(item.kind) ? "—" : <>{money(item.packPrice)} <small>per pack</small>
                   {item.currentPrice != null && <><br /><small>= {money(item.currentPrice)}/{unitLabel(item.currentUnit)}</small></>}
                   <br /><small>{item.date}{SOURCE[item.source] ? ` · ${SOURCE[item.source]}` : ""}{item.invoiceNumber && item.source === "invoice" ? ` ${item.invoiceNumber}` : ""}</small></>}
                 </td>
                 <td>{item.reason}{item.reference > 0 && <><br /><small>{item.kind === "implausible" ? "Reviewed" : "Other suppliers"}: {money(item.reference)}/{unitLabel(item.unit)}</small></>}</td>
-                <td>{item.kind === "choose" ? <ChooseFix item={item} canEdit={canEdit} onChoose={onChoose} /> : <ConversionFix item={item} canEdit={canEdit} onSave={onSave} onAccept={onAccept} />}</td>
+                <td>{item.kind === "choose" ? <ChooseFix item={item} canEdit={canEdit} onChoose={onChoose} /> : item.kind === "unit" ? <UnitFix item={item} canEdit={canEdit} onUnit={onUnit} /> : <ConversionFix item={item} canEdit={canEdit} onSave={onSave} onAccept={onAccept} />}</td>
               </tr>
             ))}
           </tbody>
