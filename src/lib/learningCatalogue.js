@@ -9,10 +9,13 @@ export async function resolveLearningCatalogue(client, mappings, scope) {
   const resolved = [];
   for (const mapping of mappings) {
     if (mapping.companyId && mapping.companyId !== scope.companyId) throw new Error('Learning company does not match the active company.');
+    // Quantity and unit cost are zero, not missing: the server's invoice normalisation refuses a
+    // line without them (invoice_subtotal_requires_complete_financial_data), and the catalogue
+    // resolution already treated a missing unit cost as 0. This is a lookup, not a purchase.
     const invoice = invoiceWithVerifiedDepartments({ supplier: mapping.supplierName, supplierId: mapping.supplierId,
       items: [{ productName: mapping.productName, matchedProductId: mapping.productId,
         department: mapping.department, departmentId: mapping.departmentId,
-        packSize: mapping.packSize, unitOfMeasure: mapping.unitOfMeasure }] }, departments, scope.companyId);
+        packSize: mapping.packSize, unitOfMeasure: mapping.unitOfMeasure, quantity: 0, unitCost: 0 }] }, departments, scope.companyId);
     const { data, error: resolveError } = await client.rpc('resolve_invoice_catalogue_v1', {
       p_company_id: scope.companyId, p_location_id: scope.locationId || null, p_invoice: invoice,
     });
