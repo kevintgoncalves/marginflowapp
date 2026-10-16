@@ -67,6 +67,8 @@ import { currentPriceFieldsFromEntry, isLatestInvoicePrice, latestInvoicePriceEn
 import { applyCatalogueAttributes, catalogueArticleMappings, newCatalogueMappings } from "./domain/catalogueImport.js";
 import CatalogueImport from "./components/CatalogueImport.jsx";
 import SupplierComparison from "./components/SupplierComparison.jsx";
+import PriceCheck from "./components/PriceCheck.jsx";
+import { priceCheckItems } from "./domain/priceCheck.js";
 import {
   forgetRelationalSupplierProductMapping,
   loadRelationalSupplierProductMappings,
@@ -7359,7 +7361,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
 
       <main className="workspace" id="workspace-content" tabIndex={-1}>
         {!demoMode && (localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || !confirmedInvoicesLoaded || reportLoadState.loading || reportLoadState.error || pendingInvoiceCount > 0 || learningNotice) && <details className="invoice-safety-banner" open={Boolean(localStorageError || cloudError || reportLoadState.error || pendingInvoiceCount)}>
-          <summary>Sync attention needed</summary>
+          <summary>{localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || (!confirmedInvoicesLoaded && cloudError) || reportLoadState.error || pendingInvoiceCount > 0 ? "Sync attention needed" : learningNotice && confirmedInvoicesLoaded && !reportLoadState.loading ? "Saved" : "Syncing"}</summary>
           {localStorage.hasLegacyData() && <p>Older browser data is preserved separately because its ownership has not been verified. It has not been imported.</p>}
           {localStorageError && <p>Recent browser work could not be stored. Export it before closing this page. <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export recovery file</button></p>}
           {pendingLearning.length > 0 && <p>{pendingLearning.length} reusable match or conversion update(s) await confirmation. {learningError || ""} <button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></p>}
@@ -12929,6 +12931,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   const [mergeOpen, setMergeOpen] = useState(false);
   const [catalogueImportOpen, setCatalogueImportOpen] = useState(false);
   const [supplierComparisonOpen, setSupplierComparisonOpen] = useState(false);
+  const [priceCheckOpen, setPriceCheckOpen] = useState(false);
   const loadRelationalIdsForImport = useMemo(() => (supabase && companyId ? () => loadRelationalProductIds(supabase, companyId) : null), [companyId]);
   const [mergeProductIds, setMergeProductIds] = useState([]);
   const [keepProductId, setKeepProductId] = useState("");
@@ -12954,6 +12957,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
   }, [priceInvoices, invoices]);
   const rows = useMemo(() => latestProductComparisons(products, comparisonInvoices, supplierProductMappings), [products, comparisonInvoices, supplierProductMappings]);
   const comparisonProduct = rows.find(row => row.id === comparisonId);
+  const priceCheckCount = useMemo(() => priceCheckItems(rows).length, [rows]);
   const filteredProductRows = useMemo(() => rows.filter(row => (!productDepartment || row.department === productDepartment) && (!productSupplier || row.supplier === productSupplier || row.comparison.articles.some(article => article.supplier === productSupplier))), [rows,productDepartment,productSupplier]);
   const productRowsForExport = useMemo(() => tableRowsMatchingQuery(filteredProductRows, productQuery), [productQuery, filteredProductRows]);
   const activeProducts = useMemo(() => products.filter((product) => product.active !== false), [products]);
@@ -13142,7 +13146,7 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
           toolbarAction={(
             <div className="button-row left tight">
               <button className="ghost" disabled={!productRowsForExport.length} onClick={downloadProductExport} type="button">Download Products Excel</button>
-              <button className="ghost" type="button" onClick={() => setSupplierComparisonOpen(true)}>Compare suppliers</button>
+              <button className="ghost" type="button" onClick={() => setSupplierComparisonOpen(true)}>Compare suppliers</button><button className="ghost" type="button" onClick={() => setPriceCheckOpen(true)}>Check prices{priceCheckCount ? ` (${priceCheckCount})` : ""}</button>
               <button className="ghost" type="button" onClick={() => setQuotationOpen(true)}>Request quotation ({quotationSelection.length})</button>
               {permissions.canEdit && permissions.canDelete && <button className="ghost" onClick={() => selectMergeProducts([])} type="button"><Combine size={16} />Merge duplicates</button>}
               {onImportCatalogue && permissions.canEdit && permissions.canDelete && permissions.canImport && <button className="ghost" onClick={() => setCatalogueImportOpen(true)} type="button">Import product database</button>}
@@ -13207,6 +13211,17 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
       {supplierComparisonOpen && (
         <SupplierComparison open={supplierComparisonOpen} onClose={() => setSupplierComparisonOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} loadError={priceInvoicesStatus === "error"} onRetryPrices={onRetryPrices}
           onSetComparisonUnit={permissions.canEdit ? (productId, unit) => setProducts((current) => current.map((product) => (product.id === productId ? { ...product, comparisonUnit: unit || undefined, updatedAt: new Date().toISOString() } : product))) : null} />
+      )}
+      {priceCheckOpen && (
+        <PriceCheck open={priceCheckOpen} onClose={() => setPriceCheckOpen(false)} rows={rows} loading={priceInvoicesStatus === "loading"} loadError={priceInvoicesStatus === "error"} onRetryPrices={onRetryPrices}
+          canEdit={Boolean(permissions.canEdit)}
+          onUpdateProduct={({ productId, apply }) => {
+            // Applied to the product as shown, so an invalid entry is reported before anything changes.
+            const product = products.find((entry) => entry.id === productId);
+            if (!product) throw new Error("This product no longer exists.");
+            const next = { ...apply(product), updatedAt: new Date().toISOString() };
+            setProducts((current) => current.map((entry) => (entry.id === productId ? next : entry)));
+          }} />
       )}
       {catalogueImportOpen && (
         <CatalogueImport

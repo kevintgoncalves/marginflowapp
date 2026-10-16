@@ -8144,3 +8144,12 @@ button.icon {
 .purchase-conversion-field { display: inline-flex !important; flex-direction: column; vertical-align: top; width: 180px; max-width: 100%; margin-right: 8px; }
 .purchase-conversion-field :is(input,select) { width: 100%; min-width: 0; }
 @media (max-width: 640px) { .purchase-conversion-field { width: 100%; margin-right: 0; } }
+
+/* Check prices */
+.mf-workflow-screen button.metric-card { text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.mf-workflow-screen button.metric-card.active { outline: 2px solid currentColor; outline-offset: -2px; }
+.mf-price-check-fix { display: grid; gap: 0.35rem; min-width: 18rem; }
+.mf-price-check-fix fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+.mf-price-check-option { display: flex; align-items: center; gap: 0.4rem; font-weight: 400; }
+.mf-price-check-option input[type="number"], .mf-price-check-option select { margin-left: 0.35rem; }
+.mf-price-check-option em { font-style: normal; color: var(--mf-success, #067647); }

@@ -14,22 +14,36 @@ export function confirmedPackConversion(product = {}, line = {}, supplier = '') 
     && sameSupplierIdentity(format.supplier || '', supplier || ''));
   const byCode = code ? candidates.filter(format => normalizeSupplierProductCode(format.supplierProductCode) === code) : [];
   const byPack = !byCode.length && pack ? candidates.filter(format => packKey(format.packSize || '') === pack) : [];
-  const matches = byCode.length ? byCode : byPack;
+  let matches = byCode.length ? byCode : byPack;
+  // A conversion confirmed in Check prices is the user's answer for this article and wins.
+  const checked = matches.filter(format => format.source === 'price_check');
+  if (checked.length) matches = checked;
   const distinct = new Set(matches.map(format => `${Number(format.baseQuantity)}:${format.baseUnit}`));
   if (distinct.size !== 1) return null;
   const format = matches[0];
   const expected = Number(format.normalizedCost) > 0 ? Number(format.normalizedCost) : null;
-  return { purchaseUnit: 'pack', baseQuantity: Number(format.baseQuantity), baseUnit: format.baseUnit, confirmed: true, source: 'product_supplier_format', expected, byCode: byCode.length > 0 };
+  return { purchaseUnit: 'pack', baseQuantity: Number(format.baseQuantity), baseUnit: format.baseUnit, confirmed: true, source: 'product_supplier_format', expected, byCode: byCode.length > 0, forced: checked.length > 0 };
 }
 
 // Reviewed catalogue prices (the product database import): one per supplier article, from the
 // supplier website or the last invoice, already converted per kg / L / unit. For each supplier,
 // these are used unless an invoice is newer than the reviewed price; a newer invoice wins.
-function catalogueOffers(product = {}, invoiceOffers = []) {
-  const latestInvoice = (supplier) => invoiceOffers.filter(offer => sameSupplierIdentity(offer.supplier || '', supplier || '')).map(offer => offer.date).sort().at(-1) || '';
+const IMPLAUSIBLE_RATIO = 3;
+function reviewedFormats(product = {}) {
   return (product.supplierFormats || []).filter(format => format.source === 'catalogue_import'
-    && Number(format.baseQuantity) > 0 && Number(format.purchaseUnitCost) > 0 && ['kg','l','each'].includes(format.baseUnit) && format.conversionReviewRequired !== true
-    && String(format.date || '').slice(0, 10) >= latestInvoice(format.supplier))
+    && Number(format.baseQuantity) > 0 && Number(format.purchaseUnitCost) > 0 && ['kg','l','each'].includes(format.baseUnit) && format.conversionReviewRequired !== true);
+}
+// The same supplier article: same code, or (without codes) the same pack.
+function sameArticle(format, offer) {
+  if (!sameSupplierIdentity(format.supplier || '', offer.supplier || '')) return false;
+  const code = normalizeSupplierProductCode(format.supplierProductCode || format.code);
+  const offerCode = normalizeSupplierProductCode(offer.code);
+  if (code && offerCode) return code === offerCode;
+  return Boolean(format.packSize) && packKey(format.packSize || '') === packKey(offer.pack || '');
+}
+function catalogueOffers(product = {}, invoiceOffers = [], keep = new Set()) {
+  const latestInvoice = (supplier) => invoiceOffers.filter(offer => sameSupplierIdentity(offer.supplier || '', supplier || '')).map(offer => offer.date).sort().at(-1) || '';
+  return reviewedFormats(product).filter(format => keep.has(format) || String(format.date || '').slice(0, 10) >= latestInvoice(format.supplier))
     .map((format, index) => {
       const packPrice = Number(format.purchaseUnitCost);
       // A per-unit price whose pack names more items than its conversion used (e.g. "250 x 9CM"
@@ -68,8 +82,13 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
       let conversion = purchaseConversion(line);
       let conversionSource = line.conversionRule ? 'invoice line' : '';
       const ownRule = line.conversionRule;
-      if ((!ownRule || ownRule.confirmed) && !['kg','l'].includes(unitKey(line.purchaseUnit || line.unitOfMeasure || ''))) {
-        const rule = confirmedPackConversion(productsById.get(id), line, invoice.supplier || line.supplier || '');
+      const perWeight = ['kg','l'].includes(unitKey(line.purchaseUnit || line.unitOfMeasure || ''));
+      const checkedRule = !perWeight ? confirmedPackConversion(productsById.get(id), line, invoice.supplier || line.supplier || '') : null;
+      if (checkedRule?.forced) {
+        const forced = purchaseConversion({ ...line, conversionRule: checkedRule });
+        if (forced.valid) { conversion = forced; conversionSource = 'checked conversion'; }
+      } else if ((!ownRule || ownRule.confirmed) && !perWeight) {
+        const rule = checkedRule;
         const fallback = rule ? purchaseConversion({ ...line, conversionRule: rule }) : null;
         if (fallback?.valid) {
           if (!conversion.valid && !ownRule) { conversion = fallback; conversionSource = 'confirmed product format'; }
@@ -94,7 +113,28 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
     }
   }
   if (includeWebsite) for (const row of rows.values()) {
-    const reviewed = catalogueOffers(productsById.get(row.id), row.offers).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to));
+    const product = productsById.get(row.id);
+    // A newer invoice replaces the reviewed price only when it is plausible: within 3x of the
+    // reviewed price per unit for the same article. Otherwise the invoice is set aside for Check
+    // prices (usually a case price read as an item price) and the reviewed price stays.
+    const keep = new Set();
+    row.setAside = [];
+    for (const format of reviewedFormats(product)) {
+      const reviewedPrice = Number(format.purchaseUnitCost) / Number(format.baseQuantity);
+      const newer = row.offers.filter(offer => offer.source === 'invoice' && offer.date > String(format.date || '').slice(0, 10) && sameArticle(format, offer));
+      if (!newer.length) continue;
+      const plausible = offer => offer.valid && offer.unit === format.baseUnit && Math.abs(Math.log(offer.price / reviewedPrice)) <= Math.log(IMPLAUSIBLE_RATIO);
+      if (newer.some(plausible)) continue;
+      const wrong = newer.filter(offer => offer.valid && offer.unit === format.baseUnit);
+      if (!wrong.length) continue;
+      keep.add(format);
+      for (const offer of wrong) {
+        row.setAside.push({ ...offer, valid: false, implausible: true, reviewedPrice, reviewedUnit: format.baseUnit,
+          status: `Price looks wrong: ${(offer.price / reviewedPrice).toFixed(1)}x the reviewed price — check the pack` });
+      }
+      row.offers = row.offers.filter(offer => !wrong.includes(offer));
+    }
+    const reviewed = catalogueOffers(product, row.offers, keep).filter(offer => offer.date && (!from || offer.date >= from) && (!to || offer.date <= to));
     if (reviewed.length) row.offers = [...row.offers.filter(offer => !reviewed.some(r => sameSupplierIdentity(r.supplier || '', offer.supplier || ''))), ...reviewed];
   }
   return [...rows.values()].map(row => {

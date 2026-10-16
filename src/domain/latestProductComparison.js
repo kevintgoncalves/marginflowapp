@@ -83,7 +83,8 @@ export function latestProductComparisons(products, invoices, mappings = []) {
     const decorate = article => ({...article,delta:current?.valid && article.valid && article.unit===current.unit && article.currency===current.currency ? current.price-article.price : null,
       percent:current?.valid && article.valid && article.unit===current.unit && article.currency===current.currency ? (current.price-article.price)/current.price*100 : null,
       isCheapest:article.valid && best && article.unit===best.unit && article.currency===best.currency && Math.abs(article.price-best.price)<1e-7});
-    return {...product,comparison:{current,best,status,difference,percent,unit:current?.unit || best?.unit || '',currency:current?.currency || best?.currency || 'GBP',
+    const setAside = (historical.get(product.id)?.setAside || []).map(offer=>({...offer,key:articleIdentity(offer),isCurrentSupplier:false}));
+    return {...product,comparison:{current,best,status,difference,percent,unit:current?.unit || best?.unit || '',currency:current?.currency || best?.currency || 'GBP',setAside,
       comparable:comparable.map(decorate),review:review.map(a=>({...a,delta:null,percent:null,isCheapest:false})),articles:articles.map(decorate)},
       normalizedCostLabel:current?.valid ? `${comparisonMoney(current.price,current.currency)}/${comparisonUnit(current.unit)}` : 'Needs conversion', packReview:status,
       cheapestSupplierName:best?.supplier || '',
