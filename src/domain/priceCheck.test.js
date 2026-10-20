@@ -242,6 +242,7 @@ test('the same buy on several invoices is not a choice (fine beans 8 x £10)', (
     conversionRule: { purchaseUnit: 'pack', baseQuantity: 1.5, baseUnit: 'kg', confirmed: true } });
   const invoices = [invoice('a', 'TG Fruits', '2026-09-24', [line('1', 'FINE BEANS X1.5KG LOOSE')]), invoice('b', 'TG Fruits', '2026-09-07', [line('2', '07-SEP FINE BEANS X1.5KG LOOSE')])];
   const rows = latestProductComparisons([beansFine], invoices, []);
-  assert.equal(rows[0].comparison.currentAuto, true);
+  // TG's delivery date before the name is not part of the article, so both lines are one article.
+  assert.equal(rows[0].comparison.currentCandidates, 1);
   assert.deepEqual(priceCheckItems(rows).filter((item) => item.kind === 'choose'), []);
 });

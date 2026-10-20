@@ -46,8 +46,27 @@ const packagingUnitTokens = new Set([
   "each", "unit", "pack", "case", "box", "bag", "bottle", "tin", "jar", "tray", "carton",
 ]);
 
+const MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec";
+const UNIT_WORD = /^(?:x|g|kg|ml|cl|l|ltr|litre|kilo|gram)s?\b/i;
+
+// Text suppliers print around the product name that changes from one invoice to the next:
+// TG's delivery date ("05-OCT CHICORY…"), Ashley James's line number ("94, Fresh Mince…"),
+// Elite's stock code before the name ("1828 EXTONS…"), Direct Seafoods' traceability text
+// ("… Species: … Catch Area: …") and stock notes ("*** NOT AVAILABLE ***"). Left in, the
+// same product never matches its learned rule twice.
+export function stripInvoiceDescriptionNoise(value = "") {
+  let text = String(value || "");
+  text = text.replace(/\s+species\s*:.*$/i, "");
+  text = text.replace(/\*{2,}[^*]*\*{2,}/g, " ");
+  text = text.replace(new RegExp(`^\\s*\\d{1,2}[-/ ](?:${MONTHS})\\b[\\s.-]*`, "i"), "");
+  text = text.replace(/^\s*\d{1,4},\s*/, "");
+  const code = text.match(/^\s*(\d{3,5}[a-z]?)\s+(?=[a-z])/i);
+  if (code && !UNIT_WORD.test(text.slice(code[0].length))) text = text.slice(code[0].length);
+  return text.trim() || String(value || "");
+}
+
 export function normalizeSupplierDescription(value = "") {
-  const tokens = productTokens(value);
+  const tokens = productTokens(stripInvoiceDescriptionNoise(value));
   return tokens.filter((token, index) => {
     if (packagingUnitTokens.has(token) || token === "x") return false;
     if (/^\d+(?:\.\d+)?(?:g|kg|ml|cl|l)$/.test(token)) return false;
