@@ -156,7 +156,10 @@ export function priceCheckItems(rows = []) {
       });
     }
     // The product card says one unit, the suppliers sell in another (e.g. butter "per L").
-    if (UNITS.includes(row.baseUnit) && !UNITS.includes(row.comparisonUnit) && unit && unit !== row.baseUnit && solid.length) {
+    // Only when no supplier price is in the product's unit at all (blueberries have one per kg and
+    // one per punnet: that is a comparison choice, not a wrong product unit).
+    const inOwnUnit = articles.some((article) => article.valid && article.unit === row.baseUnit);
+    if (UNITS.includes(row.baseUnit) && !UNITS.includes(row.comparisonUnit) && unit && unit !== row.baseUnit && solid.length && !inOwnUnit) {
       const key = `${row.id}|unit`;
       if (!(row.priceChecks || []).some((check) => check.key === key && check.unit === unit)) {
         items.push({ id: key, key, kind: 'unit', reason: `The product is set up per ${unitName(row.baseUnit)}, but its suppliers sell per ${unitName(unit)}`,

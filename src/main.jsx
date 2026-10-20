@@ -6468,7 +6468,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     return () => {
       const end = new Date();
       const start = new Date(end.getTime() - 365 * 86400000);
-      return loadRelationalInvoiceReportRange(supabase, scope, { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) });
+      return loadRelationalInvoiceReportRange(supabase, scope, { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10), includeSplits: false, concurrency: 4 });
     };
   }, [cloudEnabled, demoMode, cloudScope.companyId, cloudScope.locationId]);
   // Loaded once per session in the background after the workspace is ready, so supplier prices

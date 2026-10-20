@@ -409,7 +409,24 @@ export async function loadRelationalInvoiceDetails(client, scope = {}, invoiceId
   });
 }
 
-export async function loadRelationalInvoiceReportRange(client, scope = {}, { startDate, endDate } = {}) {
+// Runs tasks with at most `limit` in flight, keeping the results in order. Any failure fails the
+// whole read (no partial data is returned).
+async function inOrderWithLimit(tasks, limit = 4) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const index = next++;
+      results[index] = await tasks[index]();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
+// includeSplits: department splits are needed for reports, not for supplier prices. The price
+// comparison reads ~10,000 lines; their splits alone took ~100 sequential requests.
+export async function loadRelationalInvoiceReportRange(client, scope = {}, { startDate, endDate, includeSplits = true, concurrency = 1 } = {}) {
   if (!startDate || !endDate) throw new Error("Invoice reports require an explicit date range.");
   if (!client || !validScope(scope)) return [];
   const headers = await readAllPages((head = false) => {
@@ -420,17 +437,18 @@ export async function loadRelationalInvoiceReportRange(client, scope = {}, { sta
   }, { pageSize: 500, label: "invoice report headers" });
   if (!(headers || []).length) return [];
   const invoiceIds = headers.map(row => row.id);
-  const lines = [];
+  const lineChunks = [];
   for (let offset = 0; offset < invoiceIds.length; offset += 100) {
     const invoiceIdChunk = invoiceIds.slice(offset, offset + 100);
-    lines.push(...await readAllPages((head = false) => {
+    lineChunks.push(() => readAllPages((head = false) => {
       let query = client.from("invoice_lines").select(head ? "id" : "*", { count: "exact", head })
         .eq("company_id", scope.companyId).in("invoice_id", invoiceIdChunk).eq("active", true);
       if (scope.locationId) query = query.eq("location_id", scope.locationId);
       return query;
     }, { pageSize: 500, label: "invoice report lines" }));
   }
-  const lineIds = lines.map(row => row.id);
+  const lines = (await inOrderWithLimit(lineChunks, Math.max(1, concurrency))).flat();
+  const lineIds = includeSplits ? lines.map(row => row.id) : [];
   const splits = [];
   for (let offset = 0; offset < lineIds.length; offset += 100) {
     const lineIdChunk = lineIds.slice(offset, offset + 100);

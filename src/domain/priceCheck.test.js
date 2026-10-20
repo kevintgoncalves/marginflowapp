@@ -151,3 +151,11 @@ test('a product set up per L whose suppliers sell per kg gets a unit fix, not ar
   assert.deepEqual(itemsFor([fixed]), []);
   assert.deepEqual(itemsFor([keepProductUnit(butter, items[0])]), [], 'keeping the unit is remembered too');
 });
+
+test('no product-unit item when some supplier already prices in the product unit (blueberries)', () => {
+  const berries = { id: 'blue', name: 'Berries, Blueberries', baseUnit: 'kg', supplier: 'TG Fruits', active: true, supplierFormats: [
+    reviewed('TG Fruits', 'BLUEBERRIES', '', 'PUNNET', 2, 1, 'each', '2026-08-18', 'invoice'),
+    reviewed('Albion Fine Foods', 'Blueberries', 'B1', '1.5kg', 22.92, 1.5, 'kg', '2026-08-09'),
+  ] };
+  assert.equal(itemsFor([berries]).some((item) => item.kind === 'unit'), false);
+});

@@ -104,6 +104,18 @@ test("department reports use a separate date-scoped invoice and line query", asy
   assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoices", "invoice_lines", "invoice_line_department_splits"]);
 });
 
+test("supplier price loading reads every line in order without department splits", async () => {
+  const tables = invoiceDataset();
+  tables.invoices[0].invoice_date = "2026-08-31";
+  const full = await loadRelationalInvoiceReportRange(cappedClient(tables, { cap: 10000 }), scope, { startDate: "2026-09-01", endDate: "2026-09-30" });
+  const client = cappedClient(tables, { cap: 10000 });
+  const prices = await loadRelationalInvoiceReportRange(client, scope, { startDate: "2026-09-01", endDate: "2026-09-30", includeSplits: false, concurrency: 4 });
+  assert.equal(prices.length, 1004);
+  assert.deepEqual(prices.map(invoice => invoice.id), full.map(invoice => invoice.id));
+  assert.deepEqual(prices.map(invoice => invoice.items.map(item => item.id)), full.map(invoice => invoice.items.map(item => item.id)));
+  assert.equal(client.requests.some(request => request.table === "invoice_line_department_splits"), false);
+});
+
 test("current-month sales use a separate company and location scoped query", async () => {
   const tables = {
     departments: [],
