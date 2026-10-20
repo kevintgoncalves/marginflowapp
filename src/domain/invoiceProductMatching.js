@@ -51,7 +51,7 @@ const UNIT_WORD = /^(?:x|g|kg|ml|cl|l|ltr|litre|kilo|gram)s?\b/i;
 
 // Text suppliers print around the product name that changes from one invoice to the next:
 // TG's delivery date ("05-OCT CHICORY…"), Ashley James's line number ("94, Fresh Mince…"),
-// Elite's stock code before the name ("1828 EXTONS…"), Direct Seafoods' traceability text
+// Elite's stock code before the name ("1828 EXTONS…"), The Cheese Man's code ("CR004 Double…"), Direct Seafoods' traceability text
 // ("… Species: … Catch Area: …") and stock notes ("*** NOT AVAILABLE ***"). Left in, the
 // same product never matches its learned rule twice.
 export function stripInvoiceDescriptionNoise(value = "") {
@@ -60,9 +60,26 @@ export function stripInvoiceDescriptionNoise(value = "") {
   text = text.replace(/\*{2,}[^*]*\*{2,}/g, " ");
   text = text.replace(new RegExp(`^\\s*\\d{1,2}[-/ ](?:${MONTHS})\\b[\\s.-]*`, "i"), "");
   text = text.replace(/^\s*\d{1,4},\s*/, "");
+  // The Cheese Man / Elite catalogue codes printed before the name: "CR004 Double Cream", "GO003:Extra…", "PC0252 BLUE…".
+  text = text.replace(/^\s*[a-z]{1,3}\d{3,5}[a-z]?\s*[:\s]\s*(?=[a-z0-9])/i, "");
   const code = text.match(/^\s*(\d{3,5}[a-z]?)\s+(?=[a-z])/i);
   if (code && !UNIT_WORD.test(text.slice(code[0].length))) text = text.slice(code[0].length);
   return text.trim() || String(value || "");
+}
+
+// The same purchase is often learned as "MINT" with pack "X100G BAG" and later printed as
+// "MINT X100G BAG" with the same pack. Both readings identify the line.
+export function supplierDescriptionKeys(description = "", packSize = "") {
+  const keys = new Set();
+  const full = normalizeSupplierDescription(description);
+  if (full) keys.add(full);
+  const text = stripInvoiceDescriptionNoise(description).trim();
+  const pack = String(packSize || "").trim();
+  if (pack && text.length > pack.length && text.toLowerCase().endsWith(pack.toLowerCase())) {
+    const withoutPack = normalizeSupplierDescription(text.slice(0, -pack.length));
+    if (withoutPack) keys.add(withoutPack);
+  }
+  return keys;
 }
 
 export function normalizeSupplierDescription(value = "") {
@@ -242,6 +259,7 @@ export function matchInvoiceLineToExistingProduct({
   const samePack = rule => packsEquivalent(rule.packSize || rule.pack_size, packSize);
   const packReview = () => resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ['pack_changed'] });
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
+  const descriptionKeys = supplierDescriptionKeys(rawDescription || productName, packSize);
 
   if (normalizedCode) {
     const candidates = mappings.filter(candidate => candidate.autoApply !== false
@@ -263,7 +281,7 @@ export function matchInvoiceLineToExistingProduct({
   if (normalizedDescription) {
     const allDescriptionMappings = mappings.filter((candidate) => {
       const mappingDescription = normalizeSupplierDescription(candidate.normalizedSupplierDescription || candidate.supplierDescription || candidate.supplier_description);
-      if (!mappingDescription || mappingDescription !== normalizedDescription) return false;
+      if (!mappingDescription || !descriptionKeys.has(mappingDescription)) return false;
       if (candidate.autoApply === false) return false;
       const confirmationCount = numberValue(candidate.confirmationCount ?? candidate.confirmation_count, 0);
       const hasCode = normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code);
@@ -288,7 +306,7 @@ export function matchInvoiceLineToExistingProduct({
 
   const catalogue = supplierMappings.filter(row => row.catalogueEntry && row.active !== false
     && sameRuleScope(row, organisationId, supplierId) && sameLocation(row, locationId)
-    && normalizedDescription && normalizeSupplierDescription(row.supplierDescription) === normalizedDescription
+    && normalizedDescription && descriptionKeys.has(normalizeSupplierDescription(row.supplierDescription))
     && packSignature(packSize) && samePack(row));
   if (catalogue.length) {
     // Only distinct exact catalogue identities determine ambiguity, never fuzzy suggestions
