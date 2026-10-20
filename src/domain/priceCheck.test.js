@@ -192,3 +192,24 @@ test('a set-aside invoice line is listed once and offers the reviewed pack size 
   assert.equal(Math.round(wrong[0].options[0].unitPrice * 100), 2533);
   assert.equal(wrong[0].recommended.baseQuantity, 0.075);
 });
+
+test('the same line on several invoices is one row and its fix applies to all (whole chicken per kg)', () => {
+  const chicken = { id: 'chick', name: 'Chicken, Whole', baseUnit: 'kg', supplier: 'Ashley James Meat Co', active: true, supplierFormats: [
+    reviewed('Albion Fine Foods', 'Whole chicken', 'C1', '1.6kg', 9.85, 1.6, 'kg', '2026-10-12'),
+  ] };
+  const line = (id, description, packSize) => ({ id, matchedProductId: 'chick', rawDescription: description, packSize, quantity: 12.4, unitCost: 4.2, unitOfMeasure: 'pack' });
+  const invoices = [
+    invoice('a', 'Ashley James Meat Co', '2026-07-03', [line('1', 'Fresh English Whole Chicken (PER KG)', '')]),
+    invoice('b', 'Ashley James Meat Co', '2026-07-01', [line('2', 'Fresh English Whole Chicken', 'PER KG')]),
+    invoice('c', 'Ashley James Meat Co', '2026-06-22', [line('3', 'Fresh English Whole Chicken', '2 Cases')]),
+  ];
+  const items = itemsFor([chicken], invoices).filter((item) => item.kind === 'conversion');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].lines, 3);
+  assert.equal(items[0].recommended.label, 'Priced per kg');
+  const fixed = applyPriceCheckConversion(chicken, items[0], items[0].recommended);
+  assert.equal(fixed.supplierFormats.filter((format) => format.source === 'price_check').length, 3);
+  assert.deepEqual(itemsFor([fixed], invoices).filter((item) => item.kind === 'conversion'), []);
+  const [row] = latestProductComparisons([fixed], invoices, []);
+  assert.ok(row.comparison.articles.filter((article) => article.supplier === 'Ashley James Meat Co').every((article) => article.valid && Math.abs(article.price - 4.2) < 1e-6));
+});

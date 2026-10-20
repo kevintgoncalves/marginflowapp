@@ -36,39 +36,60 @@ export function priceCheckKey(productId, article) {
 
 // Possible conversions read from the pack text: the whole pack, one item of a multipack, or the
 // number of items. Each is priced so the closest to the other suppliers can be recommended.
-export function conversionOptions(pack = '', packPrice = null, unit = '') {
+export function conversionOptions(pack = '', packPrice = null, unit = '', description = '') {
   const options = [];
-  const add = (label, baseQuantity, baseUnit) => {
+  const add = (label, baseQuantity, baseUnit, extra = {}) => {
     if (!(baseQuantity > 0) || !UNITS.includes(baseUnit)) return;
     if (unit && baseUnit !== unit) return;
     if (options.some((option) => option.baseUnit === baseUnit && Math.abs(option.baseQuantity - baseQuantity) < 1e-9)) return;
-    options.push({ label, baseQuantity: round(baseQuantity, 6), baseUnit, unitPrice: packPrice ? round(packPrice / baseQuantity) : null });
+    options.push({ label, baseQuantity: round(baseQuantity, 6), baseUnit, unitPrice: packPrice ? round(packPrice / baseQuantity) : null, ...extra });
   };
-  const text = String(pack || '').toLowerCase().replace(/,/g, '.');
-  const multi = text.match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|g|ltr|lt|l|ml|cl)\b/);
-  const single = text.match(/(\d+(?:\.\d+)?)\s*(kg|g|ltr|lt|l|ml|cl)\b/);
+  const clean = (value) => String(value || '').toLowerCase().replace(/,/g, '.').replace(/(\d)\.\s*(kg|g|l|ltr)\b/g, '$1$2')
+    .replace(/\bkilos?\b/g, 'kg').replace(/\blitres?\b|\bliters?\b/g, 'l');
   const toBase = (amount, measure) => {
     const value = Number(amount);
     if (measure === 'kg') return [value, 'kg'];
     if (measure === 'g') return [value / 1000, 'kg'];
+    if (measure === 'oz') return [value * 0.0283495, 'kg'];
     if (['l', 'ltr', 'lt'].includes(measure)) return [value, 'l'];
     if (measure === 'ml') return [value / 1000, 'l'];
     if (measure === 'cl') return [value / 100, 'l'];
     return [null, ''];
   };
-  if (multi) {
-    const [itemQuantity, baseUnit] = toBase(multi[2], multi[3]);
-    add(`Whole pack (${multi[1]} × ${multi[2]}${multi[3]})`, Number(multi[1]) * itemQuantity, baseUnit);
-    add(`One item (${multi[2]}${multi[3]})`, itemQuantity, baseUnit);
-  } else if (single) {
-    const [quantity, baseUnit] = toBase(single[1], single[2]);
-    add(`Pack (${single[1]}${single[2]})`, quantity, baseUnit);
-  } else {
+  const MEASURE = '(kg|g|oz|ltr|lt|l|ml|cl)\\b';
+  // Priced by weight: "PER KG", "(PER KILO)", "/KG" in the pack or the description.
+  const perWeight = (text) => /(?:\bper\s*|\/\s*)(kg|l)\b/.exec(text) || (/^\s*(kg|l)\s*$/.exec(text));
+  const readWeights = (text, source) => {
+    const before = options.length;
+    const multi = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*[x×]\\s*(\\d+(?:\\.\\d+)?)\\s*${MEASURE}`).exec(text);
+    const single = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${MEASURE}`).exec(text);
+    if (multi) {
+      const [itemQuantity, baseUnit] = toBase(multi[2], multi[3]);
+      add(`Whole pack (${multi[1]} × ${multi[2]}${multi[3]})`, Number(multi[1]) * itemQuantity, baseUnit, { explicit: true });
+      add(`One item (${multi[2]}${multi[3]})`, itemQuantity, baseUnit, { explicit: true });
+    } else if (single && !/per\s*$/.test(text.slice(0, single.index))) {
+      const [quantity, baseUnit] = toBase(single[1], single[2]);
+      add(`${source} (${single[1]}${single[2]})`, quantity, baseUnit, { explicit: true });
+    } else if (single) {
+      // "PER 2KG TUB", "PER 3 KILO BOX": the pack holds that weight.
+      const [quantity, baseUnit] = toBase(single[1], single[2]);
+      add(`${source} (${single[1]}${single[2]})`, quantity, baseUnit, { explicit: true });
+    }
+    return options.length > before;
+  };
+  const packText = clean(pack);
+  const descriptionText = clean(description);
+  const priced = perWeight(packText) || perWeight(descriptionText);
+  if (priced) add(`Priced per ${priced[1] === 'l' ? 'L' : 'kg'}`, 1, priced[1], { explicit: true, perWeight: true });
+  if (!readWeights(packText, 'Pack') && !priced) {
     const inferred = interpretPurchasePack(pack);
-    if (inferred?.confirmed) add('Pack', Number(inferred.baseQuantity), inferred.baseUnit);
+    if (inferred?.confirmed) add('Pack', Number(inferred.baseQuantity), inferred.baseUnit, { explicit: true });
+    else readWeights(descriptionText, 'Description');
   }
-  const count = itemsInPack(pack) || (/^\s*\d+\s*$/.test(text) ? Number(text) : null);
-  if (count > 1) add(`${count} units`, count, 'each');
+  const perBox = /(\d+)\s*per\s*(?:box|case|pack|tray)/.exec(`${packText} ${descriptionText}`);
+  const count = itemsInPack(pack) || (/^\s*\d+\s*$/.test(packText) ? Number(packText) : null)
+    || (perBox ? Number(perBox[1]) : null) || itemsInPack(description);
+  if (count > 1) add(`${count} units`, count, 'each', { explicit: true });
   add('1 unit', 1, 'each');
   return options;
 }
@@ -76,10 +97,17 @@ export function conversionOptions(pack = '', packPrice = null, unit = '') {
 // Suggest the option closest to the reference price (other suppliers / reviewed price).
 export function recommendedOption(options = [], reference = null) {
   if (!options.length) return null;
-  if (!(reference > 0)) return null;
+  if (!(reference > 0)) {
+    // No other price to compare: suggest only what the pack states plainly, when it is one answer.
+    const stated = options.filter((option) => option.explicit);
+    return stated.length === 1 ? stated[0] : null;
+  }
   const priced = options.filter((option) => option.unitPrice > 0);
   if (!priced.length) return null;
   const distance = (option) => Math.abs(Math.log(option.unitPrice / reference));
+  // What the pack states wins when it is close (within 15%) to the reference.
+  const statedClose = priced.filter((option) => option.explicit && distance(option) <= Math.log(1.15)).sort((a, b) => distance(a) - distance(b));
+  if (statedClose.length) return statedClose[0];
   const best = [...priced].sort((a, b) => distance(a) - distance(b))[0];
   return distance(best) <= Math.log(OUTLIER_RATIO) ? best : null;
 }
@@ -181,12 +209,14 @@ export function priceCheckItems(rows = []) {
         reason = reference > 0 ? `${ratio >= 1 ? round(ratio, 1) + '× above' : round(1 / ratio, 1) + '× below'} the other suppliers` : 'Far from the other suppliers';
       }
       if (!kind) continue;
-      const options = conversionOptions(article.pack, packPrice, unit);
+      const options = conversionOptions(article.pack, packPrice, unit, article.description);
       // The reviewed article already knows what this pack holds (e.g. a punnet of micro herbs = 75 g).
-      if (article.reviewedQuantity > 0 && UNITS.includes(article.reviewedUnit) && (!unit || article.reviewedUnit === unit)
-        && !options.some((option) => option.baseUnit === article.reviewedUnit && Math.abs(option.baseQuantity - article.reviewedQuantity) < 1e-9)) {
-        options.unshift({ label: `Same as the reviewed article${article.reviewedPack ? ` (${article.reviewedPack})` : ''}`, baseQuantity: round(article.reviewedQuantity, 6),
-          baseUnit: article.reviewedUnit, unitPrice: packPrice ? round(packPrice / article.reviewedQuantity) : null });
+      // Quantity that gives the reviewed price for this pack price.
+      const reviewedQuantity = article.reviewedPrice > 0 && packPrice ? round(packPrice / article.reviewedPrice, 3) : null;
+      if (reviewedQuantity > 0 && UNITS.includes(article.reviewedUnit) && (!unit || article.reviewedUnit === unit)
+        && !options.some((option) => option.baseUnit === article.reviewedUnit && Math.abs(option.baseQuantity - reviewedQuantity) < 1e-9)) {
+        options.unshift({ label: `Same as the reviewed price${article.reviewedPack ? ` (${article.reviewedPack})` : ''}`, baseQuantity: reviewedQuantity,
+          baseUnit: article.reviewedUnit, unitPrice: round(packPrice / reviewedQuantity) });
       }
       if (items.some((existing) => existing.key === key)) continue;
       items.push({
@@ -211,7 +241,42 @@ export function priceCheckItems(rows = []) {
     }
   }
   const order = { implausible: 0, unit: 1, conversion: 2, outlier: 3, choose: 4 };
-  return items.sort((a, b) => order[a.kind] - order[b.kind] || a.productName.localeCompare(b.productName) || a.supplier.localeCompare(b.supplier));
+  return groupRepeatedLines(items).sort((a, b) => order[a.kind] - order[b.kind] || a.productName.localeCompare(b.productName) || a.supplier.localeCompare(b.supplier));
+}
+
+// The same supplier line on several invoices (same product, supplier and pack price, possibly worded
+// differently: "PER KG", "2 Cases", "Case x") becomes one row; its fix is applied to every line.
+function groupRepeatedLines(items) {
+  const groups = new Map();
+  const result = [];
+  for (const item of items) {
+    if (!['conversion', 'implausible'].includes(item.kind) || !(item.packPrice > 0)) { result.push(item); continue; }
+    const key = [item.productId, item.kind, normalizeSupplierDescription(item.supplier), item.packPrice.toFixed(2)].join('|');
+    const group = groups.get(key);
+    if (!group) {
+      const first = { ...item, members: [item] };
+      groups.set(key, first);
+      result.push(first);
+      continue;
+    }
+    group.members.push(item);
+    item.options.forEach((option) => {
+      if (!group.options.some((existing) => existing.baseUnit === option.baseUnit && Math.abs(existing.baseQuantity - option.baseQuantity) < 1e-9)) group.options.push(option);
+    });
+    if (item.date > group.date) Object.assign(group, { date: item.date, invoiceNumber: item.invoiceNumber, description: item.description || group.description, pack: item.pack || group.pack });
+  }
+  for (const item of result) {
+    if (!item.members) continue;
+    if (item.members.length > 1) {
+      item.options.sort((a, b) => Number(Boolean(b.explicit)) - Number(Boolean(a.explicit)) || (a.baseUnit === 'each') - (b.baseUnit === 'each'));
+      const stated = item.options.filter((option) => option.explicit);
+      const distinct = new Set(stated.map((option) => `${option.baseQuantity}:${option.baseUnit}`));
+      item.recommended = recommendedOption(item.options, item.reference)
+        || (distinct.size === 1 ? stated[0] : null);
+    }
+    item.lines = item.members.length;
+  }
+  return result;
 }
 
 const sameArticleFormat = (format, article) => sameSupplierIdentity(format.supplier || '', article.supplier || '')
@@ -228,7 +293,11 @@ const recordCheck = (product, item, now, extra = {}) => ({
 
 // Saves a confirmed conversion for one article. Reviewed catalogue articles are corrected in place;
 // invoice articles get a confirmed format that the comparison applies to that article's invoices.
-export function applyPriceCheckConversion(product, item, { baseQuantity, baseUnit }, now = new Date().toISOString()) {
+export function applyPriceCheckConversion(product, item, conversion, now = new Date().toISOString()) {
+  return (item.members || [item]).reduce((current, member) => applyOneConversion(current, member, conversion, now), product);
+}
+
+function applyOneConversion(product, item, { baseQuantity, baseUnit }, now) {
   const quantity = Number(baseQuantity);
   if (!(quantity > 0) || !UNITS.includes(baseUnit)) throw new Error('Enter how many kg, litres or units the pack holds.');
   const packPrice = Number(item.packPrice);
@@ -254,7 +323,7 @@ export function applyPriceCheckConversion(product, item, { baseQuantity, baseUni
 
 // The price is right as it is (e.g. a genuinely cheaper supplier). Hidden until the price changes.
 export function markPriceChecked(product, item, now = new Date().toISOString()) {
-  return recordCheck(product, item, now, { accepted: true });
+  return (item.members || [item]).reduce((current, member) => recordCheck(current, member, now, { accepted: true }), product);
 }
 
 // Picks the article bought now from the current supplier.

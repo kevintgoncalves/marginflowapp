@@ -152,7 +152,7 @@ export default function PriceCheck({ open, onClose, rows = [], loading = false, 
                 <td>{item.supplier}{!["choose", "unit"].includes(item.kind) && <><br /><small>{item.description || item.code}{item.pack ? ` · ${item.pack}` : ""}</small></>}</td>
                 <td>{["choose", "unit"].includes(item.kind) ? "—" : <>{money(item.packPrice)} <small>per pack</small>
                   {item.currentPrice != null && <><br /><small>= {money(item.currentPrice)}/{unitLabel(item.currentUnit)}</small></>}
-                  <br /><small>{item.date}{SOURCE[item.source] ? ` · ${SOURCE[item.source]}` : ""}{item.invoiceNumber && item.source === "invoice" ? ` ${item.invoiceNumber}` : ""}</small></>}
+                  <br /><small>{item.date}{SOURCE[item.source] ? ` · ${SOURCE[item.source]}` : ""}{item.invoiceNumber && item.source === "invoice" ? ` ${item.invoiceNumber}` : ""}{item.lines > 1 ? ` · same line on ${item.lines} invoices` : ""}</small></>}
                 </td>
                 <td>{item.reason}{item.reference > 0 && <><br /><small>{item.kind === "implausible" ? "Reviewed" : "Other suppliers"}: {money(item.reference)}/{unitLabel(item.unit)}</small></>}</td>
                 <td>{item.kind === "choose" ? <ChooseFix item={item} canEdit={canEdit} onChoose={onChoose} /> : item.kind === "unit" ? <UnitFix item={item} canEdit={canEdit} onUnit={onUnit} /> : <ConversionFix item={item} canEdit={canEdit} onSave={onSave} onAccept={onAccept} />}</td>

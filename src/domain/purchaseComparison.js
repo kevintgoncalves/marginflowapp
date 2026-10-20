@@ -1,5 +1,5 @@
 import { packKey, purchaseConversion, unitKey } from './reusablePurchasing.js';
-import { normalizeSupplierProductCode } from './invoiceProductMatching.js';
+import { normalizeSupplierDescription, normalizeSupplierProductCode } from './invoiceProductMatching.js';
 import { sameSupplierIdentity } from './supplierIdentity.js';
 import { itemsInPack } from './packCount.js';
 
@@ -14,7 +14,12 @@ export function confirmedPackConversion(product = {}, line = {}, supplier = '') 
     && sameSupplierIdentity(format.supplier || '', supplier || ''));
   const byCode = code ? candidates.filter(format => normalizeSupplierProductCode(format.supplierProductCode) === code) : [];
   const byPack = !byCode.length && pack ? candidates.filter(format => packKey(format.packSize || '') === pack) : [];
-  let matches = byCode.length ? byCode : byPack;
+  // A line with no code and no pack text matches a conversion confirmed in Check prices for the
+  // same description (e.g. "Fresh English Whole Chicken (PER KG)").
+  const description = normalizeSupplierDescription(line.rawDescription || line.productName || '');
+  const byDescription = !byCode.length && !byPack.length && description
+    ? candidates.filter(format => format.source === 'price_check' && normalizeSupplierDescription(format.description || '') === description) : [];
+  let matches = byCode.length ? byCode : byPack.length ? byPack : byDescription;
   // A conversion confirmed in Check prices is the user's answer for this article and wins.
   const checked = matches.filter(format => format.source === 'price_check');
   if (checked.length) matches = checked;
