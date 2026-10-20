@@ -66,7 +66,14 @@ export function latestProductComparisons(products, invoices, mappings = []) {
     let currentCandidates = articles.filter(a=>a.isCurrentSupplier);
     if (product.supplierProductCode) currentCandidates = currentCandidates.filter(a=>normalizeSupplierProductCode(a.code)===normalizeSupplierProductCode(product.supplierProductCode));
     else if (currentCandidates.length > 1 && product.packSize) currentCandidates = currentCandidates.filter(a=>packKey(a.pack)===packKey(product.packSize));
-    const current = currentCandidates.length === 1 ? currentCandidates[0] : null;
+    // Several articles from the current supplier and none chosen: use the one on the most recent
+    // invoice (when one date is clearly the latest). Shown as chosen automatically in Check prices.
+    let currentAuto = false;
+    let current = currentCandidates.length === 1 ? currentCandidates[0] : null;
+    if (!current && currentCandidates.length > 1) {
+      const dated = currentCandidates.filter(a=>a.date && a.valid).sort((a,b)=>b.date.localeCompare(a.date));
+      if (dated.length && (dated.length === 1 || dated[0].date > dated[1].date)) { current = dated[0]; currentAuto = true; }
+    }
     const validUnits = new Set(articles.filter(a=>a.valid).map(a=>`${a.currency}:${a.unit}`));
     const basis = ['kg','l','each'].includes(product.comparisonUnit) ? `GBP:${product.comparisonUnit}` : current?.valid ? `${current.currency}:${current.unit}` : validUnits.size===1 ? [...validUnits][0] : null;
     const comparable = articles.filter(a=>a.valid && `${a.currency}:${a.unit}`===basis).sort((a,b)=>a.price-b.price || a.supplier.localeCompare(b.supplier) || a.key.localeCompare(b.key));
@@ -84,7 +91,7 @@ export function latestProductComparisons(products, invoices, mappings = []) {
       percent:current?.valid && article.valid && article.unit===current.unit && article.currency===current.currency ? (current.price-article.price)/current.price*100 : null,
       isCheapest:article.valid && best && article.unit===best.unit && article.currency===best.currency && Math.abs(article.price-best.price)<1e-7});
     const setAside = (historical.get(product.id)?.setAside || []).map(offer=>({...offer,key:articleIdentity(offer),isCurrentSupplier:false}));
-    return {...product,comparison:{current,best,status,difference,percent,unit:current?.unit || best?.unit || '',currency:current?.currency || best?.currency || 'GBP',setAside,
+    return {...product,comparison:{current,currentAuto,currentCandidates:currentCandidates.length,best,status,difference,percent,unit:current?.unit || best?.unit || '',currency:current?.currency || best?.currency || 'GBP',setAside,
       comparable:comparable.map(decorate),review:review.map(a=>({...a,delta:null,percent:null,isCheapest:false})),articles:articles.map(decorate)},
       normalizedCostLabel:current?.valid ? `${comparisonMoney(current.price,current.currency)}/${comparisonUnit(current.unit)}` : 'Needs conversion', packReview:status,
       cheapestSupplierName:best?.supplier || '',

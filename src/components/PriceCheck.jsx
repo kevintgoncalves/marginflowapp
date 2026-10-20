@@ -70,7 +70,9 @@ function ChooseFix({ item, canEdit, onChoose }) {
       {item.candidates.map((candidate) => (
         <div key={candidate.key} className="button-row left tight">
           <span>{candidate.description || candidate.code || "Article"}{candidate.pack ? ` · ${candidate.pack}` : ""} · {money(candidate.packPrice)}{candidate.price != null ? ` (${money(candidate.price)}/${unitLabel(candidate.unitLabel)})` : ""} · {candidate.date}</span>
-          <button type="button" className="ghost mini-button" disabled={!canEdit} onClick={() => onChoose(item, candidate)}>Buy this now</button>
+          {candidate.inUse
+            ? <button type="button" className="mini-button" disabled={!canEdit} onClick={() => onChoose(item, candidate)}>Confirm (latest invoice)</button>
+            : <button type="button" className="ghost mini-button" disabled={!canEdit} onClick={() => onChoose(item, candidate)}>Buy this now</button>}
         </div>
       ))}
     </div>
@@ -106,6 +108,17 @@ export default function PriceCheck({ open, onClose, rows = [], loading = false, 
     { productId: item.productId, apply: (product) => markPriceChecked(product, item) });
   const onUnit = (item, use) => save(use ? `${item.productName} is now set up per ${unitLabel(item.unit)}.` : `${item.productName} stays per ${unitLabel(item.fromUnit)}.`,
     { productId: item.productId, apply: (product) => (use ? applyProductUnit(product, item) : keepProductUnit(product, item)) });
+  const autoChoices = useMemo(() => visible.filter((item) => item.kind === "choose" && item.auto), [visible]);
+  // One click for the articles chosen automatically from the latest invoice (those shown now).
+  const confirmAllAuto = () => {
+    let done = 0;
+    for (const item of autoChoices) {
+      const candidate = item.candidates.find((entry) => entry.inUse);
+      if (!candidate) continue;
+      try { onUpdateProduct({ productId: item.productId, apply: (product) => chooseCurrentArticle(product, item, candidate) }); done += 1; } catch { /* reported below */ }
+    }
+    setMessage(`Confirmed the latest-invoice article for ${done} of ${autoChoices.length} products.`);
+  };
   const onChoose = (item, candidate) => save(`Current article for ${item.productName}: ${candidate.description || candidate.code}.`,
     { productId: item.productId, apply: (product) => chooseCurrentArticle(product, item, candidate) });
 
@@ -138,6 +151,7 @@ export default function PriceCheck({ open, onClose, rows = [], loading = false, 
         </label>
         <input type="search" placeholder="Search products" value={query} onChange={(event) => { setQuery(event.target.value); setLimit(PAGE); }} />
         {(kind || supplier || query) && <button type="button" className="ghost" onClick={() => { setKind(""); setSupplier(""); setQuery(""); }}>Show all</button>}
+        {canEdit && autoChoices.length > 0 && <button type="button" className="ghost" onClick={confirmAllAuto}>Confirm all {autoChoices.length} latest-invoice articles</button>}
       </div>
       {message && <p role="status" className="invoice-status info">{message}</p>}
       <div className="table-wrap">

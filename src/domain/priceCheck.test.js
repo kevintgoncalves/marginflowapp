@@ -213,3 +213,25 @@ test('the same line on several invoices is one row and its fix applies to all (w
   const [row] = latestProductComparisons([fixed], invoices, []);
   assert.ok(row.comparison.articles.filter((article) => article.supplier === 'Ashley James Meat Co').every((article) => article.valid && Math.abs(article.price - 4.2) < 1e-6));
 });
+
+test('several current-supplier articles: the latest invoice is used and listed for confirmation', () => {
+  const milk = { id: 'milk', name: 'Milk, Whole', baseUnit: 'l', supplier: 'Woods Foodservice Limited', active: true, supplierFormats: [] };
+  const line = (id, code, packSize, unitCost) => ({ id, matchedProductId: 'milk', supplierProductCode: code, rawDescription: 'Whole milk', packSize, quantity: 1, unitCost, unitOfMeasure: 'pack' });
+  const invoices = [
+    invoice('a', 'Woods Foodservice Limited', '2026-10-01', [line('1', 'M2', '2L', 2.1)]),
+    invoice('b', 'Woods Foodservice Limited', '2026-08-01', [line('2', 'M4', '4 x 2L', 7.6)]),
+  ];
+  const [row] = latestProductComparisons([milk], invoices, []);
+  assert.equal(row.comparison.currentAuto, true);
+  assert.equal(row.comparison.current.code, 'M2');
+  assert.notEqual(row.comparison.status, 'Select current article');
+  const [item] = priceCheckItems([row]).filter((entry) => entry.kind === 'choose');
+  assert.equal(item.auto, true);
+  assert.equal(item.candidates[0].inUse, true);
+  assert.equal(item.candidates[0].code, 'M2');
+  const confirmed = chooseCurrentArticle(milk, item, item.candidates[0]);
+  assert.equal(confirmed.supplierProductCode, 'M2');
+  const [after] = latestProductComparisons([confirmed], invoices, []);
+  assert.equal(after.comparison.currentAuto, false);
+  assert.deepEqual(priceCheckItems([after]).filter((entry) => entry.kind === 'choose'), []);
+});

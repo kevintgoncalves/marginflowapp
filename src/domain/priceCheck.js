@@ -228,16 +228,18 @@ export function priceCheckItems(rows = []) {
       });
     }
     // The product card says one unit, the suppliers sell in another (e.g. butter "per L").
-    if (row.comparison?.status === 'Select current article') {
-      const candidates = articles.filter((article) => article.isCurrentSupplier);
-      const key = `${row.id}|choose`;
-      if (candidates.length > 1 && !(row.priceChecks || []).some((check) => check.key === key && check.count === candidates.length)) {
-        items.push({ id: key, key, kind: 'choose', reason: `${candidates.length} articles from ${row.supplier || 'the current supplier'}; choose the one you buy now`,
-          productId: row.id, productName: row.name, department: row.department || '', unit, supplier: row.supplier || '',
-          candidates: candidates.map((article) => ({ key: article.key, code: article.code || '', description: article.description || '', pack: article.pack || '',
-            date: article.date, price: article.valid ? article.price : null, unitLabel: article.valid ? article.unit : '', packPrice: packPriceOf(article) })),
-          options: [], recommended: null });
-      }
+    const candidates = articles.filter((article) => article.isCurrentSupplier);
+    const chooseKey = `${row.id}|choose`;
+    const chosenAlready = (row.priceChecks || []).some((check) => check.key === chooseKey && check.count === candidates.length);
+    if (candidates.length > 1 && !chosenAlready && (row.comparison?.status === 'Select current article' || row.comparison?.currentAuto)) {
+      const auto = row.comparison?.currentAuto ? row.comparison.current : null;
+      items.push({ id: chooseKey, key: chooseKey, kind: 'choose', auto: Boolean(auto),
+        reason: auto ? `${candidates.length} articles from ${row.supplier || 'the current supplier'}; using the latest invoice` : `${candidates.length} articles from ${row.supplier || 'the current supplier'}; choose the one you buy now`,
+        productId: row.id, productName: row.name, department: row.department || '', unit, supplier: row.supplier || '',
+        candidates: candidates.map((article) => ({ key: article.key, code: article.code || '', description: article.description || '', pack: article.pack || '',
+          date: article.date, price: article.valid ? article.price : null, unitLabel: article.valid ? article.unit : '', packPrice: packPriceOf(article), inUse: Boolean(auto && article.key === auto.key) }))
+          .sort((a, b) => Number(b.inUse) - Number(a.inUse) || String(b.date).localeCompare(String(a.date))),
+        options: [], recommended: null });
     }
   }
   const order = { implausible: 0, unit: 1, conversion: 2, outlier: 3, choose: 4 };

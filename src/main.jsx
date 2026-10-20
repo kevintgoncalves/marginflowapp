@@ -13219,8 +13219,9 @@ function Products({ userId = "", draftCompanyId = "", supplierProductMappings = 
             // Applied to the product as shown, so an invalid entry is reported before anything changes.
             const product = products.find((entry) => entry.id === productId);
             if (!product) throw new Error("This product no longer exists.");
-            const next = { ...apply(product), updatedAt: new Date().toISOString() };
-            setProducts((current) => current.map((entry) => (entry.id === productId ? next : entry)));
+            apply(product); // validates before anything changes
+            // Applied to the latest state so several changes in a row (Confirm all) all keep.
+            setProducts((current) => current.map((entry) => (entry.id === productId ? { ...apply(entry), updatedAt: new Date().toISOString() } : entry)));
           }} />
       )}
       {catalogueImportOpen && (
