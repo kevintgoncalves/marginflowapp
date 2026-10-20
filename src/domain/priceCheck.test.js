@@ -235,3 +235,13 @@ test('several current-supplier articles: the latest invoice is used and listed f
   assert.equal(after.comparison.currentAuto, false);
   assert.deepEqual(priceCheckItems([after]).filter((entry) => entry.kind === 'choose'), []);
 });
+
+test('the same buy on several invoices is not a choice (fine beans 8 x £10)', () => {
+  const beansFine = { id: 'fine', name: 'Beans, Fine Green', baseUnit: 'kg', supplier: 'TG Fruits', active: true, supplierFormats: [] };
+  const line = (id, description) => ({ id, matchedProductId: 'fine', rawDescription: description, packSize: 'X1.5KG LOOSE', quantity: 1, unitCost: 10, unitOfMeasure: 'pack',
+    conversionRule: { purchaseUnit: 'pack', baseQuantity: 1.5, baseUnit: 'kg', confirmed: true } });
+  const invoices = [invoice('a', 'TG Fruits', '2026-09-24', [line('1', 'FINE BEANS X1.5KG LOOSE')]), invoice('b', 'TG Fruits', '2026-09-07', [line('2', '07-SEP FINE BEANS X1.5KG LOOSE')])];
+  const rows = latestProductComparisons([beansFine], invoices, []);
+  assert.equal(rows[0].comparison.currentAuto, true);
+  assert.deepEqual(priceCheckItems(rows).filter((item) => item.kind === 'choose'), []);
+});

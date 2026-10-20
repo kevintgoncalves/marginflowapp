@@ -231,7 +231,12 @@ export function priceCheckItems(rows = []) {
     const candidates = articles.filter((article) => article.isCurrentSupplier);
     const chooseKey = `${row.id}|choose`;
     const chosenAlready = (row.priceChecks || []).some((check) => check.key === chooseKey && check.count === candidates.length);
-    if (candidates.length > 1 && !chosenAlready && (row.comparison?.status === 'Select current article' || row.comparison?.currentAuto)) {
+    // Nothing to choose when the articles are the same buy: one unit and prices within 5%
+    // (the same line on several invoices, worded slightly differently).
+    const pricedCandidates = candidates.filter((article) => article.valid && article.price > 0);
+    const sameBuy = pricedCandidates.length === candidates.length && new Set(pricedCandidates.map((article) => article.unit)).size === 1
+      && Math.max(...pricedCandidates.map((article) => article.price)) / Math.min(...pricedCandidates.map((article) => article.price)) <= 1.05;
+    if (candidates.length > 1 && !chosenAlready && !sameBuy && (row.comparison?.status === 'Select current article' || row.comparison?.currentAuto)) {
       const auto = row.comparison?.currentAuto ? row.comparison.current : null;
       items.push({ id: chooseKey, key: chooseKey, kind: 'choose', auto: Boolean(auto),
         reason: auto ? `${candidates.length} articles from ${row.supplier || 'the current supplier'}; using the latest invoice` : `${candidates.length} articles from ${row.supplier || 'the current supplier'}; choose the one you buy now`,
