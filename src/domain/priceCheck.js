@@ -126,6 +126,39 @@ export function priceCheckItems(rows = []) {
       const ratio = article.price / typical;
       if (ratio >= OUTLIER_RATIO || ratio <= 1 / OUTLIER_RATIO) outliers.add(article);
     });
+    // Product-level unit: what most suppliers sell in, against what the product uses.
+    // - no supplier price in the product's own unit (butter set up "per L", all sell per kg), or
+    // - most suppliers in one unit while the comparison uses another (one butter invoice read per L).
+    // A tie (blueberries: one per kg, one per punnet) is a comparison choice, not a wrong unit.
+    // Priced in a unit: comparable, or valid in its own unit but set aside as "incompatible" because
+    // the product compares in another unit.
+    const priced = (article) => Number(article.price) > 0 && UNITS.includes(article.unit) && !article.estimated
+      && (article.valid || article.status === 'Incompatible unit or currency');
+    const suppliersIn = (target) => new Set(articles.filter((article) => priced(article) && article.unit === target)
+      .map((article) => article.supplierId || normalizeSupplierDescription(article.supplier || ''))).size;
+    const counts = UNITS.map((target) => [target, suppliersIn(target)]).sort((a, b) => b[1] - a[1]);
+    const [majority, majorityCount] = counts[0];
+    const secondCount = counts[1][1];
+    let unitItem = null;
+    if (majorityCount > 0) {
+      const ownUnit = UNITS.includes(row.baseUnit) ? row.baseUnit : '';
+      const noneInOwn = ownUnit && !UNITS.includes(row.comparisonUnit) && suppliersIn(ownUnit) === 0 && majority !== ownUnit;
+      const clearMajority = majorityCount >= 2 && majorityCount > secondCount && unit && majority !== unit;
+      if (noneInOwn || clearMajority) {
+        const from = clearMajority ? unit : ownUnit;
+        unitItem = { kind: 'unit', unit: majority, fromUnit: from,
+          reason: clearMajority
+            ? `${majorityCount} suppliers sell per ${unitName(majority)}, the product is compared per ${unitName(from)} (${suppliersIn(from)})`
+            : `The product is set up per ${unitName(ownUnit)}, but its suppliers sell per ${unitName(majority)}` };
+      }
+    }
+    if (unitItem) {
+      const key = `${row.id}|unit`;
+      if (!(row.priceChecks || []).some((check) => check.key === key && check.unit === unitItem.unit)) {
+        items.push({ id: key, key, ...unitItem, productId: row.id, productName: row.name, department: row.department || '', supplier: '',
+          options: [], recommended: null });
+      } else unitItem = null;
+    }
     for (const article of [...(row.comparison?.setAside || []), ...articles]) {
       const key = priceCheckKey(row.id, article);
       if (checked(row, key, article)) continue;
@@ -137,6 +170,8 @@ export function priceCheckItems(rows = []) {
       if (article.implausible) {
         kind = 'implausible';
         reason = article.status;
+      } else if (unitItem && priced(article) && article.unit === unitItem.unit) {
+        continue;
       } else if (!article.valid && /conversion|incompatible/i.test(article.status || '') && packPrice) {
         kind = 'conversion';
         reason = article.status === 'Incompatible unit or currency' ? `Priced per ${article.unit === 'l' ? 'L' : article.unit === 'each' ? 'unit' : article.unit}, the others per ${unit === 'each' ? 'unit' : unit === 'l' ? 'L' : unit || '—'} — maybe a different product` : 'No conversion to kg / L / unit';
@@ -147,6 +182,13 @@ export function priceCheckItems(rows = []) {
       }
       if (!kind) continue;
       const options = conversionOptions(article.pack, packPrice, unit);
+      // The reviewed article already knows what this pack holds (e.g. a punnet of micro herbs = 75 g).
+      if (article.reviewedQuantity > 0 && UNITS.includes(article.reviewedUnit) && (!unit || article.reviewedUnit === unit)
+        && !options.some((option) => option.baseUnit === article.reviewedUnit && Math.abs(option.baseQuantity - article.reviewedQuantity) < 1e-9)) {
+        options.unshift({ label: `Same as the reviewed article${article.reviewedPack ? ` (${article.reviewedPack})` : ''}`, baseQuantity: round(article.reviewedQuantity, 6),
+          baseUnit: article.reviewedUnit, unitPrice: packPrice ? round(packPrice / article.reviewedQuantity) : null });
+      }
+      if (items.some((existing) => existing.key === key)) continue;
       items.push({
         id: key, key, kind, reason, productId: row.id, productName: row.name, department: row.department || '', unit,
         supplier: article.supplier || '', code: article.code || '', description: article.description || '', pack: article.pack || '',
@@ -156,17 +198,6 @@ export function priceCheckItems(rows = []) {
       });
     }
     // The product card says one unit, the suppliers sell in another (e.g. butter "per L").
-    // Only when no supplier price is in the product's unit at all (blueberries have one per kg and
-    // one per punnet: that is a comparison choice, not a wrong product unit).
-    const inOwnUnit = articles.some((article) => article.valid && article.unit === row.baseUnit);
-    if (UNITS.includes(row.baseUnit) && !UNITS.includes(row.comparisonUnit) && unit && unit !== row.baseUnit && solid.length && !inOwnUnit) {
-      const key = `${row.id}|unit`;
-      if (!(row.priceChecks || []).some((check) => check.key === key && check.unit === unit)) {
-        items.push({ id: key, key, kind: 'unit', reason: `The product is set up per ${unitName(row.baseUnit)}, but its suppliers sell per ${unitName(unit)}`,
-          productId: row.id, productName: row.name, department: row.department || '', unit, fromUnit: row.baseUnit, supplier: '',
-          options: [], recommended: null });
-      }
-    }
     if (row.comparison?.status === 'Select current article') {
       const candidates = articles.filter((article) => article.isCurrentSupplier);
       const key = `${row.id}|choose`;
@@ -235,7 +266,7 @@ export function chooseCurrentArticle(product, item, candidate, now = new Date().
 // Sets the product's own unit to the one its suppliers sell in (used for stock and recipes too).
 export function applyProductUnit(product, item, now = new Date().toISOString()) {
   if (!UNITS.includes(item.unit)) throw new Error('Choose kg, L or unit.');
-  return recordCheck({ ...product, baseUnit: item.unit }, item, now, { unit: item.unit });
+  return recordCheck({ ...product, baseUnit: item.unit, comparisonUnit: item.unit }, item, now, { unit: item.unit });
 }
 
 // Keeps the product's unit as it is; asked again only if the suppliers' unit changes.

@@ -159,3 +159,36 @@ test('no product-unit item when some supplier already prices in the product unit
   ] };
   assert.equal(itemsFor([berries]).some((item) => item.kind === 'unit'), false);
 });
+
+test('most suppliers per kg, product compared per L: one product fix, no article errors (butter, real case)', () => {
+  const butter = { id: 'butter2', name: 'Butter, Unsalted (Arla)', baseUnit: 'l', comparisonUnit: 'l', supplier: 'The Cheese Man', active: true, supplierFormats: [
+    reviewed('Woods Foodservice Limited', 'Arla Butter Unsalted', 'W3', '40 x 250G', 45.29, 10, 'kg', '2026-07-13'),
+    reviewed('Elite Fine Foods', 'ARLA UNSALTED BUTTER', 'E3', '20 x 250G', 22.78, 5, 'kg', '2026-09-04'),
+    reviewed('Albion Fine Foods', 'Butter Unsalted Red Pack', 'A3', '250g', 1.79, 0.25, 'kg', '2026-10-12'),
+    reviewed('The Cheese Man', 'Butter Unsalted 40 x 250g', '', '', 64.95, 10, 'l', '2026-06-26', 'invoice'),
+  ] };
+  const items = itemsFor([butter]);
+  assert.deepEqual(items.map((item) => item.kind), ['unit']);
+  assert.equal(items[0].unit, 'kg');
+  assert.equal(items[0].fromUnit, 'l');
+  assert.match(items[0].reason, /3 suppliers sell per kg, the product is compared per L \(1\)/);
+  const fixed = applyProductUnit(butter, items[0]);
+  assert.equal(fixed.comparisonUnit, 'kg');
+  const after = itemsFor([fixed]);
+  assert.deepEqual(after.map((item) => [item.kind, item.supplier]), [['conversion', 'The Cheese Man']], 'only the article read per L is left');
+});
+
+test('a set-aside invoice line is listed once and offers the reviewed pack size (micro herbs punnet)', () => {
+  const herbs = { id: 'micro', name: 'Micro Herbs, Mixed', baseUnit: 'kg', supplier: 'TG Fruits', active: true, supplierFormats: [
+    reviewed('TG Fruits', 'MICRO HERB SINGLE PUNNET', '', 'SINGLE PUNNET', 1.9, 0.075, 'kg', '2026-09-01', 'invoice'),
+    reviewed('TG Fruits', 'MICRO HERBS PUNNET', '', 'SINGLE PUNNET', 1.9, 0.075, 'kg', '2026-08-01', 'invoice'),
+  ] };
+  const line = { id: 'l1', matchedProductId: 'micro', rawDescription: '23-SEP MICRO HERB SINGLE PUNNET', packSize: 'SINGLE PUNNET', quantity: 1, unitCost: 1.9, unitOfMeasure: 'pack',
+    conversionRule: { purchaseUnit: 'pack', baseQuantity: 0.02, baseUnit: 'kg', confirmed: true } };
+  const items = itemsFor([herbs], [invoice('i9', 'TG Fruits', '2026-09-23', [line])]);
+  const wrong = items.filter((item) => item.kind === 'implausible');
+  assert.equal(wrong.length, 1);
+  assert.equal(wrong[0].options[0].baseQuantity, 0.075);
+  assert.equal(Math.round(wrong[0].options[0].unitPrice * 100), 2533);
+  assert.equal(wrong[0].recommended.baseQuantity, 0.075);
+});

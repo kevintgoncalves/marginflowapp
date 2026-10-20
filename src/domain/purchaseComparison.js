@@ -129,7 +129,8 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
       if (!wrong.length) continue;
       keep.add(format);
       for (const offer of wrong) {
-        row.setAside.push({ ...offer, valid: false, implausible: true, reviewedPrice, reviewedUnit: format.baseUnit,
+        if (row.setAside.some(entry => entry.invoiceId === offer.invoiceId && entry.lineId === offer.lineId)) continue;
+        row.setAside.push({ ...offer, valid: false, implausible: true, reviewedPrice, reviewedUnit: format.baseUnit, reviewedQuantity: Number(format.baseQuantity), reviewedPack: format.packSize || '',
           status: `Price looks wrong: ${(offer.price / reviewedPrice).toFixed(1)}x the reviewed price — check the pack` });
       }
       row.offers = row.offers.filter(offer => !wrong.includes(offer));
