@@ -69,3 +69,42 @@ export function parseCheesemanInvoiceRows(invoiceText = "") {
     return true;
   });
 }
+
+const NOT_SUPPLIED = /\bnot\s+available\b|\bnot\s+supplied\b|\bout\s+of\s+stock\b|\bunavailable\b/i;
+
+// Turns what the supplier printed into what was received, before matching:
+// - A line printed with a price but value 0.00 ("*** NOT AVAILABLE ***", "--> This product is not
+//   available") is kept as Missing with no cost, so the invoice adds up and nothing is charged.
+// - Elite prints "Cases" and "Splits" and a Unit Price for the whole case ("6 x 2LTR", 1 case +
+//   2 splits, £10.74, line £14.32). The number of single items is the line value divided by the
+//   price of one item; the line then becomes N items at the single price, each holding one item
+//   of the pack (2 l), so the price per l is right whether a case, splits or both came.
+export function normalizeExtractedLineQuantities(line = {}) {
+  const quantity = numberValue(line.quantity, 0);
+  const unitCost = numberValue(line.unitCost, 0);
+  const lineTotal = numberValue(line.lineTotal, 0);
+  const text = `${line.rawDescription || ""} ${line.productName || ""}`;
+  if (lineTotal === 0 && unitCost > 0 && (quantity <= 0 || NOT_SUPPLIED.test(text))) {
+    return { ...line, quantity: quantity > 0 ? quantity : 1, unitCost, lineTotal: 0, lineStatus: "Missing", status: "Missing", notSuppliedReason: "Printed with value 0.00 / not available" };
+  }
+  const pack = String(line.packSize || "").trim().toLowerCase().replace(/×/g, "x")
+    .match(/^(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|g|l|ltr|litre|liter|ml)\b/);
+  const casePrice = numberValue(line.casePrice, 0) > 0 ? numberValue(line.casePrice, 0)
+    : (quantity > 0 && lineTotal > 0 && unitCost * quantity > lineTotal * 1.02 ? unitCost : 0);
+  if (!pack || !(casePrice > 0) || !(lineTotal > 0)) return line;
+  const perCase = Number(pack[1]);
+  if (!(perCase > 1)) return line;
+  const singlePrice = casePrice / perCase;
+  const items = lineTotal / singlePrice;
+  const rounded = Math.round(items);
+  if (rounded < 1 || Math.abs(items - rounded) > Math.max(0.05, rounded * 0.02)) return line;
+  const size = Number(pack[2]) * (["g", "ml"].includes(pack[3]) ? 0.001 : 1);
+  return {
+    ...line,
+    quantity: rounded,
+    unitCost: Number((lineTotal / rounded).toFixed(4)),
+    lineTotal,
+    sourceCasePrice: casePrice,
+    conversionRule: { purchaseUnit: "pack", baseQuantity: size, baseUnit: ["kg", "g"].includes(pack[3]) ? "kg" : "l", confirmed: true, source: "cases_splits" },
+  };
+}

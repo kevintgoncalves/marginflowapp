@@ -1,4 +1,4 @@
-import { invoiceUnitCostFromExtraction } from "../src/domain/invoiceParsing.js";
+import { invoiceUnitCostFromExtraction, normalizeExtractedLineQuantities } from "../src/domain/invoiceParsing.js";
 import { matchInvoiceLineToExistingProduct } from "../src/domain/invoiceProductMatching.js";
 import { PRODUCT_RESOLUTION_MODES, canonicalProductMatchSource } from "../src/domain/invoiceProductResolution.js";
 import { extractionQualityScore, fallbackReasonsForExtraction, validateInvoiceExtraction } from "../src/domain/invoiceValidation.js";
@@ -94,6 +94,9 @@ const invoiceSchema = {
           "lineTotal",
           "department",
           "confidence",
+          "casePrice",
+          "cases",
+          "splits",
         ],
         properties: {
           productName: { type: "string" },
@@ -108,6 +111,9 @@ const invoiceSchema = {
           lineTotal: { type: "number" },
           department: { type: "string" },
           confidence: { type: "number" },
+          casePrice: { type: "number" },
+          cases: { type: "number" },
+          splits: { type: "number" },
         },
       },
     },
@@ -285,7 +291,15 @@ function normalizeInvoice(invoice, sourceText, {
   const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
 
   const normalizedLines = lines
-    .map((line) => {
+    .map((extractedLine) => {
+      const received = normalizeExtractedLineQuantities({
+        ...extractedLine,
+        quantity: asNumber(extractedLine.quantity, 1),
+        unitCost: asNumber(extractedLine.unitCost, 0),
+        lineTotal: asNumber(extractedLine.lineTotal, asNumber(extractedLine.quantity, 1) * asNumber(extractedLine.unitCost, 0)),
+        casePrice: asNumber(extractedLine.casePrice, 0),
+      });
+      const line = received;
       const quantity = asNumber(line.quantity, 1);
       const rawUnitCost = asNumber(line.unitCost, 0);
       const lineTotal = asNumber(line.lineTotal, quantity * rawUnitCost);
@@ -336,6 +350,8 @@ function normalizeInvoice(invoice, sourceText, {
         department: asString(line.department || line.suggested_department, "Kitchen Made"),
         confidence: clampConfidence(line.confidence),
         ...match,
+        ...(line.conversionRule?.source === "cases_splits" ? { conversionRule: line.conversionRule } : {}),
+        ...(line.lineStatus ? { lineStatus: line.lineStatus, status: line.status } : {}),
         productResolution,
         productMatchSource: matchSource,
         matchStatus: match.matchedProductId
@@ -502,6 +518,10 @@ Supplier-specific guidance:
 - TG Fruits invoices often contain lines like: DATE PRODUCT SIZE QTY PRICE VAT TOTAL, and PDF extraction may merge many rows onto one line. Do not put TOTAL into unitCost; unitCost must be TOTAL / QTY when necessary.
 - Albion Fine Foods, Woods, BNFS, Cheese Man and Coburn & Baker may use different column layouts. Detect rows by product description plus numeric values.
 - Cheese Man / Cheeseman rows often include description, pack/size, quantity, unit price and line value. Preserve cheese/dairy product descriptions and flag uncertain rows with lower confidence rather than inventing values.
+- Elite Fine Foods tables have columns Pack Size, Cases, Splits, Unit Price and Line Value. Unit Price is the price of a FULL CASE. For each row return cases and splits exactly as printed (0 when blank), casePrice = Unit Price, quantity = cases + splits, unitCost = Unit Price and lineTotal = Line Value. Do not divide or multiply anything yourself.
+- For every other supplier return casePrice, cases and splits as 0.
+- Direct Seafoods rows have Qty, a weight in KG, a price per KG and a Value. For items priced per KG return quantity = the KG weight and unitCost = the price per KG. A row whose Value is 0.00 or that says the product is not available: quantity 0 and lineTotal 0 (keep its printed price as unitCost).
+- Ashley James rows marked NOT AVAILABLE or with value 0.00: quantity 0 and lineTotal 0 (keep the printed price as unitCost).
 - Albion Fine Foods order pages contain both ORDER DATE and DELIVERY DATE. Use DELIVERY DATE as invoiceDate, never ORDER DATE or the browser print timestamp.
 - Products may have dates before them; ignore repeated dates unless it is the invoice date.
 

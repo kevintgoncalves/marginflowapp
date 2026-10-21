@@ -2419,7 +2419,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       departmentMode: assignment.departmentMode,
       departmentSplits: assignment.departmentSplits,
       allocationSource: match.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : ""),
-      conversionRule: match.conversionRule || line.conversionRule || purchaseDetailsForProduct(line, matchedProduct),
+      conversionRule: (line.conversionRule?.source === "cases_splits" ? line.conversionRule : null) || match.conversionRule || line.conversionRule || purchaseDetailsForProduct(line, matchedProduct),
       learnedMappingId: match.learnedMappingId || line.learnedMappingId || "",
       needsReview: false,
       reviewReasons: [],
