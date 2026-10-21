@@ -1,7 +1,7 @@
 import { learnedDepartment } from './domain/supplierDepartments.js';
 import { completeInvoiceSaveLearning, invoiceSaveFailureMessage } from './domain/invoiceSaveCompletion.js';
 import { resolveLearningCatalogue } from './lib/learningCatalogue.js';
-import { PURCHASE_UNITS, purchaseDetails } from './domain/purchaseUnits.js';
+import { PURCHASE_UNITS, purchaseDetails, purchaseDetailsForProduct } from './domain/purchaseUnits.js';
 import DataTable from "./components/DataTable.jsx";
 import InvoiceBrowser from "./components/InvoiceBrowser.jsx";
 import DailySalesPage from "./components/DailySalesPage.jsx";
@@ -2419,7 +2419,7 @@ function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSet
       departmentMode: assignment.departmentMode,
       departmentSplits: assignment.departmentSplits,
       allocationSource: match.allocationSource || (assignment.departmentMode === "Split" ? "learned_split_rule" : ""),
-      conversionRule: match.conversionRule || line.conversionRule || purchaseDetails(line),
+      conversionRule: match.conversionRule || line.conversionRule || purchaseDetailsForProduct(line, matchedProduct),
       learnedMappingId: match.learnedMappingId || line.learnedMappingId || "",
       needsReview: false,
       reviewReasons: [],
@@ -9399,7 +9399,7 @@ function Invoices({
     const sourceLine = draft?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(draft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(draft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetailsForProduct(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     setDraft((current) => ({
       ...current,
@@ -9833,7 +9833,7 @@ function Invoices({
     const sourceLine = selectedBatchInvoice?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(selectedBatchInvoice, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(selectedBatchInvoice, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetailsForProduct(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     updateSelectedBatchInvoice((base) => ({
       ...base,
@@ -10552,6 +10552,7 @@ function Invoices({
               {(currentBatchSummary.needsReview > 0 || currentBatchSummary.possibleDuplicate > 0 || currentBatchSummary.failed > 0) && <button className="ghost" onClick={() => { setBatchReviewOpen(true); reviewFirstFlaggedBatchInvoice(); }} type="button"><FileSearch size={16} />Review flagged invoices</button>}
               {currentBatchSummary.failed > 0 && <button className="ghost" disabled={currentBatchSummary.processing > 0} onClick={retryFailedBatchInvoices} type="button"><RefreshCw size={16} />Retry failed</button>}
               {!currentBatchSummary.hasOpenWork && <button className="ghost" onClick={clearCompletedBatch} type="button"><Check size={16} />Clear batch</button>}
+              {currentBatchSummary.hasOpenWork && currentBatchSummary.processing === 0 && !batchImporting && <button className="ghost" onClick={() => { if (window.confirm("Discard this batch? Invoices already imported stay saved. Invoices not imported yet are removed from this browser; upload their PDFs again to read them.")) clearCompletedBatch(); }} type="button"><X size={16} />Discard batch</button>}
             </div>
           </div>
         </Panel>
@@ -11873,7 +11874,7 @@ function InvoiceControlCentre({
     const sourceLine = reviewDetailDraft?.items?.find(item => item.id === id);
     if (sourceLine) {
       const assignment = departmentAssignmentForResolvedLine({ line: sourceLine, product, departmentNames, fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] });
-      saveExplicitDecision(reviewDetailDraft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetails(sourceLine), ...assignment, forgetLearnedRule: false }, departmentNames));
+      saveExplicitDecision(reviewDetailDraft, normalizeInvoiceLineForEditor({ ...lineWithExistingProductResolution(sourceLine, product), conversionRule: purchaseDetailsForProduct(sourceLine, product), ...assignment, forgetLearnedRule: false }, departmentNames));
     }
     setReviewDetailDraft((current) => {
       if (!current) return current;
