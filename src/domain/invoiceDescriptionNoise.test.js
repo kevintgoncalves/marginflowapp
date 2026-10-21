@@ -46,3 +46,18 @@ test("a rule learned without the pack words matches the line that prints them", 
     rawDescription: "MINT SAUCE", packSize: "X100G BAG", existingProducts: products, supplierMappings });
   assert.notEqual(other.matchedProductId, "p-mint");
 });
+
+test("pack wording the app cannot read links the product but keeps the conversion as a warning", () => {
+  const products = [{ id: "p-monk", companyId: "c1", name: "Fish, Monkfish Tail", active: true }];
+  const rule = { id: "m1", companyId: "c1", supplierId: "s1", productId: "p-monk", supplierProductCode: "01MON1K16",
+    supplierDescription: "MONKFISH: TAIL 1-2KG (KG) skinned", packSize: "1-2KG", mappingSource: "manual_selection", active: true,
+    conversionRule: { confirmed: true, purchaseUnit: "kg", baseQuantity: 1, baseUnit: "kg" } };
+  const match = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "s1", supplierProductCode: "01MON1K16",
+    rawDescription: "MONKFISH: TAIL 1-2KG (KG) skinned Species: Lophius", packSize: "KG", existingProducts: products, supplierMappings: [rule] });
+  assert.equal(match.matchedProductId, "p-monk");
+  assert.ok(match.reviewReasons.includes("pack_changed"));
+  assert.equal(match.conversionRule, undefined);
+  const real = matchInvoiceLineToExistingProduct({ organisationId: "c1", supplierId: "s1", supplierProductCode: "01MON1K16",
+    rawDescription: "MONKFISH", packSize: "5kg", existingProducts: products, supplierMappings: [{ ...rule, packSize: "2kg" }] });
+  assert.equal(real.matchedProductId, null);
+});

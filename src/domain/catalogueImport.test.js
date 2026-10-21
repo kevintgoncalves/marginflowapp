@@ -7,6 +7,7 @@ import {
   buildCatalogueImportPreview,
   catalogueArticleMappings,
   newCatalogueMappings,
+  mappingsAfterCatalogueImport,
   supplierActionsStatus,
   validateCataloguePlan,
 } from "./catalogueImport.js";
@@ -159,4 +160,23 @@ test("supplier actions report what is still to do", () => {
   const cheese = { suppliers: [{ action: "merge", from: "Cheese Man", into: "The Cheese Man" }] };
   assert.equal(supplierActionsStatus(cheese, [{ name: "The Cheese Man" }])[0].done, true, "the target alone does not count as the old name");
   assert.equal(supplierActionsStatus(cheese, [{ name: "The Cheese Man" }, { name: "Cheese Man" }])[0].done, false);
+});
+
+test("a present rule that does not apply automatically is upgraded by the reviewed article", () => {
+  const existing = [
+    { id: "old", supplierId: "s-tg", supplierDescription: "CONFERENCE KILO", packSize: "KILO", productId: "pears", autoApply: false, active: true, relationalId: "r1" },
+    { id: "keep", supplierId: "s-tg", supplierDescription: "CONFERENCE PEARS", packSize: "KILO", productId: "pears", autoApply: true, active: true },
+  ];
+  const candidates = [
+    { id: "c1", supplierId: "s-tg", supplierDescription: "CONFERENCE KILO", packSize: "KILO", productId: "pears", autoApply: true },
+    { id: "c2", supplierId: "s-tg", supplierDescription: "CONFERENCE PEARS", packSize: "KILO", productId: "pears", autoApply: true },
+  ];
+  const fresh = newCatalogueMappings(existing, candidates);
+  assert.deepEqual(fresh.map((row) => row.id), ["c1"]);
+  const after = mappingsAfterCatalogueImport(existing, fresh);
+  assert.equal(after.length, 2);
+  const upgraded = after.find((row) => row.supplierDescription === "CONFERENCE KILO");
+  assert.equal(upgraded.autoApply, true);
+  assert.equal(upgraded.id, "old");
+  assert.equal(upgraded.relationalId, undefined);
 });

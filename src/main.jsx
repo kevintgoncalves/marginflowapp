@@ -64,7 +64,7 @@ import {
 } from "lucide-react";
 import { isSupabaseConfigured, supabase } from "./lib/supabase.js";
 import { currentPriceFieldsFromEntry, isLatestInvoicePrice, latestInvoicePriceEntry, manualEditChangesPrice } from "./domain/productCurrentPrice.js";
-import { applyCatalogueAttributes, catalogueArticleMappings, newCatalogueMappings } from "./domain/catalogueImport.js";
+import { applyCatalogueAttributes, catalogueArticleMappings, mappingsAfterCatalogueImport, newCatalogueMappings } from "./domain/catalogueImport.js";
 import CatalogueImport from "./components/CatalogueImport.jsx";
 import SupplierComparison from "./components/SupplierComparison.jsx";
 import PriceCheck from "./components/PriceCheck.jsx";
@@ -6678,7 +6678,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       idFactory: uid,
     });
     const freshRules = newCatalogueMappings(working.supplierProductMappings || [], candidates);
-    working = { ...working, products: attributes.products, supplierProductMappings: [...(working.supplierProductMappings || []), ...freshRules] };
+    working = { ...working, products: attributes.products, supplierProductMappings: mappingsAfterCatalogueImport(working.supplierProductMappings || [], freshRules) };
     commit(working);
     report.updated = preview.groups.filter((group) => group.keepProductId && group.action !== "skip").length;
     report.created = attributes.created.length;

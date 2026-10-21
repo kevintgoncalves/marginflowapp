@@ -342,15 +342,35 @@ export function catalogueArticleMappings({ preview, products = [], suppliers = [
 }
 
 // Mappings already present (same supplier + code, or same supplier + description + pack)
-// are not created again, so a re-run does not duplicate rules.
+// are not created again, so a re-run does not duplicate rules. A present rule that does not
+// apply automatically, or points at another product, is replaced by the reviewed article:
+// the server upgrades the same rule (manual_selection sets auto_apply) instead of adding one.
+export function catalogueMappingKey(mapping = {}) {
+  const code = normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode);
+  const description = normalizeSupplierDescription(mapping.normalizedSupplierDescription || mapping.supplierDescription);
+  return [mapping.supplierId || "", code || `d:${description}`, code ? "" : normalizeProductName(mapping.packSize)].join("|");
+}
+
 export function newCatalogueMappings(existing = [], candidates = []) {
-  const keyOf = (mapping) => {
-    const code = normalizeSupplierProductCode(mapping.normalizedSupplierProductCode || mapping.supplierProductCode);
-    const description = normalizeSupplierDescription(mapping.normalizedSupplierDescription || mapping.supplierDescription);
-    return [mapping.supplierId || "", code || `d:${description}`, code ? "" : normalizeProductName(mapping.packSize)].join("|");
-  };
-  const present = new Set(existing.filter((mapping) => mapping.active !== false).map(keyOf));
-  return candidates.filter((mapping) => !present.has(keyOf(mapping)));
+  const present = new Map(existing.filter((mapping) => mapping.active !== false).map((mapping) => [catalogueMappingKey(mapping), mapping]));
+  return candidates.filter((mapping) => {
+    const current = present.get(catalogueMappingKey(mapping));
+    return !current || current.autoApply === false || (current.productId || current.product_id) !== mapping.productId;
+  });
+}
+
+// Existing rules with the same identity as a fresh catalogue rule are replaced locally too.
+export function mappingsAfterCatalogueImport(existing = [], fresh = []) {
+  const freshKeys = new Set(fresh.map(catalogueMappingKey));
+  const replaced = existing.filter((mapping) => mapping.active !== false && freshKeys.has(catalogueMappingKey(mapping)));
+  const fromRow = new Map(replaced.map((mapping) => [catalogueMappingKey(mapping), mapping]));
+  return [
+    ...existing.filter((mapping) => !(mapping.active !== false && freshKeys.has(catalogueMappingKey(mapping)))),
+    ...fresh.map((mapping) => {
+      const previous = fromRow.get(catalogueMappingKey(mapping));
+      return previous ? { ...mapping, id: previous.id, relationalId: undefined } : mapping;
+    }),
+  ];
 }
 
 export function supplierActionsStatus(plan, suppliers = []) {

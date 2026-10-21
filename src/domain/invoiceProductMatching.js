@@ -258,6 +258,24 @@ export function matchInvoiceLineToExistingProduct({
   const normalizedCode = normalizeSupplierProductCode(supplierProductCode);
   const samePack = rule => packsEquivalent(rule.packSize || rule.pack_size, packSize);
   const packReview = () => resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true, reviewReasons: ['pack_changed'] });
+  // The supplier's code or wording is known, only the pack text differs ("KG" vs "1-2KG",
+  // "PER KG" vs no pack, "450MM X 75MTR" vs "6 x 1SGL"). The product is the same one: link it, leave the conversion out and
+  // keep "pack changed" as a warning so the user confirms the conversion, not the product.
+  // Two packs that both read as a definite quantity and differ ("5kg" vs "10kg") are a real
+  // change and stay a review; only wording the app cannot read as a quantity is relaxed.
+  const linePack = interpretPurchasePack(packSize);
+  const packTextOnly = row => !(linePack.confirmed && interpretPurchasePack(row.packSize || row.pack_size).confirmed);
+  const packChangedMatch = (allRows, source) => {
+    const rows = allRows.filter(packTextOnly);
+    if (!rows.length || rows.length !== allRows.length) return null;
+    const ids = new Set(rows.map(row => row.productId || row.product_id).filter(Boolean));
+    if (ids.size !== 1) return null;
+    const row = rows[0];
+    const product = mappingProduct(rows.find(entry => mappingProduct(entry, products)) || row, products);
+    if (!product) return null;
+    const { conversionRule, ...mapping } = row;
+    return withMatchDebug({ ...resultFromProduct({ product, source, confidence: 0.9, needsReview: true, reviewReasons: ['pack_changed'], mapping }), conversionRule: undefined }, context);
+  };
   const normalizedDescription = normalizeSupplierDescription(rawDescription || productName);
   const descriptionKeys = supplierDescriptionKeys(rawDescription || productName, packSize);
 
@@ -265,7 +283,7 @@ export function matchInvoiceLineToExistingProduct({
     const candidates = mappings.filter(candidate => candidate.autoApply !== false
       && normalizeSupplierProductCode(candidate.normalizedSupplierProductCode || candidate.supplierProductCode || candidate.supplier_product_code) === normalizedCode);
     if (candidates.length) {
-      if (!candidates.some(samePack)) return packReview();
+      if (!candidates.some(samePack)) return packChangedMatch(candidates, PRODUCT_MATCH_SOURCES.SUPPLIER_CODE) || packReview();
       const productIds = new Set(candidates.map(row => row.productId || row.product_id).filter(Boolean));
       const mapping = candidates.find(samePack);
       const product = mapping && mappingProduct(mapping, products);
@@ -278,6 +296,7 @@ export function matchInvoiceLineToExistingProduct({
   }
 
   let descriptionPackChanged = false;
+  let packChangedRows = [];
   if (normalizedDescription) {
     const allDescriptionMappings = mappings.filter((candidate) => {
       const mappingDescription = normalizeSupplierDescription(candidate.normalizedSupplierDescription || candidate.supplierDescription || candidate.supplier_description);
@@ -291,7 +310,7 @@ export function matchInvoiceLineToExistingProduct({
     const descriptionMappings = allDescriptionMappings.filter(samePack);
     // The learned rule was for a different pack. Do not apply it, but still let a product
     // whose own name and pack fit this line (checked below) resolve it.
-    if (allDescriptionMappings.length && !descriptionMappings.length) descriptionPackChanged = true;
+    if (allDescriptionMappings.length && !descriptionMappings.length) { descriptionPackChanged = true; packChangedRows = allDescriptionMappings; }
     const productIds = new Set(descriptionMappings.map(row => row.productId || row.product_id).filter(Boolean));
     if (productIds.size > 1) {
       return resultFromProduct({ source: PRODUCT_MATCH_SOURCES.NONE, needsReview: true,
@@ -304,10 +323,11 @@ export function matchInvoiceLineToExistingProduct({
     }
   }
 
-  const catalogue = supplierMappings.filter(row => row.catalogueEntry && row.active !== false
+  const catalogueSameWording = supplierMappings.filter(row => row.catalogueEntry && row.active !== false
     && sameRuleScope(row, organisationId, supplierId) && sameLocation(row, locationId)
-    && normalizedDescription && descriptionKeys.has(normalizeSupplierDescription(row.supplierDescription))
-    && packSignature(packSize) && samePack(row));
+    && normalizedDescription && descriptionKeys.has(normalizeSupplierDescription(row.supplierDescription)));
+  const catalogue = catalogueSameWording.filter(row => packSignature(packSize) && samePack(row));
+  if (!catalogue.length && catalogueSameWording.length && !packChangedRows.length) { descriptionPackChanged = true; packChangedRows = catalogueSameWording; }
   if (catalogue.length) {
     // Only distinct exact catalogue identities determine ambiguity, never fuzzy suggestions
     // or duplicate format rows. Conversion availability does not change product identity.
@@ -350,6 +370,8 @@ export function matchInvoiceLineToExistingProduct({
 
   const scored = genericMatch.candidates || [];
   if (descriptionPackChanged) {
+    const linked = packChangedMatch(packChangedRows, PRODUCT_MATCH_SOURCES.LEARNED_RULE);
+    if (linked) return { ...linked, suggestedProducts: suggestionsFrom(scored) };
     return withMatchDebug({ ...packReview(), suggestedProducts: suggestionsFrom(scored) }, context);
   }
   const best = scored[0];
