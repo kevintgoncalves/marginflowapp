@@ -8981,7 +8981,7 @@ function Invoices({
         ...line,
         quantity,
         unitCost,
-        lineTotal: line.lineTotal || quantity * unitCost,
+        lineTotal: line.lineStatus === "Missing" ? 0 : (line.lineTotal || quantity * unitCost),
       }, documentType);
       return enrichInvoiceLine(
         {
@@ -9021,6 +9021,8 @@ function Invoices({
           learnedMappingId: line.learnedMappingId || "",
           needsReview: Boolean(line.needsReview),
           reviewReasons: line.reviewReasons || [],
+          ...(line.lineStatus ? { lineStatus: line.lineStatus, status: line.lineStatus } : {}),
+          ...(line.conversionRule?.source === "cases_splits" ? { conversionRule: line.conversionRule } : {}),
         },
         products,
         aiSettings,
@@ -9190,7 +9192,7 @@ function Invoices({
           ...line,
           quantity,
           unitCost,
-          lineTotal: line.lineTotal || quantity * unitCost,
+          lineTotal: line.lineStatus === "Missing" ? 0 : (line.lineTotal || quantity * unitCost),
         }, documentType);
         return enrichInvoiceLine(
           {
@@ -9230,6 +9232,8 @@ function Invoices({
             learnedMappingId: line.learnedMappingId || "",
             needsReview: Boolean(line.needsReview),
             reviewReasons: line.reviewReasons || [],
+            ...(line.lineStatus ? { lineStatus: line.lineStatus, status: line.lineStatus } : {}),
+            ...(line.conversionRule?.source === "cases_splits" ? { conversionRule: line.conversionRule } : {}),
           },
           products,
           aiSettings,
