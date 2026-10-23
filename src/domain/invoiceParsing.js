@@ -84,7 +84,8 @@ export function normalizeExtractedLineQuantities(line = {}) {
   const unitCost = numberValue(line.unitCost, 0);
   const lineTotal = numberValue(line.lineTotal, 0);
   const text = `${line.rawDescription || ""} ${line.productName || ""}`;
-  if (lineTotal === 0 && unitCost > 0 && (quantity <= 0 || NOT_SUPPLIED.test(text))) {
+  // The reader does not always zero these lines, so the supplier's "not available" wording decides.
+  if (unitCost > 0 && (NOT_SUPPLIED.test(text) || (lineTotal === 0 && quantity <= 0))) {
     return { ...line, quantity: quantity > 0 ? quantity : 1, unitCost, lineTotal: 0, lineStatus: "Missing", status: "Missing", notSuppliedReason: "Printed with value 0.00 / not available" };
   }
   const pack = String(line.packSize || "").trim().toLowerCase().replace(/×/g, "x")

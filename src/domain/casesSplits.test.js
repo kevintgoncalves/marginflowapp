@@ -21,6 +21,8 @@ test("lines that were not supplied are kept as Missing with no value", () => {
   assert.deepEqual([liver.quantity, liver.lineTotal, liver.lineStatus], [1, 0, "Missing"]);
   const monk = norm({ rawDescription: "MONKFISH: TAIL 2-4KG --> This product is not available", quantity: 3, unitCost: 31.3, lineTotal: 0 });
   assert.equal(monk.lineStatus, "Missing");
+  const charged = norm({ rawDescription: "MONKFISH: TAIL 2-4KG (KG) Species: x --> This product is not available", quantity: 1, unitCost: 31.3, lineTotal: 31.3 });
+  assert.deepEqual([charged.lineStatus, charged.lineTotal], ["Missing", 0]);
 });
 
 test("ordinary lines are left alone", () => {
