@@ -12856,6 +12856,7 @@ function InvoiceControlCentre({
               {viewInvoiceHasLines ? (
                 <>
                   <Field label="Amount" readOnly value={money(signedDocumentAmount(Math.abs(invoiceFinalTotal(viewInvoice)), viewInvoice))} />
+                  <label>Invoice discount £<input min="0" step="0.01" type="number" value={invoiceDiscountAmount(viewInvoice)} onChange={(event) => { const value = event.target.value === "" ? 0 : Math.abs(numberValue(event.target.value, 0)); updateControlInvoice("discountPercent", 0); updateControlInvoice("discountAmount", value); }} /></label>
                   <label>Additional charges £<input min="0" step="0.01" type="number" value={viewInvoice.additionalCharges ?? 0} onChange={(event) => updateControlInvoice("additionalCharges", event.target.value === "" ? 0 : Math.abs(numberValue(event.target.value, 0)))} /></label>
                 </>
               ) : (
