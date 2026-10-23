@@ -12854,7 +12854,10 @@ function InvoiceControlCentre({
                 </select></label>
               )}
               {viewInvoiceHasLines ? (
-                <Field label="Amount" readOnly value={money(invoiceTotal(viewInvoice))} />
+                <>
+                  <Field label="Amount" readOnly value={money(signedDocumentAmount(Math.abs(invoiceFinalTotal(viewInvoice)), viewInvoice))} />
+                  <label>Additional charges £<input min="0" step="0.01" type="number" value={viewInvoice.additionalCharges ?? 0} onChange={(event) => updateControlInvoice("additionalCharges", event.target.value === "" ? 0 : Math.abs(numberValue(event.target.value, 0)))} /></label>
+                </>
               ) : (
                 <label>Total<input min="0" step="0.01" type="number" value={viewInvoiceManualTotal} onChange={(event) => updateControlInvoice("manualTotal", event.target.value)} /></label>
               )}
