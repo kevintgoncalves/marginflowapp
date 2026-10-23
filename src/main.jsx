@@ -6733,8 +6733,11 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   };
 
   const persistInvoiceDocument = async (invoice, { forceUpdate = false, retry = false } = {}) => {
+    // Older invoices opened from "View invoices" are not part of the in-memory working set
+    // (only the latest page is loaded), so fall back to the opened cloud record itself.
     const sourceInvoice = forceUpdate
-      ? workingInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
+      ? (workingInvoices.find((candidate) => candidate.id === invoice.id || candidate.relationalId === invoice.id)
+        || ((invoice.relationalId || invoice.persistenceSource === "relational") ? invoice : null))
       : null;
     const sourceInvoiceId = sourceInvoice?.id || invoice.id || "";
     const assessment = retry ? { kind: "retry_pending_operation" } : forceUpdate && sourceInvoice
