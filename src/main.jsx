@@ -142,6 +142,7 @@ import {
   loadRelationalInvoiceSchedule,
   loadRelationalInvoiceReportRange,
   loadRelationalInvoices,
+  deleteRelationalInvoice,
   persistInvoiceWithLocalFallback,
   replaceInvoiceInCollection,
   upsertInvoiceInCollection,
@@ -6732,6 +6733,28 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     setDuplicatePrompt(null);
   };
 
+  const deleteInvoiceDocument = async (invoice) => {
+    if (!invoice) return { deleted: false };
+    const ids = new Set([invoice.id, invoice.relationalId].filter(Boolean));
+    const relationalId = invoice.relationalId || invoice.id || "";
+    try {
+      if (cloudEnabled && !demoMode) {
+        await deleteRelationalInvoice(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, relationalId);
+      }
+    } catch (error) {
+      setCloudError(`Could not delete ${documentNumberFor(invoice) || "this document"}: ${error.message || error}`);
+      return { deleted: false, error };
+    }
+    invoiceCommitGenerationRef.current += 1;
+    const keep = (row) => !ids.has(row.id) && !ids.has(row.relationalId);
+    setConfirmedInvoices((current) => current.filter(keep));
+    setInvoices((current) => current.filter(keep));
+    setCreditNotes((current) => current.filter((note) => !ids.has(note.invoiceId)));
+    setProducts((current) => [...ids].reduce((list, id) => removeInvoiceProductHistory(list, id), current));
+    setInvoicePageState((current) => ({ ...current, total: Math.max(0, Number(current.total || 0) - 1) }));
+    return { deleted: true };
+  };
+
   const persistInvoiceDocument = async (invoice, { forceUpdate = false, retry = false } = {}) => {
     // Older invoices opened from "View invoices" are not part of the in-memory working set
     // (only the latest page is loaded), so fall back to the opened cloud record itself.
@@ -7446,6 +7469,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           demoCaptureMode={demoCaptureMode}
           uploadRequest={invoiceUploadRequest}
           actionRequest={invoiceActionRequest}
+          deleteInvoiceDocument={deleteInvoiceDocument}
           aiSettings={aiSettings}
           creditNotes={creditNotes}
           draft={draft}
@@ -7491,7 +7515,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             recordsReady={demoMode || (confirmedInvoicesLoaded && !cloudLoading && !cloudError)}
             browseRequest={invoiceBrowseRequest}
             legacyInvoiceArchive={legacyInvoiceArchive}
-            requestInvoiceDelete={invoice=>setInvoiceActionRequest({id:uid(),invoiceId:invoice.id})}
+            requestInvoiceDelete={invoice=>setInvoiceActionRequest({id:uid(),invoiceId:invoice.id,invoice})}
             client={cloudEnabled ? supabase : null}
             locationId={cloudScope.locationId || ""}
             loadInvoiceDetails={invoice => loadRelationalInvoiceDetails(supabase, { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" }, invoice.id)}
@@ -8452,6 +8476,7 @@ function Invoices({
   setInvoices,
   uploadRequest = null,
   actionRequest = null,
+  deleteInvoiceDocument = null,
 }) {
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -10450,13 +10475,19 @@ function Invoices({
     setEditDraft(null);
   };
 
-  const confirmDeleteInvoice = () => {
+  const confirmDeleteInvoice = async () => {
     if (!permissions.canDelete) return;
     if (!deleteTarget) return;
-    setInvoices((current) => current.filter((invoice) => invoice.id !== deleteTarget.id));
-    setCreditNotes((current) => current.filter((note) => note.invoiceId !== deleteTarget.id));
-    setProducts((current) => removeInvoiceProductHistory(current, deleteTarget.id));
+    const target = deleteTarget;
     setDeleteTarget(null);
+    if (deleteInvoiceDocument) {
+      // Removes the cloud record too; otherwise the document comes back on the next refresh.
+      await deleteInvoiceDocument(target);
+      return;
+    }
+    setInvoices((current) => current.filter((invoice) => invoice.id !== target.id));
+    setCreditNotes((current) => current.filter((note) => note.invoiceId !== target.id));
+    setProducts((current) => removeInvoiceProductHistory(current, target.id));
   };
 
   const batchReadyPercent = currentBatchSummary.total
@@ -10514,7 +10545,7 @@ function Invoices({
   const editDraftSourceText = editDraft?.source || editDraft?.batchUploadSource?.sourceFileNames?.join(", ") || "Invoice record";
 
   useEffect(()=>{
-    if(actionRequest?.id && permissions.canDelete){const target=invoices.find(row=>row.id===actionRequest.invoiceId);if(target)setDeleteTarget(target);}
+    if(actionRequest?.id && permissions.canDelete){const target=invoices.find(row=>row.id===actionRequest.invoiceId||(row.relationalId&&row.relationalId===actionRequest.invoiceId))||actionRequest.invoice;if(target)setDeleteTarget(target);}
   },[actionRequest?.id]);
 
   useEffect(() => {
@@ -11594,7 +11625,7 @@ function InvoiceControlCentre({
       .then(invoices => { if (!cancelled) setWeekData({ invoices, sales: [], key: weekKey, error: "" }); })
       .catch(error => { if (!cancelled) setWeekData(current => ({ ...current, error: error.message })); });
     return () => { cancelled = true; };
-  }, [client, companyId, locationId, weekKey, weekAttempt]);
+  }, [client, companyId, locationId, weekKey, weekAttempt, invoicePageState.total]);
   useEffect(() => {
     if (!client || !summariesOpen) return undefined;
     let cancelled = false;
@@ -12256,6 +12287,42 @@ function InvoiceControlCentre({
     } : current);
   };
 
+  const applyExistingProductToControlLine = (id, productId) => {
+    const product = products.find((candidate) => candidate.id === productId);
+    if (!product) return;
+    setViewInvoiceStatus(`Matched to ${productDisplayName(product)}.`);
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => {
+        if (item.id !== id) return item;
+        const assignment = departmentAssignmentForResolvedLine({
+          line: item,
+          product,
+          departmentNames,
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment || departmentNames[0] || "Kitchen Made",
+        });
+        return normalizeInvoiceLineForEditor({
+          ...lineWithExistingProductResolution(item, product),
+          forgetLearnedRule: false,
+          packSize: item.packSize || "",
+          supplier: item.supplier || product.supplier || current.supplier,
+          department: assignment.department,
+          departmentId: assignment.departmentId || item.departmentId || "",
+          departmentMode: assignment.departmentMode,
+          departmentSplits: assignment.departmentSplits,
+        }, departmentNames);
+      }),
+    } : current);
+  };
+
+  const resetControlProductResolution = (id) => {
+    setViewInvoice((current) => current ? {
+      ...current,
+      items: (current.items || []).map((item) => item.id === id ? lineWithResetProductResolution(item) : item),
+    } : current);
+    setViewInvoiceStatus("Choose an existing product or create a new one.");
+  };
+
   const removeControlLine = (id) => {
     setViewInvoiceStatus("");
     setViewInvoice((current) => current ? {
@@ -12309,6 +12376,31 @@ function InvoiceControlCentre({
         setViewInvoiceStatus("Department split must total 100% before saving.");
         return;
       }
+      // Lines marked "New product will be created" must get their product now; otherwise they are
+      // saved without a product and silently drop out of the invoice amount.
+      const explicitResolution = resolveExplicitNewProductLines({
+        products,
+        items,
+        supplierMappings: supplierProductMappings,
+        supplier,
+        supplierId: supplierScopeId(supplierRecord),
+        organisationId: companyId,
+        idFactory: uid,
+        createProductFromLine: (line, productId) => explicitProductFromInvoiceLine(line, productId, {
+          supplier,
+          invoiceDate: viewInvoice.date || today(),
+          fallbackDepartment: invoiceSettings.defaultInvoiceDepartment,
+          departmentNames,
+        }),
+      });
+      if (explicitResolution.conflicts.length) {
+        setViewInvoice((current) => current ? {
+          ...current,
+          items: (current.items || []).map((item) => explicitResolution.items.find((resolved) => resolved.id === item.id) || item),
+        } : current);
+        setViewInvoiceStatus("A product with this name already exists. Choose the existing product before saving.");
+        return;
+      }
       const cleaned = prepareApprovedInvoice({
         ...viewInvoice,
         supplier,
@@ -12328,7 +12420,7 @@ function InvoiceControlCentre({
         invoiceTotal: headerOnly ? manualTotal : viewInvoice.invoiceTotal,
         total: headerOnly ? manualTotal : viewInvoice.total,
         status: viewInvoice.status || "Approved",
-        items,
+        items: explicitResolution.items,
       });
       const persistence = await persistInvoiceDocument(cleaned, { forceUpdate: true });
       if (persistence.cancelled) {
@@ -12336,14 +12428,24 @@ function InvoiceControlCentre({
         return;
       }
       const savedInvoice = persistence.invoice || cleaned;
+      const productsForLearning = [
+        ...products,
+        ...explicitResolution.createdProducts.filter((product) => !products.some((existing) => existing.id === product.id)),
+      ];
       setInvoices((current) => replaceInvoiceInCollection(current, persistence.sourceInvoiceId || viewInvoice.id, savedInvoice));
       setCreditNotes((current) => syncCreditNotesForInvoice(current, savedInvoice));
       setSuppliers((current) => ensureSupplierList(current, supplier));
-      setProducts((current) => mergeInvoiceProducts(removeInvoiceProductHistory(current, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice));
+      setProducts((current) => {
+        const withCreatedProducts = [
+          ...current,
+          ...explicitResolution.createdProducts.filter((product) => !current.some((existing) => existing.id === product.id)),
+        ];
+        return mergeInvoiceProducts(removeInvoiceProductHistory(withCreatedProducts, savedInvoice.id), savedInvoice.items, savedInvoice.date, savedInvoice);
+      });
       const learningResult = learnSupplierProductMappings({
         mappings: supplierProductMappings,
         invoice: savedInvoice,
-        products,
+        products: productsForLearning,
         companyId,
         locationId,
         supplierId: savedInvoice.supplierId || supplierScopeId(supplierRecord),
@@ -12891,12 +12993,14 @@ function InvoiceControlCentre({
                 <InvoiceLineEditor learningNotice={learningNotice}
                   addSplit={addControlSplit}
                   departmentNames={departmentNames}
+                  applyExistingProduct={permissions.canEdit ? applyExistingProductToControlLine : undefined}
                   documentType={viewInvoiceDocumentType}
                   invoice={viewInvoice}
                   items={viewInvoice.items || []}
                   products={products}
                   removeLine={removeControlLine}
                   removeSplit={removeControlSplit}
+                  resetProductResolution={permissions.canEdit ? resetControlProductResolution : undefined}
                   setDepartmentMode={setControlDepartmentMode}
                   updateLine={updateControlLine}
                   updateSplit={updateControlSplit}

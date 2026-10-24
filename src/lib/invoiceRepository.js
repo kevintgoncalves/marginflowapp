@@ -184,6 +184,29 @@ export async function persistRelationalInvoice(client, invoice = {}, scope = {},
   };
 }
 
+export async function deleteRelationalInvoice(client, scope = {}, invoiceId = "") {
+  if (!client || !validScope(scope)) {
+    throw new Error("Deleting a cloud document needs a verified company.");
+  }
+  if (!isCanonicalUuid(invoiceId)) return { deleted: 0, skipped: true };
+  // Price history only nulls its invoice link on delete, so remove those rows first:
+  // a deleted document must not keep feeding product prices.
+  const history = await client.from("product_price_history").delete()
+    .eq("company_id", scope.companyId).eq("invoice_id", invoiceId);
+  if (history.error) throw history.error;
+  const { data, error } = await client.from("invoices").delete()
+    .eq("company_id", scope.companyId).eq("id", invoiceId).select("id");
+  if (error) throw error;
+  const deleted = (data || []).length;
+  if (!deleted) {
+    const { data: still, error: readError } = await client.from("invoices").select("id")
+      .eq("company_id", scope.companyId).eq("id", invoiceId).maybeSingle();
+    if (readError) throw readError;
+    if (still) throw new Error("The cloud did not allow this document to be deleted. Only the company owner can delete documents.");
+  }
+  return { deleted, skipped: false };
+}
+
 export async function persistInvoiceWithLocalFallback({
   client,
   invoice,

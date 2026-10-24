@@ -402,3 +402,44 @@ test("batch sync resilience migration extends invoice persistence timeouts witho
   assert.doesNotMatch(migration, /\b(truncate|drop table|delete from)\b/i);
   assert.doesNotMatch(migration, /\b(?:insert into|update)\s+public\.(?:invoices|invoice_lines|invoice_line_department_splits)\b/i);
 });
+
+test("deleteRelationalInvoice removes price history then the invoice, scoped to the company", async () => {
+  const { deleteRelationalInvoice } = await import("../lib/invoiceRepository.js");
+  const calls = [];
+  const builder = (table) => {
+    const state = { table, op: "", filters: [] };
+    const api = {
+      delete() { state.op = "delete"; return api; },
+      select() { if (!state.op) state.op = "select"; return api; },
+      eq(column, value) { state.filters.push([column, value]); return api; },
+      maybeSingle() { calls.push({ ...state }); return Promise.resolve({ data: null, error: null }); },
+      then(resolve) { calls.push({ ...state }); return Promise.resolve(table === "invoices" ? { data: [{ id: "x" }], error: null } : { error: null }).then(resolve); },
+    };
+    return api;
+  };
+  const client = { from: builder };
+  const id = "11111111-2222-4333-8444-555555555555";
+  const result = await deleteRelationalInvoice(client, { companyId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, id);
+  assert.equal(result.deleted, 1);
+  assert.deepEqual(calls.map((c) => `${c.op}:${c.table}`), ["delete:product_price_history", "delete:invoices"]);
+  assert.ok(calls.every((c) => c.filters.some(([col]) => col === "company_id")));
+});
+
+test("deleteRelationalInvoice reports when the cloud keeps the document", async () => {
+  const { deleteRelationalInvoice } = await import("../lib/invoiceRepository.js");
+  const builder = (table) => {
+    let op = "";
+    const api = {
+      delete() { op = "delete"; return api; },
+      select() { if (!op) op = "select"; return api; },
+      eq() { return api; },
+      maybeSingle() { return Promise.resolve({ data: { id: "still" }, error: null }); },
+      then(resolve) { return Promise.resolve(table === "invoices" ? { data: [], error: null } : { error: null }).then(resolve); },
+    };
+    return api;
+  };
+  await assert.rejects(
+    deleteRelationalInvoice({ from: builder }, { companyId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, "11111111-2222-4333-8444-555555555555"),
+    /did not allow/,
+  );
+});
