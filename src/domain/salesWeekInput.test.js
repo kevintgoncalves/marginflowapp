@@ -53,3 +53,14 @@ test("pasting a block from a spreadsheet fills consecutive days and columns", ()
   assert.deepEqual(next[2].cells["Kitchen Made"], { gross: "500", net: "416.67" });
   assert.deepEqual(next[0].cells["Kitchen Made"], { gross: "", net: "" });
 });
+
+test("a stored gross-only difference is not turned into extra net sales", () => {
+  const stored = [{ id: "x", date: "2026-07-26", netSales: 7556.05, grossSales: 10104.46, serviceCharge: 989.06,
+    departments: { "Kitchen Made": { netSales: 3750.92, grossSales: 4500.95 }, "Bought In": { netSales: 527.01, grossSales: 631.2 }, Bar: { netSales: 3278.12, grossSales: 3933.25 } } },
+    { id: "y", date: "2026-07-27", netSales: 6090.74, grossSales: 7275.9, serviceCharge: 0,
+    departments: { Bar: { netSales: 6090.74, grossSales: 7275.89 } } }];
+  const grid = buildSalesWeekGrid("2026-07-20", stored, depts);
+  assert.deepEqual(grid[6].other, { gross: "1039.06", net: "0" });
+  assert.deepEqual(grid[0].other, { gross: "", net: "" });
+  assert.deepEqual(changedSalesDays(grid, depts).save, []);
+});

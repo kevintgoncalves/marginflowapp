@@ -40,6 +40,16 @@ function cell(value) {
   return filled(value) && Number(value) !== 0 ? String(money(value)) : "";
 }
 
+// The stored day minus its departments. Pennies of rounding are not "other" sales, and when only
+// one side is non-zero the other side is shown as 0 so it is not re-derived from the VAT rate
+// (that changed 26/07: gross-only difference became £865.88 of net sales).
+function otherPair(gross, net) {
+  const g = Math.abs(gross) < 0.05 ? 0 : money(gross);
+  const n = Math.abs(net) < 0.05 ? 0 : money(net);
+  if (!g && !n) return { gross: "", net: "" };
+  return { gross: String(g), net: String(n) };
+}
+
 // Build the editable grid for a week from the stored rows (one stored row per day).
 export function buildSalesWeekGrid(weekStart, storedRows = [], departmentNames = []) {
   return weekDates(weekStart).map((date) => {
@@ -62,7 +72,7 @@ export function buildSalesWeekGrid(weekStart, storedRows = [], departmentNames =
       date,
       storedId: stored?.relationalId || stored?.id || "",
       cells,
-      other: { gross: cell(totalGross - departmentGross), net: cell(totalNet - departmentNet) },
+      other: otherPair(totalGross - departmentGross, totalNet - departmentNet),
       serviceCharge: cell(stored?.serviceCharge),
       stored,
     };
@@ -112,8 +122,9 @@ export function salesRowFromGrid(gridRow, departmentNames = [], { vatRate = 20, 
 function sameDay(a, b, departmentNames) {
   if (!a || !b) return false;
   const round = (value) => money(value);
-  if (round(a.netSales ?? a.sales) !== round(b.netSales ?? b.sales)) return false;
-  if (round(a.grossSales) !== round(b.grossSales)) return false;
+  const near = (x, y) => Math.abs(round(x) - round(y)) < 0.05;
+  if (!near(a.netSales ?? a.sales, b.netSales ?? b.sales)) return false;
+  if (!near(a.grossSales, b.grossSales)) return false;
   if (round(a.serviceCharge) !== round(b.serviceCharge)) return false;
   const da = departmentsOf(a);
   const db = departmentsOf(b);
