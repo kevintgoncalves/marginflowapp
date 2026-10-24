@@ -6949,17 +6949,22 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     if (!start || !end || start > end) throw new Error("Choose a start date before the end date.");
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
     const range = { start, end };
-    const startedAt = performance.now();
-    const fullRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "full" })
-      .then((rows) => ({ rows, seconds: (performance.now() - startedAt) / 1000 }));
-    const lightRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "light" })
-      .then((rows) => ({ rows, seconds: (performance.now() - startedAt) / 1000 }))
-      .catch((error) => {
-        throw new Error(/invoice_report_headers|schema cache|PGRST20|42P01|does not exist/i.test(`${error.code || ""} ${error.message || ""}`)
-          ? "The invoice_report_headers view is not installed yet. Apply its SQL in Supabase, then run the check again."
-          : `Light read failed: ${error.message || "query failed"}`);
-      });
-    const [full, light, salesRows] = await Promise.all([fullRead, lightRead, loadRelationalSales(supabase, scope, { startDate: start, endDate: end })]);
+    // One read after the other, light first: two heavy reads at once could push either past the
+    // database's statement timeout.
+    const timed = async (read) => {
+      const startedAt = performance.now();
+      const rows = await read();
+      return { rows, seconds: (performance.now() - startedAt) / 1000 };
+    };
+    const light = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "light" })).catch((error) => {
+      throw new Error(/invoice_report_headers|schema cache|PGRST20|42P01|does not exist/i.test(`${error.code || ""} ${error.message || ""}`)
+        ? "The invoice_report_headers view is not installed yet. Apply its SQL in Supabase, then run the check again."
+        : `Light read failed: ${error.message || "query failed"}`);
+    });
+    const full = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "full" })).catch((error) => {
+      throw new Error(`The light read worked (${light.rows.length} invoices in ${light.seconds.toFixed(1)} s) but the old full read failed: ${error.message || "query failed"}`);
+    });
+    const salesRows = await loadRelationalSales(supabase, scope, { startDate: start, endDate: end });
     const metricsFor = (invoiceRows) => calculateMetrics(invoiceRows, salesRows, "All departments", stocktakes, wasteItems, range, allowedDepartmentNames, financialSettings, labourData);
     const fullMetrics = metricsFor(full.rows);
     const lightMetrics = metricsFor(light.rows);
@@ -17822,7 +17827,7 @@ function SettingsPanel({
                 ? `Identical: ${reportCheck.invoices.fullCount} invoices and every Dashboard figure match for ${formatRangeDate(reportCheck.range.start)} – ${formatRangeDate(reportCheck.range.end)} (${reportCheck.salesDays} sales days).`
                 : `Different: ${reportCheck.invoices.differentIds.length} invoice(s) differ, ${reportCheck.invoices.extraIds.length} extra, order ${reportCheck.invoices.sameOrder ? "same" : "different"}, figures ${reportCheck.metricsIdentical ? "same" : "different"}. Do not rely on the fast loading; tell Claude.`}
             </div>
-            <p className="helper-text">Old way {reportCheck.fullSeconds.toFixed(1)} s · fast way {reportCheck.lightSeconds.toFixed(1)} s (both ran at the same time).{reportCheck.invoices.differentIds.length ? ` First different invoice: ${reportCheck.invoices.differentIds[0]}.` : ""}</p>
+            <p className="helper-text">Fast way {reportCheck.lightSeconds.toFixed(1)} s · old way {reportCheck.fullSeconds.toFixed(1)} s (one after the other).{reportCheck.invoices.differentIds.length ? ` First different invoice: ${reportCheck.invoices.differentIds[0]}.` : ""}</p>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Department</th><th>Net sales (old / fast)</th><th>Purchases (old / fast)</th><th>GP (old / fast)</th><th>Same</th></tr></thead>

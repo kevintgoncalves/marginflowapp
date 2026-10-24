@@ -38,5 +38,10 @@
     "sha256": "3b8f1be0af413ca8f12ef5de8f69ac9e46d9a986ba38db9320e76df637470af3",
     "review": "safety/reviews/20261024200000_invoice_report_headers.md",
     "test": "supabase/tests/invoice_report_headers_test.sql"
+  },
+  "20261024210000_invoice_report_headers_no_barrier.sql": {
+    "sha256": "6197fd12cfa093e2caa63de99590fcfe71307dd6a351a8d179c4b260a743ff3b",
+    "review": "safety/reviews/20261024210000_invoice_report_headers_no_barrier.md",
+    "test": "supabase/tests/invoice_report_headers_no_barrier_test.sql"
   }
 }
