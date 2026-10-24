@@ -11,6 +11,22 @@ Medido em produção (app.marginflow.co.uk, Reading Room Brighton) a 24/10, abri
 - Arranque em cadeia: `auth` → `profiles` + `claim_internal_staff_invite` → `is_internal_staff` + `company_members`. Só aos ~3,6 s começam invoices e sales.
 - `sales_entries` e `sales_department_lines` são pedidas **4 vezes cada** no arranque (aos ~3,6 s, 5,6 s, 9,7 s e 10,1 s).
 
+
+## URGENTE (visto a 24/10 às 19:20): o Dashboard está errado em produção
+- Banner: "Purchasing report: canceling statement due to statement timeout".
+- Resultado: Purchases £0, **Invoice GP 100%** em todos os departamentos (Kitchen Made, Bought In, Bar). Acontece sempre que se recarrega.
+- Origem: `src/main.jsx` ~5944. `loadRelationalInvoiceReportRange` (`src/lib/invoiceRepository.js:459`) lê:
+  - os cabeçalhos com `metadata` (os 37 MB de snapshot);
+  - todas as `invoice_lines` com `select=*`, incluindo o snapshot de cada linha (32 pedidos);
+  - para cada página, também um pedido `count: exact`.
+  - Pelo menos uma destas queries passa o statement timeout do Postgres e o relatório falha todo.
+- Também há um pedido de invoices com `invoice_date >= 2025-1x` (período de comparação) que demora mais de 8 s.
+- O que fazer:
+  - O relatório de compras precisa só de `invoice_date`, departamento, `line_total`/net e splits. Selecionar só essas colunas, sem `metadata`; o ideal é uma view ou RPC agregada por dia e departamento.
+  - Tirar os `count: exact` desnecessários.
+  - Se uma parte falhar, mostrar "Compras indisponíveis" em vez de GP 100%. Nunca calcular GP com compras = 0 por erro.
+- **Fazer isto primeiro.**
+
 ## O que fazer (por ordem de ganho)
 1. **Não trazer o snapshot na lista.**
    - A lista e o dashboard só precisam de cabeçalho e totais. Pedir só `metadata->supplier_name` (ou o join `suppliers(name)`), ou criar uma view ou RPC com as colunas leves.
