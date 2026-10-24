@@ -5735,6 +5735,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [invoiceDayStatusOverrides, setInvoiceDayStatusOverridesState] = useState(() => demoInitialData?.invoiceDayStatusOverrides || safeReadLocalStorageArray("marginflow.invoiceDayStatusOverrides", []));
   const [sales, setSalesState] = useState(() => demoInitialData?.sales || []);
   const salesRef = useRef(sales);
+  const salesWriteGenerationRef = useRef(0);
   const [stocktakes, setStocktakesState] = useState(() => demoInitialData?.stocktakes || normalizeStocktakes(safeReadLocalStorageArray("marginflow.stocktakes", [])));
   const [wasteItems, setWasteItemsState] = useState(() => demoInitialData?.wasteItems || safeReadLocalStorageArray("marginflow.waste", []));
   const [creditNotes, setCreditNotesState] = useState(() => demoInitialData?.creditNotes || safeReadLocalStorageArray("marginflow.creditNotes", []));
@@ -5785,9 +5786,13 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         ...deletedRows.map((row) => deleteRelationalSalesEntry(supabase, row, scope)),
         ...changedRows.map((row) => persistRelationalSalesEntry(supabase, row, scope)),
       ]);
+      const generation = salesWriteGenerationRef.current;
       const freshSales = await loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end });
-      salesRef.current = freshSales;
-      setSalesState(freshSales);
+      // A later save started while this one was reading: its rows are newer than this read.
+      if (generation === salesWriteGenerationRef.current) {
+        salesRef.current = freshSales;
+        setSalesState(freshSales);
+      }
       setCloudStatus("synced");
       setCloudError("");
     } catch (error) {
@@ -5799,9 +5804,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const current = salesRef.current || [];
     const next = typeof value === "function" ? value(current) : value;
     const normalized = normalizeSalesRows(next || []);
+    salesWriteGenerationRef.current += 1;
     salesRef.current = normalized;
     setSalesState(normalized);
-    syncRelationalSalesChange(current, normalized);
+    // Compare like with like: rows read from the cloud are not normalised, so comparing them raw made
+    // every loaded day look changed and each save rewrote all loaded days (with possibly stale values).
+    syncRelationalSalesChange(normalizeSalesRows(current), normalized);
   };
   const setProducts = (value) => {
     setProductsState((current) => {
