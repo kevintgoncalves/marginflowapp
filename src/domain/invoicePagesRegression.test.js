@@ -42,6 +42,7 @@ function clientFor(tables, { cap = 137, fail } = {}) {
       range(first, last) { start = first; end = last; return this; },
       then(resolve, reject) {
         requests.push({ table, columns, start, end, head: config.head });
+        if (!(table in tables) && table === "invoice_report_headers") return Promise.resolve({ data: null, count: null, error: { code: "PGRST205", message: "Could not find the table 'public.invoice_report_headers' in the schema cache" } }).then(resolve, reject);
         const rows = (tables[table] || []).filter(row => predicates.every(predicate => predicate(row))).sort((a,b) => {
           for (const [key, dir] of orders) { const delta = String(a[key]).localeCompare(String(b[key])); if (delta) return delta * dir; } return 0;
         });

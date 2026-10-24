@@ -31,6 +31,7 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
         then(resolve, reject) {
           const request = { table, filters, orExpression, head: options.head, start, end };
           requests.push(request);
+          if (!(table in tables) && table === "invoice_report_headers") return Promise.resolve({ data: null, count: null, error: { code: "PGRST205", message: "Could not find the table 'public.invoice_report_headers' in the schema cache" } }).then(resolve, reject);
           const error = intercept(request, requests);
           const filtered = (tables[table] || []).filter((row) => filters.every(([key, value]) => row[key] === value) && predicates.every((p) => p(row))).sort((a,b) => a.id.localeCompare(b.id));
           return Promise.resolve({ error, count: filtered.length, data: options.head ? null : structuredClone(filtered.slice(start, Math.min(end + 1, start + cap))) }).then(resolve, reject);
@@ -101,7 +102,8 @@ test("department reports use a separate date-scoped invoice and line query", asy
   assert.equal(report.length, 1004);
   assert.equal(report.some(invoice => invoice.id === tables.invoices[0].id), false);
   assert.equal(report.every(invoice => invoice.items.length === 3), true);
-  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoices", "invoice_lines", "invoice_line_department_splits"]);
+  // The light header view is not installed in this fixture, so the full headers are read instead.
+  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoice_report_headers", "invoices", "invoice_lines", "invoice_line_department_splits"]);
 });
 
 test("supplier price loading reads every line in order without department splits", async () => {

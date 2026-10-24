@@ -100,28 +100,45 @@ export async function loadRelationalSalesDepartments(client, scope = {}) {
   return { byId, byName };
 }
 
-export async function loadRelationalSales(client, scope = {}, { startDate = "", endDate = "" } = {}) {
-  if (!client || !validScope(scope)) return [];
-  const entryQuery = (head = false) => {
+// Reads of the same scope and period that overlap share one request (the Dashboard, Sales and GP
+// screens ask for the same period when the app opens).
+const inFlightSalesReads = new Map();
+
+export function loadRelationalSales(client, scope = {}, range = {}) {
+  if (!client || !validScope(scope)) return Promise.resolve([]);
+  const key = JSON.stringify([scope.companyId, scope.locationId || "", range.startDate || "", range.endDate || ""]);
+  const shared = inFlightSalesReads.get(key);
+  if (shared && shared.client === client) return shared.promise;
+  const promise = readRelationalSales(client, scope, range).finally(() => {
+    if (inFlightSalesReads.get(key)?.promise === promise) inFlightSalesReads.delete(key);
+  });
+  inFlightSalesReads.set(key, { client, promise });
+  return promise;
+}
+
+async function readRelationalSales(client, scope = {}, { startDate = "", endDate = "" } = {}) {
+  const entryQuery = (columns) => (head = false) => {
     let query = client
     .from("sales_entries")
-    .select("id,company_id,location_id,sales_date,gross_sales,net_sales,vat_amount,service_charge,discounts,refunds,source,metadata,created_at,updated_at", { count: "exact", head })
+    .select(head ? "id" : columns, { count: "exact", head })
     .eq("company_id", scope.companyId);
   if (scope.locationId) query = query.eq("location_id", scope.locationId);
   if (startDate) query = query.gte("sales_date", startDate);
   if (endDate) query = query.lte("sales_date", endDate);
     return query;
   };
-  const entries = await readAllPages(entryQuery, { label: "sales entries" });
+  const [entries, departments] = await Promise.all([
+    readAllPages(entryQuery("id,company_id,location_id,sales_date,gross_sales,net_sales,vat_amount,service_charge,discounts,refunds,source,metadata,created_at,updated_at"), { label: "sales entries" }),
+    loadRelationalSalesDepartments(client, scope),
+  ]);
   if (!entries?.length) return [];
 
   const entryIds = entries.map((entry) => entry.id);
-  const departments = await loadRelationalSalesDepartments(client, scope);
-  const lines = [];
+  const lineReads = [];
   // Small ID groups keep URLs bounded even for years of sales history.
   for (let offset = 0; offset < entryIds.length; offset += 100) {
     const ids = entryIds.slice(offset, offset + 100);
-    lines.push(...await readAllPages((head = false) => {
+    lineReads.push(readAllPages((head = false) => {
       let query = client.from("sales_department_lines")
         .select("id,company_id,location_id,sales_entry_id,department_id,gross_sales,net_sales,vat_amount,service_charge,metadata,created_at,updated_at", { count: "exact", head })
         .eq("company_id", scope.companyId).in("sales_entry_id", ids);
@@ -129,7 +146,9 @@ export async function loadRelationalSales(client, scope = {}, { startDate = "", 
       return query;
     }, { label: "sales department lines" }));
   }
-  const verifiedEntries = await readAllPages(entryQuery, { label: "sales entries" });
+  const lines = (await Promise.all(lineReads)).flat();
+  // Re-read only ids and versions: a day saved while the lines were loading is detected the same way.
+  const verifiedEntries = await readAllPages(entryQuery("id,updated_at"), { label: "sales entries" });
   const versions = (rows) => JSON.stringify(rows.map((row) => [row.id, row.updated_at]));
   if (versions(entries) !== versions(verifiedEntries)) throw new Error("Sales changed during loading. Retry the read; previous data has been retained.");
 
@@ -242,7 +261,21 @@ function departmentLinePayloads(sale = {}, scope = {}, entryId, departmentByName
     .filter(Boolean);
 }
 
-export async function persistRelationalSalesEntry(client, sale = {}, scope = {}, { replaceDay = true } = {}) {
+// A read that started before (or while) sales were written must not be handed to a later caller.
+function forgetSharedSalesReads() {
+  inFlightSalesReads.clear();
+}
+
+export async function persistRelationalSalesEntry(client, sale = {}, scope = {}, options = {}) {
+  forgetSharedSalesReads();
+  try {
+    return await writeRelationalSalesEntry(client, sale, scope, options);
+  } finally {
+    forgetSharedSalesReads();
+  }
+}
+
+async function writeRelationalSalesEntry(client, sale = {}, scope = {}, { replaceDay = true } = {}) {
   if (!client || !validScope(scope)) throw new Error("Relational sales persistence needs canonical company and location scope.");
   if (!sale.date) throw new Error("Relational sales persistence needs a sales date.");
   const entryId = await ensureSalesEntryId(sale, scope);
@@ -296,6 +329,15 @@ export async function persistRelationalSalesEntry(client, sale = {}, scope = {},
 }
 
 export async function deleteRelationalSalesEntry(client, saleOrId = {}, scope = {}) {
+  forgetSharedSalesReads();
+  try {
+    return await removeRelationalSalesEntry(client, saleOrId, scope);
+  } finally {
+    forgetSharedSalesReads();
+  }
+}
+
+async function removeRelationalSalesEntry(client, saleOrId = {}, scope = {}) {
   if (!client || !validScope(scope)) return { deleted: false };
   const entryId = typeof saleOrId === "string" ? saleOrId : saleOrId.relationalId || saleOrId.id || "";
   if (!isCanonicalUuid(entryId)) return { deleted: false };

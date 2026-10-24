@@ -33,5 +33,10 @@
     "sha256": "8536a2257618648891204e8cc28803e268bd5b834545b3c2114483ac038df559",
     "review": "safety/reviews/20261024120000_delete_invoice_document.md",
     "test": "supabase/tests/delete_invoice_document_test.sql"
+  },
+  "20261024200000_invoice_report_headers.sql": {
+    "sha256": "3b8f1be0af413ca8f12ef5de8f69ac9e46d9a986ba38db9320e76df637470af3",
+    "review": "safety/reviews/20261024200000_invoice_report_headers.md",
+    "test": "supabase/tests/invoice_report_headers_test.sql"
   }
 }

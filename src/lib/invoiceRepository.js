@@ -454,18 +454,45 @@ async function inOrderWithLimit(tasks, limit = 4) {
   return results;
 }
 
-// includeSplits: department splits are needed for reports, not for supplier prices. The price
-// comparison reads ~10,000 lines; their splits alone took ~100 sequential requests.
-export async function loadRelationalInvoiceReportRange(client, scope = {}, { startDate, endDate, includeSplits = true, concurrency = 1 } = {}) {
-  if (!startDate || !endDate) throw new Error("Invoice reports require an explicit date range.");
-  if (!client || !validScope(scope)) return [];
-  const headers = await readAllPages((head = false) => {
-    let query = client.from("invoices").select(head ? "id" : invoiceHeaderColumns, { count: "exact", head })
+// The reporting period reads its headers from `invoice_report_headers`: the same rows and columns as
+// `invoices`, but the stored snapshot's `items` keeps only each line's id (the lines themselves come
+// from invoice_lines; the snapshot copy was ~97% of a 37 MB load and only gave the line order).
+// Until that view is installed, or when the caller asks for it, the full headers are read instead.
+export const INVOICE_REPORT_HEADER_VIEW = "invoice_report_headers";
+
+function reportViewUnavailable(error) {
+  const text = `${error?.code || ""} ${error?.message || ""}`;
+  return /PGRST20[0-9]|42P01|42501|could not find|schema cache|does not exist|permission denied/i.test(text);
+}
+
+function withSignal(query, signal) {
+  return signal && typeof query.abortSignal === "function" ? query.abortSignal(signal) : query;
+}
+
+async function readReportHeaders(client, scope, { startDate, endDate, source, signal }) {
+  const read = (table) => readAllPages((head = false) => {
+    let query = client.from(table).select(head ? "id" : invoiceHeaderColumns, { count: "exact", head })
       .eq("company_id", scope.companyId).gte("invoice_date", startDate).lte("invoice_date", endDate);
     if (scope.locationId) query = query.eq("location_id", scope.locationId);
-    return query;
+    return withSignal(query, signal);
   }, { pageSize: 500, label: "invoice report headers" });
-  if (!(headers || []).length) return [];
+  if (source === "full") return { headers: await read("invoices"), source: "full" };
+  try {
+    return { headers: await read(INVOICE_REPORT_HEADER_VIEW), source: "light" };
+  } catch (error) {
+    if (source === "light" || !reportViewUnavailable(error)) throw error;
+    return { headers: await read("invoices"), source: "full" };
+  }
+}
+
+// includeSplits: department splits are needed for reports, not for supplier prices. The price
+// comparison reads ~10,000 lines; their splits alone took ~100 sequential requests.
+// source: "auto" (light view, full headers if the view is missing), "light" or "full".
+export async function loadRelationalInvoiceReportRange(client, scope = {}, { startDate, endDate, includeSplits = true, concurrency = 4, source = "auto", signal, withSource = false } = {}) {
+  if (!startDate || !endDate) throw new Error("Invoice reports require an explicit date range.");
+  if (!client || !validScope(scope)) return withSource ? { invoices: [], source: "none" } : [];
+  const { headers, source: headerSource } = await readReportHeaders(client, scope, { startDate, endDate, source, signal });
+  if (!(headers || []).length) return withSource ? { invoices: [], source: headerSource } : [];
   const invoiceIds = headers.map(row => row.id);
   const lineChunks = [];
   for (let offset = 0; offset < invoiceIds.length; offset += 100) {
@@ -474,26 +501,28 @@ export async function loadRelationalInvoiceReportRange(client, scope = {}, { sta
       let query = client.from("invoice_lines").select(head ? "id" : "*", { count: "exact", head })
         .eq("company_id", scope.companyId).in("invoice_id", invoiceIdChunk).eq("active", true);
       if (scope.locationId) query = query.eq("location_id", scope.locationId);
-      return query;
+      return withSignal(query, signal);
     }, { pageSize: 500, label: "invoice report lines" }));
   }
   const lines = (await inOrderWithLimit(lineChunks, Math.max(1, concurrency))).flat();
   const lineIds = includeSplits ? lines.map(row => row.id) : [];
-  const splits = [];
+  const splitChunks = [];
   for (let offset = 0; offset < lineIds.length; offset += 100) {
     const lineIdChunk = lineIds.slice(offset, offset + 100);
-    splits.push(...await readAllPages((head = false) => {
+    splitChunks.push(() => readAllPages((head = false) => {
       let query = client.from("invoice_line_department_splits").select(head ? "id" : "*", { count: "exact", head })
         .eq("company_id", scope.companyId).in("invoice_line_id", lineIdChunk).eq("active", true);
       if (scope.locationId) query = query.eq("location_id", scope.locationId);
-      return query;
+      return withSignal(query, signal);
     }, { pageSize: 500, label: "invoice report department splits" }));
   }
+  const splits = (await inOrderWithLimit(splitChunks, Math.max(1, concurrency))).flat();
   const splitsByLine = new Map();
   splits.forEach(split => splitsByLine.set(split.invoice_line_id, [...(splitsByLine.get(split.invoice_line_id) || []), split]));
   const linesByInvoice = new Map();
   lines.forEach(line => linesByInvoice.set(line.invoice_id, [...(linesByInvoice.get(line.invoice_id) || []), { ...line, invoice_line_department_splits: splitsByLine.get(line.id) || [] }]));
-  return headers.map(header => invoiceFromRelationalRow({ ...header, invoice_lines: linesByInvoice.get(header.id) || [] }));
+  const invoices = headers.map(header => invoiceFromRelationalRow({ ...header, invoice_lines: linesByInvoice.get(header.id) || [] }));
+  return withSource ? { invoices, source: headerSource } : invoices;
 }
 
 export async function loadRelationalInvoices(client, scope = {}) {

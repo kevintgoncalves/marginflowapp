@@ -157,6 +157,7 @@ import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js"
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
 import { buildSalesWeekGrid, changedSalesDays, dayTotals, gridColumns, pasteIntoGrid, weekDates as salesWeekDates, weekStartFor as salesWeekStartFor } from "./domain/salesWeekInput.js";
+import { canonicalJson, compareInvoiceLists, headlineRows } from "./domain/reportLoadComparison.js";
 import { OTHER_DEPARTMENT as POS_OTHER_DEPARTMENT, applyPastedDay, buildPastedDay, categoryMapUpdates, defaultDepartmentFor, parseSalesPaste } from "./domain/salesPasteImport.js";
 import { loadCustomerOnboardingState } from "./lib/onboardingRepository.js";
 import { claimInternalStaffInvite, closeSupportWorkspace } from "./lib/adminRepository.js";
@@ -886,8 +887,8 @@ async function ensureAuthProfile(user) {
 
 async function loadAuthMembership(user) {
   if (!supabase || !user) return null;
-  await ensureAuthProfile(user);
-  const { data, error } = await supabase
+  // The membership read does not depend on the profile row, so both go out together.
+  const [, { data, error }] = await Promise.all([ensureAuthProfile(user), supabase
     .from("company_members")
     .select("id, company_id, location_id, role_label, status, companies(name, trading_name, onboarding_status, onboarding_step, onboarding_completed_at), locations(name)")
     .eq("user_id", user.id)
@@ -895,7 +896,7 @@ async function loadAuthMembership(user) {
     .order("created_at", { ascending: true })
     .order("id", { ascending: true })
     .limit(1)
-    .maybeSingle();
+    .maybeSingle()]);
   if (error) throw error;
   return data || null;
 }
@@ -5650,7 +5651,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [confirmedInvoicesLoaded, setConfirmedInvoicesLoaded] = useState(false);
   const [invoicePageState, setInvoicePageState] = useState({ nextOffset: 0, total: 0, filters: {}, hasMore: false, loading: false, error: "" });
   const [reportInvoices, setReportInvoices] = useState([]);
-  const [reportLoadState, setReportLoadState] = useState({ loading: false, error: "" });
+  const [reportLoadState, setReportLoadState] = useState({ loading: false, error: "", purchasesFailed: false });
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
@@ -5941,21 +5942,33 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const reportPages = new Set(["dashboard", "reports", "gp", "suppliers", "ai"]);
     if (!reportPages.has(active)) return undefined;
     let cancelled = false;
-    setReportLoadState({ loading: true, error: "" });
+    // A newer period or scope supersedes this read: stop downloading it instead of discarding it later.
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    setReportLoadState({ loading: true, error: "", purchasesFailed: false });
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-    Promise.allSettled([
-      loadRelationalInvoiceReportRange(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end }),
-      loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end }),
-    ]).then(([invoiceResult, salesResult]) => {
+    const invoiceRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end, signal: controller?.signal });
+    const salesRead = loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end });
+    // Sales are small: show them as soon as they arrive while the purchases are still loading.
+    salesRead.then((rows) => {
+      if (cancelled) return;
+      salesRef.current = rows;
+      setSalesState(rows);
+    }, () => {});
+    Promise.allSettled([invoiceRead, salesRead]).then(([invoiceResult, salesResult]) => {
       if (cancelled) return;
       const errors = [];
-      if (invoiceResult.status === "fulfilled") setReportInvoices(invoiceResult.value);
-      else errors.push(`Purchasing report: ${invoiceResult.reason?.message || "query failed"}`);
-      if (salesResult.status === "fulfilled") { salesRef.current = salesResult.value; setSalesState(salesResult.value); }
-      else errors.push(`Sales report: ${salesResult.reason?.message || "query failed"}`);
-      setReportLoadState({ loading: false, error: errors.join(" ") });
+      const purchasesFailed = invoiceResult.status !== "fulfilled";
+      // A failed read leaves no purchases for this period: GP is shown as unavailable, never
+      // worked out from purchases of £0 (or from another period's purchases).
+      setReportInvoices(purchasesFailed ? [] : invoiceResult.value);
+      if (purchasesFailed) errors.push(`Purchasing report: ${invoiceResult.reason?.message || "query failed"}`);
+      if (salesResult.status !== "fulfilled") errors.push(`Sales report: ${salesResult.reason?.message || "query failed"}`);
+      setReportLoadState({ loading: false, error: errors.join(" "), purchasesFailed });
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller?.abort();
+    };
   }, [active, cloudEnabled, cloudScope.companyId, cloudScope.locationId, dateRange.end, dateRange.start, demoMode]);
   const labourDateRange = useMemo(() => resolveDateRange(labourDateRangeState, financialSettings.weekStartsOn), [labourDateRangeState, financialSettings.weekStartsOn]);
   const workingInvoices = useMemo(() => demoMode ? invoices : invoices.filter(invoiceIsOperational), [demoMode, invoices]);
@@ -6929,6 +6942,38 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     };
   }, [cloudEnabled, cloudLoadAttempt, workingInvoices, readOnly]);
 
+  // Settings > Compare report loading: reads the period through the full headers and through the
+  // light view, then compares every invoice and the Dashboard figures. Read-only.
+  const compareReportLoading = async ({ start, end }) => {
+    if (!cloudEnabled) throw new Error("The cloud workspace is not connected.");
+    if (!start || !end || start > end) throw new Error("Choose a start date before the end date.");
+    const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    const range = { start, end };
+    const startedAt = performance.now();
+    const fullRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "full" })
+      .then((rows) => ({ rows, seconds: (performance.now() - startedAt) / 1000 }));
+    const lightRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "light" })
+      .then((rows) => ({ rows, seconds: (performance.now() - startedAt) / 1000 }))
+      .catch((error) => {
+        throw new Error(/invoice_report_headers|schema cache|PGRST20|42P01|does not exist/i.test(`${error.code || ""} ${error.message || ""}`)
+          ? "The invoice_report_headers view is not installed yet. Apply its SQL in Supabase, then run the check again."
+          : `Light read failed: ${error.message || "query failed"}`);
+      });
+    const [full, light, salesRows] = await Promise.all([fullRead, lightRead, loadRelationalSales(supabase, scope, { startDate: start, endDate: end })]);
+    const metricsFor = (invoiceRows) => calculateMetrics(invoiceRows, salesRows, "All departments", stocktakes, wasteItems, range, allowedDepartmentNames, financialSettings, labourData);
+    const fullMetrics = metricsFor(full.rows);
+    const lightMetrics = metricsFor(light.rows);
+    return {
+      range,
+      invoices: compareInvoiceLists(full.rows, light.rows),
+      metricsIdentical: canonicalJson(fullMetrics) === canonicalJson(lightMetrics),
+      rows: headlineRows(fullMetrics, lightMetrics),
+      salesDays: salesRows.length,
+      fullSeconds: full.seconds,
+      lightSeconds: light.seconds,
+    };
+  };
+
   const compareDeviceWithCloud = async () => {
     if (!cloudEnabled) {
       return {
@@ -7475,6 +7520,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             onInputSales={() => setSalesInputRequest({ id: uid() })}
             availablePages={visibleNavItems.map(item => item.id)}
             pendingCount={demoMode ? 0 : pendingInvoiceCount}
+            purchasesState={demoMode ? "ready" : reportLoadState.loading ? "loading" : reportLoadState.purchasesFailed ? "unavailable" : "ready"}
             stocktakes={stocktakes}
             suppliers={suppliers}
             supplierSpend={departmentSupplierSpend}
@@ -7661,6 +7707,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             menuSettings={menuSettings}
             onImportBackupToCloud={importBackupToCloud}
             onCompareDeviceWithCloud={compareDeviceWithCloud}
+            onCompareReportLoading={compareReportLoading}
             onInspectRecoveryBackup={inspectRecoveryBackupAgainstCloud}
             onMigrateLocalToCloud={migrateLocalDataToCloud}
             onDiagnoseLaptopRecovery={diagnoseCurrentLaptopRecovery}
@@ -8087,13 +8134,23 @@ function ComparisonCards({ comparisonMode, setComparisonMode, comparisonMetrics,
   );
 }
 
-function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend }) {
+function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, dailyRows, gpTarget, metrics, supplierSpend, purchasesState = "ready" }) {
   const [breakdownView, setBreakdownView] = useState("Department");
   const hasData = Boolean(metrics.sales || metrics.purchases || metrics.waste || supplierSpend.some((row) => row.spend));
   const sortedSuppliers = [...supplierSpend].sort((a, b) => b.spend - a.spend);
   const totalSupplierSpend = sortedSuppliers.reduce((sum, row) => sum + numberValue(row.spend), 0);
   const chartData = aggregateDashboardRows(dailyRows, dateRange);
   const chartPrefix = chartTitlePrefix(chartData.granularity);
+
+  if (dashboardMode && purchasesState !== "ready") {
+    const message = purchasesState === "loading" ? "Loading purchases for this period…" : "Purchases are unavailable for this period, so supplier spend and GP are not shown.";
+    return (
+      <div className="dashboard-operational-view">
+        <Panel id="mf-supplier-report" className="dashboard-supplier-spend" title="Supplier spend"><p className="helper-text">{message}</p></Panel>
+        <Panel className="dashboard-performance-breakdown" title="Performance breakdown"><p className="helper-text">{message}</p></Panel>
+      </div>
+    );
+  }
 
   if (dashboardMode) {
     return (
@@ -8156,14 +8213,17 @@ function PerformanceCharts({ dashboardMode = false, dateRange, departmentRows, d
   );
 }
 
-function DashboardPerformance({filterBar,metrics,dailyRows,comparisonMetrics,compareRange,comparisonMode,setComparisonMode,gpTarget}) {
+function DashboardPerformance({filterBar,metrics,dailyRows,comparisonMetrics,compareRange,comparisonMode,setComparisonMode,gpTarget,purchasesState="ready"}) {
   const [metricView,setMetricView]=useState("Sales & purchases");
   const hasSales=Boolean(metrics.salesRows?.length),hasPurchases=Boolean(metrics.invoices?.length),hasWaste=Boolean(metrics.wasteRecords?.length),hasLabour=Boolean(metrics.labourRecords?.length);
+  // Purchases still loading or unavailable: purchases and GP are not shown rather than shown as £0 / 100%.
+  const purchasesReady=purchasesState==="ready";
+  const purchasesLabel=purchasesState==="loading"?"Loading…":"Unavailable";
   const hasGp=hasSales&&metrics.netSales>0;
   const comparisonReady=hasSales&&Boolean(comparisonMetrics?.salesRows?.length)&&comparisonMetrics.netSales!==0;
   const salesDates=new Set((metrics.salesRows||[]).map(row=>row.date));
   const purchaseDates=new Set((metrics.invoices||[]).map(row=>row.date));
-  const rows=dailyRows.map(row=>({...row,label:formatRangeDate(row.date),netSales:salesDates.has(row.date)?row.netSales:null,purchases:purchaseDates.has(row.date)?row.purchases:null}));
+  const rows=dailyRows.map(row=>({...row,label:formatRangeDate(row.date),netSales:salesDates.has(row.date)?row.netSales:null,purchases:purchasesReady&&purchaseDates.has(row.date)?row.purchases:null}));
   const series=metricView==="Net sales"?[{key:"netSales",label:"Net sales"}]:metricView==="Purchases"?[{key:"purchases",label:"Purchases"}]:[{key:"netSales",label:"Net sales"},{key:"purchases",label:"Purchases"}];
   return <section className="mf-performance-surface" id="mf-sales-report">
     <h2>Performance</h2>
@@ -8172,9 +8232,9 @@ function DashboardPerformance({filterBar,metrics,dailyRows,comparisonMetrics,com
       controls={<label className="mf-chart-metric"><span>Metric</span><select aria-label="Performance metric" value={metricView} onChange={event=>setMetricView(event.target.value)}><option>Sales &amp; purchases</option><option>Net sales</option><option>Purchases</option></select></label>}
       summary={<><span>Net sales</span><strong>{moneyOrEmpty(metrics.netSales,hasSales)}</strong>{comparisonReady?<span className={`mf-change-capsule ${metrics.netSales>=comparisonMetrics.netSales?'positive':'negative'}`}>{metrics.netSales>=comparisonMetrics.netSales?'▲':'▼'} {percent(Math.abs(changePercent(metrics.netSales,comparisonMetrics.netSales)))}</span>:<small>{comparisonMode==="None"?"Comparison off":"Comparison unavailable"}</small>}{compareRange&&<small>{formatRangeDate(compareRange.start)} – {formatRangeDate(compareRange.end)}</small>}<small>Selected department &amp; period</small></>}/>
     <div className="mf-performance-facts">
-      <div><span>Purchases</span><strong>{moneyOrEmpty(metrics.purchases,hasPurchases)}</strong><small>Confirmed financial inputs</small></div>
-      <div><span>Invoice GP</span><strong>{hasGp?percent(metrics.invoiceGp):"—"}</strong><small>Target {percent(gpTarget)}</small></div>
-      <div><span>Real GP incl. waste</span><strong>{hasGp?percent(metrics.realGp):"—"}</strong><small>Stock-adjusted GP</small></div>
+      <div><span>Purchases</span><strong>{purchasesReady?moneyOrEmpty(metrics.purchases,hasPurchases):purchasesLabel}</strong><small>Confirmed financial inputs</small></div>
+      <div><span>Invoice GP</span><strong>{!purchasesReady?purchasesLabel:hasGp?percent(metrics.invoiceGp):"—"}</strong><small>Target {percent(gpTarget)}</small></div>
+      <div><span>Real GP incl. waste</span><strong>{!purchasesReady?purchasesLabel:hasGp?percent(metrics.realGp):"—"}</strong><small>Stock-adjusted GP</small></div>
       <div><span>Waste</span><strong>{moneyOrEmpty(metrics.waste,hasWaste)}</strong><small>{hasWaste?"Recorded waste":"No waste recorded"}</small></div>
       <div><span>Labour %</span><strong>{hasGp&&hasLabour?percent(metrics.labourPercent):"—"}</strong><small>{hasLabour?"Of net sales":"No labour recorded"}</small></div>
       <div><span>Gross sales</span><strong>{moneyOrEmpty(metrics.grossSales,hasSales)}</strong><small>Including VAT / tax</small></div>
@@ -8186,7 +8246,7 @@ function chartMoney(value,compact=false) {
   return compact?new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP",notation:"compact",maximumFractionDigits:1}).format(value):money(value);
 }
 
-function PerformanceSections({ filterBar, dashboardMode = false, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
+function PerformanceSections({ filterBar, dashboardMode = false, purchasesState = "ready", dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -8199,8 +8259,10 @@ function PerformanceSections({ filterBar, dashboardMode = false, dateRange, date
           <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
         </Panel>
       )}
-      {dashboardMode ? <DashboardPerformance filterBar={filterBar} metrics={metrics} dailyRows={dailyRows} comparisonMetrics={comparisonMetrics} compareRange={compareRange} comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} gpTarget={gpTarget} /> : <PerformanceSummaryCards dashboardMode={false} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />}
-      <PerformanceCharts dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
+      {purchasesState === "loading" && <div className="invoice-status info dashboard-purchases-loading" role="status">Purchases for this period are still loading. Sales are up to date; purchases and GP appear when they finish.</div>}
+      {purchasesState === "unavailable" && <div className="invoice-status warning dashboard-purchases-loading" role="alert">Purchases could not be loaded for this period, so purchases and GP are not shown. Sales are up to date. Reload to try again.</div>}
+      {dashboardMode ? <DashboardPerformance purchasesState={purchasesState} filterBar={filterBar} metrics={metrics} dailyRows={dailyRows} comparisonMetrics={comparisonMetrics} compareRange={compareRange} comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} gpTarget={gpTarget} /> : <PerformanceSummaryCards dashboardMode={false} metrics={metrics} dateRangeState={dateRangeState} dateRange={dateRange} department={department} gpTarget={gpTarget} weekStartsOn={financialSettings.weekStartsOn} />}
+      <PerformanceCharts purchasesState={purchasesState} dashboardMode={dashboardMode} dateRange={dateRange} departmentRows={departmentRows} dailyRows={dailyRows} gpTarget={gpTarget} metrics={metrics} supplierSpend={supplierSpend} suppliers={suppliers} />
       {dashboardMode ? (
         <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
       ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} />}
@@ -8348,7 +8410,7 @@ function ProductDetails({ product, onClose, onEdit }) {
   </InvoiceModal>;
 }
 
-function Dashboard({ filterBar, onUtility, onInputSales, availablePages = [], pendingCount = 0, dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
+function Dashboard({ filterBar, onUtility, onInputSales, availablePages = [], pendingCount = 0, purchasesState = "ready", dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, financialSettings, gpTarget, invoices, metrics, onNavigate, permissions, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems }) {
   const dashboardDepartment = department;
   const dashboardMetrics = metrics;
   const dashboardTarget = gpTarget;
@@ -8363,7 +8425,7 @@ function Dashboard({ filterBar, onUtility, onInputSales, availablePages = [], pe
       <div className="dashboard-content">
         <section className="dashboard-main-column">
           <button className="mf-ai-entry" type="button" onClick={() => onUtility?.("MarginFlow AI")}><Sparkles size={21} /><span>Ask about your costs, invoices or GP…<small>Contextual assistant · Coming soon</small></span><ChevronRight size={20} /></button>
-          <PerformanceSections dashboardMode filterBar={filterBar} dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
+          <PerformanceSections dashboardMode purchasesState={purchasesState} filterBar={filterBar} dateRange={dateRange} dateRangeState={dateRangeState} demoMode={demoMode} department={dashboardDepartment} departmentNames={departmentNames} departmentSettings={departmentSettings} financialSettings={financialSettings} gpTarget={dashboardTarget} invoices={invoices} metrics={dashboardMetrics} permissions={permissions} sales={sales} setDateRangeState={setDateRangeState} stocktakes={stocktakes} suppliers={suppliers} supplierSpend={dashboardSupplierSpend} wasteItems={wasteItems} />
           <details className="dashboard-documents"><summary>Recent purchasing documents</summary>
             <DataTable
               columns={[
@@ -16968,6 +17030,7 @@ function SettingsPanel({
   labourSettings = defaultLabourSettings,
   menuSettings,
   onCompareDeviceWithCloud,
+  onCompareReportLoading,
   onImportBackupToCloud,
   onInspectRecoveryBackup,
   onMigrateLocalToCloud,
@@ -17012,6 +17075,20 @@ function SettingsPanel({
   const [emergencyBackupPreview, setEmergencyBackupPreview] = useState(null);
   const [emergencyBackupInputKey, setEmergencyBackupInputKey] = useState(0);
   const [syncDiagnostic, setSyncDiagnostic] = useState(null);
+  const [reportCheckRange, setReportCheckRange] = useState(() => ({ start: `${today().slice(0, 4)}-01-01`, end: toIsoDate(addDays(parseDate(today()), -1)) }));
+  const [reportCheck, setReportCheck] = useState(null);
+  const [reportCheckBusy, setReportCheckBusy] = useState(false);
+  const runReportCheck = async () => {
+    setReportCheckBusy(true);
+    setReportCheck(null);
+    try {
+      setReportCheck(await onCompareReportLoading?.(reportCheckRange));
+    } catch (error) {
+      setReportCheck({ error: `${error.message || "The check failed."} No data was changed.` });
+    } finally {
+      setReportCheckBusy(false);
+    }
+  };
   const [laptopRecoveryPreview, setLaptopRecoveryPreview] = useState(null);
   const [recoveryConflictDiagnostic, setRecoveryConflictDiagnostic] = useState(null);
   const [invoiceSafetyBackups, setInvoiceSafetyBackups] = useState(() => readInvoiceAutoBackups());
@@ -17729,6 +17806,42 @@ function SettingsPanel({
         onSaveResolution={onSaveRecoveryResolution}
         onVerify={onVerifyRecovery}
       />}
+
+      <Panel className="settings-backup-section" title="Compare report loading" action="Read-only">
+        <p className="helper-text">Reads the period twice, the old way (full invoice records) and the fast way, then checks that every invoice and the Dashboard figures are exactly the same. Nothing is changed. The old way can take a few seconds.</p>
+        <div className="button-row left wrap">
+          <label>From<input type="date" value={reportCheckRange.start} onChange={(event) => setReportCheckRange((current) => ({ ...current, start: event.target.value }))} /></label>
+          <label>To<input type="date" value={reportCheckRange.end} onChange={(event) => setReportCheckRange((current) => ({ ...current, end: event.target.value }))} /></label>
+          <button className="ghost" disabled={reportCheckBusy || !cloudEnabled} onClick={runReportCheck} type="button"><Search size={16} />{reportCheckBusy ? "Comparing…" : "Compare report loading"}</button>
+        </div>
+        {reportCheck?.error && <div className="invoice-status warning">{reportCheck.error}</div>}
+        {reportCheck && !reportCheck.error && (
+          <>
+            <div className={`invoice-status ${reportCheck.invoices.identical && reportCheck.metricsIdentical ? "info" : "warning"}`}>
+              {reportCheck.invoices.identical && reportCheck.metricsIdentical
+                ? `Identical: ${reportCheck.invoices.fullCount} invoices and every Dashboard figure match for ${formatRangeDate(reportCheck.range.start)} – ${formatRangeDate(reportCheck.range.end)} (${reportCheck.salesDays} sales days).`
+                : `Different: ${reportCheck.invoices.differentIds.length} invoice(s) differ, ${reportCheck.invoices.extraIds.length} extra, order ${reportCheck.invoices.sameOrder ? "same" : "different"}, figures ${reportCheck.metricsIdentical ? "same" : "different"}. Do not rely on the fast loading; tell Claude.`}
+            </div>
+            <p className="helper-text">Old way {reportCheck.fullSeconds.toFixed(1)} s · fast way {reportCheck.lightSeconds.toFixed(1)} s (both ran at the same time).{reportCheck.invoices.differentIds.length ? ` First different invoice: ${reportCheck.invoices.differentIds[0]}.` : ""}</p>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Department</th><th>Net sales (old / fast)</th><th>Purchases (old / fast)</th><th>GP (old / fast)</th><th>Same</th></tr></thead>
+                <tbody>
+                  {reportCheck.rows.map((row) => (
+                    <tr key={row.department}>
+                      <td>{row.department}</td>
+                      <td>{money(row.full.netSales)} / {row.light.netSales === null ? "–" : money(row.light.netSales)}</td>
+                      <td>{money(row.full.purchases)} / {row.light.purchases === null ? "–" : money(row.light.purchases)}</td>
+                      <td>{percent(row.full.gp)} / {row.light.gp === null ? "–" : percent(row.light.gp)}</td>
+                      <td>{row.equal ? "✓" : "✗"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </Panel>
 
       <Panel className="settings-backup-section" title="Backup & Restore" action="Invoices only">
         <div className="button-row left wrap">
