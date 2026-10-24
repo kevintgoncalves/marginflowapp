@@ -34,6 +34,7 @@ import {
   ArrowDownUp,
   Boxes,
   CalendarDays,
+  ClipboardPaste,
   ChefHat,
   Check,
   ChevronDown,
@@ -156,6 +157,7 @@ import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js"
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
 import { buildSalesWeekGrid, changedSalesDays, dayTotals, gridColumns, pasteIntoGrid, weekDates as salesWeekDates, weekStartFor as salesWeekStartFor } from "./domain/salesWeekInput.js";
+import { OTHER_DEPARTMENT as POS_OTHER_DEPARTMENT, applyPastedDay, buildPastedDay, categoryMapUpdates, defaultDepartmentFor, parseSalesPaste } from "./domain/salesPasteImport.js";
 import { loadCustomerOnboardingState } from "./lib/onboardingRepository.js";
 import { claimInternalStaffInvite, closeSupportWorkspace } from "./lib/adminRepository.js";
 import { onboardingNeedsRedirect } from "./domain/onboarding.js";
@@ -7619,6 +7621,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             sales={sales}
             setDateRangeState={setDateRangeState}
             setSales={setSales}
+            setFinancialSettings={setFinancialSettings}
             weekStartsOn={financialSettings.weekStartsOn}
             stocktakes={stocktakes}
             suppliers={suppliers}
@@ -16538,7 +16541,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
   );
 }
 
-function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeState, department, departmentNames, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
+function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeState, department, departmentNames, financialSettings = {}, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setFinancialSettings = () => {}, setSales, weekStartsOn }) {
   const makeSalesDraft = (date = today(), loadedEntry = null) => {
     const existing = loadedEntry || sales.find((row) => row.date === date);
     const departments = salesDepartments(existing);
@@ -16600,6 +16603,9 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
   const [weekLoading, setWeekLoading] = useState(false);
   const [weekStatus, setWeekStatus] = useState("");
   const weekRequestRef = useRef(0);
+  // A POS paste for a day of another week waits here until that week's saved sales are loaded, so
+  // the grid (and the "it had £X before" note) starts from what is stored.
+  const pendingPasteRef = useRef(null);
   const shiftWeek = (start, days) => toIsoDate(addDays(parseDate(start), days));
   const loadSalesWeek = (start) => {
     const dates = salesWeekDates(start);
@@ -16607,13 +16613,77 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
     weekRequestRef.current = requestId;
     setSalesWeekStart(start);
     setWeekStatus("");
-    setSalesWeekGrid(buildSalesWeekGrid(start, sales.filter((row) => dates.includes(row.date)), departmentNames));
-    if (!client) return;
+    const localGrid = buildSalesWeekGrid(start, sales.filter((row) => dates.includes(row.date)), departmentNames);
+    if (!client) {
+      const pending = pendingPasteRef.current;
+      pendingPasteRef.current = null;
+      setSalesWeekGrid(pending ? pending(localGrid) : localGrid);
+      return;
+    }
+    setSalesWeekGrid(localGrid);
     setWeekLoading(true);
     loadRelationalSales(client, { companyId, locationId }, { startDate: dates[0], endDate: dates[6] })
-      .then((rows) => { if (weekRequestRef.current === requestId) setSalesWeekGrid(buildSalesWeekGrid(start, rows, departmentNames)); })
-      .catch((error) => { if (weekRequestRef.current === requestId) setWeekStatus(error.message || "Could not load the saved sales for this week."); })
+      .then((rows) => {
+        if (weekRequestRef.current !== requestId) return;
+        const grid = buildSalesWeekGrid(start, rows, departmentNames);
+        const pending = pendingPasteRef.current;
+        pendingPasteRef.current = null;
+        setSalesWeekGrid(pending ? pending(grid) : grid);
+      })
+      .catch((error) => {
+        if (weekRequestRef.current !== requestId) return;
+        const lostPaste = Boolean(pendingPasteRef.current);
+        pendingPasteRef.current = null;
+        setWeekStatus(`${error.message || "Could not load the saved sales for this week."}${lostPaste ? " The pasted report was not put in the grid; try again." : ""}`);
+      })
       .finally(() => { if (weekRequestRef.current === requestId) setWeekLoading(false); });
+  };
+
+  // Paste from POS: text copied from the POS report screens fills one day of the grid. Nothing is
+  // saved until the user presses Save, and typing in the grid by hand still works as before.
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteDate, setPasteDate] = useState("");
+  const [pasteChoices, setPasteChoices] = useState({});
+  const savedCategoryMap = financialSettings?.salesCategoryMap || {};
+  const pasteParsed = useMemo(() => (pasteText.trim() ? parseSalesPaste(pasteText) : null), [pasteText]);
+  const pasteEffectiveChoices = useMemo(() => Object.fromEntries((pasteParsed?.categories || []).map((row) => [
+    row.name,
+    pasteChoices[row.name] ?? defaultDepartmentFor(row.name, departmentNames, savedCategoryMap),
+  ])), [pasteParsed, pasteChoices, departmentNames, savedCategoryMap]);
+  const pasteDay = useMemo(() => (pasteParsed ? buildPastedDay(pasteParsed, { departmentNames, choices: pasteEffectiveChoices }) : null), [pasteParsed, departmentNames, pasteEffectiveChoices]);
+  const pasteTargetDate = pasteDate || pasteDay?.date || "";
+  const pasteTargetRow = salesWeekGrid.find((row) => row.date === pasteTargetDate) || null;
+  const pasteTargetNet = pasteTargetRow ? dayTotals(pasteTargetRow, departmentNames, salesVatRate).net : 0;
+  const closePaste = () => {
+    setPasteOpen(false);
+    setPasteText("");
+    setPasteDate("");
+    setPasteChoices({});
+  };
+  const applyPaste = () => {
+    if (!pasteDay?.ready || !pasteTargetDate) return;
+    const date = pasteTargetDate;
+    const values = pasteDay.values;
+    const updates = categoryMapUpdates(pasteEffectiveChoices);
+    if (Object.entries(updates).some(([key, value]) => savedCategoryMap[key] !== value)) {
+      setFinancialSettings({ ...financialSettings, salesCategoryMap: { ...savedCategoryMap, ...updates } });
+    }
+    const put = (grid) => {
+      const before = grid.find((row) => row.date === date);
+      const beforeNet = before ? dayTotals(before, departmentNames, salesVatRate).net : 0;
+      setWeekStatus(beforeNet
+        ? `Report put in ${formatRangeDate(date)}. That day had ${money(beforeNet)} net before: Save to replace it, or Cancel to keep it.`
+        : `Report put in ${formatRangeDate(date)}. Check the row, then Save.`);
+      return applyPastedDay(grid, date, values);
+    };
+    if (salesWeekDates(salesWeekStart).includes(date)) {
+      setSalesWeekGrid(put(salesWeekGrid));
+    } else {
+      pendingPasteRef.current = put;
+      loadSalesWeek(salesWeekStartFor(date, weekStartsOn));
+    }
+    closePaste();
   };
   const updateWeekCell = (rowIndex, key, field, value) => {
     setSalesWeekGrid((current) => current.map((row, index) => {
@@ -16633,6 +16703,7 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
     setInputOpen(false);
   };
   const openInputSales = () => {
+    closePaste();
     loadSalesWeek(salesWeekStartFor(today(), weekStartsOn));
     setInputOpen(true);
   };
@@ -16771,7 +16842,59 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
             <label>Week starting<input type="date" value={salesWeekStart} onChange={(event) => event.target.value && loadSalesWeek(salesWeekStartFor(event.target.value, weekStartsOn))} /></label>
             <button className="ghost" onClick={() => loadSalesWeek(shiftWeek(salesWeekStart, 7))} type="button" aria-label="Next week">›</button>
             <span className="helper-text">{weekLoading ? "Loading saved sales…" : "Fill any days of the week, then save once. Gross includes VAT; leave Net empty to work it out at " + salesVatRate + "%. You can paste a block copied from a spreadsheet."}</span>
+            {permissions.canAdd && !pasteOpen && <button className="ghost" disabled={weekLoading} onClick={() => setPasteOpen(true)} type="button"><ClipboardPaste size={16} />Paste from POS</button>}
           </div>
+          {pasteOpen && (
+            <div className="sales-paste-panel">
+              <label>
+                <span>Paste the report text for one day</span>
+                <textarea autoFocus onChange={(event) => { setPasteText(event.target.value); setPasteDate(""); }} placeholder={"Open the day's reports in your POS, select all the text, copy and paste it here.\nSquare: paste the Sales summary and then the Category sales, one after the other."} rows={5} value={pasteText} />
+              </label>
+              {pasteDay && (
+                <>
+                  <label className="sales-paste-date">
+                    <span>Sales date{pasteDay.date && !pasteDate ? " (from the report)" : ""}</span>
+                    <input onChange={(event) => setPasteDate(event.target.value)} type="date" value={pasteTargetDate} />
+                  </label>
+                  {pasteDay.problems.map((problem) => <div className="invoice-status warning" key={problem}>{problem}</div>)}
+                  {pasteParsed.categories.length > 0 && (
+                    <div className="table-wrap modal-table">
+                      <table>
+                        <thead><tr><th>Category in the report</th><th>Gross</th><th>Net</th><th>Goes to</th></tr></thead>
+                        <tbody>
+                          {pasteParsed.categories.map((row) => (
+                            <tr key={row.name}>
+                              <td>{row.name}</td>
+                              <td className="numeric">{row.grossSales === null ? "–" : money(row.grossSales)}</td>
+                              <td className="numeric">{row.netSales === null ? "–" : money(row.netSales)}</td>
+                              <td>
+                                <select aria-label={`Department for ${row.name}`} onChange={(event) => setPasteChoices((current) => ({ ...current, [row.name]: event.target.value }))} value={pasteEffectiveChoices[row.name] || ""}>
+                                  <option value="">Choose…</option>
+                                  {departmentNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                                  <option value={POS_OTHER_DEPARTMENT}>Other (no department)</option>
+                                </select>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <ul className="sales-paste-checks">
+                    {pasteDay.checks.map((check) => <li className={check.ok ? "ok" : "warning"} key={check.label}>{check.ok ? "✓" : "!"} {check.label}{check.detail ? ` – ${check.detail}` : ""}</li>)}
+                    {pasteDay.values.serviceCharge !== undefined && <li className="ok">✓ Service charge (incl. tips) {money(Number(pasteDay.values.serviceCharge) || 0)}</li>}
+                    {pasteDay.unassigned.length > 0 && <li className="warning">! Choose where {pasteDay.unassigned.join(", ")} goes</li>}
+                  </ul>
+                  {pasteTargetNet > 0 && <div className="invoice-status warning">{formatRangeDate(pasteTargetDate)} already has {money(pasteTargetNet)} net in the grid. Putting the report in replaces that row in the grid; nothing is saved until you press Save.</div>}
+                  {!pasteTargetDate && <div className="invoice-status info">Choose the sales date.</div>}
+                </>
+              )}
+              <div className="sales-paste-actions">
+                <button className="ghost" onClick={closePaste} type="button">Close</button>
+                <button disabled={!pasteDay?.ready || !pasteTargetDate || weekLoading} onClick={applyPaste} type="button">Put in the grid{pasteDay?.ready && pasteTargetDate ? ` · ${money(pasteDay.net)} net` : ""}</button>
+              </div>
+            </div>
+          )}
           {weekStatus && <div className="invoice-status info">{weekStatus}</div>}
           {weekChanges.cleared.length > 0 && <div className="invoice-status warning">Emptied day(s) {weekChanges.cleared.map(formatRangeDate).join(", ")} will be removed when you save.</div>}
           <div className="table-wrap modal-table sales-input-table">

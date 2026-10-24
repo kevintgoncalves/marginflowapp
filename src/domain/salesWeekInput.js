@@ -50,6 +50,17 @@ function otherPair(gross, net) {
   return { gross: String(g), net: String(n) };
 }
 
+// Discounts, refunds and the source are not grid columns but are kept, so saving a day from the
+// grid does not wipe what a POS paste (or an older import) recorded for it.
+function storedDetails(stored) {
+  if (!stored) return {};
+  const details = {};
+  if (Number(stored.discounts)) details.discounts = money(stored.discounts);
+  if (Number(stored.refunds)) details.refunds = money(stored.refunds);
+  if (stored.source && stored.source !== "manual") details.source = stored.source;
+  return details;
+}
+
 // Build the editable grid for a week from the stored rows (one stored row per day).
 export function buildSalesWeekGrid(weekStart, storedRows = [], departmentNames = []) {
   return weekDates(weekStart).map((date) => {
@@ -74,6 +85,7 @@ export function buildSalesWeekGrid(weekStart, storedRows = [], departmentNames =
       cells,
       other: otherPair(totalGross - departmentGross, totalNet - departmentNet),
       serviceCharge: cell(stored?.serviceCharge),
+      details: storedDetails(stored),
       stored,
     };
   });
@@ -107,6 +119,7 @@ export function salesRowFromGrid(gridRow, departmentNames = [], { vatRate = 20, 
   const serviceCharge = filled(gridRow.serviceCharge) && gridRow.serviceCharge !== "" ? money(gridRow.serviceCharge) : 0;
   if (!net && !gross && !serviceCharge) return null;
   const date = gridRow.date;
+  const details = gridRow.details || {};
   return {
     id: gridRow.storedId || idFactory(),
     date,
@@ -116,6 +129,9 @@ export function salesRowFromGrid(gridRow, departmentNames = [], { vatRate = 20, 
     grossSales: money(gross),
     serviceCharge,
     departments,
+    ...(details.discounts !== undefined ? { discounts: money(details.discounts) } : {}),
+    ...(details.refunds !== undefined ? { refunds: money(details.refunds) } : {}),
+    ...(details.source ? { source: details.source } : {}),
   };
 }
 

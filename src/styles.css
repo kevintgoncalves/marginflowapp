@@ -8162,6 +8162,16 @@ button.icon {
 .sales-week-input .sales-week-nav { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
 .sales-week-input .sales-week-nav label { display: flex; flex-direction: column; gap: 4px; }
 .sales-week-input .sales-week-nav .helper-text { flex: 1 1 260px; margin: 0; }
+.modal-stack.sales-week-input { grid-template-columns: minmax(0, 1fr); }
+.sales-week-input .sales-paste-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--border, #e2e5ea); border-radius: 10px; background: var(--surface-muted, #f7f8fa); }
+.sales-week-input .sales-paste-panel label { display: flex; flex-direction: column; gap: 4px; }
+.sales-week-input .sales-paste-panel textarea { width: 100%; min-height: 96px; font: inherit; font-size: 13px; resize: vertical; }
+.sales-week-input .sales-paste-panel .sales-paste-date { max-width: 220px; }
+.sales-week-input .sales-paste-panel td.numeric { text-align: right; }
+.sales-week-input .sales-paste-checks { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.sales-week-input .sales-paste-checks .ok { color: var(--success, #1f7a4d); }
+.sales-week-input .sales-paste-checks .warning { color: var(--warning, #a15c00); font-weight: 600; }
+.sales-week-input .sales-paste-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .sales-week-input .sales-input-table input { width: 100%; min-width: 72px; text-align: right; }
 .sales-week-input .sales-input-table th, .sales-week-input .sales-input-table td { white-space: nowrap; }
 .sales-week-input .sales-input-table td.numeric { text-align: right; font-weight: 600; }
