@@ -6951,17 +6951,19 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const range = { start, end };
     // One read after the other, light first: two heavy reads at once could push either past the
     // database's statement timeout.
+    // Fast way: light headers, splits inside the line requests. Old way: exactly as before (full
+    // headers, splits read separately), so an identical result proves both changes.
     const timed = async (read) => {
       const startedAt = performance.now();
-      const rows = await read();
-      return { rows, seconds: (performance.now() - startedAt) / 1000 };
+      const result = await read();
+      return { rows: result.invoices, timings: result.timings || {}, seconds: (performance.now() - startedAt) / 1000 };
     };
-    const light = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "light" })).catch((error) => {
+    const light = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "light", withSource: true })).catch((error) => {
       throw new Error(/invoice_report_headers|schema cache|PGRST20|42P01|does not exist/i.test(`${error.code || ""} ${error.message || ""}`)
         ? "The invoice_report_headers view is not installed yet. Apply its SQL in Supabase, then run the check again."
         : `Light read failed: ${error.message || "query failed"}`);
     });
-    const full = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "full" })).catch((error) => {
+    const full = await timed(() => loadRelationalInvoiceReportRange(supabase, scope, { startDate: start, endDate: end, source: "full", splits: "separate", withSource: true })).catch((error) => {
       throw new Error(`The light read worked (${light.rows.length} invoices in ${light.seconds.toFixed(1)} s) but the old full read failed: ${error.message || "query failed"}`);
     });
     const salesRows = await loadRelationalSales(supabase, scope, { startDate: start, endDate: end });
@@ -6976,6 +6978,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       salesDays: salesRows.length,
       fullSeconds: full.seconds,
       lightSeconds: light.seconds,
+      fullTimings: full.timings,
+      lightTimings: light.timings,
     };
   };
 
@@ -17828,6 +17832,17 @@ function SettingsPanel({
                 : `Different: ${reportCheck.invoices.differentIds.length} invoice(s) differ, ${reportCheck.invoices.extraIds.length} extra, order ${reportCheck.invoices.sameOrder ? "same" : "different"}, figures ${reportCheck.metricsIdentical ? "same" : "different"}. Do not rely on the fast loading; tell Claude.`}
             </div>
             <p className="helper-text">Fast way {reportCheck.lightSeconds.toFixed(1)} s · old way {reportCheck.fullSeconds.toFixed(1)} s (one after the other).{reportCheck.invoices.differentIds.length ? ` First different invoice: ${reportCheck.invoices.differentIds[0]}.` : ""}</p>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Phase</th><th>Fast way</th><th>Old way</th></tr></thead>
+                <tbody>
+                  {["headers", "lines", "splits"].map((phase) => {
+                    const cell = (timing) => timing ? `${timing.seconds.toFixed(1)} s · ${timing.requests} request${timing.requests === 1 ? "" : "s"}` : phase === "splits" ? "inside lines" : "–";
+                    return <tr key={phase}><td>{phase === "headers" ? "Invoice headers" : phase === "lines" ? "Invoice lines" : "Department splits"}</td><td>{cell(reportCheck.lightTimings?.[phase])}</td><td>{cell(reportCheck.fullTimings?.[phase])}</td></tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Department</th><th>Net sales (old / fast)</th><th>Purchases (old / fast)</th><th>GP (old / fast)</th><th>Same</th></tr></thead>

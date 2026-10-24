@@ -17,10 +17,11 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
   return {
     requests,
     from(table) {
-      let filters = [], predicates = [], options = {}, orExpression = "", start = 0, end = Infinity;
+      let filters = [], predicates = [], options = {}, orExpression = "", start = 0, end = Infinity, embed = false, embedFilters = [];
       const query = {
-        select(columns, config = {}) { options = config; return this; },
-        eq(key, value) { filters.push([key, value]); return this; },
+        select(columns, config = {}) { options = config; embed = String(columns).includes("invoice_line_department_splits("); return this; },
+        // PostgREST: a filter on an embedded table filters the embedded rows, not the parent rows.
+        eq(key, value) { if (key.startsWith("invoice_line_department_splits.")) embedFilters.push([key.split(".")[1], value]); else filters.push([key, value]); return this; },
         in(key, values) { predicates.push((row) => values.includes(row[key])); return this; },
         gte(key, value) { predicates.push((row) => row[key] >= value); return this; },
         lte(key, value) { predicates.push((row) => row[key] <= value); return this; },
@@ -34,7 +35,9 @@ function cappedClient(tables, { cap = 77, intercept = () => {} } = {}) {
           if (!(table in tables) && table === "invoice_report_headers") return Promise.resolve({ data: null, count: null, error: { code: "PGRST205", message: "Could not find the table 'public.invoice_report_headers' in the schema cache" } }).then(resolve, reject);
           const error = intercept(request, requests);
           const filtered = (tables[table] || []).filter((row) => filters.every(([key, value]) => row[key] === value) && predicates.every((p) => p(row))).sort((a,b) => a.id.localeCompare(b.id));
-          return Promise.resolve({ error, count: filtered.length, data: options.head ? null : structuredClone(filtered.slice(start, Math.min(end + 1, start + cap))) }).then(resolve, reject);
+          const page = structuredClone(filtered.slice(start, Math.min(end + 1, start + cap)));
+          if (embed) page.forEach((row) => { row.invoice_line_department_splits = structuredClone((tables.invoice_line_department_splits || []).filter((split) => split.invoice_line_id === row.id && embedFilters.every(([key, value]) => split[key] === value)).sort((a, b) => a.id.localeCompare(b.id))); });
+          return Promise.resolve({ error, count: filtered.length, data: options.head ? null : page }).then(resolve, reject);
         },
       };
       return query;
@@ -102,8 +105,9 @@ test("department reports use a separate date-scoped invoice and line query", asy
   assert.equal(report.length, 1004);
   assert.equal(report.some(invoice => invoice.id === tables.invoices[0].id), false);
   assert.equal(report.every(invoice => invoice.items.length === 3), true);
-  // The light header view is not installed in this fixture, so the full headers are read instead.
-  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoice_report_headers", "invoices", "invoice_lines", "invoice_line_department_splits"]);
+  // The light header view is not installed in this fixture, so the full headers are read instead;
+  // department splits come inside the line requests.
+  assert.deepEqual([...new Set(client.requests.map(request => request.table))], ["invoice_report_headers", "invoices", "invoice_lines"]);
 });
 
 test("supplier price loading reads every line in order without department splits", async () => {

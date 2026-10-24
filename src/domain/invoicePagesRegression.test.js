@@ -23,10 +23,10 @@ function fixture(count = 1105) {
 function clientFor(tables, { cap = 137, fail } = {}) {
   const requests = [];
   return { requests, from(table) {
-    let predicates = [], columns = "", config = {}, start = 0, end = Infinity, orders = [];
+    let predicates = [], columns = "", config = {}, start = 0, end = Infinity, orders = [], embedFilters = [];
     const query = {
       select(value, options = {}) { columns = value; config = options; return this; },
-      eq(key, value) { predicates.push(row => key.includes(".") ? (row[key.split(".")[0]] || []).some(child => child[key.split(".")[1]] === value) : row[key] === value); return this; },
+      eq(key, value) { if (key.startsWith("invoice_line_department_splits.")) { embedFilters.push([key.split(".")[1], value]); return this; } predicates.push(row => key.includes(".") ? (row[key.split(".")[0]] || []).some(child => child[key.split(".")[1]] === value) : row[key] === value); return this; },
       in(key, values) { predicates.push(row => values.includes(row[key])); return this; },
       gte(key, value) { predicates.push(row => row[key] >= value); return this; },
       lte(key, value) { predicates.push(row => row[key] <= value); return this; },
@@ -38,7 +38,7 @@ function clientFor(tables, { cap = 137, fail } = {}) {
         } else predicates.push(row => !row.location_id || row.location_id === scope.locationId);
         return this;
       },
-      order(key, options) { orders.push([key, options?.ascending !== false ? 1 : -1]); return this; },
+      order(key, options) { if (!options?.referencedTable) orders.push([key, options?.ascending !== false ? 1 : -1]); return this; },
       range(first, last) { start = first; end = last; return this; },
       then(resolve, reject) {
         requests.push({ table, columns, start, end, head: config.head });
@@ -46,7 +46,9 @@ function clientFor(tables, { cap = 137, fail } = {}) {
         const rows = (tables[table] || []).filter(row => predicates.every(predicate => predicate(row))).sort((a,b) => {
           for (const [key, dir] of orders) { const delta = String(a[key]).localeCompare(String(b[key])); if (delta) return delta * dir; } return 0;
         });
-        return Promise.resolve({ data: config.head ? null : structuredClone(rows.slice(start, Math.min(end + 1, start + cap))), count: rows.length, error: fail?.({ table, start }) }).then(resolve, reject);
+        const page = structuredClone(rows.slice(start, Math.min(end + 1, start + cap)));
+        if (String(columns).includes("invoice_line_department_splits(")) page.forEach(row => { row.invoice_line_department_splits = structuredClone((tables.invoice_line_department_splits || []).filter(split => split.invoice_line_id === row.id && embedFilters.every(([key, value]) => split[key] === value)).sort((a, b) => a.id.localeCompare(b.id))); });
+        return Promise.resolve({ data: config.head ? null : page, count: rows.length, error: fail?.({ table, start }) }).then(resolve, reject);
       },
     };
     return query;

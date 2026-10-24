@@ -29,10 +29,12 @@ function fakeClient(tables, { cap = 1000, view = true } = {}) {
     requests,
     from(table) {
       const predicates = [];
+      const embedFilters = [];
       let config = {}, start = 0, end = Infinity, columns = "*";
       const query = {
         select(value, options = {}) { columns = value; config = options; return query; },
-        eq(key, value) { predicates.push((row) => row[key] === value); return query; },
+        // PostgREST: a filter on an embedded table filters the embedded rows, not the parent rows.
+        eq(key, value) { if (key.startsWith("invoice_line_department_splits.")) embedFilters.push([key.split(".")[1], value]); else predicates.push((row) => row[key] === value); return query; },
         in(key, values) { predicates.push((row) => values.includes(row[key])); return query; },
         gte(key, value) { predicates.push((row) => row[key] >= value); return query; },
         lte(key, value) { predicates.push((row) => row[key] <= value); return query; },
@@ -50,6 +52,9 @@ function fakeClient(tables, { cap = 1000, view = true } = {}) {
             : (tables[table] || []);
           const rows = source.filter((row) => predicates.every((p) => p(row))).sort((a, b) => a.id.localeCompare(b.id));
           const data = config.head ? null : structuredClone(rows.slice(start, Math.min(end + 1, start + cap)));
+          if (data && String(columns).includes("invoice_line_department_splits(")) {
+            data.forEach((row) => { row.invoice_line_department_splits = structuredClone((tables.invoice_line_department_splits || []).filter((split) => split.invoice_line_id === row.id && embedFilters.every(([key, value]) => split[key] === value)).sort((a, b) => a.id.localeCompare(b.id))); });
+          }
           return Promise.resolve({ data, count: rows.length, error: null }).then(resolve, reject);
         },
       };
@@ -237,4 +242,29 @@ test("headline rows show each department and flag any difference", () => {
   const changed = structuredClone(metrics);
   changed.departmentRows[0].purchases = 20.01;
   assert.deepEqual(headlineRows(metrics, changed).map((row) => row.equal), [true, false]);
+});
+
+test("splits read inside the line requests give exactly the same invoices as the separate split reads", async () => {
+  const tables = invoiceTables();
+  // an inactive split, another company's split and another location's split must stay out either way
+  const someLine = tables.invoice_lines[5].id;
+  tables.invoice_line_department_splits.push(
+    { id: uuid("32000000", 1), company_id: companyId, location_id: locationId, invoice_line_id: someLine, department_id: "dept-9", percentage: 10, amount: 1, active: false },
+    { id: uuid("32000000", 2), company_id: "11111111-1111-4111-8111-111111111111", location_id: locationId, invoice_line_id: someLine, department_id: "dept-9", percentage: 10, amount: 1, active: true },
+    { id: uuid("32000000", 3), company_id: companyId, location_id: "22222222-2222-4222-8222-222222222222", invoice_line_id: someLine, department_id: "dept-9", percentage: 10, amount: 1, active: true },
+  );
+  const separateClient = fakeClient(tables, { cap: 137 });
+  const separate = await loadRelationalInvoiceReportRange(separateClient, scope, { ...period, source: "full", splits: "separate", withSource: true });
+  const embeddedClient = fakeClient(tables, { cap: 137 });
+  const embedded = await loadRelationalInvoiceReportRange(embeddedClient, scope, { ...period, source: "light", withSource: true });
+  assert.equal(compareInvoiceLists(separate.invoices, embedded.invoices).identical, true);
+  assert.equal(canonicalJson(separate.invoices), canonicalJson(embedded.invoices));
+  assert.ok(separate.invoices.some((invoice) => invoice.items.some((item) => item.departmentSplits.length === 2)));
+  assert.equal(separate.invoices.flatMap((invoice) => invoice.items).some((item) => item.departmentSplits.some((split) => split.departmentId === "dept-9")), false);
+  // no request for the split table on the embedded path; the phase counts say where the requests went
+  assert.equal(embeddedClient.requests.some((request) => request.table === "invoice_line_department_splits"), false);
+  assert.equal(embedded.timings.splits, undefined);
+  assert.equal(embedded.timings.lines.requests, embeddedClient.requests.filter((request) => request.table === "invoice_lines").length);
+  assert.ok(separate.timings.splits.requests >= 37, `separate splits used ${separate.timings.splits.requests} requests`);
+  assert.equal(embedded.timings.headers.requests + embedded.timings.lines.requests, embeddedClient.requests.length);
 });
