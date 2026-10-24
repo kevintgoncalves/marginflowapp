@@ -22,3 +22,30 @@ test("rule lookup sends a zero-value line the invoice normalisation accepts", as
   assert.equal(line.packSize, "1KG");
   assert.deepEqual([resolved.supplierId, resolved.productId, resolved.departmentId], ["s1", "p1", "d1"]);
 });
+
+// One match pointing at a merged/inactive product used to throw and block every other pending match
+// ("21 reusable match… Product identifier belongs to another scope or is inactive", 24/10/2026).
+test("a match to an inactive product is skipped and the others still resolve", async () => {
+  const client = {
+    from: () => ({ select: () => ({ eq: () => ({ eq: async () => ({ data: [{ id: "d1", name: "Kitchen Made", company_id: "c1", active: true }], error: null }) }) }) }),
+    rpc: async (name, payload) => payload.p_invoice.items[0].matchedProductId === "dead"
+      ? { data: null, error: { code: "42501", message: "Product identifier belongs to another scope or is inactive" } }
+      : { data: { supplierId: "s1", items: [{ matchedProductId: "p1", departmentId: "d1" }] }, error: null },
+  };
+  const skipped = [];
+  const resolved = await resolveLearningCatalogue(client, [
+    { id: "m1", companyId: "c1", supplierName: "Woods", productName: "Old", productId: "dead", department: "Kitchen Made" },
+    { id: "m2", companyId: "c1", supplierName: "Woods", productName: "Apples", productId: "p1", department: "Kitchen Made" },
+  ], { companyId: "c1", locationId: "l1" }, { skipped });
+  assert.deepEqual(resolved.map((row) => row.id), ["m2"]);
+  assert.equal(skipped[0].mappingId, "m1");
+  assert.equal(skipped[0].permanent, true);
+});
+
+test("without a skip list the error still throws (other callers unchanged)", async () => {
+  const client = {
+    from: () => ({ select: () => ({ eq: () => ({ eq: async () => ({ data: [], error: null }) }) }) }),
+    rpc: async () => ({ data: null, error: { code: "42501", message: "Product identifier belongs to another scope or is inactive" } }),
+  };
+  await assert.rejects(resolveLearningCatalogue(client, [{ id: "m1", companyId: "c1", supplierName: "W", productName: "X", productId: "dead" }], { companyId: "c1" }));
+});

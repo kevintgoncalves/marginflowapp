@@ -6171,11 +6171,18 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     setLearningNotice("");
     try {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
-      const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope);
+      const unsavable = [];
+      const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope, { skipped: unsavable });
       const result = await persistRelationalSupplierProductMappings(supabase, resolvedMappings, {
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
       });
+      if (unsavable.length) {
+        // Matches to inactive/merged products cannot be saved; stop retrying them.
+        const unsavableIds = new Set(unsavable.map(row => row.mappingId));
+        setPendingLearning(current => current.filter(row => !unsavableIds.has(row.id)));
+        result.skipped = [...result.skipped, ...unsavable];
+      }
       if (result.persisted.length) {
         const resolvedById = new Map(resolvedMappings.map(mapping => [mapping.id, mapping]));
         result.persisted = result.persisted.map(entry => ({ ...entry, mapping: resolvedById.get(entry.mappingId) }));
@@ -6190,8 +6197,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       }
       const savedIds = new Set(result.persisted.map(row => row.mappingId));
       setPendingLearning(current => current.filter(row => !savedIds.has(row.id)));
-      setLearningError(result.skipped.length ? result.skipped[0].reason : "");
-      if (!result.skipped.length && result.persisted.length) setLearningNotice(`Reusable matches/conversions saved (${result.persisted.length}).`);
+      const retryable = result.skipped.filter(row => !row.permanent);
+      setLearningError(retryable.length ? retryable[0].reason : "");
+      if (!retryable.length && result.persisted.length) setLearningNotice(`Reusable matches/conversions saved (${result.persisted.length}).${unsavable.length ? ` ${unsavable.length} match(es) to inactive products were not saved.` : ""}`);
       invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
       return result;
     } catch (error) {
