@@ -189,6 +189,13 @@ export async function deleteRelationalInvoice(client, scope = {}, invoiceId = ""
     throw new Error("Deleting a cloud document needs a verified company.");
   }
   if (!isCanonicalUuid(invoiceId)) return { deleted: 0, skipped: true };
+  if (client.rpc) {
+    const rpc = await client.rpc("delete_invoice_document_v1", { p_company_id: scope.companyId, p_invoice_id: invoiceId });
+    if (!rpc.error) return { deleted: Number(rpc.data || 0), skipped: false };
+    // Older databases without the function fall back to the direct (RLS-checked) delete below.
+    const missingFunction = rpc.error.code === "PGRST202" || /delete_invoice_document_v1/.test(rpc.error.message || "") && /not find|does not exist/i.test(rpc.error.message || "");
+    if (!missingFunction) throw rpc.error;
+  }
   // Price history only nulls its invoice link on delete, so remove those rows first:
   // a deleted document must not keep feeding product prices.
   const history = await client.from("product_price_history").delete()

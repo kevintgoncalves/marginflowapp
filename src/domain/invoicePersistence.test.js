@@ -443,3 +443,15 @@ test("deleteRelationalInvoice reports when the cloud keeps the document", async 
     /did not allow/,
   );
 });
+
+test("deleteRelationalInvoice uses the owner delete function when available", async () => {
+  const { deleteRelationalInvoice } = await import("../lib/invoiceRepository.js");
+  const rpcCalls = [];
+  const client = {
+    rpc: async (name, args) => { rpcCalls.push([name, args]); return { data: 1, error: null }; },
+    from: () => { throw new Error("direct delete should not run"); },
+  };
+  const result = await deleteRelationalInvoice(client, { companyId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, "11111111-2222-4333-8444-555555555555");
+  assert.equal(result.deleted, 1);
+  assert.equal(rpcCalls[0][0], "delete_invoice_document_v1");
+});
