@@ -535,9 +535,11 @@ export async function loadRelationalInvoiceReportRange(client, scope = {}, { sta
         query = query.order("id", { ascending: true, referencedTable: SPLIT_TABLE });
       }
       return withSignal(query, signal);
-    }), { pageSize: 500, label: "invoice report lines" }));
+    }), { pageSize: 1000, label: "invoice report lines" }));
   }
-  const lines = await timer.time("lines", async () => (await inOrderWithLimit(lineChunks, Math.max(1, concurrency))).flat());
+  // A group of 100 invoices holds ~1,000 lines: pages of 1,000 (the API's row limit; a capped page
+  // is continued) read most groups in one request, and up to four groups go at a time.
+  const lines = await timer.time("lines", async () => (await inOrderWithLimit(lineChunks, Math.max(1, Math.min(4, concurrency * 2)))).flat());
   if (embedSplits) {
     const linesByInvoice = new Map();
     lines.forEach(line => linesByInvoice.set(line.invoice_id, [...(linesByInvoice.get(line.invoice_id) || []), { ...line, [SPLIT_TABLE]: line[SPLIT_TABLE] || [] }]));
