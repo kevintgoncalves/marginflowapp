@@ -242,7 +242,7 @@ function departmentLinePayloads(sale = {}, scope = {}, entryId, departmentByName
     .filter(Boolean);
 }
 
-export async function persistRelationalSalesEntry(client, sale = {}, scope = {}) {
+export async function persistRelationalSalesEntry(client, sale = {}, scope = {}, { replaceDay = true } = {}) {
   if (!client || !validScope(scope)) throw new Error("Relational sales persistence needs canonical company and location scope.");
   if (!sale.date) throw new Error("Relational sales persistence needs a sales date.");
   const entryId = await ensureSalesEntryId(sale, scope);
@@ -254,6 +254,25 @@ export async function persistRelationalSalesEntry(client, sale = {}, scope = {})
     .select("id,company_id,location_id,sales_date,gross_sales,net_sales,vat_amount,service_charge,discounts,refunds,source,metadata,created_at,updated_at")
     .single();
   if (error) throw error;
+
+  // One sales entry per day: the day screen replaces the whole day, so older entries for the same
+  // date (legacy imports, or a day saved while it was outside the loaded period) must not survive
+  // and double the sales.
+  if (replaceDay) {
+    const sameDay = (query) => {
+      const scoped = query.eq("company_id", scope.companyId).eq("sales_date", sale.date).neq("id", entryId);
+      return scope.locationId ? scoped.eq("location_id", scope.locationId) : scoped.is("location_id", null);
+    };
+    const { data: others, error: othersError } = await sameDay(client.from("sales_entries").select("id"));
+    if (othersError) throw othersError;
+    if (others?.length) {
+      const { data: removed, error: removeError } = await sameDay(client.from("sales_entries").delete()).select("id");
+      if (removeError) throw removeError;
+      if ((removed || []).length < others.length) {
+        throw new Error(`Another sales entry already exists for ${sale.date} and could not be replaced. Only the company owner can remove it.`);
+      }
+    }
+  }
 
   const deleteResult = await client
     .from("sales_department_lines")

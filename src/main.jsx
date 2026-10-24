@@ -16530,8 +16530,8 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
 }
 
 function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeState, department, departmentNames, inputRequest = null, isActive = true, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), sales, setDateRangeState, setSales, weekStartsOn }) {
-  const makeSalesDraft = (date = today()) => {
-    const existing = sales.find((row) => row.date === date);
+  const makeSalesDraft = (date = today(), loadedEntry = null) => {
+    const existing = loadedEntry || sales.find((row) => row.date === date);
     const departments = salesDepartments(existing);
     const hasDepartmentBreakdown = Object.keys(departments).length > 0;
     return {
@@ -16587,7 +16587,23 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
     setSalesDraft(makeSalesDraft(today()));
     setInputOpen(true);
   };
-  const updateDraftDate = (date) => setSalesDraft(makeSalesDraft(date || today()));
+  const [draftDayEntry, setDraftDayEntry] = useState(null);
+  const updateDraftDate = (date) => {
+    const nextDate = date || today();
+    setDraftDayEntry(null);
+    setSalesDraft(makeSalesDraft(nextDate));
+    // A day outside the loaded period is not in `sales`: read it so the form shows (and the save
+    // replaces) what is already stored for that date instead of starting empty.
+    if (!client || sales.some((row) => row.date === nextDate)) return;
+    loadRelationalSales(client, { companyId, locationId }, { startDate: nextDate, endDate: nextDate })
+      .then((rows) => {
+        const stored = rows.find((row) => row.date === nextDate);
+        if (!stored) return;
+        setDraftDayEntry(stored);
+        setSalesDraft((current) => current.date === nextDate ? makeSalesDraft(nextDate, stored) : current);
+      })
+      .catch(() => {});
+  };
   const updateDraftTop = (field, value) => setSalesDraft((current) => ({ ...current, [field]: value }));
   const updateDraftLine = (departmentName, field, value) => {
     setSalesDraft((current) => ({
@@ -16613,7 +16629,8 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
     const grossSales = numberValue(salesDraft.grossSales, 0) || departmentGrossSales || netSales;
     const serviceCharge = numberValue(salesDraft.serviceCharge, 0);
     if (!netSales && !grossSales && !serviceCharge && !departmentValues.length) return;
-    const existing = sales.find((row) => row.date === salesDraft.date);
+    const existing = sales.find((row) => row.date === salesDraft.date)
+      || (draftDayEntry?.date === salesDraft.date ? draftDayEntry : null);
     const nextRow = {
       id: existing?.id || uid(),
       date: salesDraft.date,

@@ -81,3 +81,60 @@ test("September sales load only the confirmed company, Main Location and date ra
   assert.equal(sales.reduce((sum, row) => sum + row.netSales, 0), 148175.48);
   assert.equal(sales.reduce((sum, row) => sum + row.grossSales, 0), 176387.13);
 });
+
+// A day saved from the Input sales screen replaces the whole day. Older entries for the same date
+// (legacy Kitchen-Made-only rows, or a day saved while outside the loaded period) doubled June sales.
+function writeClient(state) {
+  const C = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  return {
+    calls: state.calls,
+    from(table) {
+      const filters = [];
+      let op = "select", payload = null, returning = false;
+      const rows = () => (state[table] ||= []);
+      const matches = (row) => filters.every((f) => f(row));
+      const q = {
+        select() { if (op === "select") op = "select"; else returning = true; return q; },
+        upsert(p) { op = "upsert"; payload = p; return q; },
+        insert(p) { op = "insert"; payload = p; return q; },
+        delete() { op = "delete"; return q; },
+        eq(k, v) { filters.push((r) => r[k] === v); return q; },
+        neq(k, v) { filters.push((r) => r[k] !== v); return q; },
+        is(k, v) { filters.push((r) => (r[k] ?? null) === v); return q; },
+        or() { return q; },
+        order() { return q; },
+        single() { return q.then((res) => ({ ...res, data: Array.isArray(res.data) ? res.data[0] : res.data })); },
+        then(resolve, reject) {
+          state.calls.push(`${op}:${table}`);
+          let result;
+          if (op === "upsert") { const list = rows().filter((r) => r.id !== payload.id); list.push(payload); state[table] = list; result = { data: [payload], error: null }; }
+          else if (op === "insert") { const items = [].concat(payload); rows().push(...items); result = { data: items, error: null }; }
+          else if (op === "delete") { const gone = rows().filter(matches); state[table] = rows().filter((r) => !matches(r)); result = { data: returning ? gone : null, error: null }; }
+          else { result = { data: rows().filter(matches), error: null }; }
+          return Promise.resolve(result).then(resolve, reject);
+        },
+      };
+      return q;
+    },
+    C,
+  };
+}
+
+test("saving a day removes the other entries stored for that date", async () => {
+  const { persistRelationalSalesEntry } = await import("../lib/salesRepository.js");
+  const C = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", L = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const keep = "11111111-2222-4333-8444-555555555555";
+  const state = {
+    calls: [],
+    departments: [{ id: "d1", name: "Kitchen Made", company_id: C, active: true }],
+    sales_entries: [
+      { id: "99999999-2222-4333-8444-555555555555", company_id: C, location_id: L, sales_date: "2026-06-02", net_sales: 681.19 },
+      { id: "88888888-2222-4333-8444-555555555555", company_id: C, location_id: L, sales_date: "2026-06-03", net_sales: 10 },
+    ],
+  };
+  const client = writeClient(state);
+  await persistRelationalSalesEntry(client, { id: keep, date: "2026-06-02", netSales: 1581.35, grossSales: 1897.6, departments: {} }, { companyId: C, locationId: L });
+  const june2 = state.sales_entries.filter((r) => r.sales_date === "2026-06-02");
+  assert.deepEqual(june2.map((r) => r.id), [keep]);
+  assert.equal(state.sales_entries.filter((r) => r.sales_date === "2026-06-03").length, 1);
+});
