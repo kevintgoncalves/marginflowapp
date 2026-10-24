@@ -155,6 +155,7 @@ import { diagnoseLaptopLegacyRecovery } from "./lib/legacyRecoveryDiagnosticRepo
 import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
+import { buildSalesWeekGrid, changedSalesDays, dayTotals, gridColumns, pasteIntoGrid, weekDates as salesWeekDates, weekStartFor as salesWeekStartFor } from "./domain/salesWeekInput.js";
 import { loadCustomerOnboardingState } from "./lib/onboardingRepository.js";
 import { claimInternalStaffInvite, closeSupportWorkspace } from "./lib/adminRepository.js";
 import { onboardingNeedsRedirect } from "./domain/onboarding.js";
@@ -16591,8 +16592,48 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
   const departmentRows = salesByDepartment(sales, dateRange, departmentNames);
   const salesChartData = aggregateDashboardRows(dailyRows.map((row) => ({ ...row, purchases: 0, waste: 0 })), dateRange);
 
+  // Week entry: one row per day, saved together. Replaces the old one-day form (its period and
+  // comparison date fields in the same window were easy to confuse with the sales date).
+  const salesVatRate = 20;
+  const [salesWeekStart, setSalesWeekStart] = useState(() => salesWeekStartFor(today(), weekStartsOn));
+  const [salesWeekGrid, setSalesWeekGrid] = useState(() => buildSalesWeekGrid(salesWeekStartFor(today(), weekStartsOn), sales, departmentNames));
+  const [weekLoading, setWeekLoading] = useState(false);
+  const [weekStatus, setWeekStatus] = useState("");
+  const weekRequestRef = useRef(0);
+  const shiftWeek = (start, days) => toIsoDate(addDays(parseDate(start), days));
+  const loadSalesWeek = (start) => {
+    const dates = salesWeekDates(start);
+    const requestId = weekRequestRef.current + 1;
+    weekRequestRef.current = requestId;
+    setSalesWeekStart(start);
+    setWeekStatus("");
+    setSalesWeekGrid(buildSalesWeekGrid(start, sales.filter((row) => dates.includes(row.date)), departmentNames));
+    if (!client) return;
+    setWeekLoading(true);
+    loadRelationalSales(client, { companyId, locationId }, { startDate: dates[0], endDate: dates[6] })
+      .then((rows) => { if (weekRequestRef.current === requestId) setSalesWeekGrid(buildSalesWeekGrid(start, rows, departmentNames)); })
+      .catch((error) => { if (weekRequestRef.current === requestId) setWeekStatus(error.message || "Could not load the saved sales for this week."); })
+      .finally(() => { if (weekRequestRef.current === requestId) setWeekLoading(false); });
+  };
+  const updateWeekCell = (rowIndex, key, field, value) => {
+    setSalesWeekGrid((current) => current.map((row, index) => {
+      if (index !== rowIndex) return row;
+      if (key === "__serviceCharge") return { ...row, serviceCharge: value };
+      if (key === "__other") return { ...row, other: { ...row.other, [field]: value } };
+      return { ...row, cells: { ...row.cells, [key]: { ...(row.cells[key] || {}), [field]: value } } };
+    }));
+  };
+  const weekChanges = useMemo(() => changedSalesDays(salesWeekGrid, departmentNames, { vatRate: salesVatRate, idFactory: uid }), [salesWeekGrid, departmentNames]);
+  const saveSalesWeek = () => {
+    const { save, cleared } = weekChanges;
+    if (!save.length && !cleared.length) { setWeekStatus("Nothing changed this week."); return; }
+    if (cleared.length && !window.confirm(`Remove the saved sales for ${cleared.map(formatRangeDate).join(", ")}?`)) return;
+    const touched = new Set([...save.map((row) => row.date), ...cleared]);
+    setSales((current) => [...save, ...current.filter((row) => !touched.has(row.date))].sort((a, b) => a.date.localeCompare(b.date)));
+    setInputOpen(false);
+  };
   const openInputSales = () => {
-    setSalesDraft(makeSalesDraft(today()));
+    loadSalesWeek(salesWeekStartFor(today(), weekStartsOn));
     setInputOpen(true);
   };
   const [draftDayEntry, setDraftDayEntry] = useState(null);
@@ -16679,7 +16720,7 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
 
       <div className="dashboard-layout secondary">
         <Panel className="mf-sales-report-surface" title="Sales over time"><InteractiveChart title="Daily sales" initialView="Line" rows={dailyRows.map(row=>({...row,label:formatRangeDate(row.date)}))} series={[{key:salesMetric,label:salesMetric==="netSales"?"Net sales":"Gross sales"}]} formatValue={chartMoney} controls={<label className="mf-chart-metric"><span>Metric</span><select aria-label="Sales chart metric" value={salesMetric} onChange={event=>setSalesMetric(event.target.value)}><option value="netSales">Net sales</option><option value="grossSales">Gross sales</option></select></label>}/></Panel>
-        <Panel title="Comparison">
+        <Panel title="Comparison" action={<label className="mf-chart-metric"><span>Compare week start</span><input type="date" value={compareWeekStart} onChange={(event) => setCompareWeekStart(event.target.value)} /></label>}>
           <DataTable
             columns={[
               { key: "period", label: "Compare" },
@@ -16716,7 +16757,7 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
         footer={(
           <>
             <button className="ghost" onClick={() => setInputOpen(false)} type="button">Cancel</button>
-            {permissions.canAdd && <button onClick={saveSalesDraft} type="button"><Save size={16} />Save sales</button>}
+            {permissions.canAdd && <button disabled={weekLoading} onClick={saveSalesWeek} type="button"><Save size={16} />{weekChanges.save.length || weekChanges.cleared.length ? `Save ${weekChanges.save.length + weekChanges.cleared.length} day(s)` : "Save sales"}</button>}
           </>
         )}
         onClose={() => setInputOpen(false)}
@@ -16724,40 +16765,56 @@ function SalesAnalysis({ client, companyId, locationId, dateRange, dateRangeStat
         title="Input sales"
         wide
       >
-        <div className="modal-stack">
-          <Panel title="Period and comparison" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
-            <div className="form-grid six">
-              <label>Period<select value={normalizeRangePreset(dateRangeState.preset)} onChange={(event) => {
-                const preset = event.target.value;
-                setDateRangeState(normalizeRangePreset(preset) === "Custom"
-                  ? { ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: dateRange.end, specificDate: dateRange.start }
-                  : dateRangeStateForPreset(preset, weekStartsOn));
-              }}>{rangePresets.map((preset) => <option key={preset}>{preset}</option>)}</select></label>
-              <Field label="Start date" type="date" value={dateRange.start} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: value, endDate: dateRange.end, specificDate: value })} />
-              <Field label="End date" type="date" value={dateRange.end} onChange={(value) => setDateRangeState({ ...dateRangeState, preset: "Custom", startDate: dateRange.start, endDate: value, specificDate: dateRange.start })} />
-              <Field label="Compare week start" type="date" value={compareWeekStart} onChange={setCompareWeekStart} />
-            </div>
-          </Panel>
-          <div className="form-grid six">
-            <Field label="Sales date" type="date" value={salesDraft.date} onChange={updateDraftDate} />
-            <Field label="Gross sales" type="number" value={salesDraft.grossSales} onChange={(value) => updateDraftTop("grossSales", value)} />
-            <Field label="Net sales" type="number" value={salesDraft.netSales} onChange={(value) => updateDraftTop("netSales", value)} />
-            <Field label="Service charge" type="number" value={salesDraft.serviceCharge} onChange={(value) => updateDraftTop("serviceCharge", value)} />
+        <div className="modal-stack sales-week-input">
+          <div className="sales-week-nav">
+            <button className="ghost" onClick={() => loadSalesWeek(shiftWeek(salesWeekStart, -7))} type="button" aria-label="Previous week">‹</button>
+            <label>Week starting<input type="date" value={salesWeekStart} onChange={(event) => event.target.value && loadSalesWeek(salesWeekStartFor(event.target.value, weekStartsOn))} /></label>
+            <button className="ghost" onClick={() => loadSalesWeek(shiftWeek(salesWeekStart, 7))} type="button" aria-label="Next week">›</button>
+            <span className="helper-text">{weekLoading ? "Loading saved sales…" : "Fill any days of the week, then save once. Gross includes VAT; leave Net empty to work it out at " + salesVatRate + "%. You can paste a block copied from a spreadsheet."}</span>
           </div>
-          <p className="helper-text">Department sales are optional but recommended. They use the active departments created in Settings.</p>
+          {weekStatus && <div className="invoice-status info">{weekStatus}</div>}
+          {weekChanges.cleared.length > 0 && <div className="invoice-status warning">Emptied day(s) {weekChanges.cleared.map(formatRangeDate).join(", ")} will be removed when you save.</div>}
           <div className="table-wrap modal-table sales-input-table">
             <table>
               <thead>
-                <tr>{["Department sales", "Gross sales", "Net sales"].map((header) => <th key={header}>{header}</th>)}</tr>
+                <tr>
+                  <th rowSpan={2}>Day</th>
+                  {departmentNames.map((name) => <th colSpan={2} key={name}>{name}</th>)}
+                  <th colSpan={2} title="Sales you don't split by department, e.g. events or deposits">Other (no department)</th>
+                  <th rowSpan={2} title="Service charge including tips">Service charge</th>
+                  <th rowSpan={2}>Day net</th>
+                </tr>
+                <tr>
+                  {[...departmentNames, "__other"].flatMap((name) => [<th key={name + "g"}>Gross</th>, <th key={name + "n"}>Net</th>])}
+                </tr>
               </thead>
               <tbody>
-                {salesDraft.rows.map((row) => (
-                  <tr key={row.department}>
-                    <td>{row.department}</td>
-                    <td><input min="0" step="0.01" type="number" value={row.grossSales} onChange={(event) => updateDraftLine(row.department, "grossSales", event.target.value)} /></td>
-                    <td><input min="0" step="0.01" type="number" value={row.netSales} onChange={(event) => updateDraftLine(row.department, "netSales", event.target.value)} /></td>
-                  </tr>
-                ))}
+                {salesWeekGrid.map((row, rowIndex) => {
+                  const totals = dayTotals(row, departmentNames, salesVatRate);
+                  const input = (value, columnIndex, onValue, placeholder = "") => (
+                    <input inputMode="decimal" placeholder={placeholder} type="text" value={value}
+                      onChange={(event) => onValue(event.target.value)}
+                      onPaste={(event) => {
+                        const text = event.clipboardData?.getData("text") || "";
+                        if (!/[\t\n]/.test(text)) return;
+                        event.preventDefault();
+                        setSalesWeekGrid((current) => pasteIntoGrid(current, departmentNames, rowIndex, columnIndex, text));
+                      }} />
+                  );
+                  return (
+                    <tr key={row.date}>
+                      <td><strong>{new Intl.DateTimeFormat("en-GB", { weekday: "short" }).format(parseDate(row.date))}</strong> {formatRangeDate(row.date)}</td>
+                      {departmentNames.flatMap((name, index) => [
+                        <td key={name + "g"}>{input(row.cells[name]?.gross ?? "", index * 2, (value) => updateWeekCell(rowIndex, name, "gross", value))}</td>,
+                        <td key={name + "n"}>{input(row.cells[name]?.net ?? "", index * 2 + 1, (value) => updateWeekCell(rowIndex, name, "net", value))}</td>,
+                      ])}
+                      <td>{input(row.other.gross, departmentNames.length * 2, (value) => updateWeekCell(rowIndex, "__other", "gross", value))}</td>
+                      <td>{input(row.other.net, departmentNames.length * 2 + 1, (value) => updateWeekCell(rowIndex, "__other", "net", value))}</td>
+                      <td>{input(row.serviceCharge, departmentNames.length * 2 + 2, (value) => updateWeekCell(rowIndex, "__serviceCharge", "value", value))}</td>
+                      <td className="numeric">{totals.net ? money(totals.net) : "–"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
