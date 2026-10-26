@@ -6,12 +6,14 @@
 //  - implausible: an invoice price far from the reviewed price for the same article (kept aside).
 //  - outlier: a converted price 3x above or below the other suppliers (usually case vs item).
 //  - choose: several articles from the current supplier and none chosen as the current one.
+//  - basis: a "N x size" pack read as the whole case with no answer yet; the price may be per item.
 //  - unit: the product card's unit differs from the unit its suppliers sell in.
 import { interpretPurchasePack } from './purchaseUnits.js';
 import { itemsInPack } from './packCount.js';
 import { normalizeSupplierProductCode, normalizeSupplierDescription } from './invoiceProductMatching.js';
 import { packKey } from './reusablePurchasing.js';
 import { sameSupplierIdentity } from './supplierIdentity.js';
+import { basisPrices, multipackReading, supplierBasisAnswers, supplierSuggestion } from './packPriceBasis.js';
 
 export const PRICE_CHECK_SOURCE = 'price_check';
 export const OUTLIER_RATIO = 3;
@@ -121,6 +123,7 @@ function checked(product, key, article) {
 // rows: output of latestProductComparisons (each product with .comparison).
 export function priceCheckItems(rows = []) {
   const items = [];
+  const supplierAnswers = supplierBasisAnswers(rows);
   for (const row of rows) {
     if (row.active === false) continue;
     const articles = (row.comparison?.articles || []).filter((article) => article.date);
@@ -208,6 +211,29 @@ export function priceCheckItems(rows = []) {
         kind = 'outlier';
         reason = reference > 0 ? `${ratio >= 1 ? round(ratio, 1) + '× above' : round(1 / ratio, 1) + '× below'} the other suppliers` : 'Far from the other suppliers';
       }
+      if (!kind && article.basisPending && article.valid && article.source === 'invoice') {
+        const reading = multipackReading(article.pack);
+        const prices = basisPrices(packPrice, reading);
+        if (prices && (!unit || reading.unit === unit)) {
+          const per = unitName(reading.unit);
+          const caseOption = { label: `Price per case (${reading.count} × ${reading.itemQuantity < 1 ? `${round(reading.itemQuantity * 1000, 2)}${reading.unit === 'kg' ? 'g' : 'ml'}` : `${reading.itemQuantity}${reading.unit}`})`,
+            baseQuantity: reading.caseQuantity, baseUnit: reading.unit, unitPrice: round(prices.casePrice), explicit: true, basis: 'case' };
+          const itemOption = { label: 'Price per item', baseQuantity: reading.itemQuantity, baseUnit: reading.unit, unitPrice: round(prices.itemPrice), explicit: true, basis: 'item' };
+          const options = [caseOption, itemOption];
+          const suggestion = supplierSuggestion(supplierAnswers, article.supplier);
+          const byPrice = reference > 0 ? recommendedOption(options, reference) : null;
+          const recommended = byPrice || (suggestion ? options.find((option) => option.basis === suggestion.basis) : null);
+          const why = byPrice ? 'closest to other prices' : suggestion ? `${suggestion.count} earlier ${article.supplier} answers were per ${suggestion.basis}` : '';
+          items.push({
+            id: key, key, kind: 'basis', productId: row.id, productName: row.name, department: row.department || '', unit: reading.unit,
+            reason: `Price per case or per item? £${prices.casePrice.toFixed(2)}/${per} per case · £${prices.itemPrice.toFixed(2)}/${per} per item`,
+            supplier: article.supplier || '', code: article.code || '', description: article.description || '', pack: article.pack || '',
+            packPrice, date: article.date || '', source: article.source || '', invoiceNumber: article.invoiceNumber || '',
+            currentPrice: article.price, currentUnit: article.unit, reference, options, recommended, recommendedWhy: why, article,
+          });
+        }
+        continue;
+      }
       if (!kind) continue;
       const options = conversionOptions(article.pack, packPrice, unit, article.description);
       // The reviewed article already knows what this pack holds (e.g. a punnet of micro herbs = 75 g).
@@ -247,7 +273,7 @@ export function priceCheckItems(rows = []) {
         options: [], recommended: null });
     }
   }
-  const order = { implausible: 0, unit: 1, conversion: 2, outlier: 3, choose: 4 };
+  const order = { implausible: 0, unit: 1, conversion: 2, outlier: 3, basis: 4, choose: 5 };
   return groupRepeatedLines(items).sort((a, b) => order[a.kind] - order[b.kind] || a.productName.localeCompare(b.productName) || a.supplier.localeCompare(b.supplier));
 }
 

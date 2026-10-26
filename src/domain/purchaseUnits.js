@@ -1,8 +1,22 @@
 // Invoice quantity and unit cost are immutable inputs to conversion.
 export const PURCHASE_UNITS = ['kg', 'litre', 'box', 'case', 'bag', 'sack', 'bottle', 'pack', 'punnet', 'each'];
-export function interpretPurchasePack(pack = '', purchaseUnit = '') {
+// Pack texts that are already one unit: "KILO", "PER KG", "(PER KG)", "p/kg", "SINGLE KG" → 1 kg;
+// "PER LTR", "PER L" → 1 litre; "SINGLE", "EACH", "x1" → 1 each. Returns null for anything else.
+export function unitPackMeasure(pack = '') {
+  const text = String(pack || '').trim().toLowerCase().replace(/^\((.*)\)$/, '$1').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  if (/^(?:(?:per|p\/|\/|single)\s*)?(?:kilo|kilos|kg|kgs|kilogram|kilograms)$/.test(text)) return { baseQuantity: 1, baseUnit: 'kg' };
+  if (/^(?:(?:per|p\/|\/|single)\s*)?(?:l|ltr|litre|litres|liter|liters)$/.test(text)) return { baseQuantity: 1, baseUnit: 'l' };
+  if (/^(?:single|each|ea|x\s*1|1\s*x|1 each|per each)$/.test(text)) return { baseQuantity: 1, baseUnit: 'each' };
+  return null;
+}
+// unitWords: false keeps the first reading, where only "KILO", "KG", "LITRE", "L" and "LTR"
+// without a number count as a quantity (used where a pack change decides product matching).
+export function interpretPurchasePack(pack = '', purchaseUnit = '', { unitWords = true } = {}) {
   const text = String(pack).trim().toLowerCase().replace(/×/g, 'x');
   if (/^(kilo|kg|litre|l|ltr)$/.test(text)) return { purchaseUnit: /^(kilo|kg)$/.test(text) ? 'kg' : 'litre', baseQuantity: 1, baseUnit: /^(kilo|kg)$/.test(text) ? 'kg' : 'l', confirmed: true, inferred: true };
+  const unitPack = unitWords ? unitPackMeasure(text) : null;
+  if (unitPack) return { purchaseUnit: purchaseUnit || (unitPack.baseUnit === 'l' ? 'litre' : unitPack.baseUnit), ...unitPack, confirmed: true, inferred: true };
   const container = text.match(/\b(box|case|bag|sack|bottle|pack|punnet|pnt)\b/)?.[1];
   if (/^(single\s+)?(pnt|punnet)$/.test(text)) return { purchaseUnit: 'punnet', baseQuantity: 1, baseUnit: 'punnet', weightUnknown: true, confirmed: false };
   // Accept only unambiguous measures and explicitly recognised trailing descriptors.

@@ -263,8 +263,8 @@ export function matchInvoiceLineToExistingProduct({
   // keep "pack changed" as a warning so the user confirms the conversion, not the product.
   // Two packs that both read as a definite quantity and differ ("5kg" vs "10kg") are a real
   // change and stay a review; only wording the app cannot read as a quantity is relaxed.
-  const linePack = interpretPurchasePack(packSize);
-  const packTextOnly = row => !(linePack.confirmed && interpretPurchasePack(row.packSize || row.pack_size).confirmed);
+  const linePack = interpretPurchasePack(packSize, '', { unitWords: false });
+  const packTextOnly = row => !(linePack.confirmed && interpretPurchasePack(row.packSize || row.pack_size, '', { unitWords: false }).confirmed);
   const packChangedMatch = (allRows, source) => {
     const rows = allRows.filter(packTextOnly);
     if (!rows.length || rows.length !== allRows.length) return null;

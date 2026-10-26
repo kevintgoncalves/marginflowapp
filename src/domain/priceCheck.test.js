@@ -204,11 +204,12 @@ test('the same line on several invoices is one row and its fix applies to all (w
     invoice('c', 'Ashley James Meat Co', '2026-06-22', [line('3', 'Fresh English Whole Chicken', '2 Cases')]),
   ];
   const items = itemsFor([chicken], invoices).filter((item) => item.kind === 'conversion');
+  // The "PER KG" pack is read as 1 kg on its own; the two other wordings are one row.
   assert.equal(items.length, 1);
-  assert.equal(items[0].lines, 3);
+  assert.equal(items[0].lines, 2);
   assert.equal(items[0].recommended.label, 'Priced per kg');
   const fixed = applyPriceCheckConversion(chicken, items[0], items[0].recommended);
-  assert.equal(fixed.supplierFormats.filter((format) => format.source === 'price_check').length, 3);
+  assert.equal(fixed.supplierFormats.filter((format) => format.source === 'price_check').length, 2);
   assert.deepEqual(itemsFor([fixed], invoices).filter((item) => item.kind === 'conversion'), []);
   const [row] = latestProductComparisons([fixed], invoices, []);
   assert.ok(row.comparison.articles.filter((article) => article.supplier === 'Ashley James Meat Co').every((article) => article.valid && Math.abs(article.price - 4.2) < 1e-6));

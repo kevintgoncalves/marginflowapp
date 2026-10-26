@@ -8227,6 +8227,13 @@ button.icon {
 .costing-summary strong { font-size: 18px; }
 .costing-summary .warn strong { color: var(--warning); }
 .costing-summary .good strong { color: var(--success); }
+.recipe-weight { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 12px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.recipe-weight-total { flex: 1 1 200px; display: grid; gap: 2px; }
+.recipe-weight-total span, .recipe-weight-total small, .recipe-weight-hint { color: var(--muted); font-size: 12px; }
+.recipe-weight-total strong { font-size: 16px; }
+.recipe-weight label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.recipe-weight label input { width: 110px; font-size: 16px; }
+.recipe-weight-hint { flex-basis: 100%; }
 .menu-header-actions .menu-picker { display: flex; align-items: center; gap: 6px; }
 .menu-dish-toolbar { flex-wrap: wrap; }
 .menu-dish-sort { display: flex; align-items: center; gap: 6px; white-space: nowrap; }

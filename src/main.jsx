@@ -95,11 +95,14 @@ import {
   LINE_TYPES,
   PACK_UNIT,
   PORTION_UNIT,
+  PRICE_BASIS,
+  PRICE_BASIS_LABELS,
   costChange,
   costDish,
   costLine,
   costRecipe,
   createCostingContext,
+  ingredientWeight,
   lineFromSearchHit,
   productUnitPrice,
   recordForSave,
@@ -108,6 +111,7 @@ import {
   unitsForLine,
   upgradeDish,
   upgradeRecipe,
+  yieldAfterLoss,
 } from "./domain/recipeCosting.js";
 import { buildMenuReport, dishTargetGp, menuDishRows, menuSummary, menuTargetGp } from "./domain/menuReport.js";
 import { ingredientRecipeName, recipeBookEntries, recipeBookEntry } from "./domain/recipeBook.js";
@@ -7657,7 +7661,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             suppliers={suppliers}
           />
         )}
-        {active === "recipes" && <Recipes companyName={stocktakeCompanyName} departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
+        {active === "recipes" && <Recipes companyName={stocktakeCompanyName} departmentNames={allowedDepartmentNames} menuSettings={menuSettings} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting companyName={stocktakeCompanyName} financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} setProducts={setProducts} />}
         {active === "waste" && <Waste dateRange={dateRange} department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
@@ -14402,6 +14406,8 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
 }
 
 const RECIPE_YIELD_UNITS = ["portions", "kg", "g", "l", "ml", "each"];
+const formatWeight = (value) => String(Number(numberValue(value).toFixed(3)));
+const recipePriceBasis = (menuSettings = {}) => (PRICE_BASIS_LABELS[menuSettings?.recipePriceBasis] ? menuSettings.recipePriceBasis : PRICE_BASIS.AVERAGE);
 const NEW_MENU_CATEGORY = "__new__";
 
 function costingUnitLabel(unit, recipe = null) {
@@ -14417,7 +14423,8 @@ function ingredientLineMeta(line, costed) {
   if (costed.priceUnit === PACK_UNIT && costed.packPrice > 0) parts.push(`${money(costed.packPrice)}/pack`);
   else if (costed.unitPrice != null) parts.push(`${money(costed.unitPrice)}/${costed.priceUnit}`);
   else if (costed.packPrice > 0) parts.push(`${money(costed.packPrice)}/pack`);
-  if (costed.priceDate) parts.push(formatRangeDate(costed.priceDate));
+  if (costed.basisLabel && costed.priceUnit !== PACK_UNIT) parts.push(costed.basisLabel);
+  else if (costed.priceDate) parts.push(formatRangeDate(costed.priceDate));
   return parts.join(" · ");
 }
 
@@ -14561,6 +14568,18 @@ function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, 
                   {canEdit && <button className="ghost mini-button" onClick={() => update(line.id, { unit: PACK_UNIT })} type="button">Count in packs</button>}
                 </div>
               )}
+              {costed.basisPending && costed.status === LINE_STATUS.OK && line.type === LINE_TYPES.PRODUCT && costed.reading && (
+                <div className="ingredient-line-alert conversion">
+                  <Badge tone="amber">Case or item?</Badge>
+                  <span>Is {money(costed.packPrice)} for the whole case ({costed.packSize}) or for one item? Answered once for this supplier article.</span>
+                  {canEdit && onConfirmConversion && (
+                    <span className="ingredient-conversion-fields">
+                      <button className="ghost mini-button" onClick={() => onConfirmConversion(costed.productId, { packSize: costed.packSize || "", baseQuantity: costed.reading.caseQuantity, baseUnit: costed.reading.unit })} type="button">Per case · {money(costed.casePrice)}/{costed.reading.unit}</button>
+                      <button className="ghost mini-button" onClick={() => onConfirmConversion(costed.productId, { packSize: costed.packSize || "", baseQuantity: costed.reading.itemQuantity, baseUnit: costed.reading.unit })} type="button">Per item · {money(costed.itemPrice)}/{costed.reading.unit}</button>
+                    </span>
+                  )}
+                </div>
+              )}
               {costed.status === LINE_STATUS.NEEDS_CONVERSION && line.type === LINE_TYPES.RECIPE && <div className="ingredient-line-alert"><Badge tone="amber">Check</Badge><span>This recipe has ingredients without a cost. Open it to finish them.</span></div>}
               {costed.status === LINE_STATUS.UNIT_MISMATCH && <div className="ingredient-line-alert"><Badge tone="amber">Unit</Badge><span>Priced per {costed.priceUnit || "pack"}. Choose a matching unit or count in packs.</span></div>}
               {costed.status === LINE_STATUS.NO_PRICE && <div className="ingredient-line-alert"><Badge tone="amber">No price</Badge><span>This product has no invoice price yet.</span></div>}
@@ -14581,13 +14600,14 @@ function useConfirmRecipeConversion(setProducts, canEdit) {
   ))) : null;
 }
 
-function Recipes({ companyName = "", permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes }) {
+function Recipes({ companyName = "", menuSettings = defaultMenuSettings, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes }) {
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [methodOpen, setMethodOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
-  const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
+  const priceBasis = recipePriceBasis(menuSettings);
+  const context = useMemo(() => createCostingContext(products, recipes, { priceBasis, asOf: today() }), [products, recipes, priceBasis]);
   const canWrite = editing?.original ? permissions.canEdit : permissions.canAdd;
   const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
   const [bookMessage, setBookMessage] = useState("");
@@ -14623,6 +14643,13 @@ function Recipes({ companyName = "", permissions = permissionsForPage(rolePermis
   const setForm = (patch) => setEditing((current) => ({ ...current, form: { ...current.form, ...patch } }));
 
   const draftCost = editing ? costRecipe({ ...editing.form, id: editing.form.id || "__draft__" }, context) : null;
+  const draftWeight = editing ? ingredientWeight(editing.form.ingredients, context) : null;
+  const suggestedYieldKg = draftWeight ? yieldAfterLoss(draftWeight.totalKg, editing.form.cookingLossPercent) : 0;
+  const useWeightAsYield = () => {
+    if (!(suggestedYieldKg > 0)) return;
+    const liquid = draftWeight.volumeL > 0 && !draftWeight.weightKg;
+    setForm({ yieldQuantity: suggestedYieldKg, yieldUnit: liquid ? "l" : "kg" });
+  };
 
   const saveRecipe = () => {
     if (!canWrite || !editing) return;
@@ -14635,7 +14662,9 @@ function Recipes({ companyName = "", permissions = permissionsForPage(rolePermis
       .map((line) => ({ ...line, quantity: numberValue(line.quantity), wastePercent: numberValue(line.wastePercent), ...(line.type === LINE_TYPES.MANUAL ? { manualUnitCost: numberValue(line.manualUnitCost) } : {}) }));
     const { batchCost, unitCost, ...rest } = form;
     const costed = costRecipe({ ...rest, id, ingredients }, context);
-    const next = recordForSave(original, { ...rest, id, name: form.name.trim(), yieldQuantity: numberValue(form.yieldQuantity), ingredients, savedCost: costed.batchCost, savedAt: today(), updatedAt: new Date().toISOString() });
+    const loss = form.cookingLossPercent === undefined || form.cookingLossPercent === "" ? {} : { cookingLossPercent: numberValue(form.cookingLossPercent) };
+    const { cookingLossPercent, ...withoutLoss } = rest;
+    const next = recordForSave(original, { ...withoutLoss, ...loss, id, name: form.name.trim(), yieldQuantity: numberValue(form.yieldQuantity), ingredients, savedCost: costed.batchCost, savedAt: today(), updatedAt: new Date().toISOString() });
     setRecipes((current) => (original ? current.map((recipe) => (recipe.id === original.id ? next : recipe)) : [next, ...current]));
     setEditing(null);
   };
@@ -14663,7 +14692,7 @@ function Recipes({ companyName = "", permissions = permissionsForPage(rolePermis
 
   return (
     <div className="page-grid">
-      <Panel title="Recipe costing" action="Live prices from the latest invoices">
+      <Panel title="Recipe costing" action={`Live prices · ${PRICE_BASIS_LABELS[priceBasis].toLowerCase()} (Settings)`}>
         <div className="table-toolbar menu-dish-toolbar">
           <label><Search size={15} /><input aria-label="Search recipes" placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
           {recipes.length > 0 && <button className="ghost" onClick={downloadBook} type="button"><Download size={15} />Download recipe book</button>}
@@ -14711,6 +14740,18 @@ function Recipes({ companyName = "", permissions = permissionsForPage(rolePermis
             <div><span>Per {String(editing.form.yieldUnit || "unit").replace(/s$/, "")}</span><strong>{money(draftCost?.unitCost || 0)}</strong></div>
             {draftCost?.issues > 0 && <div className="warn"><span>To check</span><strong>{draftCost.issues} line{draftCost.issues === 1 ? "" : "s"}</strong></div>}
           </div>
+          {editing.form.ingredients.length > 0 && (
+            <div className="recipe-weight">
+              <div className="recipe-weight-total">
+                <span>Total ingredient weight</span>
+                <strong>{draftWeight.totalKg > 0 ? `${formatWeight(draftWeight.totalKg)} ${draftWeight.volumeL > 0 && !draftWeight.weightKg ? "l" : "kg"}` : "—"}{draftWeight.approximate && draftWeight.weightKg > 0 ? " (approx.)" : ""}</strong>
+                <small>{[draftWeight.approximate && draftWeight.weightKg > 0 ? "1 ml counted as 1 g" : "", draftWeight.excluded ? `${draftWeight.excluded} line${draftWeight.excluded === 1 ? "" : "s"} without a known weight left out` : ""].filter(Boolean).join(" · ")}</small>
+              </div>
+              <label>Cooking loss %<input inputMode="decimal" min="0" max="95" step="any" type="number" placeholder="0" value={editing.form.cookingLossPercent ?? ""} onChange={(event) => setForm({ cookingLossPercent: event.target.value })} /></label>
+              <button className="ghost" disabled={!(suggestedYieldKg > 0)} onClick={useWeightAsYield} type="button">Use as yield{suggestedYieldKg > 0 ? ` (${formatWeight(suggestedYieldKg)} ${draftWeight.volumeL > 0 && !draftWeight.weightKg ? "l" : "kg"})` : ""}</button>
+              <small className="recipe-weight-hint">The weight after cooking is always the most accurate: you can still type the yield above.</small>
+            </div>
+          )}
           <div className="recipe-optional-fields">
             {methodOpen ? (
               <div className="recipe-optional-field wide-field">
@@ -14825,7 +14866,6 @@ function MenuReportDialog({ companyName, defaultVat, menu, menuTarget, onClose, 
 function MenuCosting({ companyName = "", financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus, setProducts }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const defaultVat = numberValue(financialSettings.defaultVat, 20);
-  const recipePriceBasis = menuSettings.recipePriceBasis || financialSettings.recipePriceBasis || "latest";
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [showArchived, setShowArchived] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState(() => visibleMenus(menus)[0]?.id || "");
@@ -14836,7 +14876,8 @@ function MenuCosting({ companyName = "", financialSettings, menuSettings, menus,
   const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
   const [archivedMenusOpen, setArchivedMenusOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
-  const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
+  const priceBasis = recipePriceBasis(menuSettings);
+  const context = useMemo(() => createCostingContext(products, recipes, { priceBasis, asOf: today() }), [products, recipes, priceBasis]);
   const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
   const selectableMenus = useMemo(() => visibleMenus(menus, showArchived), [menus, showArchived]);
   const editableMenus = useMemo(() => visibleMenus(menus), [menus]);
@@ -15001,7 +15042,7 @@ function MenuCosting({ companyName = "", financialSettings, menuSettings, menus,
         {activeMenu && <button className="menu-header-action" onClick={() => setReportOpen(true)} type="button"><Download size={15} />Download report</button>}
         {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
       </div>
-      {reportOpen && activeMenu && <MenuReportDialog companyName={companyName} defaultVat={defaultVat} menu={activeMenu} menuTarget={menuTarget} onClose={() => setReportOpen(false)} priceBasis={recipePriceBasis} rows={dishRows} />}
+      {reportOpen && activeMenu && <MenuReportDialog companyName={companyName} defaultVat={defaultVat} menu={activeMenu} menuTarget={menuTarget} onClose={() => setReportOpen(false)} priceBasis={priceBasis} rows={dishRows} />}
       {archivedMenusOpen && (
         <Panel className="archived-menus-panel" title="Archived Menus" action={`${archivedMenus.length} archived`}>
           {archivedMenus.length ? (
@@ -17916,6 +17957,7 @@ function SettingsPanel({
           <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
 
           <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
+          <label>Price for recipe costs<select value={recipePriceBasis(menuSettings)} onChange={(event) => updateMenu("recipePriceBasis", event.target.value)}>{Object.entries(PRICE_BASIS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}{value === PRICE_BASIS.AVERAGE ? " (paid, weighted by quantity)" : value === PRICE_BASIS.CHEAPEST ? " (linked suppliers)" : ""}</option>)}</select></label>
           <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowSubcategoryTargetOverride} label="Allow subcategory target override" onChange={(value) => updateMenu("allowSubcategoryTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowDishTargetOverride} label="Allow dish target override" onChange={(value) => updateMenu("allowDishTargetOverride", value)} />

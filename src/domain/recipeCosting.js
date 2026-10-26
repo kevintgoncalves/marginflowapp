@@ -8,7 +8,7 @@
 
 import { normalisedCostForPrice } from "./productPackaging.js";
 import { normalizeProductName, rankProductCandidates } from "./productMatching.js";
-import { packSignature } from "./purchaseUnits.js";
+import { articleAnswer, basisPrices, multipackReading } from "./packPriceBasis.js";
 
 export const RECIPE_SCHEMA_VERSION = 2;
 export const LINE_TYPES = Object.freeze({ PRODUCT: "Product", RECIPE: "Recipe", MANUAL: "Manual" });
@@ -70,27 +70,133 @@ function wasteFactor(wastePercent) {
 
 // ---------- Product price ----------
 
+// Price per kg, litre or each of one purchase: its pack price, pack text and supplier.
+// The answer confirmed for that supplier article (Check prices, or "1 pack = …" in a recipe line)
+// comes first. A "N x size" pack read as the whole case with no answer is marked basisPending,
+// with the price per item alongside, so the line can ask once.
+export function packUnitPrice(product = {}, { packPrice = 0, packSize = "", supplier = "", code = "", normalizedCost = null, normalizedUnit = "", reviewRequired = false } = {}) {
+  const price = numberOr(packPrice);
+  const answer = articleAnswer(product, { supplier, code, pack: packSize });
+  if (answer && unitBase(answer.baseUnit)) {
+    const unit = unitBase(answer.baseUnit);
+    return { confirmed: true, unit: unit.base, price: price / (numberOr(answer.baseQuantity) * unit.factor), source: answer.source === "recipe" ? "recipe-conversion" : "checked" };
+  }
+  let result = null;
+  const recorded = String(normalizedUnit || "").toLowerCase();
+  if (numberOr(normalizedCost) > 0 && unitBase(recorded) && !reviewRequired) {
+    result = { confirmed: true, unit: unitBase(recorded).base, price: numberOr(normalizedCost), source: "invoice" };
+  } else {
+    const parsed = normalisedCostForPrice(price, packSize);
+    if (!parsed.reviewRequired && parsed.normalizedCost > 0 && unitBase(parsed.baseUnit)) {
+      result = { confirmed: true, unit: unitBase(parsed.baseUnit).base, price: parsed.normalizedCost, source: "pack" };
+    }
+  }
+  if (!result) return { confirmed: false, unit: "", price: null, source: "" };
+  const reading = multipackReading(packSize);
+  const both = basisPrices(price, reading);
+  if (both && reading.unit === result.unit && Math.abs(result.price - both.casePrice) <= Math.max(0.0001, both.casePrice * 0.001)) {
+    return { ...result, basisPending: true, casePrice: both.casePrice, itemPrice: both.itemPrice, reading };
+  }
+  return result;
+}
+
 // The product's current price per kg, litre or each, from its latest invoice.
 // A conversion confirmed in the recipe editor applies only while the pack format is unchanged.
 export function productUnitPrice(product = {}) {
   const packPrice = numberOr(product.unitCost);
   const date = product.currentPriceDate || product.lastUpdated || "";
   const base = { packPrice, packSize: product.packSize || "", supplier: product.supplier || "", date };
-  const confirmed = product.recipeConversion;
-  if (confirmed && numberOr(confirmed.baseQuantity) > 0 && unitBase(confirmed.baseUnit)
-    && packSignature(confirmed.packSize) === packSignature(product.packSize)) {
-    const unit = unitBase(confirmed.baseUnit).base;
-    return { ...base, confirmed: true, unit, price: packPrice / numberOr(confirmed.baseQuantity), source: "recipe-conversion" };
+  const price = packUnitPrice(product, {
+    packPrice, packSize: product.packSize || "", supplier: product.supplier || "", code: product.supplierProductCode || "",
+    normalizedCost: product.normalizedCost, normalizedUnit: product.normalizedUnit, reviewRequired: Boolean(product.conversionReviewRequired),
+  });
+  return { ...base, ...price };
+}
+
+// ---------- Price basis for recipe costs ----------
+
+export const PRICE_BASIS = Object.freeze({ AVERAGE: "average4w", LATEST: "latest", CHEAPEST: "cheapest" });
+export const PRICE_BASIS_LABELS = Object.freeze({
+  [PRICE_BASIS.AVERAGE]: "Average of the last 4 weeks",
+  [PRICE_BASIS.LATEST]: "Latest invoice",
+  [PRICE_BASIS.CHEAPEST]: "Cheapest supplier",
+});
+const AVERAGE_DAYS = 28;
+const CHEAPEST_DAYS = 84;
+
+function isoDaysBefore(isoDate, days) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(isoDate || ""));
+  if (!match) return "";
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) - days)).toISOString().slice(0, 10);
+}
+
+// Invoice purchases of a product, including those of products merged into it.
+export function productPurchases(product = {}, products = []) {
+  const sources = [product, ...products.filter((other) => other && other.id !== product.id && other.mergedIntoProductId === product.id)];
+  return sources.flatMap((source) => (source.supplierFormats || [])
+    .filter((format) => format.source === "Invoice" && format.date && numberOr(format.purchaseUnitCost) > 0 && numberOr(format.quantity) > 0)
+    .map((format) => ({
+      date: String(format.date).slice(0, 10), supplier: format.supplier || "", packSize: format.packSize || "",
+      packPrice: numberOr(format.purchaseUnitCost), quantity: numberOr(format.quantity), owner: source,
+    })));
+}
+
+function purchaseUnitPrice(purchase) {
+  return packUnitPrice(purchase.owner, { packPrice: purchase.packPrice, packSize: purchase.packSize, supplier: purchase.supplier });
+}
+
+function supplierNames(purchases) {
+  const names = [...new Set(purchases.map((purchase) => purchase.supplier).filter(Boolean))];
+  return names.length === 1 ? names[0] : names.length ? `${names.length} suppliers` : "";
+}
+
+// Price per kg, litre or each used for recipe costs, with the basis it comes from:
+//  - average of the last 4 weeks (default): what was paid, weighted by the quantity bought;
+//  - latest invoice;
+//  - cheapest supplier: the latest price of each supplier linked to the product (last 12 weeks).
+// Without purchases for the chosen basis it falls back to the latest invoice and says so.
+export function recipeProductPrice(product = {}, { basis = PRICE_BASIS.AVERAGE, asOf = "", products = [] } = {}) {
+  const latest = productUnitPrice(product);
+  const latestResult = (note = "") => ({ ...latest, basis: PRICE_BASIS.LATEST, basisLabel: note ? `latest invoice · ${note}` : "latest invoice" });
+  if (basis === PRICE_BASIS.LATEST) return latestResult();
+  const today = asOf || new Date().toISOString().slice(0, 10);
+  const purchases = productPurchases(product, products).filter((purchase) => purchase.date <= today);
+  const priced = purchases.map((purchase) => ({ ...purchase, unitPrice: purchaseUnitPrice(purchase) })).filter((purchase) => purchase.unitPrice.confirmed && purchase.unitPrice.price > 0);
+  const counts = new Map();
+  priced.forEach((purchase) => counts.set(purchase.unitPrice.unit, (counts.get(purchase.unitPrice.unit) || 0) + 1));
+  const unit = latest.confirmed ? latest.unit : [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  const sameUnit = priced.filter((purchase) => purchase.unitPrice.unit === unit);
+  if (basis === PRICE_BASIS.CHEAPEST) {
+    const from = isoDaysBefore(today, CHEAPEST_DAYS);
+    const latestBySupplier = new Map();
+    sameUnit.filter((purchase) => purchase.date >= from && purchase.supplier).forEach((purchase) => {
+      const key = purchase.supplier.trim().toLowerCase();
+      const current = latestBySupplier.get(key);
+      if (!current || purchase.date > current.date) latestBySupplier.set(key, purchase);
+    });
+    const offers = [...latestBySupplier.values()];
+    if (offers.length < 2) return latestResult("one supplier");
+    const cheapest = offers.sort((a, b) => a.unitPrice.price - b.unitPrice.price)[0];
+    return { ...latest, ...cheapest.unitPrice, confirmed: true, unit, price: cheapest.unitPrice.price, supplier: cheapest.supplier, date: cheapest.date,
+      basis: PRICE_BASIS.CHEAPEST, basisLabel: `cheapest of ${offers.length} suppliers` };
   }
-  const recorded = String(product.normalizedUnit || "").toLowerCase();
-  if (numberOr(product.normalizedCost) > 0 && unitBase(recorded) && !product.conversionReviewRequired) {
-    return { ...base, confirmed: true, unit: unitBase(recorded).base, price: numberOr(product.normalizedCost), source: "invoice" };
-  }
-  const parsed = normalisedCostForPrice(packPrice, product.packSize, product);
-  if (!parsed.reviewRequired && parsed.normalizedCost > 0 && unitBase(parsed.baseUnit)) {
-    return { ...base, confirmed: true, unit: unitBase(parsed.baseUnit).base, price: parsed.normalizedCost, source: "pack" };
-  }
-  return { ...base, confirmed: false, unit: "", price: null, source: "" };
+  const from = isoDaysBefore(today, AVERAGE_DAYS - 1);
+  const recent = sameUnit.filter((purchase) => purchase.date >= from);
+  if (!recent.length) return latestResult("no purchase in 4 weeks");
+  const spend = recent.reduce((sum, purchase) => sum + purchase.quantity * purchase.packPrice, 0);
+  const volume = recent.reduce((sum, purchase) => sum + (purchase.quantity * purchase.packPrice) / purchase.unitPrice.price, 0);
+  const pending = recent.find((purchase) => purchase.unitPrice.basisPending);
+  return {
+    ...latest,
+    confirmed: true,
+    unit,
+    price: spend / volume,
+    supplier: supplierNames(recent),
+    date: recent.map((purchase) => purchase.date).sort().at(-1),
+    basis: PRICE_BASIS.AVERAGE,
+    basisLabel: `4-week average${recent.length > 1 ? ` of ${recent.length} purchases` : ""}`,
+    basisPending: Boolean(latest.basisPending || pending),
+  };
 }
 
 export function findProduct(products = [], productId = "") {
@@ -186,9 +292,11 @@ export function recordForSave(previous = null, next = {}) {
 
 // ---------- Costing ----------
 
-export function createCostingContext(products = [], recipes = []) {
+export function createCostingContext(products = [], recipes = [], { priceBasis = PRICE_BASIS.AVERAGE, asOf = "" } = {}) {
   return {
     products,
+    priceBasis,
+    asOf,
     recipes: recipes.map((recipe) => upgradeRecipe(recipe)),
     cache: new Map(),
   };
@@ -272,8 +380,9 @@ export function costLine(line = {}, context, trail = []) {
   }
   const product = findProduct(context.products, line.productId || line.sourceId);
   if (!product) return { id: line.id, status: LINE_STATUS.MISSING, cost: null };
-  const price = productUnitPrice(product);
-  const details = { id: line.id, name: product.name, supplier: price.supplier, packSize: price.packSize, packPrice: price.packPrice, priceDate: price.date, productId: product.id };
+  const price = recipeProductPrice(product, { basis: context.priceBasis, asOf: context.asOf, products: context.products });
+  const details = { id: line.id, name: product.name, supplier: price.supplier, packSize: price.packSize, packPrice: price.packPrice, priceDate: price.date, productId: product.id,
+    basisLabel: price.basisLabel, basisPending: Boolean(price.basisPending), casePrice: price.casePrice, itemPrice: price.itemPrice, reading: price.reading };
   if (unit === PACK_UNIT) {
     if (!(price.packPrice > 0)) return { ...details, status: LINE_STATUS.NO_PRICE, cost: null };
     return { ...details, status: LINE_STATUS.OK, cost: round(quantity * price.packPrice * factor), unitPrice: price.packPrice, priceUnit: PACK_UNIT };
@@ -282,6 +391,51 @@ export function costLine(line = {}, context, trail = []) {
   const baseQuantity = convertQuantity(quantity, unit, price.unit);
   if (baseQuantity === null) return { ...details, status: LINE_STATUS.UNIT_MISMATCH, cost: null, unitPrice: price.price, priceUnit: price.unit };
   return { ...details, status: LINE_STATUS.OK, cost: round(baseQuantity * price.price * factor), unitPrice: price.price, priceUnit: price.unit };
+}
+
+// ---------- Total weight of a recipe ----------
+
+// Sum of the ingredient lines in kg (1 ml counted as 1 g, so the total is approximate when there
+// are liquids). Lines in "each", or packs and portions whose weight is unknown, are left out and
+// counted, so the screen can say how many.
+export function ingredientWeight(lines = [], context) {
+  let weightKg = 0;
+  let volumeL = 0;
+  let excluded = 0;
+  const addBase = (quantity, base) => {
+    if (base === "kg") weightKg += quantity;
+    else if (base === "l") volumeL += quantity;
+    else excluded += 1;
+  };
+  for (const line of lines) {
+    const quantity = numberOr(line.quantity);
+    const unit = String(line.unit || "").toLowerCase();
+    const measured = unitBase(unit);
+    if (!(quantity > 0)) continue;
+    if (measured && measured.base !== "each") { addBase(quantity * measured.factor, measured.base); continue; }
+    if (line.type === LINE_TYPES.RECIPE && (unit === PORTION_UNIT || unit === "portions" || !unit)) {
+      const recipe = findRecipe(context, line.recipeId || line.sourceId);
+      const yieldBase = recipe ? recipeYieldBase(recipe) : null;
+      if (yieldBase && yieldBase.base !== PORTION_UNIT) addBase(quantity * (yieldBase.quantity / numberOr(recipe.yieldQuantity, 1)), yieldBase.base);
+      else excluded += 1;
+      continue;
+    }
+    if (line.type === LINE_TYPES.PRODUCT && unit === PACK_UNIT) {
+      const product = findProduct(context.products, line.productId || line.sourceId);
+      const price = product ? productUnitPrice(product) : null;
+      if (price?.confirmed && ["kg", "l"].includes(price.unit) && price.price > 0 && price.packPrice > 0) addBase(quantity * (price.packPrice / price.price), price.unit);
+      else excluded += 1;
+      continue;
+    }
+    excluded += 1;
+  }
+  return { totalKg: round(weightKg + volumeL, 4), weightKg: round(weightKg, 4), volumeL: round(volumeL, 4), approximate: volumeL > 0, excluded };
+}
+
+// Yield after cooking loss (reducing, roasting): total × (1 − loss).
+export function yieldAfterLoss(totalKg, lossPercent = 0) {
+  const loss = Math.min(Math.max(numberOr(lossPercent), 0), 95);
+  return round(numberOr(totalKg) * (1 - loss / 100), 3);
 }
 
 export function costDish(dish = {}, context, defaultVatRate = 20) {

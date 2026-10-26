@@ -2,6 +2,7 @@ import { packKey, purchaseConversion, unitKey } from './reusablePurchasing.js';
 import { normalizeSupplierDescription, normalizeSupplierProductCode } from './invoiceProductMatching.js';
 import { sameSupplierIdentity } from './supplierIdentity.js';
 import { itemsInPack } from './packCount.js';
+import { articleAnswer, multipackReading } from './packPriceBasis.js';
 
 // A pack conversion confirmed for this product and supplier article (catalogue import or manual),
 // used for invoice lines that carry no conversion of their own. Never overrides a line's own rule.
@@ -24,6 +25,11 @@ export function confirmedPackConversion(product = {}, line = {}, supplier = '') 
   const checked = matches.filter(format => format.source === 'price_check');
   if (checked.length) matches = checked;
   const distinct = new Set(matches.map(format => `${Number(format.baseQuantity)}:${format.baseUnit}`));
+  if (!distinct.size) {
+    // The "1 pack = …" answer given in a recipe line for this pack is the user's answer too.
+    const answer = articleAnswer({ ...product, supplierFormats: [] }, { supplier, pack: line.packSize || '' });
+    return answer ? { purchaseUnit: 'pack', baseQuantity: answer.baseQuantity, baseUnit: answer.baseUnit, confirmed: true, source: 'recipe_conversion', expected: null, byCode: false, forced: true } : null;
+  }
   if (distinct.size !== 1) return null;
   const format = matches[0];
   const expected = Number(format.normalizedCost) > 0 ? Number(format.normalizedCost) : null;
@@ -109,7 +115,11 @@ export function purchaseComparison(products, invoices, { from = '', to = '', dem
       const billedNet = Number(line.quantity)>0 && conversion.net!=null ? conversion.net/Number(line.quantity) : null;
       const netPackPrice = packConversion.valid && conversion.valid && packConversion.unit===conversion.unit ? conversion.price*packConversion.factor : ['bag','sack','pack','case','box','bottle','each'].includes(unitKey(line.unitOfMeasure)) ? billedNet : null;
       const valid = conversion.valid && conversion.volume > 0 && conversion.net > 0;
-      row.offers.push({ supplier: invoice.supplier || line.supplier || '', supplierId: invoice.supplierId || '',
+      // A "N x size" pack read as the whole case with no answer yet: the price may be per item.
+      const reading = valid && !perWeight ? multipackReading(line.packSize) : null;
+      const basisPending = Boolean(reading && conversion.unit === reading.unit && Math.abs(conversion.factor - reading.caseQuantity) < 1e-6
+        && !articleAnswer(productsById.get(id), { supplier: invoice.supplier || line.supplier || '', code: line.supplierProductCode || '', pack: line.packSize || '' }));
+      row.offers.push({ basisPending, supplier: invoice.supplier || line.supplier || '', supplierId: invoice.supplierId || '',
         code: line.supplierProductCode || '', description: line.rawDescription || line.productName || '',
         pack: line.packSize || '', packPrice: Number(line.unitCost), netPackPrice, billingUnit:line.unitOfMeasure || '', date, lineId:line.id || String(index), brand:line.brand || '', specification:line.specification || '', equivalenceStatus:line.equivalenceStatus || '', matchSource:line.productMatchSource || '',
         invoiceId: invoice.id, invoiceNumber: invoice.documentNumber || invoice.invoiceNumber || invoice.id,

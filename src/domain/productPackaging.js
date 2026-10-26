@@ -1,4 +1,5 @@
 import { numberValue, normalizeHeader, roundQuantity } from "./numberUtils.js";
+import { unitPackMeasure } from "./purchaseUnits.js";
 
 const weightUnits = new Map([
   ["kg", { baseUnit: "kg", factor: 1 }],
@@ -47,6 +48,11 @@ export function parsePackSize(packSize = "", overrides = {}) {
   const text = raw.toLowerCase().replace(/×/g, "x").replace(/\*/g, "x").replace(/\s+/g, " ");
   if (!text) {
     return { baseQuantity: 1, baseUnit: "each", confidence: "unknown", reviewRequired: true, reason: "No pack size supplied" };
+  }
+
+  const unit = unitPackMeasure(text);
+  if (unit) {
+    return { ...unit, confidence: "high", reviewRequired: false, reason: unit.baseUnit === "each" ? "Single item" : "Priced per kg / L" };
   }
 
   const compact = text.replace(/\s+/g, "");

@@ -1,5 +1,5 @@
 import { learnedDepartment } from './supplierDepartments.js';
-import { interpretPurchasePack, packSignature } from './purchaseUnits.js';
+import { interpretPurchasePack, packSignature, unitPackMeasure } from './purchaseUnits.js';
 import {normalizeSupplierDescription,normalizeSupplierProductCode} from './invoiceProductMatching.js';
 import {lineWithAutoMatchedProductResolution,isManuallyMatchedProductResolution} from './invoiceProductResolution.js';
 export function unitKey(value='') {return String(value).trim().toLowerCase().replace(/^per\s+|^\//,'').replace(/^(kilo|kilogram)s?$/,'kg').replace(/^kgs$/,'kg').replace(/^(litre|liter|ltr)s?$/,'l').replace(/^(ea|unit|piece)s?$/,'each');}
@@ -22,8 +22,8 @@ export function refreshPendingInvoice(invoice,rules,products,companyId='',locati
   const compatible=matches.filter(rule=>(packSignature(line.packSize)===packSignature(rule.packSize))&&(!line.unitOfMeasure||!rule.unitOfMeasure||unitKey(line.unitOfMeasure)===unitKey(rule.unitOfMeasure)));
   // Pack wording the app cannot read as a quantity ("PER KG", "1-2KG") is not a pack change:
   // link the product, keep the conversion out and leave "pack changed" as a warning.
-  const linePack=interpretPurchasePack(line.packSize);
-  const wordingOnly=!compatible.length&&matches.every(rule=>!(linePack.confirmed&&interpretPurchasePack(rule.packSize).confirmed))&&new Set(matches.map(rule=>rule.productId)).size===1;
+  const linePack=interpretPurchasePack(line.packSize,'',{unitWords:false});
+  const wordingOnly=!compatible.length&&matches.every(rule=>!(linePack.confirmed&&interpretPurchasePack(rule.packSize,'',{unitWords:false}).confirmed))&&new Set(matches.map(rule=>rule.productId)).size===1;
   if(wordingOnly){const rule=matches[0];const product=products.find(p=>p.id===rule.productId&&p.active!==false);if(product){const next={...lineWithAutoMatchedProductResolution(line,product,{source:'learned_rule',confidence:0.9}),learnedMappingId:rule.id,department:line.department||rule.department,departmentId:line.departmentId||rule.departmentId};next.reviewReasons=[...(line.reviewReasons||[]).filter(r=>!['no_confirmed_product_match','ambiguous_product_match','mapping_conflict','pack_changed'].includes(r)),'pack_changed'];next.needsReview=true;if(JSON.stringify(next)!==JSON.stringify(line))changed=true;return next;}}
   if(new Set(compatible.map(rule=>rule.productId)).size!==1){const reasons=[...(line.reviewReasons||[]).filter(r=>!['mapping_conflict','pack_changed'].includes(r)),compatible.length?'mapping_conflict':'pack_changed'];const next={...line,matchedProductId:"",productId:"",productResolution:"unresolved",productMatchSource:"no_product_match",needsReview:true,reviewReasons:reasons};if(JSON.stringify(next)!==JSON.stringify(line))changed=true;return next;}
   const rule=compatible.sort((a,b)=>String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')))[0];const product=products.find(p=>p.id===rule.productId&&p.active!==false);if(!product)return line;
@@ -35,7 +35,7 @@ export function refreshPendingInvoice(invoice,rules,products,companyId='',locati
 }
 export function purchaseConversion(line){
  const quantity=Number(line.quantity);const cost=Number(line.unitCost);const billing=unitKey(line.purchaseUnit||line.unitOfMeasure||line.billingUnit||'');
- const rule=line.conversionRule || (line.purchaseUnit || /^\s*(?:kilo|kg|litre|l|ltr)\s*$|^\s*x\s*\d|^\s*\d+\s*x\s*\d|^\s*single\s+pnt/i.test(line.packSize || '') ? interpretPurchasePack(line.packSize, line.purchaseUnit) : null);
+ const rule=line.conversionRule || (line.purchaseUnit || /^\s*(?:kilo|kg|litre|l|ltr)\s*$|^\s*x\s*\d|^\s*\d+\s*x\s*\d|^\s*single\s+pnt/i.test(line.packSize || '') || unitPackMeasure(line.packSize) ? interpretPurchasePack(line.packSize, line.purchaseUnit) : null);
  let factor=null,unit=null;
  if(rule?.confirmed&&Number(rule.baseQuantity)>0&&['kg','l','each','punnet'].includes(rule.baseUnit)){factor=Number(rule.baseQuantity);unit=rule.baseUnit;}
  else if(rule){factor=null;}

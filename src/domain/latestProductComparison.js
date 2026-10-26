@@ -93,7 +93,7 @@ export function latestProductComparisons(products, invoices, mappings = []) {
     const setAside = (historical.get(product.id)?.setAside || []).map(offer=>({...offer,key:articleIdentity(offer),isCurrentSupplier:false}));
     return {...product,comparison:{current,currentAuto,currentCandidates:currentCandidates.length,best,status,difference,percent,unit:current?.unit || best?.unit || '',currency:current?.currency || best?.currency || 'GBP',setAside,
       comparable:comparable.map(decorate),review:review.map(a=>({...a,delta:null,percent:null,isCheapest:false})),articles:articles.map(decorate)},
-      normalizedCostLabel:current?.valid ? `${comparisonMoney(current.price,current.currency)}/${comparisonUnit(current.unit)}` : 'Needs conversion', packReview:status,
+      normalizedCostLabel:current?.valid ? `${comparisonMoney(current.price,current.currency)}/${comparisonUnit(current.unit)}${current.basisPending ? ' · case or item?' : ''}` : 'Needs conversion', packReview:status,
       cheapestSupplierName:best?.supplier || '',
       priceDifferenceLabel:difference>0 ? `${comparisonMoney(difference,current.currency)}/${comparisonUnit(current.unit)} cheaper` : status};
   });

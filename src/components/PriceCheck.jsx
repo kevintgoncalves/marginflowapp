@@ -9,6 +9,7 @@ const KINDS = [
   ["unit", "Product unit", "The product is set up in one unit but its suppliers sell in another (for example butter per L)."],
   ["conversion", "No conversion", "The price cannot be turned into a price per kg, L or unit yet."],
   ["outlier", "Far from other suppliers", "The price per kg, L or unit is 3× above or below the other suppliers — usually a case read as one item."],
+  ["basis", "Case or item?", "A \"N x size\" pack priced as the whole case. Some suppliers price one item inside it (one tin, one bag): answer once per article."],
   ["choose", "Choose the article", "Several articles from the current supplier; choose the one you buy now."],
 ];
 const SOURCE = { website: "website", catalogue: "invoice (reviewed)", invoice: "invoice" };
@@ -31,7 +32,7 @@ function ConversionFix({ item, canEdit, onSave, onAccept }) {
           return (
             <label key={value} className="mf-price-check-option">
               <input type="radio" name={`conv-${item.id}`} value={value} checked={choice === value} onChange={() => setChoice(value)} />
-              <span>{option.label} = {option.baseQuantity} {unitLabel(option.baseUnit)} → <strong>{money(option.unitPrice)}/{unitLabel(option.baseUnit)}</strong>{recommended && <em> · closest to other prices</em>}</span>
+              <span>{option.label} = {option.baseQuantity} {unitLabel(option.baseUnit)} → <strong>{money(option.unitPrice)}/{unitLabel(option.baseUnit)}</strong>{recommended && <em> · {item.recommendedWhy || "closest to other prices"}</em>}</span>
             </label>
           );
         })}
@@ -49,7 +50,7 @@ function ConversionFix({ item, canEdit, onSave, onAccept }) {
         <button type="button" disabled={!canEdit || !selected || !(selected.baseQuantity > 0)} onClick={() => onSave(item, selected)}>
           Save{preview != null ? ` (${money(preview)}/${unitLabel(selected.baseUnit)})` : ""}
         </button>
-        <button type="button" className="ghost" disabled={!canEdit} onClick={() => onAccept(item)}>{item.kind === "outlier" ? "Price is right" : "Ignore"}</button>
+        <button type="button" className="ghost" disabled={!canEdit} onClick={() => onAccept(item)}>{item.kind === "outlier" ? "Price is right" : item.kind === "basis" ? "Ask later" : "Ignore"}</button>
       </div>
     </div>
   );
