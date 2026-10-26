@@ -23,7 +23,7 @@ import InteractiveChart from "./components/InteractiveChart.jsx";
 import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createScopedStorage, createWorkspacePersistence } from "./lib/workspaceStorage.js";
+import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createPortal } from "react-dom";
@@ -362,6 +362,9 @@ const cloudModuleDefinitions = [
   { key: "aiSettings", storageKey: "marginflow.aiSettings" },
   { key: "departmentSelection", storageKey: "marginflow.department" },
 ];
+// Cloud modules too large for the browser's ~5 MB storage (products alone passed 8 MB). For a
+// signed-in workspace they live only in the cloud and are reloaded on every start.
+const cloudOnlyBrowserKeys = ["marginflow.products", "marginflow.invoiceLineCorrections", "marginflow.supplierProductMappings", "marginflow.labour"];
 const cloudWritableModuleDefinitions = cloudModuleDefinitions.filter((definition) => !["invoices", "sales"].includes(definition.key));
 
 function currentSearchParams() {
@@ -5617,11 +5620,13 @@ function App(props) {
   const userId = props.authUser?.id || "demo";
   const companyId = props.authMembership?.company_id || "demo";
   const locationId = props.authMembership?.location_id || "";
+  const cloudWorkspace = Boolean(props.authUser?.id && props.authMembership?.company_id) && !props.demoMode;
   const persistence = useMemo(() => {
     const scoped = createScopedStorage(() => window.localStorage, { userId, companyId, locationId });
     return createWorkspacePersistence(scoped, (detail) => queueMicrotask(() =>
-      window.dispatchEvent(new CustomEvent("marginflow-storage-error", { detail: { ...detail, scope: scoped.prefix } }))));
-  }, [userId, companyId, locationId]);
+      window.dispatchEvent(new CustomEvent("marginflow-storage-error", { detail: { ...detail, scope: scoped.prefix } }))),
+    { cloudOnlyKeys: cloudWorkspace ? cloudOnlyBrowserKeys : [] });
+  }, [userId, companyId, locationId, cloudWorkspace]);
   return <WorkspaceStorageContext.Provider value={persistence}>
     <WorkspaceApp key={persistence.localStorage.prefix} {...props} />
   </WorkspaceStorageContext.Provider>;
@@ -5629,7 +5634,7 @@ function App(props) {
 
 function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementFeatureKeys = [], onExitSupport, onSignOut, readOnly = false, supportMode = false, supportSessionId = "" }) {
   const { localStorage, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
-    saveSerializedLocalStorage, readMarginFlowLocalStorage, storedStateUpdater, persistenceDiagnostics, exportVolatileWrites } = React.useContext(WorkspaceStorageContext);
+    saveSerializedLocalStorage, readMarginFlowLocalStorage, storedStateUpdater, persistenceDiagnostics, exportVolatileWrites, retryVolatileWrites } = React.useContext(WorkspaceStorageContext);
   const demoInitialData = useMemo(() => (demoMode ? createDemoData() : null), [demoMode]);
   const displayRecoveryMode = !demoMode && displayRecoveryModeEnabled();
   const demoCaptureMode = demoMode ? demoCaptureModeFromUrl() : "";
@@ -5656,6 +5661,13 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
   const [localStorageError, setLocalStorageError] = useState(false);
+  // Older browser data was removed: store again what the browser refused, and clear the warning
+  // only when nothing is left unstored.
+  const retryBrowserWrites = () => {
+    const remaining = retryVolatileWrites();
+    if (!remaining.length) setLocalStorageError(false);
+    return remaining;
+  };
   useEffect(() => {
     const onStorageError = (event) => {
       if (event.detail?.scope === localStorage.prefix) setLocalStorageError(event.detail);
@@ -7717,6 +7729,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             onImportBackupToCloud={importBackupToCloud}
             onCompareDeviceWithCloud={compareDeviceWithCloud}
             onCompareReportLoading={compareReportLoading}
+            onRetryBrowserWrites={retryBrowserWrites}
             onInspectRecoveryBackup={inspectRecoveryBackupAgainstCloud}
             onMigrateLocalToCloud={migrateLocalDataToCloud}
             onDiagnoseLaptopRecovery={diagnoseCurrentLaptopRecovery}
@@ -17040,6 +17053,7 @@ function SettingsPanel({
   menuSettings,
   onCompareDeviceWithCloud,
   onCompareReportLoading,
+  onRetryBrowserWrites,
   onImportBackupToCloud,
   onInspectRecoveryBackup,
   onMigrateLocalToCloud,
@@ -17087,6 +17101,33 @@ function SettingsPanel({
   const [reportCheckRange, setReportCheckRange] = useState(() => ({ start: `${today().slice(0, 4)}-01-01`, end: toIsoDate(addDays(parseDate(today()), -1)) }));
   const [reportCheck, setReportCheck] = useState(null);
   const [reportCheckBusy, setReportCheckBusy] = useState(false);
+  // Older browser data: old unscoped keys that filled the browser's storage. Exported first, then
+  // removed only on the user's confirmation, and only where the value is still the exported one.
+  const [legacyKeys, setLegacyKeys] = useState(() => { try { return legacyBrowserKeys(window.localStorage); } catch { return []; } });
+  const [legacyExport, setLegacyExport] = useState(null);
+  const [legacySaved, setLegacySaved] = useState(false);
+  const [legacyStatus, setLegacyStatus] = useState("");
+  const exportLegacyBrowserData = () => {
+    const payload = legacyBrowserExport(window.localStorage);
+    downloadJsonFile(`marginflow-older-browser-data-${today()}.json`, payload);
+    setLegacyExport(payload);
+    setLegacySaved(false);
+    setLegacyStatus(`Downloaded ${Object.keys(payload.keys).length} key(s). Check the file is in your Downloads before removing anything.`);
+  };
+  const removeLegacyBrowserData = () => {
+    if (!legacyExport || !legacySaved) return;
+    if (!window.confirm("Remove the older browser data from this browser? The exported file keeps a full copy. Your cloud data is not touched.")) return;
+    try {
+      const { removed, kept } = removeExportedLegacyBrowserData(window.localStorage, legacyExport);
+      const remaining = onRetryBrowserWrites?.() || [];
+      setLegacyKeys(legacyBrowserKeys(window.localStorage));
+      setLegacyExport(null);
+      setLegacySaved(false);
+      setLegacyStatus(`Removed ${removed.length} key(s)${kept.length ? `; kept ${kept.length} that changed after the export (export again to include them)` : ""}. ${remaining.length ? `${remaining.length} browser write(s) still could not be stored.` : "Browser work is being stored again."}`);
+    } catch (error) {
+      setLegacyStatus(`${error.message || "Removal failed."} Nothing else was changed.`);
+    }
+  };
   const runReportCheck = async () => {
     setReportCheckBusy(true);
     setReportCheck(null);
@@ -17815,6 +17856,26 @@ function SettingsPanel({
         onSaveResolution={onSaveRecoveryResolution}
         onVerify={onVerifyRecovery}
       />}
+
+      {(legacyKeys.length > 0 || legacyStatus) && (
+        <Panel className="settings-backup-section" title="Older browser data" action={`${(legacyKeys.reduce((sum, row) => sum + row.chars, 0) * 2 / 1e6).toFixed(1)} MB`}>
+          {legacyKeys.length > 0 && <>
+          <p className="helper-text">This browser still holds data saved by an older version of MarginFlow, before browser data was tied to an account. The app never reads it, but it fills the browser's storage, so current work cannot be saved here. Export it once, then remove it. Your cloud data is not touched, and the exported file can still be checked with Pending invoice recovery.</p>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Browser key</th><th>Size</th></tr></thead>
+              <tbody>{legacyKeys.slice(0, 12).map((row) => <tr key={row.key}><td>{row.key.replace(/autoBackup\..*/, "autoBackup…")}</td><td>{(row.chars * 2 / 1e6).toFixed(2)} MB</td></tr>)}</tbody>
+            </table>
+          </div>
+          <div className="button-row left wrap">
+            <button onClick={exportLegacyBrowserData} type="button"><Download size={16} />1. Export older browser data</button>
+            <label><input type="checkbox" checked={legacySaved} disabled={!legacyExport} onChange={(event) => setLegacySaved(event.target.checked)} /> The file is in my Downloads</label>
+            <button className="ghost danger" disabled={!legacyExport || !legacySaved} onClick={removeLegacyBrowserData} type="button">2. Remove older browser data</button>
+          </div>
+          </>}
+          {legacyStatus && <div className="invoice-status info">{legacyStatus}</div>}
+        </Panel>
+      )}
 
       <Panel className="settings-backup-section" title="Compare report loading" action="Read-only">
         <p className="helper-text">Reads the period twice, the old way (full invoice records) and the fast way, then checks that every invoice and the Dashboard figures are exactly the same. Nothing is changed. The old way can take a few seconds.</p>

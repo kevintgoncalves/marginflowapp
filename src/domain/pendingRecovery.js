@@ -35,6 +35,12 @@ export function recoveryPacket(rows, scope) {
 }
 
 export function readRecoveryPacket(packet) {
+  // The file written by "Export and remove older browser data": read its invoice keys as the
+  // browser did before they were removed.
+  if (packet?.format === 'marginflow-legacy-browser-data-v1' && packet.keys && typeof packet.keys === 'object') {
+    const entries = Object.entries(packet.keys);
+    return readLegacyPendingRows({ length: entries.length, key: i => entries[i]?.[0] ?? null, getItem: k => packet.keys[k] ?? null });
+  }
   if (packet?.format === 'marginflow-live-work-v1' && Array.isArray(packet.currentSnapshot?.invoices)) return packet.currentSnapshot.invoices;
   if (packet?.format !== 'marginflow-pending-recovery-v1' || !Array.isArray(packet.originals)) throw new Error('Invalid recovery archive');
   // Scope from an uploaded file is deliberately not accepted as ownership proof.

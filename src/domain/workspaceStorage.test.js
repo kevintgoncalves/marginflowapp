@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createScopedStorage, createWorkspacePersistence } from '../lib/workspaceStorage.js';
+import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from '../lib/workspaceStorage.js';
+import { readRecoveryPacket } from './pendingRecovery.js';
 function memoryStorage() {
  const data = new Map();
  return { get length() { return data.size; }, key(i) { return [...data.keys()][i] ?? null; },
@@ -63,4 +64,58 @@ test('serialization failures also report non-durability instead of success',()=>
  const cyclic={};cyclic.self=cyclic;
  assert.equal(p.saveLocalStorage('marginflow.invoices',cyclic),false);
  assert.equal(diagnostic.error,'TypeError');assert.equal(raw.length,0);
+});
+
+test('cloud-only modules are neither written to nor read from the browser; other work still is', () => {
+ const raw = memoryStorage(), scoped = createScopedStorage(() => raw, scope);
+ scoped.setItem('marginflow.products', '[{"id":"stale-copy"}]');
+ const p = createWorkspacePersistence(scoped, () => assert.fail('no warning for cloud-only modules'), { cloudOnlyKeys: ['marginflow.products'] });
+ assert.deepEqual(p.safeReadLocalStorageArray('marginflow.products', []), []);
+ assert.equal(p.saveLocalStorage('marginflow.products', [{ id: 'new' }]), true);
+ assert.equal(scoped.getItem('marginflow.products'), '[{"id":"stale-copy"}]', 'the old copy is left alone, only ignored');
+ assert.equal('marginflow.products' in p.readMarginFlowLocalStorage(), false);
+ assert.equal(p.saveLocalStorage('marginflow.pendingInvoices', [{ id: 'pending' }]), true);
+ assert.match(scoped.getItem('marginflow.pendingInvoices'), /pending/);
+ // without the option (demo or local workspaces) nothing changes
+ const plain = createWorkspacePersistence(scoped);
+ assert.deepEqual(plain.safeReadLocalStorageArray('marginflow.products', []), [{ id: 'stale-copy' }]);
+});
+
+test('older browser data is exported verbatim and only unchanged exported keys are removed', () => {
+ const raw = memoryStorage();
+ raw.setItem('marginflow.products', 'old-products');
+ raw.setItem('marginflow.invoices', '[{"id":"legacy-pending","syncStatus":"pending_sync"}]');
+ raw.setItem('marginflow.invoices.autoBackup.2026-09-01', '[{"id":"older"}]');
+ raw.setItem('other-app', 'keep');
+ const scoped = createScopedStorage(() => raw, scope);
+ scoped.setItem('marginflow.companySettings', '{"name":"current"}');
+ assert.deepEqual(legacyBrowserKeys(raw).map(row => row.key).sort(), ['marginflow.invoices', 'marginflow.invoices.autoBackup.2026-09-01', 'marginflow.products']);
+ const exported = legacyBrowserExport(raw, '2026-10-26T10:00:00Z');
+ assert.equal(exported.keys['marginflow.products'], 'old-products');
+ raw.setItem('marginflow.products', 'changed-after-export');
+ raw.setItem('marginflow.newer', 'not-in-export');
+ const result = removeExportedLegacyBrowserData(raw, exported);
+ assert.deepEqual(result.removed.sort(), ['marginflow.invoices', 'marginflow.invoices.autoBackup.2026-09-01']);
+ assert.deepEqual(result.kept, ['marginflow.products']);
+ assert.equal(raw.getItem('marginflow.products'), 'changed-after-export');
+ assert.equal(raw.getItem('marginflow.newer'), 'not-in-export');
+ assert.equal(raw.getItem('other-app'), 'keep');
+ assert.equal(scoped.getItem('marginflow.companySettings'), '{"name":"current"}');
+ assert.throws(() => removeExportedLegacyBrowserData(raw, null), /Export/);
+ // the exported file can still be checked by Pending invoice recovery
+ assert.deepEqual(readRecoveryPacket(JSON.parse(JSON.stringify(exported))).map(row => row.id).sort(), ['legacy-pending', 'older']);
+});
+
+test('after space is freed, refused writes are stored again and reported only if still refused', () => {
+ const raw = memoryStorage(), scoped = createScopedStorage(() => raw, scope);
+ let full = true;
+ const realSet = raw.setItem.bind(raw);
+ raw.setItem = (k, v) => { if (full) throw new DOMException('Full', 'QuotaExceededError'); realSet(k, v); };
+ const p = createWorkspacePersistence(scoped);
+ assert.equal(p.saveLocalStorage('marginflow.pendingInvoices', [{ id: 'unsaved' }]), false);
+ assert.equal(p.retryVolatileWrites().length, 1);
+ full = false;
+ assert.deepEqual(p.retryVolatileWrites(), []);
+ assert.match(scoped.getItem('marginflow.pendingInvoices'), /unsaved/);
+ assert.deepEqual(p.exportVolatileWrites(), {});
 });

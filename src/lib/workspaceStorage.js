@@ -35,10 +35,47 @@ export function createScopedStorage(getStorage, { userId, companyId, locationId 
   };
 }
 
-export function createWorkspacePersistence(localStorage, onError = () => {}) {
+// Keys in old, unscoped browser storage (written before storage was bound to an account). They
+// are never read by the app; they can only be exported and removed by the user.
+export function legacyBrowserKeys(storage) {
+  const keys = [];
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (key?.startsWith("marginflow.") && !key.startsWith("marginflow.scope.")) keys.push({ key, chars: (storage.getItem(key) || "").length });
+  }
+  return keys.sort((left, right) => right.chars - left.chars);
+}
+
+export const LEGACY_BROWSER_EXPORT_FORMAT = "marginflow-legacy-browser-data-v1";
+
+export function legacyBrowserExport(storage, exportedAt = new Date().toISOString()) {
+  const keys = {};
+  legacyBrowserKeys(storage).forEach(({ key }) => { keys[key] = storage.getItem(key); });
+  return { format: LEGACY_BROWSER_EXPORT_FORMAT, exportedAt, keys };
+}
+
+// Removes only the old keys that are in the export and still hold exactly the exported value.
+export function removeExportedLegacyBrowserData(storage, exported) {
+  if (exported?.format !== LEGACY_BROWSER_EXPORT_FORMAT || !exported.keys) throw new Error("Export the older browser data first.");
+  const removed = [];
+  const kept = [];
+  Object.entries(exported.keys).forEach(([key, value]) => {
+    if (!key.startsWith("marginflow.") || key.startsWith("marginflow.scope.")) { kept.push(key); return; }
+    if (storage.getItem(key) !== value) { kept.push(key); return; }
+    storage.removeItem(key);
+    removed.push(key);
+  });
+  return { removed, kept };
+}
+
+// cloudOnlyKeys: modules the cloud holds and reloads on every start. They are not copied into the
+// browser (they outgrew its ~5 MB limit) and an old copy left there is never read back.
+export function createWorkspacePersistence(localStorage, onError = () => {}, { cloudOnlyKeys = [] } = {}) {
 const volatileWrites = new Map();
 const failures = new Map();
+const cloudOnly = new Set(cloudOnlyKeys);
 function safeReadLocalStorage(key, fallback) {
+  if (cloudOnly.has(key)) return fallback;
   try {
     const stored = localStorage.getItem(key);
     return stored ? { ...fallback, ...JSON.parse(stored) } : fallback;
@@ -48,6 +85,7 @@ function safeReadLocalStorage(key, fallback) {
 }
 
 function safeReadLocalStorageArray(key, fallback) {
+  if (cloudOnly.has(key)) return fallback;
   try {
     const stored = localStorage.getItem(key);
     return stored ? JSON.parse(stored) : fallback;
@@ -101,6 +139,10 @@ function saveInvoiceDropSafetyBackup(key, nextSerialized, reason = "state_update
 }
 
 function saveSerializedLocalStorage(key, serializedValue, reason = "state_update") {
+  if (cloudOnly.has(key)) {
+    volatileWrites.delete(key); failures.delete(key);
+    return;
+  }
   saveInvoiceDropSafetyBackup(key, serializedValue, reason);
   try {
     localStorage.setItem(key, serializedValue);
@@ -146,7 +188,7 @@ function readMarginFlowLocalStorage() {
   try {
     for (let index = 0; index < localStorage.length; index += 1) {
       const key = localStorage.key(index);
-      if (key?.startsWith("marginflow.")) data[key] = localStorage.getItem(key);
+      if (key?.startsWith("marginflow.") && !cloudOnly.has(key)) data[key] = localStorage.getItem(key);
     }
   } catch {
     return data;
@@ -176,7 +218,20 @@ function storedStateUpdater(setState, key) {
 }
 
 
-return { localStorage, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
+// After space was freed: store again what the browser refused. Returns what still failed.
+function retryVolatileWrites() {
+  for (const [key, value] of [...volatileWrites]) {
+    try {
+      localStorage.setItem(key, value);
+      volatileWrites.delete(key); failures.delete(key);
+    } catch (error) {
+      failures.set(key, { key, error: error?.name || "Error", attemptedBytes: value.length * 2 });
+    }
+  }
+  return [...failures.values()];
+}
+
+return { localStorage, retryVolatileWrites, safeReadLocalStorage, safeReadLocalStorageArray, saveLocalStorage,
   saveSerializedLocalStorage, readInvoiceAutoBackups, readMarginFlowLocalStorage,
   buildFullBackupPayload, storedStateUpdater,
   persistenceDiagnostics: () => [...failures.values()],
