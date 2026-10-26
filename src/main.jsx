@@ -41,6 +41,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Combine,
+  Copy,
   Download,
   Edit3,
   Eye,
@@ -108,6 +109,10 @@ import {
   upgradeDish,
   upgradeRecipe,
 } from "./domain/recipeCosting.js";
+import { buildMenuReport, dishTargetGp, menuDishRows, menuSummary, menuTargetGp } from "./domain/menuReport.js";
+import { ingredientRecipeName, recipeBookEntries, recipeBookEntry } from "./domain/recipeBook.js";
+import { downloadMenuReportExcel, downloadMenuReportPdf } from "./utils/exportMenuReport.js";
+import { copyRecipeForBook, downloadRecipeBookPdf } from "./utils/recipeBookExport.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
 import {
@@ -7652,8 +7657,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             suppliers={suppliers}
           />
         )}
-        {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} setProducts={setProducts} />}
+        {active === "recipes" && <Recipes companyName={stocktakeCompanyName} departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
+        {active === "menu" && <MenuCosting companyName={stocktakeCompanyName} financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} setProducts={setProducts} />}
         {active === "waste" && <Waste dateRange={dateRange} department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
           client={cloudEnabled ? supabase : null} companyId={cloudScope.companyId} locationId={cloudScope.locationId || ""}
@@ -14444,7 +14449,7 @@ function stampCostingLines(lines, context, trail = []) {
   });
 }
 
-function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, onChange, onConfirmConversion, products, recipes }) {
+function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, onChange, onConfirmConversion, products, recipes, showRecipeName = false }) {
   const [query, setQuery] = useState("");
   const [linkingId, setLinkingId] = useState("");
   const [conversionDrafts, setConversionDrafts] = useState({});
@@ -14529,6 +14534,7 @@ function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, 
                 <label><span>Qty</span><input disabled={!canEdit} inputMode="decimal" min="0" step="any" type="number" value={line.quantity} onChange={(event) => update(line.id, { quantity: event.target.value })} /></label>
                 <label><span>Unit</span><select disabled={!canEdit} value={line.unit || ""} onChange={(event) => update(line.id, { unit: event.target.value })}>{unitOptions.map((unit) => <option key={unit} value={unit}>{costingUnitLabel(unit, recipe)}</option>)}</select></label>
                 {line.type === LINE_TYPES.MANUAL && <label><span>£ per unit</span><input disabled={!canEdit} inputMode="decimal" min="0" step="any" type="number" value={line.manualUnitCost ?? 0} onChange={(event) => update(line.id, { manualUnitCost: event.target.value })} /></label>}
+                {showRecipeName && line.type !== LINE_TYPES.MANUAL && <label className="ingredient-recipe-name"><span>Name in recipe</span><input disabled={!canEdit} placeholder={ingredientRecipeName({ ...line, recipeName: "" }, context)} value={line.recipeName || ""} onChange={(event) => update(line.id, { recipeName: event.target.value })} /></label>}
                 <label><span>Waste %</span><input disabled={!canEdit} inputMode="decimal" min="0" max="95" step="any" type="number" value={line.wastePercent ?? 0} onChange={(event) => update(line.id, { wastePercent: event.target.value })} /></label>
                 <div className="ingredient-line-cost"><span>Cost</span><strong>{costed.cost == null ? "—" : money(costed.cost)}</strong></div>
               </div>
@@ -14575,7 +14581,7 @@ function useConfirmRecipeConversion(setProducts, canEdit) {
   ))) : null;
 }
 
-function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes }) {
+function Recipes({ companyName = "", permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes }) {
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
@@ -14584,6 +14590,26 @@ function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owne
   const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
   const canWrite = editing?.original ? permissions.canEdit : permissions.canAdd;
   const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
+  const [bookMessage, setBookMessage] = useState("");
+  // Copy and download only read the recipes; nothing is saved.
+  const copyForBook = async (recipe) => {
+    try {
+      await copyRecipeForBook(recipeBookEntry(recipe, context));
+      setBookMessage(`Copied “${String(recipe.name || "Recipe").trim()}” — paste it into the recipe book.`);
+    } catch {
+      setBookMessage("Copy failed: the browser did not allow access to the clipboard.");
+    }
+  };
+  const downloadBook = async () => {
+    const entries = recipeBookEntries(recipes, context);
+    if (!entries.length) { setBookMessage("No active recipes to download."); return; }
+    try {
+      await downloadRecipeBookPdf(entries, { companyName });
+      setBookMessage(`Recipe book downloaded: ${entries.length} recipe${entries.length === 1 ? "" : "s"}.`);
+    } catch {
+      setBookMessage("The recipe book could not be created.");
+    }
+  };
 
   const openRecipe = (row = null) => {
     if (row ? !permissions.canEdit : !permissions.canAdd) return;
@@ -14640,8 +14666,10 @@ function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owne
       <Panel title="Recipe costing" action="Live prices from the latest invoices">
         <div className="table-toolbar menu-dish-toolbar">
           <label><Search size={15} /><input aria-label="Search recipes" placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+          {recipes.length > 0 && <button className="ghost" onClick={downloadBook} type="button"><Download size={15} />Download recipe book</button>}
           {permissions.canAdd && <PrimaryAction onClick={() => openRecipe()}>Add Recipe</PrimaryAction>}
         </div>
+        {bookMessage && <p className="recipe-book-message" role="status">{bookMessage}<button aria-label="Dismiss" className="icon" onClick={() => setBookMessage("")} type="button"><X size={14} /></button></p>}
         {!visibleRows.length ? <div className="empty-state">{rows.length ? "No recipe matches this search." : "Add your first recipe to cost it from your invoices."}</div> : (
           <div className="menu-dish-rows recipe-rows" role="table" aria-label="Recipes">
             <div className="menu-dish-row menu-dish-head" role="row"><span role="columnheader">Recipe</span><span role="columnheader">Makes</span><span role="columnheader">Batch cost</span><span role="columnheader">Cost per unit</span><span role="columnheader" aria-label="Actions" /></div>
@@ -14656,6 +14684,7 @@ function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owne
                 <span role="cell" data-label="Batch cost">{money(row.batchCost)}</span>
                 <span role="cell" data-label="Cost per unit">{money(row.unitCost)} / {row.unitLabel}</span>
                 <span className="menu-dish-actions" role="cell">
+                  <button aria-label={`Copy ${row.name} for recipe book`} className="icon" onClick={() => copyForBook(recipes.find((recipe) => recipe.id === row.id))} title="Copy for recipe book" type="button"><Copy size={15} /></button>
                   {permissions.canEdit && <button aria-label={`Edit ${row.name}`} className="icon" onClick={() => openRecipe(row)} type="button"><Edit3 size={15} /></button>}
                   {permissions.canDelete && <button aria-label={`Delete ${row.name}`} className="icon danger" onClick={() => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe? Dishes that use it will show it as missing.", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== row.id)) })} type="button"><Trash2 size={15} /></button>}
                 </span>
@@ -14672,7 +14701,11 @@ function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owne
             <label>Unit<select value={editing.form.yieldUnit} onChange={(event) => setForm({ yieldUnit: event.target.value })}>{(RECIPE_YIELD_UNITS.includes(editing.form.yieldUnit) ? RECIPE_YIELD_UNITS : [editing.form.yieldUnit, ...RECIPE_YIELD_UNITS]).map((unit) => <option key={unit}>{unit}</option>)}</select></label>
           </div>
           {error && <p className="form-error" role="alert">{error}</p>}
-          <IngredientLinesEditor canEdit={canWrite} context={context} excludeRecipeId={editing.form.id || "__draft__"} lines={editing.form.ingredients} onChange={(ingredients) => setForm({ ingredients })} onConfirmConversion={onConfirmConversion} products={products} recipes={recipes} />
+          <div className="recipe-book-copy">
+            <button className="ghost mini-button" onClick={() => copyForBook(editing.form)} type="button"><Copy size={14} />Copy for recipe book</button>
+            {bookMessage && <small role="status">{bookMessage}</small>}
+          </div>
+          <IngredientLinesEditor canEdit={canWrite} context={context} excludeRecipeId={editing.form.id || "__draft__"} lines={editing.form.ingredients} onChange={(ingredients) => setForm({ ingredients })} onConfirmConversion={onConfirmConversion} products={products} recipes={recipes} showRecipeName />
           <div className="costing-summary">
             <div><span>Batch cost</span><strong>{money(draftCost?.batchCost || 0)}</strong></div>
             <div><span>Per {String(editing.form.yieldUnit || "unit").replace(/s$/, "")}</span><strong>{money(draftCost?.unitCost || 0)}</strong></div>
@@ -14754,9 +14787,45 @@ function MenuDishList({ canDelete, canEdit, onAdd, onDelete, onEdit, rows }) {
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus, setProducts }) {
+function MenuReportDialog({ companyName, defaultVat, menu, menuTarget, onClose, priceBasis, rows }) {
+  const [format, setFormat] = useState("pdf");
+  const [includeDetail, setIncludeDetail] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const download = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const report = buildMenuReport({ menu, rows, companyName, menuTarget, defaultVat, priceBasis, includeDetail, generatedAt: new Date().toISOString() });
+      if (format === "xlsx") await downloadMenuReportExcel(report);
+      else await downloadMenuReportPdf(report);
+      onClose();
+    } catch (downloadError) {
+      setError(downloadError?.message || "The report could not be created.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <AppModal title="Download menu report" open onClose={onClose} footer={<><button className="ghost" onClick={onClose} type="button">Cancel</button><button disabled={busy} onClick={download} type="button"><Download size={16} />{busy ? "Creating..." : "Download"}</button></>}>
+      <div className="menu-report-options">
+        <p><strong>{menu.name}</strong> · {rows.length} dish{rows.length === 1 ? "" : "es"}. Same numbers as this screen; nothing is changed.</p>
+        <fieldset>
+          <legend>Format</legend>
+          <label><input checked={format === "pdf"} name="menu-report-format" onChange={() => setFormat("pdf")} type="radio" />PDF (A4)</label>
+          <label><input checked={format === "xlsx"} name="menu-report-format" onChange={() => setFormat("xlsx")} type="radio" />Excel</label>
+        </fieldset>
+        <label className="menu-report-detail"><input checked={includeDetail} onChange={(event) => setIncludeDetail(event.target.checked)} type="checkbox" />Include detail (ingredients of each dish)</label>
+        {error && <p className="form-error" role="alert">{error}</p>}
+      </div>
+    </AppModal>
+  );
+}
+
+function MenuCosting({ companyName = "", financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus, setProducts }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
   const defaultVat = numberValue(financialSettings.defaultVat, 20);
+  const recipePriceBasis = menuSettings.recipePriceBasis || financialSettings.recipePriceBasis || "latest";
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [showArchived, setShowArchived] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState(() => visibleMenus(menus)[0]?.id || "");
@@ -14766,6 +14835,7 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   const [dishError, setDishError] = useState("");
   const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
   const [archivedMenusOpen, setArchivedMenusOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
   const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
   const selectableMenus = useMemo(() => visibleMenus(menus, showArchived), [menus, showArchived]);
@@ -14780,41 +14850,13 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
     setActiveMenuId(selectableMenus[0]?.id || "");
   }, [activeMenuId, selectableMenus]);
 
-  const targetFor = (menu, subcategory, dish) => {
-    const dishTarget = menuSettings.allowDishTargetOverride ? numberValue(dish?.targetGp) : 0;
-    const subcategoryTarget = menuSettings.allowSubcategoryTargetOverride ? numberValue(subcategory?.targetGp) : 0;
-    const menuTargetValue = menuSettings.allowMenuTargetOverride ? numberValue(menu?.targetGp) : 0;
-    return dishTarget || subcategoryTarget || menuTargetValue || defaultTarget;
-  };
+  const targetFor = (menu, subcategory, dish) => dishTargetGp(menu, subcategory, dish, menuSettings, defaultTarget);
 
-  const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
-    (subcategory.dishes || []).map((dish) => {
-      const upgraded = upgradeDish(dish, defaultVat);
-      const costed = costDish(dish, context, defaultVat);
-      const target = targetFor(activeMenu, subcategory, dish);
-      return {
-        id: dish.id,
-        name: dish.name,
-        status: dish.status,
-        subcategory: subcategory.name,
-        subcategoryId: subcategory.id,
-        cost: costed.cost,
-        priceIncludingVat: costed.priceIncludingVat,
-        net: costed.net,
-        gp: costed.gp,
-        issues: costed.issues,
-        manualLines: costed.manualLines,
-        targetGp: target,
-        belowTarget: costed.gp != null && costed.gp < target,
-        costChange: costChange(costed.cost, upgraded.savedCost),
-      };
-    })
-  );
+  // The same rows feed the screen and the downloadable report.
+  const dishRows = menuDishRows(activeMenu, context, { menuSettings, defaultTarget, defaultVat });
   const pricedRows = dishRows.filter((dish) => dish.gp != null);
-  const menuGp = average(pricedRows.map((dish) => dish.gp));
-  const menuTarget = (menuSettings.allowMenuTargetOverride ? numberValue(activeMenu?.targetGp) : 0) || defaultTarget;
-  const averageDishCost = dishRows.length ? dishRows.reduce((sum, dish) => sum + dish.cost, 0) / dishRows.length : 0;
-  const belowTargetCount = dishRows.filter((dish) => dish.belowTarget).length;
+  const { averageGp: menuGp, averageCost: averageDishCost, belowTarget: belowTargetCount } = menuSummary(dishRows);
+  const menuTarget = menuTargetGp(activeMenu, menuSettings, defaultTarget);
 
   const createMenu = () => {
     if (!permissions.canAdd) return;
@@ -14956,8 +14998,10 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
         {selectableMenus.length > 1 && <label className="menu-picker">Menu<select aria-label="Menu" value={activeMenu?.id || ""} onChange={(event) => setActiveMenuId(event.target.value)}>{selectableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}{isMenuArchived(menu) ? " (Archived)" : ""}</option>)}</select></label>}
         <button aria-expanded={menuHierarchyOpen} className="menu-header-action" onClick={() => { setMenuHierarchyOpen((current) => !current); setArchivedMenusOpen(false); }} type="button">Menu hierarchy</button>
         <button aria-expanded={archivedMenusOpen} className="menu-header-action" onClick={() => { setArchivedMenusOpen((current) => !current); setMenuHierarchyOpen(false); }} type="button">Archived Menus</button>
+        {activeMenu && <button className="menu-header-action" onClick={() => setReportOpen(true)} type="button"><Download size={15} />Download report</button>}
         {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
       </div>
+      {reportOpen && activeMenu && <MenuReportDialog companyName={companyName} defaultVat={defaultVat} menu={activeMenu} menuTarget={menuTarget} onClose={() => setReportOpen(false)} priceBasis={recipePriceBasis} rows={dishRows} />}
       {archivedMenusOpen && (
         <Panel className="archived-menus-panel" title="Archived Menus" action={`${archivedMenus.length} archived`}>
           {archivedMenus.length ? (
