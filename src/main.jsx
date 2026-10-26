@@ -254,6 +254,7 @@ import {
   stocktakeTemplateRows,
 } from "./domain/stocktakeImport.js";
 import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
+import { departmentStockPosition, periodStockResult, stockUnavailableReason } from "./domain/stockPeriod.js";
 import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
 import { downloadProductsExcel } from "./utils/exportProductsExcel.js";
 import { mondaySundayWeekDates, mondayWeekStart, shiftMondayWeek } from "./domain/weekNavigation.js";
@@ -1293,6 +1294,12 @@ function moneyForCurrency(value, currency = "GBP") {
   } catch {
     return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Number(value) || 0);
   }
+}
+
+// Waste is part of the stock cost, so it is shown as its share — never added to it.
+function wasteShareLabel(metrics) {
+  const salesShare = `${percent(metrics.wastePercent)} of net sales`;
+  return metrics.stockAvailable && metrics.wasteShareOfCost != null ? `${percent(metrics.wasteShareOfCost)} of stock cost · ${salesShare}` : salesShare;
 }
 
 function percent(value) {
@@ -3711,30 +3718,16 @@ function wasteCost(row) {
   return numberValue(row.quantity) * numberValue(row.unitCost);
 }
 
-function latestStocktakeValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
-  const relevant = stocktakes
-    .filter((stocktake) => departmentMatches(stocktake.department, selectedDepartment) && stocktake.date <= dateRange.end)
-    .sort((a, b) => b.date.localeCompare(a.date));
-  if (selectedDepartment === "All departments") {
-    const latestByDepartment = departmentNames.map((department) => relevant.find((stocktake) => stocktake.department === department)).filter(Boolean);
-    return latestByDepartment.reduce((sum, stocktake) => sum + numberValue(stocktake.totalValue), 0);
-  }
-  return numberValue(relevant[0]?.totalValue);
-}
-
-function latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
-  const relevant = stocktakes
-    .filter((stocktake) => departmentMatches(stocktake.department, selectedDepartment) && stocktake.date <= dateRange.end)
-    .sort((a, b) => b.date.localeCompare(a.date));
-  if (selectedDepartment === "All departments") {
-    return departmentNames.map((department) => relevant.find((stocktake) => stocktake.department === department)).filter(Boolean);
-  }
-  return relevant[0] ? [relevant[0]] : [];
-}
-
-function openingStockValue(stocktakes, selectedDepartment, departmentNames = defaultDepartments, dateRange = { start: "0000-01-01", end: "9999-12-31" }) {
-  return latestStocktakeRecords(stocktakes, selectedDepartment, departmentNames, dateRange)
-    .reduce((sum, stocktake) => sum + numberValue(stocktake.openingStockValue), 0);
+// Opening and closing counts around the period, per department (see domain/stockPeriod.js).
+function periodStock(stocktakes, selectedDepartment, departmentNames, dateRange, invoicesInRange, netSales, waste) {
+  const names = selectedDepartment === "All departments" ? departmentNames : [selectedDepartment];
+  const departments = names.map((name) => ({
+    department: name,
+    position: departmentStockPosition(stocktakes.filter((stocktake) => departmentMatches(stocktake.department, name)), dateRange),
+    required: selectedDepartment !== "All departments" || Math.abs(purchasesForDepartment(invoicesInRange, name)) > 0.01,
+  }));
+  const purchases = purchasesForDepartment(invoicesInRange, selectedDepartment);
+  return periodStockResult({ departments, purchases, waste, netSales });
 }
 
 function salesForDepartment(salesRows, selectedDepartment, gpCalculationBase = "Net Sales") {
@@ -3786,12 +3779,10 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
   const vat = vatForDepartment(salesRows, selectedDepartment);
   const purchases = purchasesForDepartment(filteredInvoices, selectedDepartment);
   const allPurchases = filteredInvoices.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0);
-  const openingStock = openingStockValue(stocktakes, selectedDepartment, departmentNames, dateRange);
-  const closingStock = latestStocktakeValue(stocktakes, selectedDepartment, departmentNames, dateRange);
   const waste = departmentWaste.reduce((sum, item) => sum + wasteCost(item), 0);
   const labour = numberValue(labourSummary.wages, 0);
-  const stocktakeCost = openingStock + purchases - closingStock;
-  const realCostIncludingWaste = stocktakeCost + waste;
+  // Waste is already inside the stock cost (bought, then missing from the closing count): not added again.
+  const stock = periodStock(stocktakes, selectedDepartment, departmentNames, dateRange, filteredInvoices, salesTotal, waste);
 
   return {
     grossSales,
@@ -3800,20 +3791,22 @@ function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, waste
     sales: salesTotal,
     purchases,
     allPurchases,
-    openingStock,
-    closingStock,
-    stocktakeCost,
-    realCostIncludingWaste,
+    stockAvailable: stock.stockAvailable,
+    stockUnavailableReason: stock.stockAvailable ? "" : stockUnavailableReason(stock),
+    openingStock: stock.openingStock,
+    closingStock: stock.closingStock,
+    stocktakeCost: stock.stocktakeCost,
+    wasteShareOfCost: stock.wasteShareOfCost,
     invoiceGp: salesTotal ? ((salesTotal - purchases) / salesTotal) * 100 : 0,
-    stocktakeGp: salesTotal ? ((salesTotal - stocktakeCost) / salesTotal) * 100 : 0,
-    realGp: salesTotal ? ((salesTotal - realCostIncludingWaste) / salesTotal) * 100 : 0,
+    stocktakeGp: stock.stocktakeGp,
+    realGp: stock.stocktakeGp,
     waste,
     wastePercent: salesTotal ? (waste / salesTotal) * 100 : 0,
     labour,
     labourHours: numberValue(labourSummary.hours, 0),
     labourPercent: salesTotal ? (labour / salesTotal) * 100 : 0,
     labourRecords: labourSummary.rows || [],
-    stockVariance: closingStock - openingStock,
+    stockVariance: stock.stockAvailable ? stock.closingStock - stock.openingStock : null,
     salesRows: departmentSalesRows,
     wasteRecords: departmentWaste,
     invoiceItems: departmentInvoiceItems,
@@ -7669,7 +7662,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         )}
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
         {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
-        {active === "waste" && <Waste department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
+        {active === "waste" && <Waste dateRange={dateRange} department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
           client={cloudEnabled ? supabase : null} companyId={cloudScope.companyId} locationId={cloudScope.locationId || ""}
           isActive={active === "gp"}
@@ -8039,13 +8032,14 @@ function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeStat
   const hasPurchases = (metrics.invoices || []).length > 0;
   const hasWaste = (metrics.wasteRecords || []).length > 0;
   const hasGp = hasSales && numberValue(metrics.netSales) > 0;
+  const hasStockGp = hasGp && metrics.stockAvailable;
   return (
     <>
       <div className="metric-grid primary-metrics">
         <Metric empty={!hasSales} label="Net Sales" value={moneyOrEmpty(metrics.netSales, hasSales)} delta={hasSales ? "Used for GP" : "No sales logged yet"} />
         <Metric empty={!hasPurchases} label="Purchases" value={moneyOrEmpty(metrics.purchases, hasPurchases)} delta={hasPurchases ? department : "No invoices logged yet"} />
         {dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
-        <Metric empty={!hasGp} label="Real GP incl. waste" value={hasGp ? percent(metrics.realGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.realGp >= gpTarget ? "good" : "warn") : "default"} />
+        <Metric empty={!hasStockGp} label="Real GP incl. waste" value={hasStockGp ? percent(metrics.realGp) : hasGp ? "Not available" : "–"} delta={hasStockGp ? `Target ${percent(gpTarget)}` : hasGp ? metrics.stockUnavailableReason : `Target ${percent(gpTarget)}`} tone={hasStockGp ? (metrics.realGp >= gpTarget ? "good" : "warn") : "default"} />
         {dashboardMode && <Metric empty={!hasWaste} label="Waste" value={moneyOrEmpty(metrics.waste,hasWaste)} delta={hasWaste ? "Recorded waste" : "No waste logged yet"} />}
         {dashboardMode && <Metric empty={!hasGp || !metrics.labourRecords?.length} label="Labour %" value={hasGp && metrics.labourRecords?.length ? percent(metrics.labourPercent) : "–"} delta={metrics.labourRecords?.length ? "Of net sales" : "No labour logged yet"} />}
       </div>
@@ -8054,8 +8048,8 @@ function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeStat
         <div className="metric-grid secondary-metrics">
           <Metric empty={!hasSales} label="Gross Sales" value={moneyOrEmpty(metrics.grossSales, hasSales)} delta={rangeLabel(dateRangeState, dateRange, weekStartsOn)} />
           {!dashboardMode && <Metric empty={!hasGp} label="Invoice GP %" value={hasGp ? percent(metrics.invoiceGp) : "–"} delta={`Target ${percent(gpTarget)}`} tone={hasGp ? (metrics.invoiceGp >= gpTarget ? "good" : "warn") : "default"} />}
-          <Metric empty={!hasGp} label="Stocktake GP %" value={hasGp ? percent(metrics.stocktakeGp) : "–"} delta="Opening + purchases - closing" tone={hasGp ? (metrics.stocktakeGp >= gpTarget ? "good" : "warn") : "default"} />
-          <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? `${percent(metrics.wastePercent)} of GP base` : "No waste logged yet"} tone={hasSales && hasWaste ? "warn" : "default"} />
+          <Metric empty={!hasStockGp} label="Stocktake GP %" value={hasStockGp ? percent(metrics.stocktakeGp) : hasGp ? "Not available" : "–"} delta={hasStockGp || !hasGp ? "Opening + purchases - closing" : metrics.stockUnavailableReason} tone={hasStockGp ? (metrics.stocktakeGp >= gpTarget ? "good" : "warn") : "default"} />
+          <Metric empty={!hasWaste} label="Waste Cost" value={moneyOrEmpty(metrics.waste, hasWaste)} delta={hasWaste ? wasteShareLabel(metrics) : "No waste logged yet"} tone={hasSales && hasWaste ? "warn" : "default"} />
         </div>
       </details>
     </>
@@ -8116,8 +8110,9 @@ function aggregateDashboardRows(rows, range) {
   const groupedRows = [...buckets.values()].map((row) => ({
     ...row,
     invoiceGp: row.netSales ? ((row.netSales - row.purchases) / row.netSales) * 100 : 0,
-    stocktakeGp: row.netSales ? ((row.netSales - row.purchases) / row.netSales) * 100 : 0,
-    realGp: row.netSales ? ((row.netSales - row.purchases - row.waste) / row.netSales) * 100 : 0,
+    // Stock GP needs counts at each end of the bucket; daily rows do not carry them.
+    stocktakeGp: null,
+    realGp: null,
   }));
 
   return { granularity, rows: groupedRows };
@@ -8256,8 +8251,8 @@ function DashboardPerformance({filterBar,metrics,dailyRows,comparisonMetrics,com
     <div className="mf-performance-facts">
       <div><span>Purchases</span><strong>{purchasesReady?moneyOrEmpty(metrics.purchases,hasPurchases):purchasesLabel}</strong><small>Confirmed financial inputs</small></div>
       <div><span>Invoice GP</span><strong>{!purchasesReady?purchasesLabel:hasGp?percent(metrics.invoiceGp):"—"}</strong><small>Target {percent(gpTarget)}</small></div>
-      <div><span>Real GP incl. waste</span><strong>{!purchasesReady?purchasesLabel:hasGp?percent(metrics.realGp):"—"}</strong><small>Stock-adjusted GP</small></div>
-      <div><span>Waste</span><strong>{moneyOrEmpty(metrics.waste,hasWaste)}</strong><small>{hasWaste?"Recorded waste":"No waste recorded"}</small></div>
+      <div><span>Real GP incl. waste</span><strong>{!purchasesReady?purchasesLabel:!hasGp?"—":metrics.stockAvailable?percent(metrics.realGp):"Not available"}</strong><small>{hasGp&&!metrics.stockAvailable?metrics.stockUnavailableReason:"Stock-adjusted GP · waste included"}</small></div>
+      <div><span>Waste</span><strong>{moneyOrEmpty(metrics.waste,hasWaste)}</strong><small>{hasWaste?wasteShareLabel(metrics):"No waste recorded"}</small></div>
       <div><span>Labour %</span><strong>{hasGp&&hasLabour?percent(metrics.labourPercent):"—"}</strong><small>{hasLabour?"Of net sales":"No labour recorded"}</small></div>
       <div><span>Gross sales</span><strong>{moneyOrEmpty(metrics.grossSales,hasSales)}</strong><small>Including VAT / tax</small></div>
     </div>
@@ -14994,10 +14989,12 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
   );
 }
 
-function Waste({ department, departmentNames, metrics, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "waste"), products, requestDelete, wasteItems, setWasteItems }) {
+function Waste({ dateRange, department, departmentNames, metrics, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "waste"), products, requestDelete, wasteItems, setWasteItems }) {
   const visibleWaste = wasteItems.filter((item) => departmentMatches(item.department, department)).map((item) => ({ ...item, cost: wasteCost(item) }));
-  const visibleWasteCost = visibleWaste.reduce((sum, item) => sum + numberValue(item.cost), 0);
-  const visibleWasteDays = new Set(visibleWaste.map((item) => item.date).filter(Boolean)).size;
+  // The summary follows the selected period; the table still lists every record.
+  const periodWaste = dateRange ? visibleWaste.filter((item) => dateInRange(item.date, dateRange)) : visibleWaste;
+  const periodWasteCost = periodWaste.reduce((sum, item) => sum + numberValue(item.cost), 0);
+  const periodWasteDays = new Set(periodWaste.map((item) => item.date).filter(Boolean)).size;
   const emptyWaste = { date: today(), department: department === "All departments" ? departmentNames[0] || "Kitchen Made" : department, productName: "", quantity: 1, unitCost: 0, reason: "Spoiled", notes: "" };
   const [form, setForm] = useState(emptyWaste);
   const [editingWasteId, setEditingWasteId] = useState("");
@@ -15029,10 +15026,10 @@ function Waste({ department, departmentNames, metrics, permissions = permissions
   return (
     <div className="waste-page">
       <div className="metric-grid waste-metrics">
-        <Metric label="Waste cost" value={money(visibleWasteCost)} delta="This month" />
+        <Metric label="Waste cost" value={money(periodWasteCost)} delta={dateRange ? `${formatRangeDate(dateRange.start)} – ${formatRangeDate(dateRange.end)}` : "All dates"} />
         <Metric label="% of net sales" value={percent(metrics?.wastePercent || 0)} delta="Current selected period" />
-        <Metric label="Average waste cost" value={money(visibleWaste.length ? visibleWasteCost / visibleWaste.length : 0)} delta="Per event" />
-        <Metric label="Waste events" value={visibleWaste.length} delta={`${visibleWasteDays} day${visibleWasteDays === 1 ? "" : "s"} logged`} />
+        <Metric label="Average waste cost" value={money(periodWaste.length ? periodWasteCost / periodWaste.length : 0)} delta="Per event in period" />
+        <Metric label="Waste events" value={periodWaste.length} delta={`${periodWasteDays} day${periodWasteDays === 1 ? "" : "s"} logged in period`} />
       </div>
       <Panel title="Waste tracking" action="Separate cost line">
         <DataTable
@@ -18325,8 +18322,8 @@ function DailyGpTable({ rows }) {
         { key: "purchases", label: "Purchases", render: (value) => money(value) },
         { key: "waste", label: "Waste", render: (value) => money(value) },
         { key: "invoiceGp", label: "Invoice GP %", render: (value) => percent(value) },
-        { key: "stocktakeGp", label: "Stocktake GP %", render: (value) => percent(value) },
-        { key: "realGp", label: "Real GP including waste", render: (value) => percent(value) },
+        { key: "stocktakeGp", label: "Stocktake GP %", render: (value) => value == null ? "—" : percent(value) },
+        { key: "realGp", label: "Real GP including waste", render: (value) => value == null ? "—" : percent(value) },
       ]}
       rows={visibleRows}
     />
@@ -18371,7 +18368,7 @@ function InsightList({ metrics }) {
   return (
     <div className="stack-list">
       <Opportunity title="Invoice GP" body={`Invoice GP is ${percent(metrics.invoiceGp)}. Review high-value invoices before the next order.`} />
-      <Opportunity title="Stocktake cost" body={`Opening + purchases - closing gives ${money(metrics.stocktakeCost)} real cost used.`} />
+      <Opportunity title="Stocktake cost" body={metrics.stockAvailable ? `Opening + purchases - closing gives ${money(metrics.stocktakeCost)} real cost used, waste included.` : `${metrics.stockUnavailableReason}: stock cost not calculated.`} />
       <Opportunity title="Waste pressure" body={`Waste is ${money(metrics.waste)} or ${percent(metrics.wastePercent)} of current sales.`} />
     </div>
   );
