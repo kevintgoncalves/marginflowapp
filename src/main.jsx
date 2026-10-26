@@ -87,7 +87,27 @@ import {
   normalizeProductName,
   productAliases,
   rankProductCandidates,
+  createProductMatchIndex,
 } from "./domain/productMatching.js";
+import {
+  LINE_STATUS,
+  LINE_TYPES,
+  PACK_UNIT,
+  PORTION_UNIT,
+  costChange,
+  costDish,
+  costLine,
+  costRecipe,
+  createCostingContext,
+  lineFromSearchHit,
+  productUnitPrice,
+  recordForSave,
+  searchIngredients,
+  suggestedPrice,
+  unitsForLine,
+  upgradeDish,
+  upgradeRecipe,
+} from "./domain/recipeCosting.js";
 import { invoiceLearningDebug } from "./domain/invoiceLearningDiagnostics.js";
 import { correctionHistoryForInvoice, deactivateSupplierProductMapping, learnSupplierProductMappings } from "./domain/invoiceLearning.js";
 import {
@@ -2309,12 +2329,6 @@ function InvoiceFinancialSummary({ invoice = {}, currency = "GBP", discountAmoun
   );
 }
 
-function recipeAutocomplete(recipes, query, limit = 8) {
-  const term = String(query || "").trim().toLowerCase();
-  if (!term) return [];
-  return recipes.filter((recipe) => recipe.name.toLowerCase().includes(term)).slice(0, limit);
-}
-
 function enrichInvoiceLine(line, products, matchingSettings = defaultMatchingSettings, supplierMappings = [], { organisationId = "", locationId = "", departmentNames = defaultDepartments } = {}) {
   if (isCreateNewProductResolution(line)) {
     return lineWithCreateNewProductResolution(line);
@@ -3855,28 +3869,6 @@ function calculateMetrics(invoices, sales, department, stocktakes, wasteItems, d
     };
   });
   return { ...base, dailyRows, departmentRows };
-}
-
-function recipeBatchCost(recipe) {
-  return (recipe.ingredients || []).reduce((sum, ingredient) => sum + numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost), 0);
-}
-
-function recipeUnitCost(recipe) {
-  return numberValue(recipe.yieldQuantity) ? recipeBatchCost(recipe) / numberValue(recipe.yieldQuantity) : 0;
-}
-
-function dishCost(dish, recipes) {
-  const linkedRecipeCost = (dish.recipeIds || []).reduce((sum, recipeId) => {
-    const recipe = recipes.find((item) => item.id === recipeId);
-    return sum + (recipe ? recipeUnitCost(recipe) : 0);
-  }, 0);
-  const ingredientCost = (dish.ingredients || []).reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
-  return linkedRecipeCost + ingredientCost + numberValue(dish.manualCost);
-}
-
-function gpFor(cost, price) {
-  const sellingPrice = numberValue(price);
-  return sellingPrice ? ((sellingPrice - numberValue(cost)) / sellingPrice) * 100 : 0;
 }
 
 function average(values) {
@@ -7661,7 +7653,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           />
         )}
         {active === "recipes" && <Recipes departmentNames={allowedDepartmentNames} permissions={permissionsByPage.recipes} products={products} recipes={recipes} requestDelete={requestDelete} setProducts={setProducts} setRecipes={setRecipes} suppliers={suppliers} />}
-        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} />}
+        {active === "menu" && <MenuCosting financialSettings={financialSettings} menuSettings={menuSettings} menus={menus} permissions={permissionsByPage.menu} products={products} recipes={recipes} requestDelete={requestDelete} setMenus={setMenus} setProducts={setProducts} />}
         {active === "waste" && <Waste dateRange={dateRange} department={effectiveDepartment} departmentNames={allowedDepartmentNames} metrics={metrics} permissions={permissionsByPage.waste} products={products} requestDelete={requestDelete} setWasteItems={setWasteItems} wasteItems={wasteItems} />}
         <SalesAnalysis
           client={cloudEnabled ? supabase : null} companyId={cloudScope.companyId} locationId={cloudScope.locationId || ""}
@@ -14404,240 +14396,301 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
   );
 }
 
-function Recipes({ departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes, suppliers }) {
-  const blankIngredient = () => ({ id: uid(), productId: "", productName: "", supplier: "", quantity: 1, unit: "", unitCost: 0, lineCost: 0 });
-  const empty = { name: "", yieldQuantity: 1, yieldUnit: "portions", notes: "", method: "", ingredients: [blankIngredient(), blankIngredient()] };
-  const visibleSuppliers = activeSupplierRows(suppliers);
-  const emptyProduct = { name: "", supplier: visibleSuppliers[0]?.name || "", packSize: "", quantity: 1, unitCost: 0, department: departmentNames[0] || "Kitchen Made", aliases: "" };
-  const [form, setForm] = useState(empty);
-  const [editingId, setEditingId] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
+const RECIPE_YIELD_UNITS = ["portions", "kg", "g", "l", "ml", "each"];
+const NEW_MENU_CATEGORY = "__new__";
+
+function costingUnitLabel(unit, recipe = null) {
+  if (unit === PORTION_UNIT) return recipe?.yieldUnit && !["kg", "g", "l", "ml"].includes(recipe.yieldUnit) ? recipe.yieldUnit.replace(/s$/, "") : "portion";
+  if (unit === PACK_UNIT) return "pack";
+  return unit;
+}
+
+function ingredientLineMeta(line, costed) {
+  if (line.type === LINE_TYPES.MANUAL) return `Manual price · ${money(numberValue(line.manualUnitCost))} per ${line.unit || "unit"}`;
+  if (line.type === LINE_TYPES.RECIPE) return costed.unitPrice != null ? `Recipe · ${money(costed.unitPrice)}/${costed.priceUnit}` : "Recipe";
+  const parts = [costed.supplier, costed.packSize].filter(Boolean);
+  if (costed.priceUnit === PACK_UNIT && costed.packPrice > 0) parts.push(`${money(costed.packPrice)}/pack`);
+  else if (costed.unitPrice != null) parts.push(`${money(costed.unitPrice)}/${costed.priceUnit}`);
+  else if (costed.packPrice > 0) parts.push(`${money(costed.packPrice)}/pack`);
+  if (costed.priceDate) parts.push(formatRangeDate(costed.priceDate));
+  return parts.join(" · ");
+}
+
+function searchHitMeta(hit, context) {
+  if (hit.type === LINE_TYPES.RECIPE) {
+    const costed = costRecipe(hit.id, context);
+    const unit = costed.yieldBase?.base === PORTION_UNIT ? (hit.recipe.yieldUnit || "portion").replace(/s$/, "") : costed.yieldBase?.base;
+    return `Recipe · ${costed.baseCost != null ? `${money(costed.baseCost)}/${unit}` : "cost to check"}`;
+  }
+  const price = productUnitPrice(hit.product);
+  return [hit.product.supplier, hit.product.packSize, price.confirmed ? `${money(price.price)}/${price.unit}` : price.packPrice > 0 ? `${money(price.packPrice)}/pack` : "", price.date ? formatRangeDate(price.date) : ""].filter(Boolean).join(" · ");
+}
+
+// Records the price used at this save on each line, so a later change can be shown as "up X% since".
+// A starting point for "1 pack =": the first weight or volume in the pack text ("1kg tray" → 1 kg).
+function guessPackContent(packSize = "") {
+  const match = String(packSize).toLowerCase().replace(/×/g, "x").match(/(?:(\d+(?:\.\d+)?)\s*x\s*)?(\d+(?:\.\d+)?)\s*(kg|g|ltr|litre|l|ml)\b/);
+  if (!match) return {};
+  const unit = ["kg", "g"].includes(match[3]) ? "kg" : "l";
+  const quantity = Number(match[1] || 1) * Number(match[2]) * (["g", "ml"].includes(match[3]) ? 0.001 : 1);
+  return { baseQuantity: String(Number(quantity.toFixed(4))), baseUnit: unit };
+}
+
+function stampCostingLines(lines, context, trail = []) {
+  const stamp = today();
+  return lines.map((line) => {
+    const costed = costLine(line, context, trail);
+    return costed.unitPrice != null ? { ...line, savedUnitPrice: costed.unitPrice, savedAt: stamp } : line;
+  });
+}
+
+function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, onChange, onConfirmConversion, products, recipes }) {
+  const [query, setQuery] = useState("");
+  const [linkingId, setLinkingId] = useState("");
+  const [conversionDrafts, setConversionDrafts] = useState({});
+  const searchRef = useRef(null);
+  const productIndex = useMemo(() => createProductMatchIndex(products.filter((product) => product.active !== false && !product.mergedIntoProductId)), [products]);
+  const hits = useMemo(() => searchIngredients(query, { products, recipes, excludeRecipeId, productIndex, limit: 8 }), [query, products, recipes, excludeRecipeId, productIndex]);
+  const trail = excludeRecipeId ? [excludeRecipeId] : [];
+  const update = (id, patch) => onChange(lines.map((line) => (line.id === id ? { ...line, ...patch } : line)));
+  const remove = (id) => onChange(lines.filter((line) => line.id !== id));
+  const pick = (hit) => {
+    const next = lineFromSearchHit(hit, linkingId || uid());
+    if (linkingId) onChange(lines.map((line) => (line.id === linkingId ? { ...next, wastePercent: line.wastePercent || 0 } : line)));
+    else onChange([...lines, next]);
+    setQuery("");
+    setLinkingId("");
+  };
+  const addManual = () => {
+    const name = query.trim();
+    if (!name) return;
+    onChange([...lines, { id: uid(), type: LINE_TYPES.MANUAL, productId: "", sourceId: "", name, quantity: 1, unit: "each", manualUnitCost: 0, wastePercent: 0 }]);
+    setQuery("");
+  };
+  const startLinking = (line) => {
+    setLinkingId(line.id);
+    setQuery(line.name || "");
+    searchRef.current?.focus();
+  };
+  const confirmConversion = (line, costed) => {
+    const draft = conversionDrafts[line.id] || guessPackContent(costed.packSize);
+    if (!(numberValue(draft.baseQuantity) > 0) || !draft.baseUnit) return;
+    onConfirmConversion?.(costed.productId, { packSize: costed.packSize || "", baseQuantity: numberValue(draft.baseQuantity), baseUnit: draft.baseUnit });
+    setConversionDrafts((current) => ({ ...current, [line.id]: undefined }));
+  };
+
+  return (
+    <div className="ingredient-editor">
+      {canEdit && (
+        <div className="ingredient-search">
+          <label>
+            <span>{linkingId ? "Link to a product" : "Add ingredient"}</span>
+            <span className="ingredient-search-field">
+              <Search size={15} aria-hidden="true" />
+              <input ref={searchRef} aria-label="Search product or recipe" autoComplete="off" placeholder="Search product or recipe" value={query} onChange={(event) => setQuery(event.target.value)} />
+              {(query || linkingId) && <button aria-label="Clear search" className="icon" onClick={() => { setQuery(""); setLinkingId(""); }} type="button"><X size={14} /></button>}
+            </span>
+          </label>
+          {query.trim() && (
+            <div className="ingredient-suggestions" role="listbox">
+              {hits.map((hit) => (
+                <button key={`${hit.type}-${hit.id}`} onClick={() => pick(hit)} role="option" aria-selected="false" type="button">
+                  <strong>{hit.name}</strong>
+                  <span>{searchHitMeta(hit, context)}</span>
+                </button>
+              ))}
+              {!linkingId && <button className="ingredient-manual-option" onClick={addManual} type="button"><Plus size={14} />Add “{query.trim()}” with a manual price</button>}
+              {!hits.length && <small>No product or recipe found. Check the products list before adding a manual line.</small>}
+            </div>
+          )}
+        </div>
+      )}
+      {!lines.length && <div className="empty-state">Search above to add the first ingredient.</div>}
+      <ul className="ingredient-lines">
+        {lines.map((line) => {
+          const costed = costLine(line, context, trail);
+          const recipe = line.type === LINE_TYPES.RECIPE ? context.recipes.find((item) => item.id === (line.recipeId || line.sourceId)) : null;
+          const units = unitsForLine(line, context);
+          const unitOptions = units.includes(line.unit) || !line.unit ? units : [line.unit, ...units];
+          const change = line.savedUnitPrice ? costChange(costed.unitPrice, line.savedUnitPrice) : null;
+          const draft = conversionDrafts[line.id] || guessPackContent(costed.packSize);
+          return (
+            <li className={`ingredient-line status-${costed.status}`} key={line.id}>
+              <div className="ingredient-line-head">
+                <div className="ingredient-line-name">
+                  {line.type === LINE_TYPES.MANUAL && canEdit
+                    ? <input aria-label="Ingredient name" value={line.name} onChange={(event) => update(line.id, { name: event.target.value })} />
+                    : <strong>{costed.name || line.name || "Missing item"}</strong>}
+                  <small>{ingredientLineMeta(line, costed)}</small>
+                </div>
+                {canEdit && <button aria-label={`Remove ${costed.name || line.name || "ingredient"}`} className="icon danger" onClick={() => remove(line.id)} type="button"><Trash2 size={15} /></button>}
+              </div>
+              <div className="ingredient-line-controls">
+                <label><span>Qty</span><input disabled={!canEdit} inputMode="decimal" min="0" step="any" type="number" value={line.quantity} onChange={(event) => update(line.id, { quantity: event.target.value })} /></label>
+                <label><span>Unit</span><select disabled={!canEdit} value={line.unit || ""} onChange={(event) => update(line.id, { unit: event.target.value })}>{unitOptions.map((unit) => <option key={unit} value={unit}>{costingUnitLabel(unit, recipe)}</option>)}</select></label>
+                {line.type === LINE_TYPES.MANUAL && <label><span>£ per unit</span><input disabled={!canEdit} inputMode="decimal" min="0" step="any" type="number" value={line.manualUnitCost ?? 0} onChange={(event) => update(line.id, { manualUnitCost: event.target.value })} /></label>}
+                <label><span>Waste %</span><input disabled={!canEdit} inputMode="decimal" min="0" max="95" step="any" type="number" value={line.wastePercent ?? 0} onChange={(event) => update(line.id, { wastePercent: event.target.value })} /></label>
+                <div className="ingredient-line-cost"><span>Cost</span><strong>{costed.cost == null ? "—" : money(costed.cost)}</strong></div>
+              </div>
+              {costed.status === LINE_STATUS.MANUAL && (
+                <div className="ingredient-line-alert">
+                  <Badge tone="amber">Not linked</Badge>
+                  <span>Uses the price typed by hand, so invoices don't update it.</span>
+                  {canEdit && <button className="ghost mini-button" onClick={() => startLinking(line)} type="button">Link to a product</button>}
+                </div>
+              )}
+              {costed.status === LINE_STATUS.NEEDS_CONVERSION && line.type === LINE_TYPES.PRODUCT && (
+                <div className="ingredient-line-alert conversion">
+                  <span>How much is in one pack{costed.packSize ? ` (${costed.packSize})` : ""}? Until then this line has no cost.</span>
+                  {canEdit && onConfirmConversion && (
+                    <span className="ingredient-conversion-fields">
+                      <span>1 pack =</span>
+                      <input aria-label="Content per pack" inputMode="decimal" min="0" step="any" type="number" value={draft.baseQuantity ?? ""} onChange={(event) => setConversionDrafts((current) => ({ ...current, [line.id]: { ...draft, baseQuantity: event.target.value } }))} />
+                      <select aria-label="Content unit" value={draft.baseUnit || ""} onChange={(event) => setConversionDrafts((current) => ({ ...current, [line.id]: { ...draft, baseUnit: event.target.value } }))}>
+                        <option value="">unit</option><option value="kg">kg</option><option value="l">litre</option><option value="each">each</option>
+                      </select>
+                      <button className="ghost mini-button" disabled={!(numberValue(draft.baseQuantity) > 0) || !draft.baseUnit} onClick={() => confirmConversion(line, costed)} type="button">Confirm conversion</button>
+                    </span>
+                  )}
+                  {canEdit && <button className="ghost mini-button" onClick={() => update(line.id, { unit: PACK_UNIT })} type="button">Count in packs</button>}
+                </div>
+              )}
+              {costed.status === LINE_STATUS.NEEDS_CONVERSION && line.type === LINE_TYPES.RECIPE && <div className="ingredient-line-alert"><Badge tone="amber">Check</Badge><span>This recipe has ingredients without a cost. Open it to finish them.</span></div>}
+              {costed.status === LINE_STATUS.UNIT_MISMATCH && <div className="ingredient-line-alert"><Badge tone="amber">Unit</Badge><span>Priced per {costed.priceUnit || "pack"}. Choose a matching unit or count in packs.</span></div>}
+              {costed.status === LINE_STATUS.NO_PRICE && <div className="ingredient-line-alert"><Badge tone="amber">No price</Badge><span>This product has no invoice price yet.</span></div>}
+              {costed.status === LINE_STATUS.MISSING && <div className="ingredient-line-alert"><Badge tone="red">Missing</Badge><span>This product or recipe no longer exists.</span>{canEdit && <button className="ghost mini-button" onClick={() => startLinking(line)} type="button">Choose another</button>}</div>}
+              {costed.status === LINE_STATUS.CYCLE && <div className="ingredient-line-alert"><Badge tone="red">Loop</Badge><span>This recipe would contain itself.</span></div>}
+              {change != null && <div className="ingredient-line-alert"><Badge tone={change > 0 ? "amber" : "green"}>{change > 0 ? `Price up ${change}%` : `Price down ${Math.abs(change)}%`}</Badge><span>since {formatRangeDate(line.savedAt)}</span></div>}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function useConfirmRecipeConversion(setProducts, canEdit) {
+  return canEdit && setProducts ? (productId, conversion) => setProducts((current) => current.map((product) => (
+    product.id === productId ? { ...product, recipeConversion: { ...conversion, confirmedAt: new Date().toISOString() }, updatedAt: new Date().toISOString() } : product
+  ))) : null;
+}
+
+function Recipes({ permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "recipes"), products, recipes, requestDelete, setProducts, setRecipes }) {
+  const [editing, setEditing] = useState(null);
+  const [query, setQuery] = useState("");
+  const [error, setError] = useState("");
   const [methodOpen, setMethodOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
-  const [createProductForIngredientId, setCreateProductForIngredientId] = useState("");
-  const [productForm, setProductForm] = useState(emptyProduct);
+  const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
+  const canWrite = editing?.original ? permissions.canEdit : permissions.canAdd;
+  const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
 
-  const ingredientFromProduct = (ingredient, product) => {
-    const cheapest = cheapestOffer(product, products);
-    const quantity = numberValue(ingredient.quantity, 1);
-    const unitCost = numberValue(cheapest.price, product.unitCost);
-    return {
-      ...ingredient,
-      productId: product.id,
-      productName: product.name,
-      supplier: cheapest.supplier || product.supplier || "",
-      unit: ingredient.unit || product.packSize || "",
-      unitCost,
-      lineCost: quantity * unitCost,
-    };
+  const openRecipe = (row = null) => {
+    if (row ? !permissions.canEdit : !permissions.canAdd) return;
+    const original = row ? recipes.find((recipe) => recipe.id === row.id) : null;
+    const form = original ? upgradeRecipe(original) : { id: "", schemaVersion: 2, name: "", yieldQuantity: 1, yieldUnit: "portions", method: "", notes: "", ingredients: [], status: "Active" };
+    setEditing({ original, form });
+    setMethodOpen(Boolean(form.method?.trim()));
+    setNotesOpen(Boolean(form.notes?.trim()));
+    setError("");
   };
+  const setForm = (patch) => setEditing((current) => ({ ...current, form: { ...current.form, ...patch } }));
 
-  const updateIngredient = (id, field, value) => {
-    setForm((current) => ({
-      ...current,
-      ingredients: current.ingredients.map((ingredient) => {
-        if (ingredient.id !== id) return ingredient;
-        let updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-        if (field === "productName") {
-          const product = products.find((candidate) => candidate.active !== false && candidate.name.toLowerCase() === String(value).trim().toLowerCase());
-          updated = product ? ingredientFromProduct(updated, product) : { ...updated, productId: "", supplier: "", unitCost: 0, lineCost: 0 };
-        }
-        if (field === "quantity" || field === "unitCost") {
-          updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
-        }
-        return updated;
-      }),
-    }));
-  };
-
-  const openCreateProduct = (ingredient) => {
-    if (!permissions.canAdd && !permissions.canEdit) return;
-    setCreateProductForIngredientId(ingredient.id);
-    setProductForm({
-      ...emptyProduct,
-      name: ingredient.productName || "",
-      unitCost: ingredient.unitCost || 0,
-      packSize: ingredient.unit || "",
-    });
-  };
-
-  const saveCreatedProduct = () => {
-    if (!permissions.canAdd && !permissions.canEdit) return;
-    if (!productForm.name.trim()) return;
-    const product = productRecordFromInput(productForm, {
-      id: uid(),
-      defaultSupplier: visibleSuppliers[0]?.name || "",
-      defaultDepartment: departmentNames[0] || "Kitchen Made",
-      date: today(),
-    });
-    setProducts((current) => [product, ...current]);
-    setForm((current) => ({
-      ...current,
-      ingredients: current.ingredients.map((ingredient) => (
-        ingredient.id === createProductForIngredientId
-          ? ingredientFromProduct({ ...ingredient, productName: product.name, unit: ingredient.unit || product.packSize }, product)
-          : ingredient
-      )),
-    }));
-    setCreateProductForIngredientId("");
-    setProductForm(emptyProduct);
-  };
+  const draftCost = editing ? costRecipe({ ...editing.form, id: editing.form.id || "__draft__" }, context) : null;
 
   const saveRecipe = () => {
-    if (editingId ? !permissions.canEdit : !permissions.canAdd) return;
-    if (!form.name.trim()) return;
-    const ingredients = form.ingredients
-      .filter((ingredient) => ingredient.productName.trim())
-      .map((ingredient) => ({
-        ...ingredient,
-        quantity: numberValue(ingredient.quantity, 1),
-        unitCost: numberValue(ingredient.unitCost),
-        lineCost: numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost),
-      }));
-    const batchCost = ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
-    const yieldQuantity = numberValue(form.yieldQuantity, 1);
-    const payload = {
-      id: editingId || uid(),
-      name: form.name,
-      yieldQuantity,
-      yieldUnit: form.yieldUnit,
-      notes: form.notes,
-      method: form.method,
-      ingredients,
-      batchCost,
-      unitCost: yieldQuantity ? batchCost / yieldQuantity : 0,
+    if (!canWrite || !editing) return;
+    const { form, original } = editing;
+    if (!form.name.trim()) { setError("Enter a recipe name."); return; }
+    if (!(numberValue(form.yieldQuantity) > 0)) { setError("Enter how much the recipe makes."); return; }
+    const id = form.id || uid();
+    const trail = [id];
+    const ingredients = stampCostingLines(form.ingredients.filter((line) => line.type !== LINE_TYPES.MANUAL || line.name.trim()), context, trail)
+      .map((line) => ({ ...line, quantity: numberValue(line.quantity), wastePercent: numberValue(line.wastePercent), ...(line.type === LINE_TYPES.MANUAL ? { manualUnitCost: numberValue(line.manualUnitCost) } : {}) }));
+    const { batchCost, unitCost, ...rest } = form;
+    const costed = costRecipe({ ...rest, id, ingredients }, context);
+    const next = recordForSave(original, { ...rest, id, name: form.name.trim(), yieldQuantity: numberValue(form.yieldQuantity), ingredients, savedCost: costed.batchCost, savedAt: today(), updatedAt: new Date().toISOString() });
+    setRecipes((current) => (original ? current.map((recipe) => (recipe.id === original.id ? next : recipe)) : [next, ...current]));
+    setEditing(null);
+  };
+
+  const rows = recipes.map((recipe) => {
+    const upgraded = upgradeRecipe(recipe);
+    const costed = costRecipe(recipe.id, context);
+    const change = costChange(costed.batchCost, upgraded.savedCost);
+    return {
+      id: recipe.id,
+      name: recipe.name,
+      yieldLabel: `${upgraded.yieldQuantity} ${upgraded.yieldUnit}`,
+      batchCost: costed.batchCost,
+      unitCost: costed.unitCost,
+      linked: upgraded.ingredients.length,
+      unitLabel: String(upgraded.yieldUnit || "unit").replace(/s$/, ""),
+      manualLines: costed.manualLines,
+      check: costed.issues ? `${costed.issues} to check` : change != null ? `Cost ${change > 0 ? "+" : ""}${change}% since ${formatRangeDate(upgraded.savedAt)}` : "OK",
     };
-    if (editingId) setRecipes((current) => current.map((recipe) => (recipe.id === editingId ? payload : recipe)));
-    else setRecipes((current) => [payload, ...current]);
-    setForm(empty);
-    setEditingId("");
-    setModalOpen(false);
-  };
+  });
 
-  const openRecipeModal = (row = null) => {
-    if (row && !permissions.canEdit) return;
-    if (!row && !permissions.canAdd) return;
-    if (row) {
-      const ingredients = (row.ingredients || []).map((ingredient) => ({
-        id: ingredient.id || uid(),
-        productId: ingredient.productId || "",
-        productName: ingredient.productName || ingredient.name || "",
-        supplier: ingredient.supplier || "",
-        quantity: numberValue(ingredient.quantity, 1),
-        unit: ingredient.unit || "",
-        unitCost: numberValue(ingredient.unitCost),
-        lineCost: numberValue(ingredient.lineCost, numberValue(ingredient.quantity, 1) * numberValue(ingredient.unitCost)),
-      }));
-      setForm({ name: row.name, yieldQuantity: row.yieldQuantity, yieldUnit: row.yieldUnit, notes: row.notes || "", method: row.method || "", ingredients: ingredients.length ? ingredients : [blankIngredient(), blankIngredient()] });
-      setEditingId(row.id);
-      setMethodOpen(Boolean(row.method?.trim()));
-      setNotesOpen(Boolean(row.notes?.trim()));
-    } else {
-      setForm(empty);
-      setEditingId("");
-      setMethodOpen(false);
-      setNotesOpen(false);
-    }
-    setCreateProductForIngredientId("");
-    setModalOpen(true);
-  };
-
-  const rows = recipes.map((recipe) => ({
-    ...recipe,
-    yieldLabel: `${recipe.yieldQuantity} ${recipe.yieldUnit}`,
-    batchCost: recipeBatchCost(recipe),
-    unitCost: recipeUnitCost(recipe),
-    linked: recipe.ingredients.length,
-  }));
-  const currentBatchCost = form.ingredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)), 0);
-  const currentUnitCost = numberValue(form.yieldQuantity, 1) ? currentBatchCost / numberValue(form.yieldQuantity, 1) : 0;
+  const visibleRows = rows
+    .filter((row) => !query.trim() || String(row.name || "").toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
 
   return (
     <div className="page-grid">
-      <Panel title="Recipe costing">
-        <DataTable
-          columns={[
-            { key: "name", label: "Recipe" },
-            { key: "yieldLabel", label: "Yield" },
-            { key: "batchCost", label: "Batch cost", render: (value) => money(value) },
-            { key: "unitCost", label: "Unit cost", render: (value) => money(value) },
-            { key: "linked", label: "Ingredients" },
-          ]}
-          onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe?", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== id)) }) : null}
-          onEdit={permissions.canEdit ? openRecipeModal : null}
-          rows={rows}
-          toolbarAction={permissions.canAdd ? <PrimaryAction onClick={() => openRecipeModal()}>Add Recipe</PrimaryAction> : null}
-        />
+      <Panel title="Recipe costing" action="Live prices from the latest invoices">
+        <div className="table-toolbar menu-dish-toolbar">
+          <label><Search size={15} /><input aria-label="Search recipes" placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+          {permissions.canAdd && <PrimaryAction onClick={() => openRecipe()}>Add Recipe</PrimaryAction>}
+        </div>
+        {!visibleRows.length ? <div className="empty-state">{rows.length ? "No recipe matches this search." : "Add your first recipe to cost it from your invoices."}</div> : (
+          <div className="menu-dish-rows recipe-rows" role="table" aria-label="Recipes">
+            <div className="menu-dish-row menu-dish-head" role="row"><span role="columnheader">Recipe</span><span role="columnheader">Makes</span><span role="columnheader">Batch cost</span><span role="columnheader">Cost per unit</span><span role="columnheader" aria-label="Actions" /></div>
+            {visibleRows.map((row) => (
+              <div className="menu-dish-row" key={row.id} role="row">
+                <span className="menu-dish-name" role="cell">
+                  {permissions.canEdit ? <button className="link-button" onClick={() => openRecipe(row)} type="button">{row.name}</button> : <strong>{row.name}</strong>}
+                  <small>{row.linked} ingredient{row.linked === 1 ? "" : "s"}</small>
+                  <span className="menu-dish-flags">{row.check !== "OK" && <Badge tone="amber">{row.check}</Badge>}{row.manualLines > 0 && <Badge tone="gray">{row.manualLines} manual price{row.manualLines === 1 ? "" : "s"}</Badge>}</span>
+                </span>
+                <span role="cell" data-label="Makes">{row.yieldLabel}</span>
+                <span role="cell" data-label="Batch cost">{money(row.batchCost)}</span>
+                <span role="cell" data-label="Cost per unit">{money(row.unitCost)} / {row.unitLabel}</span>
+                <span className="menu-dish-actions" role="cell">
+                  {permissions.canEdit && <button aria-label={`Edit ${row.name}`} className="icon" onClick={() => openRecipe(row)} type="button"><Edit3 size={15} /></button>}
+                  {permissions.canDelete && <button aria-label={`Delete ${row.name}`} className="icon danger" onClick={() => requestDelete({ title: "Delete recipe", message: "Are you sure you want to delete this recipe? Dishes that use it will show it as missing.", onConfirm: () => setRecipes((current) => current.filter((recipe) => recipe.id !== row.id)) })} type="button"><Trash2 size={15} /></button>}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </Panel>
-      {modalOpen && (editingId ? permissions.canEdit : permissions.canAdd) && (
-        <EditModal title={editingId ? "Edit recipe" : "Create recipe"} onCancel={() => setModalOpen(false)} onSave={saveRecipe} saveLabel="Save Recipe">
-          <div className="form-grid six">
-            <Field label="Recipe name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-            <Field label="Yield quantity" type="number" value={form.yieldQuantity} onChange={(value) => setForm({ ...form, yieldQuantity: value })} />
-            <Field label="Yield unit" value={form.yieldUnit} onChange={(value) => setForm({ ...form, yieldUnit: value })} />
+      {editing && canWrite && (
+        <EditModal title={editing.original ? "Edit recipe" : "Create recipe"} onCancel={() => setEditing(null)} onSave={saveRecipe} saveLabel="Save Recipe">
+          <div className="costing-form">
+            <label className="costing-form-name">Recipe name<input value={editing.form.name} onChange={(event) => setForm({ name: event.target.value })} /></label>
+            <label>Makes<input inputMode="decimal" min="0" step="any" type="number" value={editing.form.yieldQuantity} onChange={(event) => setForm({ yieldQuantity: event.target.value })} /></label>
+            <label>Unit<select value={editing.form.yieldUnit} onChange={(event) => setForm({ yieldUnit: event.target.value })}>{(RECIPE_YIELD_UNITS.includes(editing.form.yieldUnit) ? RECIPE_YIELD_UNITS : [editing.form.yieldUnit, ...RECIPE_YIELD_UNITS]).map((unit) => <option key={unit}>{unit}</option>)}</select></label>
+          </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <IngredientLinesEditor canEdit={canWrite} context={context} excludeRecipeId={editing.form.id || "__draft__"} lines={editing.form.ingredients} onChange={(ingredients) => setForm({ ingredients })} onConfirmConversion={onConfirmConversion} products={products} recipes={recipes} />
+          <div className="costing-summary">
+            <div><span>Batch cost</span><strong>{money(draftCost?.batchCost || 0)}</strong></div>
+            <div><span>Per {String(editing.form.yieldUnit || "unit").replace(/s$/, "")}</span><strong>{money(draftCost?.unitCost || 0)}</strong></div>
+            {draftCost?.issues > 0 && <div className="warn"><span>To check</span><strong>{draftCost.issues} line{draftCost.issues === 1 ? "" : "s"}</strong></div>}
           </div>
           <div className="recipe-optional-fields">
             {methodOpen ? (
               <div className="recipe-optional-field wide-field">
                 <div className="recipe-optional-field-head"><label htmlFor="recipe-method">Method</label><button className="recipe-optional-trigger" onClick={() => setMethodOpen(false)} type="button">Hide method</button></div>
-                <textarea id="recipe-method" rows={7} placeholder="Add preparation method" value={form.method} onChange={(event) => setForm({ ...form, method: event.target.value })} />
+                <textarea id="recipe-method" rows={6} placeholder="Add preparation method" value={editing.form.method || ""} onChange={(event) => setForm({ method: event.target.value })} />
               </div>
             ) : <button aria-expanded="false" className="recipe-optional-trigger" onClick={() => setMethodOpen(true)} type="button"><Plus size={15} />Add method</button>}
             {notesOpen ? (
               <div className="recipe-optional-field">
                 <div className="recipe-optional-field-head"><label htmlFor="recipe-notes">Recipe notes</label><button className="recipe-optional-trigger" onClick={() => setNotesOpen(false)} type="button">Hide notes</button></div>
-                <textarea id="recipe-notes" rows={3} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+                <textarea id="recipe-notes" rows={3} value={editing.form.notes || ""} onChange={(event) => setForm({ notes: event.target.value })} />
               </div>
             ) : <button aria-expanded="false" className="recipe-optional-trigger" onClick={() => setNotesOpen(true)} type="button"><Plus size={15} />Add notes</button>}
-          </div>
-          <div className="table-wrap bulk-entry-table recipe-builder-table">
-            <table>
-              <thead><tr>{["Search ingredient", "Product", "Supplier", "Unit cost", "Quantity", "Unit", "Cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-              <tbody>
-                {form.ingredients.map((ingredient) => {
-                  const productFound = products.some((product) => product.active !== false && product.name.toLowerCase() === ingredient.productName.trim().toLowerCase());
-                  const needsProduct = ingredient.productName.trim() && !productFound;
-                  return (
-                    <tr key={ingredient.id}>
-                      <td>
-                        <input list={`recipe-product-${ingredient.id}`} value={ingredient.productName} onChange={(event) => updateIngredient(ingredient.id, "productName", event.target.value)} />
-                        <datalist id={`recipe-product-${ingredient.id}`}>
-                          {productAutocomplete(products, ingredient.productName).map((product) => <option key={product.id} value={product.name} />)}
-                        </datalist>
-                        {needsProduct && (permissions.canAdd || permissions.canEdit) && <button className="match-hint" onClick={() => openCreateProduct(ingredient)} type="button"><Plus size={13} />Create Product</button>}
-                      </td>
-                      <td>{ingredient.productId ? ingredient.productName : "-"}</td>
-                      <td>{ingredient.supplier || "-"}</td>
-                      <td>{money(ingredient.unitCost)}</td>
-                      <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateIngredient(ingredient.id, "quantity", event.target.value)} /></td>
-                      <td><input value={ingredient.unit} onChange={(event) => updateIngredient(ingredient.id, "unit", event.target.value)} /></td>
-                      <td>{money(numberValue(ingredient.lineCost, numberValue(ingredient.quantity) * numberValue(ingredient.unitCost)))}</td>
-                      <td>{permissions.canDelete && <button className="icon danger" onClick={() => requestDelete({ title: "Delete ingredient", message: "Are you sure you want to delete this ingredient?", onConfirm: () => setForm((current) => ({ ...current, ingredients: current.ingredients.length > 1 ? current.ingredients.filter((item) => item.id !== ingredient.id) : current.ingredients })) })} type="button"><Trash2 size={15} /></button>}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="button-row left tight">
-            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setForm((current) => ({ ...current, ingredients: [...current.ingredients, blankIngredient()] }))} type="button"><Plus size={16} />Add Ingredient Row</button>}
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Batch cost" value={money(currentBatchCost)} delta={`${form.ingredients.filter((ingredient) => ingredient.productName.trim()).length} ingredient(s)`} />
-            <Metric label="Unit cost" value={money(currentUnitCost)} delta={`Per ${form.yieldUnit || "unit"}`} />
-          </div>
-        </EditModal>
-      )}
-      {createProductForIngredientId && (permissions.canAdd || permissions.canEdit) && (
-        <EditModal title="Create product" onCancel={() => setCreateProductForIngredientId("")} onSave={saveCreatedProduct} saveLabel="Save Product">
-          <div className="form-grid six">
-            <Field label="Product name" value={productForm.name} onChange={(value) => setProductForm({ ...productForm, name: value })} />
-            <label>Supplier<select value={productForm.supplier} onChange={(event) => setProductForm({ ...productForm, supplier: event.target.value })}>{suppliers.map((supplier) => <option key={supplier.id}>{supplier.name}</option>)}</select></label>
-            <Field label="Pack size" value={productForm.packSize} onChange={(value) => setProductForm({ ...productForm, packSize: value })} />
-            <Field label="Quantity" type="number" value={productForm.quantity} onChange={(value) => setProductForm({ ...productForm, quantity: value })} />
-            <Field label="Unit cost" type="number" value={productForm.unitCost} onChange={(value) => setProductForm({ ...productForm, unitCost: value })} />
-            <label>Department<select value={productForm.department} onChange={(event) => setProductForm({ ...productForm, department: event.target.value })}>{departmentNames.map((dept) => <option key={dept}>{dept}</option>)}</select></label>
-            <Field label="Aliases" value={productForm.aliases} onChange={(value) => setProductForm({ ...productForm, aliases: value })} />
           </div>
         </EditModal>
       )}
@@ -14645,56 +14698,123 @@ function Recipes({ departmentNames, permissions = permissionsForPage(rolePermiss
   );
 }
 
-function MenuCosting({ financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus }) {
+const MENU_SORTS = [
+  { id: "gp-asc", label: "GP · lowest first", compare: (a, b) => (a.gp ?? -Infinity) - (b.gp ?? -Infinity) },
+  { id: "gp-desc", label: "GP · highest first", compare: (a, b) => (b.gp ?? -Infinity) - (a.gp ?? -Infinity) },
+  { id: "cost-desc", label: "Cost · highest first", compare: (a, b) => b.cost - a.cost },
+  { id: "category", label: "Category", compare: (a, b) => a.subcategory.localeCompare(b.subcategory) || a.name.localeCompare(b.name) },
+  { id: "name", label: "Name", compare: (a, b) => a.name.localeCompare(b.name) },
+];
+
+function MenuDishList({ canDelete, canEdit, onAdd, onDelete, onEdit, rows }) {
+  const [sortId, setSortId] = useState("gp-asc");
+  const [query, setQuery] = useState("");
+  const sort = MENU_SORTS.find((option) => option.id === sortId) || MENU_SORTS[0];
+  const visible = rows
+    .filter((row) => !query.trim() || `${row.name} ${row.subcategory}`.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort(sort.compare);
+  return (
+    <div className="menu-dish-list">
+      <div className="table-toolbar menu-dish-toolbar">
+        <label><Search size={15} /><input aria-label="Search dishes" placeholder="Search..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <label className="menu-dish-sort">Sort<select aria-label="Sort dishes" value={sortId} onChange={(event) => setSortId(event.target.value)}>{MENU_SORTS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+        {onAdd && <PrimaryAction onClick={onAdd}>Add Dish</PrimaryAction>}
+      </div>
+      {!visible.length ? <EmptyState /> : (
+        <div className="menu-dish-rows" role="table" aria-label="Menu dishes">
+          <div className="menu-dish-row menu-dish-head" role="row">
+            <span role="columnheader">Dish</span><span role="columnheader">Cost</span><span role="columnheader">Price inc VAT</span><span role="columnheader">Net</span><span role="columnheader">GP</span><span role="columnheader">Target</span><span role="columnheader" aria-label="Actions" />
+          </div>
+          {visible.map((row) => (
+            <div className={`menu-dish-row${row.belowTarget ? " below-target" : ""}`} key={row.id} role="row">
+              <span className="menu-dish-name" role="cell">
+                {canEdit ? <button className="link-button" onClick={() => onEdit(row)} type="button">{row.name}</button> : <strong>{row.name}</strong>}
+                <small>{row.subcategory}{row.status ? ` · ${row.status}` : ""}</small>
+                <span className="menu-dish-flags">
+                  {row.belowTarget && <Badge tone="red">Below target</Badge>}
+                  {row.costChange != null && row.costChange > 0 && <Badge tone="amber">Cost +{row.costChange}%</Badge>}
+                  {row.issues > 0 && <Badge tone="amber">{row.issues} to check</Badge>}
+                  {row.manualLines > 0 && <Badge tone="gray">{row.manualLines} manual price{row.manualLines === 1 ? "" : "s"}</Badge>}
+                </span>
+              </span>
+              <span role="cell" data-label="Cost">{money(row.cost)}</span>
+              <span role="cell" data-label="Price inc VAT">{money(row.priceIncludingVat)}</span>
+              <span role="cell" data-label="Net">{money(row.net)}</span>
+              <span role="cell" data-label="GP" className={row.gp == null ? "" : row.belowTarget ? "gp-bad" : "gp-good"}>{row.gp == null ? "—" : percent(row.gp)}</span>
+              <span role="cell" data-label="Target">{percent(row.targetGp)}</span>
+              <span className="menu-dish-actions" role="cell">
+                {canEdit && <button aria-label={`Edit ${row.name}`} className="icon" onClick={() => onEdit(row)} type="button"><Edit3 size={15} /></button>}
+                {canDelete && <button aria-label={`Delete ${row.name}`} className="icon danger" onClick={() => onDelete(row.id)} type="button"><Trash2 size={15} /></button>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuCosting({ financialSettings, menuSettings, menus, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "menu"), products, recipes, requestDelete, setMenus, setProducts }) {
   const defaultTarget = numberValue(menuSettings.defaultMenuTargetGp, financialSettings.targetGp);
+  const defaultVat = numberValue(financialSettings.defaultVat, 20);
   const [menuForm, setMenuForm] = useState({ name: "", season: "", startDate: today(), endDate: today(), targetGp: defaultTarget, status: "Draft" });
   const [showArchived, setShowArchived] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState(() => visibleMenus(menus)[0]?.id || "");
   const [menuSubcategoryRows, setMenuSubcategoryRows] = useState([{ id: uid(), name: "" }, { id: uid(), name: "" }]);
-  const [dishForm, setDishForm] = useState({ menuId: menus[0]?.id || "", subcategoryId: menus[0]?.subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" });
   const [menuModalOpen, setMenuModalOpen] = useState(false);
-  const [dishModalOpen, setDishModalOpen] = useState(false);
+  const [dishEditor, setDishEditor] = useState(null);
+  const [dishError, setDishError] = useState("");
   const [menuHierarchyOpen, setMenuHierarchyOpen] = useState(false);
   const [archivedMenusOpen, setArchivedMenusOpen] = useState(false);
-  const blankDishIngredient = () => ({ id: uid(), type: "Product", name: "", quantity: 1, unit: "each", unitCost: 0, lineCost: 0, sourceId: "" });
-  const [dishIngredientRows, setDishIngredientRows] = useState([blankDishIngredient(), blankDishIngredient()]);
+  const context = useMemo(() => createCostingContext(products, recipes), [products, recipes]);
+  const onConfirmConversion = useConfirmRecipeConversion(setProducts, permissions.canEdit || permissions.canAdd);
   const selectableMenus = useMemo(() => visibleMenus(menus, showArchived), [menus, showArchived]);
   const editableMenus = useMemo(() => visibleMenus(menus), [menus]);
   const archivedMenus = useMemo(() => menus.filter((menu) => isMenuArchived(menu)), [menus]);
   const activeMenu = selectableMenus.find((menu) => menu.id === activeMenuId) || selectableMenus[0];
   const activeMenuArchived = isMenuArchived(activeMenu);
   const subcategories = activeMenu?.subcategories || [];
-  const dishMenu = editableMenus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
-  const dishSubcategories = dishMenu?.subcategories || [];
 
   useEffect(() => {
     if (selectableMenus.some((menu) => menu.id === activeMenuId)) return;
     setActiveMenuId(selectableMenus[0]?.id || "");
   }, [activeMenuId, selectableMenus]);
+
+  const targetFor = (menu, subcategory, dish) => {
+    const dishTarget = menuSettings.allowDishTargetOverride ? numberValue(dish?.targetGp) : 0;
+    const subcategoryTarget = menuSettings.allowSubcategoryTargetOverride ? numberValue(subcategory?.targetGp) : 0;
+    const menuTargetValue = menuSettings.allowMenuTargetOverride ? numberValue(menu?.targetGp) : 0;
+    return dishTarget || subcategoryTarget || menuTargetValue || defaultTarget;
+  };
+
   const dishRows = (activeMenu?.subcategories || []).flatMap((subcategory) =>
-    subcategory.dishes.map((dish) => {
-      const cost = dishCost(dish, recipes);
-      const gp = gpFor(cost, dish.sellingPrice);
-      const dishTarget = menuSettings.allowDishTargetOverride ? numberValue(dish.targetGp) : 0;
-      const subcategoryTarget = menuSettings.allowSubcategoryTargetOverride ? numberValue(subcategory.targetGp) : 0;
-      const menuTargetValue = menuSettings.allowMenuTargetOverride ? numberValue(activeMenu.targetGp) : 0;
-      const target = dishTarget || subcategoryTarget || menuTargetValue || defaultTarget;
+    (subcategory.dishes || []).map((dish) => {
+      const upgraded = upgradeDish(dish, defaultVat);
+      const costed = costDish(dish, context, defaultVat);
+      const target = targetFor(activeMenu, subcategory, dish);
       return {
-        ...dish,
         id: dish.id,
+        name: dish.name,
+        status: dish.status,
         subcategory: subcategory.name,
-        cost,
-        gp,
+        subcategoryId: subcategory.id,
+        cost: costed.cost,
+        priceIncludingVat: costed.priceIncludingVat,
+        net: costed.net,
+        gp: costed.gp,
+        issues: costed.issues,
+        manualLines: costed.manualLines,
         targetGp: target,
-        variance: gp - target,
+        belowTarget: costed.gp != null && costed.gp < target,
+        costChange: costChange(costed.cost, upgraded.savedCost),
       };
     })
   );
-  const menuGp = average(dishRows.map((dish) => dish.gp));
+  const pricedRows = dishRows.filter((dish) => dish.gp != null);
+  const menuGp = average(pricedRows.map((dish) => dish.gp));
   const menuTarget = (menuSettings.allowMenuTargetOverride ? numberValue(activeMenu?.targetGp) : 0) || defaultTarget;
-  const estimatedTotalCost = dishRows.reduce((sum, dish) => sum + dish.cost, 0);
-  const averageDishCost = dishRows.length ? estimatedTotalCost / dishRows.length : 0;
-  const highCostDishCount = dishRows.filter((dish) => dish.cost > averageDishCost).length;
+  const averageDishCost = dishRows.length ? dishRows.reduce((sum, dish) => sum + dish.cost, 0) / dishRows.length : 0;
+  const belowTargetCount = dishRows.filter((dish) => dish.belowTarget).length;
 
   const createMenu = () => {
     if (!permissions.canAdd) return;
@@ -14711,64 +14831,56 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
     setMenuModalOpen(false);
   };
 
-  const addDish = () => {
-    if (!permissions.canAdd && !permissions.canEdit) return;
-    const selectedMenu = menus.find((menu) => menu.id === dishForm.menuId) || activeMenu;
-    if (!selectedMenu || !dishForm.subcategoryId || !dishForm.name.trim()) return;
-    const dishIngredients = dishIngredientRows
-      .filter((ingredient) => ingredient.name.trim())
-      .map((ingredient) => ({ ...ingredient, lineCost: numberValue(ingredient.quantity) * numberValue(ingredient.unitCost) }));
-    const ingredientCost = dishIngredients.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0);
-    const dish = {
-      id: uid(),
-      name: dishForm.name,
-      sellingPrice: numberValue(dishForm.sellingPrice),
-      recipeIds: [],
-      ingredients: dishIngredients,
-      manualCost: 0,
-      targetGp: "",
-      status: dishForm.status,
-    };
-    setMenus((current) => current.map((menu) => {
-      if (menu.id !== selectedMenu.id) return menu;
-      return {
-        ...menu,
-        subcategories: menu.subcategories.map((subcategory) => (subcategory.id === dishForm.subcategoryId ? { ...subcategory, dishes: [...subcategory.dishes, dish] } : subcategory)),
-      };
-    }));
-    setActiveMenuId(selectedMenu.id);
-    setDishForm({ menuId: selectedMenu.id, subcategoryId: dishForm.subcategoryId, name: "", sellingPrice: 0, status: "Draft" });
-    setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]);
-    setDishModalOpen(false);
+  const openDish = (row = null) => {
+    if (!activeMenu || activeMenuArchived) return;
+    if (row ? !permissions.canEdit : !(permissions.canAdd || permissions.canEdit)) return;
+    const subcategory = row ? subcategories.find((item) => item.id === row.subcategoryId) : subcategories[0];
+    const original = row ? (subcategory?.dishes || []).find((dish) => dish.id === row.id) : null;
+    const dish = original ? upgradeDish(original, defaultVat) : { id: "", schemaVersion: 2, name: "", sellingPrice: "", vatRate: defaultVat, status: "Draft", targetGp: "", ingredients: [] };
+    setDishEditor({ original, menuId: activeMenu.id, subcategoryId: subcategory?.id || NEW_MENU_CATEGORY, newCategoryName: "", form: dish });
+    setDishError("");
   };
+  const setDishForm = (patch) => setDishEditor((current) => ({ ...current, form: { ...current.form, ...patch } }));
 
-  const updateDishIngredient = (id, field, value) => {
-    setDishIngredientRows((current) => current.map((ingredient) => {
-      if (ingredient.id !== id) return ingredient;
-      const updated = { ...ingredient, [field]: ["quantity", "unitCost"].includes(field) ? numberValue(value) : value };
-      if (field === "name") {
-        if (updated.type === "Product") {
-          const product = matchProduct(value, products)?.product;
-          if (product) {
-            updated.name = product.name;
-            updated.sourceId = product.id;
-            updated.unitCost = numberValue(product.unitCost);
-            updated.unit = product.packSize || updated.unit;
-          }
-        }
-        if (updated.type === "Recipe") {
-          const recipe = recipes.find((item) => item.name.toLowerCase() === String(value).trim().toLowerCase()) || recipes.find((item) => item.name.toLowerCase().includes(String(value).toLowerCase()));
-          if (recipe) {
-            updated.name = recipe.name;
-            updated.sourceId = recipe.id;
-            updated.unitCost = recipeUnitCost(recipe);
-            updated.unit = recipe.yieldUnit || updated.unit;
-          }
-        }
-      }
-      updated.lineCost = numberValue(updated.quantity) * numberValue(updated.unitCost);
-      return updated;
+  const saveDish = () => {
+    if (!dishEditor) return;
+    const { form, original, menuId } = dishEditor;
+    if (original ? !permissions.canEdit : !(permissions.canAdd || permissions.canEdit)) return;
+    const menu = menus.find((item) => item.id === menuId);
+    if (!menu) return;
+    if (!form.name.trim()) { setDishError("Enter a dish name."); return; }
+    const newCategoryName = dishEditor.newCategoryName.trim();
+    if (dishEditor.subcategoryId === NEW_MENU_CATEGORY && !newCategoryName) { setDishError("Enter a name for the new category."); return; }
+    const newSubcategory = dishEditor.subcategoryId === NEW_MENU_CATEGORY ? { id: uid(), name: newCategoryName, targetGp: numberValue(menu.targetGp, defaultTarget), dishes: [] } : null;
+    const subcategoryId = newSubcategory?.id || dishEditor.subcategoryId;
+    const ingredients = stampCostingLines(form.ingredients.filter((line) => line.type !== LINE_TYPES.MANUAL || line.name.trim()), context)
+      .map((line) => ({ ...line, quantity: numberValue(line.quantity), wastePercent: numberValue(line.wastePercent), ...(line.type === LINE_TYPES.MANUAL ? { manualUnitCost: numberValue(line.manualUnitCost) } : {}) }));
+    const { recipeIds, manualCost, ...rest } = form;
+    const id = form.id || uid();
+    const costed = costDish({ ...rest, id, ingredients, schemaVersion: 2 }, context, defaultVat);
+    const dish = recordForSave(original, {
+      ...rest,
+      id,
+      name: form.name.trim(),
+      sellingPrice: numberValue(form.sellingPrice),
+      vatRate: numberValue(form.vatRate, defaultVat),
+      targetGp: form.targetGp === "" ? "" : numberValue(form.targetGp),
+      ingredients,
+      savedCost: costed.cost,
+      savedAt: today(),
+      updatedAt: new Date().toISOString(),
+    });
+    setMenus((current) => current.map((item) => {
+      const withoutDish = original ? (item.subcategories || []).map((subcategory) => ({ ...subcategory, dishes: (subcategory.dishes || []).filter((entry) => entry.id !== original.id || subcategory.id === subcategoryId) })) : (item.subcategories || []);
+      if (item.id !== menuId) return original ? { ...item, subcategories: withoutDish } : item;
+      const nextSubcategories = [...withoutDish, ...(newSubcategory ? [newSubcategory] : [])].map((subcategory) => {
+        if (subcategory.id !== subcategoryId) return subcategory;
+        const dishes = subcategory.dishes || [];
+        return { ...subcategory, dishes: dishes.some((entry) => entry.id === id) ? dishes.map((entry) => (entry.id === id ? dish : entry)) : [...dishes, dish] };
+      });
+      return { ...item, subcategories: nextSubcategories };
     }));
+    setDishEditor(null);
   };
 
   const updateActiveMenuStatus = (nextStatus) => {
@@ -14831,9 +14943,17 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
     });
   };
 
+  const draftDish = dishEditor ? costDish({ ...dishEditor.form, schemaVersion: 2 }, context, defaultVat) : null;
+  const draftMenu = dishEditor ? menus.find((menu) => menu.id === dishEditor.menuId) : null;
+  const draftSubcategory = draftMenu?.subcategories?.find((subcategory) => subcategory.id === dishEditor?.subcategoryId) || null;
+  const draftTarget = dishEditor ? targetFor(draftMenu, draftSubcategory, dishEditor.form) : defaultTarget;
+  const draftSuggested = draftDish ? suggestedPrice(draftDish.cost, draftTarget, numberValue(dishEditor.form.vatRate, defaultVat)) : null;
+  const canAddDish = !activeMenuArchived && (permissions.canAdd || permissions.canEdit);
+
   return (
     <div className="menu-costing-page menu-overview-page">
       <div className="menu-header-actions" aria-label="Menu actions">
+        {selectableMenus.length > 1 && <label className="menu-picker">Menu<select aria-label="Menu" value={activeMenu?.id || ""} onChange={(event) => setActiveMenuId(event.target.value)}>{selectableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}{isMenuArchived(menu) ? " (Archived)" : ""}</option>)}</select></label>}
         <button aria-expanded={menuHierarchyOpen} className="menu-header-action" onClick={() => { setMenuHierarchyOpen((current) => !current); setArchivedMenusOpen(false); }} type="button">Menu hierarchy</button>
         <button aria-expanded={archivedMenusOpen} className="menu-header-action" onClick={() => { setArchivedMenusOpen((current) => !current); setMenuHierarchyOpen(false); }} type="button">Archived Menus</button>
         {permissions.canAdd && <PrimaryAction onClick={() => setMenuModalOpen(true)}>Create Menu</PrimaryAction>}
@@ -14857,22 +14977,18 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
         <>
           {activeMenuArchived && <div className="menu-archived-notice"><Badge tone="amber">Archived</Badge><span>This menu is read-only until its status changes.</span></div>}
           <div className="metric-grid compact menu-metrics menu-overview-metrics">
-            <Metric label="Food GP %" value={percent(menuGp)} delta="Average without sales mix" tone={menuGp >= menuTarget ? "good" : "warn"} />
-            <Metric label="Average dish cost" value={money(averageDishCost)} delta={activeMenuArchived ? "Archived menu" : "Active menu"} />
-            <Metric label="Menu items" value={dishRows.length} delta={activeMenuArchived ? "Archived menu" : "Active menu"} />
-            <Metric label="High cost items" value={highCostDishCount} delta="Review needed" tone="warn" />
+            <Metric label="Food GP %" value={pricedRows.length ? percent(menuGp) : "–"} delta={`On net price · target ${percent(menuTarget)}`} tone={pricedRows.length ? (menuGp >= menuTarget ? "good" : "warn") : "default"} />
+            <Metric label="Average dish cost" value={money(averageDishCost)} delta="Live prices" />
+            <Metric label="Menu items" value={dishRows.length} delta={activeMenu.name} />
+            <Metric label="Below target" value={belowTargetCount} delta={belowTargetCount ? "Review price or recipe" : "All dishes on target"} tone={belowTargetCount ? "warn" : "good"} />
           </div>
           <Panel className="menu-overview-table" title="">
-            <DataTable
-              columns={[
-                { key: "name", label: "Menu item" },
-                { key: "subcategory", label: "Category" },
-                { key: "cost", label: "Cost", render: (value) => money(value) },
-                { key: "sellingPrice", label: "Price", render: (value) => money(value) },
-                { key: "gp", label: "GP %", render: (value) => percent(value) },
-                { key: "status", label: "Status" },
-              ]}
-              onDelete={permissions.canDelete && !activeMenuArchived ? deleteDish : null}
+            <MenuDishList
+              canDelete={permissions.canDelete && !activeMenuArchived}
+              canEdit={permissions.canEdit && !activeMenuArchived}
+              onAdd={canAddDish ? () => openDish() : null}
+              onDelete={deleteDish}
+              onEdit={openDish}
               rows={dishRows}
             />
           </Panel>
@@ -14885,17 +15001,17 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
               <label>Lifecycle status<select disabled={!permissions.canEdit} value={activeMenu.status || MENU_STATUSES.DRAFT} onChange={(event) => updateActiveMenuStatus(event.target.value)}>{MENU_STATUS_OPTIONS.map((status) => <option key={status}>{status}</option>)}</select></label>
             </div>
             <div className="button-row left menu-hierarchy-actions">
-              {!activeMenuArchived && (permissions.canAdd || permissions.canEdit) && <PrimaryAction onClick={() => { setDishForm({ menuId: activeMenu.id, subcategoryId: subcategories[0]?.id || "", name: "", sellingPrice: 0, status: "Draft" }); setDishIngredientRows([blankDishIngredient(), blankDishIngredient()]); setDishModalOpen(true); }}>Add Dish</PrimaryAction>}
+              {canAddDish && <PrimaryAction onClick={() => openDish()}>Add Dish</PrimaryAction>}
               {permissions.canDelete && !activeMenuArchived && <button aria-label="Delete menu" className="icon danger" onClick={deleteMenu} title="Delete menu" type="button"><Trash2 size={16} /></button>}
             </div>
             </Panel>
             <Panel title="Subcategory summary">
             <div className="stack-list">
               {subcategories.map((subcategory) => {
-                const rows = dishRows.filter((dish) => dish.subcategory === subcategory.name);
+                const rows = dishRows.filter((dish) => dish.subcategoryId === subcategory.id && dish.gp != null);
                 const gp = average(rows.map((dish) => dish.gp));
                 const target = numberValue(subcategory.targetGp, menuTarget);
-                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{percent(gp)}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{rows.length} dishes</span>{permissions.canDelete && !activeMenuArchived && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
+                return <div className="compact-row" key={subcategory.id}><span>{subcategory.name}</span><strong>{rows.length ? percent(gp) : "–"}</strong><span>Target {percent(target)}</span><Badge tone={gp >= target ? "green" : "amber"}>{percent(gp - target)}</Badge><span>{(subcategory.dishes || []).length} dishes</span>{permissions.canDelete && !activeMenuArchived && <button className="icon danger" onClick={() => deleteSubcategory(subcategory.id)} type="button"><Trash2 size={15} /></button>}</div>;
               })}
             </div>
             </Panel>
@@ -14926,62 +15042,28 @@ function MenuCosting({ financialSettings, menuSettings, menus, permissions = per
           </div>
         </EditModal>
       )}
-      {dishModalOpen && (permissions.canAdd || permissions.canEdit) && (
-        <EditModal title="Add dish" onCancel={() => setDishModalOpen(false)} onSave={addDish} saveLabel="Save Dish">
-          <div className="form-grid six">
-            <Field label="Dish name" value={dishForm.name} onChange={(value) => setDishForm({ ...dishForm, name: value })} />
-            <label>Menu<select value={dishForm.menuId} onChange={(event) => {
-              const nextMenu = menus.find((menu) => menu.id === event.target.value);
-              setDishForm({ ...dishForm, menuId: event.target.value, subcategoryId: nextMenu?.subcategories?.[0]?.id || "" });
-            }}>{editableMenus.map((menu) => <option key={menu.id} value={menu.id}>{menu.name}</option>)}</select></label>
-            <label>Subcategory<select value={dishForm.subcategoryId} onChange={(event) => setDishForm({ ...dishForm, subcategoryId: event.target.value })}>{dishSubcategories.map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}</select></label>
-            <Field label="Selling price" type="number" value={dishForm.sellingPrice} onChange={(value) => setDishForm({ ...dishForm, sellingPrice: value })} />
-            <label>Status<select value={dishForm.status} onChange={(event) => setDishForm({ ...dishForm, status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+      {dishEditor && (
+        <EditModal title={dishEditor.original ? "Edit dish" : "Add dish"} onCancel={() => setDishEditor(null)} onSave={saveDish} saveLabel="Save Dish">
+          <div className="costing-form dish">
+            <label className="costing-form-name">Dish name<input value={dishEditor.form.name} onChange={(event) => setDishForm({ name: event.target.value })} /></label>
+            <label>Category<select value={dishEditor.subcategoryId} onChange={(event) => setDishEditor((current) => ({ ...current, subcategoryId: event.target.value }))}>
+              {(draftMenu?.subcategories || []).map((subcategory) => <option key={subcategory.id} value={subcategory.id}>{subcategory.name}</option>)}
+              <option value={NEW_MENU_CATEGORY}>+ New category</option>
+            </select></label>
+            {dishEditor.subcategoryId === NEW_MENU_CATEGORY && <label>New category<input value={dishEditor.newCategoryName} onChange={(event) => setDishEditor((current) => ({ ...current, newCategoryName: event.target.value }))} /></label>}
+            <label>Status<select value={dishEditor.form.status || "Draft"} onChange={(event) => setDishForm({ status: event.target.value })}><option>Draft</option><option>Active</option><option>Archived</option></select></label>
+            <label>Price inc VAT (£)<input inputMode="decimal" min="0" step="0.01" type="number" value={dishEditor.form.sellingPrice} onChange={(event) => setDishForm({ sellingPrice: event.target.value })} /></label>
+            <label>VAT %<input inputMode="decimal" min="0" step="any" type="number" value={dishEditor.form.vatRate} onChange={(event) => setDishForm({ vatRate: event.target.value })} /></label>
+            {menuSettings.allowDishTargetOverride && <label>Target GP %<input inputMode="decimal" min="0" max="99" step="any" type="number" placeholder={String(draftTarget)} value={dishEditor.form.targetGp ?? ""} onChange={(event) => setDishForm({ targetGp: event.target.value })} /></label>}
           </div>
-          <div className="table-wrap compact-table dish-builder-table">
-            <table>
-              <thead><tr>{["Type", "Search", "Quantity", "Unit", "Cost auto", "Line cost", ""].map((header) => <th key={header}>{header}</th>)}</tr></thead>
-              <tbody>
-                {dishIngredientRows.map((ingredient) => {
-                  const productMatches = ingredient.type === "Product" ? productAutocomplete(products, ingredient.name, 5) : [];
-                  const recipeMatches = ingredient.type === "Recipe" ? recipeAutocomplete(recipes, ingredient.name, 5) : [];
-                  return (
-                  <tr key={ingredient.id}>
-                    <td><select value={ingredient.type} onChange={(event) => updateDishIngredient(ingredient.id, "type", event.target.value)}><option>Product</option><option>Recipe</option></select></td>
-                    <td>
-                      <input value={ingredient.name} onChange={(event) => updateDishIngredient(ingredient.id, "name", event.target.value)} />
-                      {Boolean(productMatches.length || recipeMatches.length) && (
-                        <div className="inline-suggestion-list">
-                          {productMatches.map((product) => (
-                            <button key={product.id} onClick={() => updateDishIngredient(ingredient.id, "name", product.name)} type="button">
-                              {product.name}<span>{product.supplier || "No supplier"} · {money(product.unitCost)}</span>
-                            </button>
-                          ))}
-                          {recipeMatches.map((recipe) => (
-                            <button key={recipe.id} onClick={() => updateDishIngredient(ingredient.id, "name", recipe.name)} type="button">
-                              {recipe.name}<span>Recipe · {money(recipeUnitCost(recipe))}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </td>
-                    <td><input min="0" step="0.01" type="number" value={ingredient.quantity} onChange={(event) => updateDishIngredient(ingredient.id, "quantity", event.target.value)} /></td>
-                    <td><input value={ingredient.unit} onChange={(event) => updateDishIngredient(ingredient.id, "unit", event.target.value)} /></td>
-                    <td>{money(ingredient.unitCost)}</td>
-                    <td>{money(ingredient.lineCost)}</td>
-                    <td>{permissions.canDelete && <button className="icon danger" onClick={() => setDishIngredientRows((current) => current.length > 1 ? current.filter((item) => item.id !== ingredient.id) : current)} type="button"><Trash2 size={15} /></button>}</td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="button-row left tight">
-            {(permissions.canAdd || permissions.canEdit) && <button className="ghost" onClick={() => setDishIngredientRows((current) => [...current, blankDishIngredient()])} type="button"><Plus size={16} />Add Ingredient Row</button>}
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Dish cost" value={money(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0))} delta="Sum all ingredients" />
-            <Metric label="GP" value={percent(gpFor(dishIngredientRows.reduce((sum, ingredient) => sum + numberValue(ingredient.lineCost), 0), dishForm.sellingPrice))} delta="Selling price vs cost" />
+          {dishError && <p className="form-error" role="alert">{dishError}</p>}
+          <IngredientLinesEditor canEdit context={context} lines={dishEditor.form.ingredients} onChange={(ingredients) => setDishForm({ ingredients })} onConfirmConversion={onConfirmConversion} products={products} recipes={recipes} />
+          <div className="costing-summary">
+            <div><span>Net price</span><strong>{money(draftDish?.net || 0)}</strong></div>
+            <div><span>Cost</span><strong>{money(draftDish?.cost || 0)}</strong></div>
+            <div className={draftDish?.gp != null && draftDish.gp < draftTarget ? "warn" : "good"}><span>GP on net</span><strong>{draftDish?.gp == null ? "—" : percent(draftDish.gp)}</strong></div>
+            <div><span>For {percent(draftTarget)} GP</span><strong>{draftSuggested == null ? "—" : money(draftSuggested)}</strong>{draftSuggested != null && <button className="ghost mini-button" onClick={() => setDishForm({ sellingPrice: draftSuggested })} type="button">Use price</button>}</div>
+            {draftDish?.issues > 0 && <div className="warn"><span>To check</span><strong>{draftDish.issues} line{draftDish.issues === 1 ? "" : "s"}</strong></div>}
           </div>
         </EditModal>
       )}
