@@ -6,7 +6,7 @@
 // value is packs × the pack price. Nothing here changes a product or a stocktake: the screen
 // applies the confirmed rows and learns the names the user confirmed as aliases.
 
-import { articleAnswer, multipackReading } from "./packPriceBasis.js";
+import { articleAnswer, multipackReading, supplierBasisAnswers, supplierSuggestion } from "./packPriceBasis.js";
 import { normalizeHeader, numberValue } from "./numberUtils.js";
 import { parsePackSize } from "./productPackaging.js";
 import { normalizeProductName, productAliases, productTokens } from "./productMatching.js";
@@ -42,6 +42,8 @@ const AMBIGUOUS_GAP = 0.05;
 const RECENT_DAYS = 60;
 const MAX_BASE_QUANTITY = 100;
 const MAX_LINE_VALUE = 2000;
+const MIN_STRANGE_VALUE = 30;
+const TYPICAL_FACTOR = 3;
 
 // ---------- Units ----------
 
@@ -245,17 +247,33 @@ const BASES = ["kg", "l", "each"];
 
 // What one purchase pack holds, in kg, litres or items, or null when unknown. items: the number of
 // bottles, tins or bags in a case priced as a whole ("24 x 330ml"), so "30 uni" is 1.25 cases.
-export function productPackContent(product = {}) {
-  const content = packContentOnly(product);
-  if (!content) return null;
+//
+// An "N x size" pack follows the same case-or-item rule as recipe costs: the answer confirmed for
+// the article (Check prices or a recipe line), then what the invoice price shows, then what the
+// supplier's other answers point to. With none of these the case reading is used and marked
+// basisPending, so the row asks "per case or per item?" instead of being confirmed.
+export function productPackContent(product = {}, { basisAnswers = null } = {}) {
   const reading = multipackReading(product.packSize || "");
-  const items = reading && content.base === reading.unit && close(content.quantity, reading.caseQuantity, 0.001) ? reading.count : 1;
-  return { ...content, items };
+  const withItems = (content) => ({ ...content, items: reading && content.base === reading.unit && close(content.quantity, reading.caseQuantity, 0.001) ? reading.count : 1 });
+  const answer = articleAnswer(product, { supplier: product.supplier || "", code: product.supplierProductCode || "", pack: product.packSize || "" });
+  if (answer && BASES.includes(answer.baseUnit)) return withItems({ quantity: Number(answer.baseQuantity), base: answer.baseUnit, source: "confirmed" });
+  if (reading) {
+    const item = { quantity: reading.itemQuantity, base: reading.unit, items: 1, basis: "item", reading };
+    const whole = { quantity: reading.caseQuantity, base: reading.unit, items: reading.count, basis: "case", reading };
+    const unitCost = numberValue(product.unitCost);
+    const normalizedCost = numberValue(product.normalizedCost);
+    if (unitCost > 0 && normalizedCost > 0 && String(product.normalizedUnit || "").toLowerCase() === reading.unit && !product.conversionReviewRequired
+      && close(unitCost / normalizedCost, reading.itemQuantity, 0.01)) return { ...item, source: "invoice" };
+    const suggestion = basisAnswers ? supplierSuggestion(basisAnswers, product.supplier || "") : null;
+    if (suggestion?.basis === "item") return { ...item, source: "supplier" };
+    if (suggestion?.basis === "case") return { ...whole, source: "supplier" };
+    return { ...whole, source: "pack", basis: "", basisPending: true };
+  }
+  const content = packContentOnly(product);
+  return content ? { ...content, items: 1 } : null;
 }
 
 function packContentOnly(product = {}) {
-  const answer = articleAnswer(product, { supplier: product.supplier || "", code: product.supplierProductCode || "", pack: product.packSize || "" });
-  if (answer && BASES.includes(answer.baseUnit)) return { quantity: Number(answer.baseQuantity), base: answer.baseUnit, source: "confirmed" };
   if (product.packSize) {
     const parsed = parsePackSize(product.packSize);
     if (!parsed.reviewRequired && parsed.baseQuantity > 0 && BASES.includes(parsed.baseUnit)) return { quantity: parsed.baseQuantity, base: parsed.baseUnit, source: "pack" };
@@ -294,6 +312,9 @@ export function packsForCount(quantity, unit = { kind: "none" }, content = null)
     if (content && content.base === unit.base && content.quantity > 0) return { packs: baseQuantity / content.quantity, baseQuantity, base: unit.base };
     return { packs: amount, baseQuantity, base: unit.base, note: "1 item = 1 pack" };
   }
+  if (unit.kind === "pack" && content?.source === "stocktake" && content.base === "each") {
+    return { packs: amount / content.quantity, baseQuantity: amount, base: "each" };
+  }
   if (unit.kind === "count" && content?.base === "each" && content.quantity > 1) {
     return { packs: amount / content.quantity, baseQuantity: amount, base: "each" };
   }
@@ -317,11 +338,32 @@ function daysBetween(left, right) {
   return Number.isFinite(a) && Number.isFinite(b) ? Math.abs(a - b) / 86400000 : Infinity;
 }
 
-function averagePurchasePacks(product = {}) {
-  const quantities = (product.supplierFormats || [])
-    .filter((format) => format.source === "Invoice" && numberValue(format.quantity) > 0)
-    .map((format) => numberValue(format.quantity));
-  return quantities.length ? quantities.reduce((sum, value) => sum + value, 0) / quantities.length : 0;
+// Average value of one invoice purchase of the product (quantity × pack price).
+export function typicalPurchaseValue(product = {}) {
+  const values = (product.supplierFormats || [])
+    .filter((format) => format.source === "Invoice" && numberValue(format.quantity) > 0 && numberValue(format.purchaseUnitCost) > 0)
+    .map((format) => numberValue(format.quantity) * numberValue(format.purchaseUnitCost));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+const PACK_WORD_SYNONYMS = Object.freeze({
+  box: ["box", "bx", "case", "crate", "ctn", "carton"],
+  case: ["box", "bx", "case", "crate", "ctn", "carton"],
+  tin: ["tin", "can", "a10"],
+  pack: ["pack", "pk", "pkt", "packet"],
+  bottle: ["bottle", "btl"],
+  bag: ["bag", "sack"],
+  punnet: ["punnet", "pnt"],
+  bunch: ["bunch", "bnch"],
+});
+
+// Whether the pack word counted ("punnet", "loaf", "bx") is how the product is bought.
+export function packWordFits(product = {}, pack = "") {
+  if (!pack) return true;
+  const words = normalizeProductName(`${product.packSize || ""} ${product.unit || ""} ${product.unitOfMeasure || ""} ${product.name || ""}`)
+    .split(" ")
+    .flatMap((word) => [word, word.replace(/(es|s)$/, "")]);
+  return (PACK_WORD_SYNONYMS[pack] || [pack]).some((synonym) => words.includes(synonym));
 }
 
 function sameText(left, right) {
@@ -330,6 +372,7 @@ function sameText(left, right) {
 
 // One entry per product and recipe the import can match to.
 export function createFreeImportIndex(products = [], recipes = [], { costingContext = null } = {}) {
+  const basisAnswers = supplierBasisAnswers(products);
   const productEntries = products
     .filter((product) => product && product.active !== false && !product.mergedIntoProductId)
     .map((product) => ({
@@ -338,7 +381,7 @@ export function createFreeImportIndex(products = [], recipes = [], { costingCont
       name: product.name || product.productName || "",
       product,
       names: productAliases(product).map((alias) => ({ text: alias, normalized: normalizeProductName(alias), tokens: productTokens(cleanCountName(alias).name), primary: sameText(alias, product.name || product.productName || "") })),
-      content: productPackContent(product),
+      content: productPackContent(product, { basisAnswers }),
       packText: normalizeProductName(`${product.packSize || ""} ${product.unit || ""} ${product.name || ""}`),
     }));
   const recipeEntries = recipes
@@ -352,7 +395,7 @@ export function createFreeImportIndex(products = [], recipes = [], { costingCont
       names: [{ text: recipe.name || "", normalized: normalizeProductName(recipe.name || ""), tokens: productTokens(recipe.name || ""), primary: true }],
       packText: "",
     }));
-  return { entries: [...productEntries, ...recipeEntries], costingContext };
+  return { entries: [...productEntries, ...recipeEntries], costingContext, basisAnswers };
 }
 
 function bonuses(entry, context) {
@@ -429,6 +472,13 @@ export function rankFreeImportCandidates(rawName = "", index = { entries: [] }, 
 export function decideFreeImportMatch(candidates = []) {
   const [best, second] = candidates;
   if (!best) return { status: FREE_IMPORT_STATUS.NO_MATCH, candidate: null, source: "" };
+  // A product and a recipe both fit ("Pearl barley"): the product first, never confirmed alone.
+  const strong = (candidate) => candidate.exact || (candidate.inputCoverage >= AUTO_INPUT_COVERAGE && candidate.targetCoverage >= AUTO_TARGET_COVERAGE);
+  const strongProduct = candidates.find((candidate) => candidate.type === TARGET_TYPES.PRODUCT && strong(candidate));
+  const strongRecipe = candidates.find((candidate) => candidate.type === TARGET_TYPES.RECIPE && strong(candidate));
+  if (strongProduct && strongRecipe) {
+    return { status: FREE_IMPORT_STATUS.SUGGESTED, candidate: strongProduct, source: strongProduct.exactSource || FREE_MATCH_SOURCE.FUZZY, productAndRecipe: true };
+  }
   if (best.exact) {
     const tied = candidates.filter((candidate) => candidate.exact && candidate.exactRaw === best.exactRaw);
     if (tied.length === 1 || (second && best.score - second.score >= AUTO_GAP)) return { status: FREE_IMPORT_STATUS.CONFIRMED, candidate: best, source: best.exactSource };
@@ -451,8 +501,8 @@ function round(value, places = 4) {
 }
 
 // Quantity in packs (product) or base units (recipe), value, and warnings, for a matched row.
-export function valueFreeImportRow(row = {}, target = null, { costingContext = null } = {}) {
-  if (!target) return { packs: null, value: null, conversion: null, warnings: [] };
+export function valueFreeImportRow(row = {}, target = null, { costingContext = null, basisAnswers = null } = {}) {
+  if (!target) return { packs: null, value: null, conversion: null, warnings: [], issues: {} };
   const unit = row.unitInfo || parseCountUnit(row.unitText);
   const warnings = [];
   if (target.type === TARGET_TYPES.RECIPE) {
@@ -472,18 +522,49 @@ export function valueFreeImportRow(row = {}, target = null, { costingContext = n
     return { packs: null, baseQuantity, base, unitCost: costed.baseCost, value, conversion: { base }, warnings };
   }
   const product = target.product;
-  const content = row.packContent || productPackContent(product);
-  const conversion = packsForCount(row.quantity, unit, content);
-  if (conversion.needsConversion) return { packs: null, value: null, conversion: { ...conversion, content }, warnings };
   const unitCost = numberValue(product.unitCost);
+  const content = row.packContent || productPackContent(product, { basisAnswers });
+  const override = row.packsOverride !== null && row.packsOverride !== undefined && row.packsOverride !== "" ? numberValue(row.packsOverride, NaN) : NaN;
+  const issues = { unitMismatch: false, basisPending: false };
+  let conversion;
+  if (Number.isFinite(override) && override >= 0) {
+    conversion = { packs: override, note: "packs entered by you" };
+  } else {
+    conversion = packsForCount(row.quantity, unit, content);
+    if (conversion.needsConversion) return { packs: null, value: null, conversion: { ...conversion, content }, warnings, issues };
+    // Counted in punnets, loaves or boxes while the product is bought another way: the count is
+    // not packs, so it is never confirmed on its own.
+    if (unit.kind === "pack" && !(row.packContent?.source === "stocktake") && !packWordFits(product, unit.pack)) {
+      issues.unitMismatch = true;
+      warnings.push(`Counted in ${unit.label}, but ${product.name || "the product"} is bought as ${product.packSize || product.unit || "another pack"} — enter the packs or 1 pack = how many ${unit.label}.`);
+    }
+    if (content?.basisPending && !row.packContent) {
+      issues.basisPending = true;
+      warnings.push(`Is the price of ${product.packSize} per case or per item? Choose once and it is kept for this product.`);
+    }
+  }
   const packs = round(conversion.packs, 4);
   const value = round(packs * unitCost, 2);
-  const average = averagePurchasePacks(product);
+  const typical = typicalPurchaseValue(product);
   if (conversion.base && conversion.base !== "each" && conversion.baseQuantity > MAX_BASE_QUANTITY) warnings.push(`${round(conversion.baseQuantity, 2)} ${conversion.base} is far above a usual count — was it g or ml?`);
-  else if (average > 0 && packs > Math.max(5, average * 10)) warnings.push(`${round(packs, 2)} packs is more than 10× the usual purchase (${round(average, 1)}).`);
-  if (value > MAX_LINE_VALUE) warnings.push(`£${value.toFixed(2)} on one line — check the quantity.`);
+  else if (typical > 0 && value > Math.max(MIN_STRANGE_VALUE, typical * TYPICAL_FACTOR)) warnings.push(`£${value.toFixed(2)} is more than ${TYPICAL_FACTOR}× a usual purchase (£${typical.toFixed(2)}) — check the quantity.`);
+  else if (value > MAX_LINE_VALUE) warnings.push(`£${value.toFixed(2)} on one line — check the quantity.`);
   if (!(unitCost > 0)) warnings.push("This product has no price yet.");
-  return { packs, baseQuantity: conversion.baseQuantity, base: conversion.base, unitCost, value, conversion: { ...conversion, content }, warnings };
+  const basisOptions = issues.basisPending && content.reading ? basisChoices(row.quantity, unit, content.reading, unitCost) : null;
+  return { packs, baseQuantity: conversion.baseQuantity, base: conversion.base, unitCost, value, conversion: { ...conversion, content }, warnings, issues, basisOptions };
+}
+
+// Packs and value of a row under each reading of an "N x size" price.
+function basisChoices(quantity, unit, reading, unitCost) {
+  const choice = (content) => {
+    const result = packsForCount(quantity, unit, content);
+    if (result.needsConversion) return null;
+    return { packs: round(result.packs, 4), value: round(result.packs * unitCost, 2), baseQuantity: content.quantity, baseUnit: content.base };
+  };
+  return {
+    case: choice({ quantity: reading.caseQuantity, base: reading.unit, items: reading.count }),
+    item: choice({ quantity: reading.itemQuantity, base: reading.unit, items: 1 }),
+  };
 }
 
 function targetFromCandidate(candidate) {
@@ -493,16 +574,28 @@ function targetFromCandidate(candidate) {
     : { type: TARGET_TYPES.PRODUCT, id: candidate.id, name: candidate.name, product: candidate.entry.product };
 }
 
-function withValuation(row, target, options) {
-  const valuation = valueFreeImportRow(row, target, options);
-  const needsReview = Boolean(valuation.conversion?.needsConversion) || valuation.warnings.some((warning) => !/incomplete|no price/i.test(warning));
+const STRANGE_WARNING = /far above|usual purchase|on one line|is a lot/;
+
+function withValuation(row, target, options = {}) {
+  const valuation = valueFreeImportRow(row, target, { ...options, basisAnswers: options.basisAnswers || (options.products ? supplierBasisAnswers(options.products) : null) });
+  const strange = valuation.warnings.some((warning) => STRANGE_WARNING.test(warning));
+  const needsConversion = Boolean(valuation.conversion?.needsConversion);
+  const unitMismatch = Boolean(valuation.issues?.unitMismatch);
+  const basisPending = Boolean(valuation.issues?.basisPending);
+  const needsReview = needsConversion || strange || unitMismatch || basisPending;
   return {
     ...row,
     target: target ? { type: target.type, id: target.id, name: target.name, supplier: target.product?.supplier || "", packSize: target.product?.packSize || "", yieldUnit: target.recipe?.yieldUnit || "" } : null,
     ...valuation,
-    strange: valuation.warnings.some((warning) => !/incomplete|no price/i.test(warning)),
-    needsConversion: Boolean(valuation.conversion?.needsConversion),
-    confirmed: row.status === FREE_IMPORT_STATUS.CONFIRMED && !needsReview && !row.reviewed ? true : Boolean(row.reviewed && target && !valuation.conversion?.needsConversion),
+    strange,
+    needsConversion,
+    unitMismatch,
+    basisPending,
+    // Confirmed alone only with a sure match and nothing to check; a row the user chose stays
+    // open only while the packs cannot be worked out or the case/item price is unanswered.
+    confirmed: row.reviewed
+      ? Boolean(target && !needsConversion && !basisPending)
+      : row.status === FREE_IMPORT_STATUS.CONFIRMED && !needsReview,
   };
 }
 
@@ -630,12 +723,13 @@ export function parseFreeStocktakeImport(rawRows = [], {
       nameSupplier: cleaned.supplier,
       status: decision.status,
       source: decision.source,
+      productAndRecipe: Boolean(decision.productAndRecipe),
       confidence: decision.candidate ? Math.max(0, Math.min(1, decision.candidate.score)) : 0,
       candidates: candidates.map((candidate) => ({ type: candidate.type, id: candidate.id, name: candidate.name, score: Math.max(0, Math.min(1, candidate.score)), supplier: candidate.entry.product?.supplier || "", packSize: candidate.entry.product?.packSize || "" })),
       ignored: false,
       reviewed: false,
     };
-    reviewRows.push(withValuation(row, targetFromCandidate(decision.candidate), { costingContext }));
+    reviewRows.push(withValuation(row, targetFromCandidate(decision.candidate), { costingContext, basisAnswers: matchIndex.basisAnswers || supplierBasisAnswers(products) }));
   });
   return {
     kind: "free",
@@ -677,7 +771,7 @@ export function chooseFreeImportTarget(rows = [], rowId, { type = TARGET_TYPES.P
     if (!target) return row;
     const sameTarget = row.target && row.target.type === target.type && row.target.id === target.id;
     const updated = { ...row, ignored: false, reviewed: true, status: FREE_IMPORT_STATUS.CONFIRMED, source: sameTarget && row.source ? row.source : FREE_MATCH_SOURCE.MANUAL, packContent: sameTarget ? row.packContent : undefined };
-    return withValuation(updated, target, { costingContext });
+    return withValuation(updated, target, { costingContext, products });
   });
   return markRepeatedRows(next);
 }
@@ -689,13 +783,39 @@ export function setFreeImportPackContent(rows = [], rowId, content = {}, { produ
   return rows.map((row) => {
     if (row.id !== rowId || !row.target) return row;
     const target = findTarget(row.target.type, row.target.id, { products, recipes });
-    return withValuation({ ...row, packContent: { quantity, base: content.base, source: "stocktake" }, reviewed: true, status: FREE_IMPORT_STATUS.CONFIRMED }, target, { costingContext });
+    return withValuation({ ...row, packContent: { quantity, base: content.base, source: "stocktake" }, packsOverride: undefined, reviewed: true, status: FREE_IMPORT_STATUS.CONFIRMED }, target, { costingContext, products });
   });
+}
+
+// Packs typed by the user for a row ("6 punnets" = 0.5 box): used as they are.
+export function setFreeImportPacks(rows = [], rowId, packs, { products = [], recipes = [], costingContext = null } = {}) {
+  return rows.map((row) => {
+    if (row.id !== rowId || row.target?.type !== TARGET_TYPES.PRODUCT) return row;
+    const target = findTarget(row.target.type, row.target.id, { products, recipes });
+    const value = packs === "" || packs === null || packs === undefined ? undefined : packs;
+    return withValuation({ ...row, packsOverride: value, reviewed: value !== undefined || row.reviewed, status: value !== undefined ? FREE_IMPORT_STATUS.CONFIRMED : row.status }, target, { costingContext, products });
+  });
+}
+
+// Rows of a product valued again after it changed (a case/item answer was saved on it).
+export function revalueProductRows(rows = [], product = null, { products = [], recipes = [], costingContext = null } = {}) {
+  if (!product) return rows;
+  const catalogue = products.map((candidate) => (candidate.id === product.id ? product : candidate));
+  return rows.map((row) => (row.target?.type === TARGET_TYPES.PRODUCT && row.target.id === product.id
+    ? withValuation(row, { type: TARGET_TYPES.PRODUCT, id: product.id, name: product.name || "", product }, { costingContext, products: catalogue })
+    : row));
+}
+
+// The conversion to keep on the product for a case/item answer, as the recipe editor saves it.
+export function basisConversion(product = {}, basis = "item") {
+  const reading = multipackReading(product.packSize || "");
+  if (!reading || !["case", "item"].includes(basis)) return null;
+  return { packSize: product.packSize, baseQuantity: basis === "case" ? reading.caseQuantity : reading.itemQuantity, baseUnit: reading.unit };
 }
 
 // Confirms a row as it stands, including a strange value the user has checked.
 export function acceptFreeImportRow(rows = [], rowId) {
-  return rows.map((row) => (row.id === rowId && row.target && !row.needsConversion
+  return rows.map((row) => (row.id === rowId && row.target && !row.needsConversion && !row.basisPending
     ? { ...row, reviewed: true, confirmed: true, status: FREE_IMPORT_STATUS.CONFIRMED }
     : row));
 }
@@ -706,7 +826,7 @@ export function ignoreFreeImportRow(rows = [], rowId, ignored = true) {
 
 // "Confirm all suggested ≥ X": rows with a match, no strange value and no conversion to answer.
 export function confirmSuggestedAbove(rows = [], minimum = 0.8) {
-  return rows.map((row) => (!row.ignored && !row.confirmed && row.target && !row.needsConversion && !row.strange
+  return rows.map((row) => (!row.ignored && !row.confirmed && row.target && !row.needsConversion && !row.strange && !row.unitMismatch && !row.basisPending && !row.productAndRecipe
     && [FREE_IMPORT_STATUS.SUGGESTED, FREE_IMPORT_STATUS.AMBIGUOUS].includes(row.status) && row.confidence >= minimum
     ? { ...row, reviewed: true, confirmed: true, status: FREE_IMPORT_STATUS.CONFIRMED }
     : row));

@@ -22,7 +22,11 @@ import {
   prepTotals,
   productPackContent,
   productsWithLearnedAliases,
+  basisConversion,
+  revalueProductRows,
   setFreeImportPackContent,
+  setFreeImportPacks,
+  typicalPurchaseValue,
 } from "./stocktakeFreeImport.js";
 
 // Invented catalogue: no customer data.
@@ -286,4 +290,88 @@ test("sizes in pack words and single items of a case are converted", () => {
   const perItem = { ...caseOfBottles, recipeConversion: { packSize: "24 x 330ml", baseQuantity: 0.33, baseUnit: "l" } };
   approx(packsForCount(3, parseCountUnit("uni"), productPackContent(perItem)).packs, 3);
   approx(packsForCount(0.8, parseCountUnit("uni"), productPackContent({ packSize: "3.17kg" })).packs, 0.8);
+});
+
+// ---------- Part A fixes (invented cases shaped like the real ones) ----------
+
+const invoice = (date, quantity, price, packSize) => ({ source: "Invoice", date, quantity, purchaseUnitCost: price, packSize });
+const fixProducts = [
+  { id: "f-carrots", name: "Carrots, Baby Rainbow", supplier: "Veg Co", packSize: "BOX", unitCost: 24.99, supplierFormats: [invoice("2026-10-02", 1, 24.99, "BOX")] },
+  { id: "f-focaccia", name: "Focaccia", supplier: "Bakery Co", packSize: "case", unitCost: 54, supplierFormats: [invoice("2026-10-05", 1, 54, "case")] },
+  { id: "f-chicken", name: "Chicken, Whole", supplier: "Butcher Co", packSize: "900g", unitCost: 4.2 },
+  { id: "f-barley", name: "Pearl Barley", supplier: "Dry Goods Co", packSize: "2kg", unitCost: 3.4 },
+  { id: "f-pine", name: "Pine Nuts", supplier: "Fine Foods Co", packSize: "6x1kg", unitCost: 26.6 },
+  { id: "f-cheese", name: "Smoked Applewood", supplier: "Fine Foods Co", packSize: "6x750g", unitCost: 8.74 },
+  { id: "f-other-a", name: "Capers", supplier: "Elite Co", packSize: "6x700g", unitCost: 5, recipeConversion: { packSize: "6x700g", baseQuantity: 0.7, baseUnit: "kg" } },
+  { id: "f-other-b", name: "Olives", supplier: "Elite Co", packSize: "4x2kg", unitCost: 9, recipeConversion: { packSize: "4x2kg", baseQuantity: 2, baseUnit: "kg" } },
+  { id: "f-vine", name: "Stuffed Vine Leaves", supplier: "Elite Co", packSize: "6x2kg", unitCost: 14.9 },
+  { id: "f-sugar", name: "Sugar Caster", supplier: "Dry Goods Co", packSize: "2kg", unitCost: 3, supplierFormats: [invoice("2026-10-01", 2, 3, "2kg")] },
+];
+const fixRecipes = [{ id: "r-barley", schemaVersion: 2, name: "Pearl Barley", yieldQuantity: 1, yieldUnit: "kg", ingredients: [
+  { id: "l1", type: "Product", productId: "f-barley", sourceId: "f-barley", quantity: 400, unit: "g", wastePercent: 0 },
+] }];
+const fixContext = () => createCostingContext(fixProducts, fixRecipes, { priceBasis: PRICE_BASIS.LATEST });
+const fixParse = (rows, list = fixProducts) => parseFreeStocktakeImport(sheet(...rows), { products: list, recipes: fixRecipes, costingContext: createCostingContext(list, fixRecipes, { priceBasis: PRICE_BASIS.LATEST }) });
+
+test("A1: a count in punnets, loaves or boxes of a product bought another way is never confirmed alone", () => {
+  const result = fixParse([["baby carrots", 6, "punnets"], ["Focaccia", 3, "loaf"], ["Whole chicken", 1, "bx"]]);
+  for (const text of ["baby carrots", "Focaccia", "Whole chicken"]) {
+    const row = rowFor(result, text);
+    assert.equal(row.unitMismatch, true, text);
+    assert.equal(row.confirmed, false, text);
+  }
+  const carrots = rowFor(result, "baby carrots");
+  const typed = setFreeImportPacks(result.reviewRows, carrots.id, "0.5", { products: fixProducts, recipes: fixRecipes, costingContext: fixContext() });
+  const fixed = typed.find((row) => row.id === carrots.id);
+  assert.equal(fixed.confirmed, true);
+  approx(fixed.value, 12.5, 2);
+  const perBox = setFreeImportPackContent(result.reviewRows, carrots.id, { quantity: 12, base: "each" }, { products: fixProducts, recipes: fixRecipes, costingContext: fixContext() });
+  approx(perBox.find((row) => row.id === carrots.id).packs, 0.5);
+  assert.equal(perBox.find((row) => row.id === carrots.id).unitMismatch, false);
+});
+
+test("A2: a product and a recipe with the same name: the product, shown with the recipe, for review", () => {
+  const row = rowFor(fixParse([["Pearl barley", 5458, "g"]]), "Pearl barley");
+  assert.equal(row.target.type, TARGET_TYPES.PRODUCT);
+  assert.equal(row.target.id, "f-barley");
+  assert.equal(row.confirmed, false);
+  assert.equal(row.productAndRecipe, true);
+  assert.ok(row.candidates.some((candidate) => candidate.type === TARGET_TYPES.RECIPE));
+  assert.equal(confirmSuggestedAbove([row], 0)[0].confirmed, false);
+});
+
+test("A3: N x size packs use the supplier's item answers, or ask case or item", () => {
+  const list = fixProducts.map((product) => (["f-pine", "f-cheese"].includes(product.id) ? { ...product, supplier: "Elite Co" } : product));
+  const result = fixParse([["Pine nuts", 1.375, "kg"], ["Smoked applewood 750g", 2, "uni"], ["Stuffed vine leaves", 2, "kg"]], list);
+  // Two Elite articles answered "per item" and none "per case": items.
+  approx(rowFor(result, "Pine nuts").packs, 1.375);
+  approx(rowFor(result, "Pine nuts").value, 36.58, 2);
+  approx(rowFor(result, "Smoked applewood 750g").value, 17.48, 2);
+  approx(rowFor(result, "Stuffed vine leaves").packs, 1);
+  // Another supplier with no answers: the row asks, and the answer is kept on the product.
+  const asking = fixParse([["Pine nuts", 1.375, "kg"]]);
+  const row = rowFor(asking, "Pine nuts");
+  assert.equal(row.basisPending, true);
+  assert.equal(row.confirmed, false);
+  approx(row.basisOptions.case.value, 6.1, 1);
+  approx(row.basisOptions.item.value, 36.58, 2);
+  const pine = fixProducts.find((product) => product.id === "f-pine");
+  const conversion = basisConversion(pine, "item");
+  assert.deepEqual(conversion, { packSize: "6x1kg", baseQuantity: 1, baseUnit: "kg" });
+  const answered = { ...pine, recipeConversion: conversion };
+  const after = revalueProductRows(asking.reviewRows, answered, { products: fixProducts, recipes: fixRecipes, costingContext: fixContext() })[0];
+  assert.equal(after.basisPending, false);
+  assert.equal(after.confirmed, true);
+  approx(after.value, 36.58, 2);
+});
+
+test("A4: a line worth more than 3x a usual purchase is flagged", () => {
+  assert.equal(typicalPurchaseValue(fixProducts[0]), 24.99);
+  const result = fixParse([["Carrots baby rainbow", 6, "box"], ["Sugar caster", 4, "kg"]]);
+  const carrots = rowFor(result, "Carrots baby rainbow");
+  assert.equal(carrots.strange, true);
+  assert.equal(carrots.confirmed, false);
+  assert.ok(freeImportRowFilter(carrots, FREE_IMPORT_FILTERS.STRANGE));
+  assert.equal(rowFor(result, "Sugar caster").strange, false);
+  assert.equal(rowFor(result, "Sugar caster").confirmed, true);
 });

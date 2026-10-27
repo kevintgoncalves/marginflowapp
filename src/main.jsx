@@ -292,10 +292,12 @@ import {
   freeImportResult,
   learnedAliases,
   mergeImportedCounts,
+  basisConversion,
   mergePrepLines,
   parseFreeStocktakeImport,
   prepTotals,
   productsWithLearnedAliases,
+  revalueProductRows,
 } from "./domain/stocktakeFreeImport.js";
 import { departmentStockPosition, periodStockResult, stockUnavailableReason } from "./domain/stockPeriod.js";
 import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
@@ -14163,6 +14165,15 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     }));
   };
 
+  // "Per case or per item?" answered in the import is kept on the product, as the recipe editor does.
+  const confirmImportBasis = (row, basis) => {
+    const product = products.find((candidate) => candidate.id === row.target?.id);
+    const conversion = product ? basisConversion(product, basis) : null;
+    if (!conversion || !permissions.canImport) return;
+    const updated = { ...product, recipeConversion: { ...conversion, confirmedAt: new Date().toISOString() }, updatedAt: new Date().toISOString() };
+    setProducts((current) => current.map((candidate) => (candidate.id === updated.id ? { ...candidate, recipeConversion: updated.recipeConversion, updatedAt: updated.updatedAt } : candidate)));
+    setModal((current) => ({ ...current, pendingImport: revalueProductRows(current.pendingImport, updated, { products, recipes, costingContext }) }));
+  };
   const cancelImport = () => setModal((current) => ({ ...current, pendingImport: [], prepEstimates: [], importSummary: null, importFileKey: current.importFileKey + 1, status: "Import cancelled." }));
   const resolveImportRow = (current, rowId, product) => (current.importSummary?.kind === "free"
     ? chooseFreeImportTarget(current.pendingImport, rowId, { product }, { products: [product, ...products], recipes, costingContext })
@@ -14394,6 +14405,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
                   index={freeImportIndex}
                   onApply={applyPendingImport}
                   onCancel={cancelImport}
+                  onConfirmBasis={confirmImportBasis}
                   onCreateProduct={(row) => openProductCreation(row, "import")}
                   onPrepEstimatesChange={(prepEstimates) => setModal((current) => ({ ...current, prepEstimates }))}
                   onRowsChange={(pendingImport) => setModal((current) => ({ ...current, pendingImport }))}

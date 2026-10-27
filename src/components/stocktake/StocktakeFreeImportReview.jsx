@@ -13,6 +13,7 @@ import {
   ignoreFreeImportRow,
   rankFreeImportCandidates,
   setFreeImportPackContent,
+  setFreeImportPacks,
 } from "../../domain/stocktakeFreeImport.js";
 
 const gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
@@ -41,6 +42,9 @@ function rowState(row) {
   if (row.confirmed) return { tone: "exact", label: sourceLabels[row.source] || "Confirmed" };
   if (!row.target) return { tone: "no_match", label: "No match" };
   if (row.needsConversion) return { tone: "ambiguous", label: "Pack content needed" };
+  if (row.basisPending) return { tone: "ambiguous", label: "Case or item price?" };
+  if (row.unitMismatch) return { tone: "ambiguous", label: "Counted unit differs from the pack" };
+  if (row.productAndRecipe) return { tone: "ambiguous", label: "Product or recipe?" };
   if (row.strange) return { tone: "ambiguous", label: "Check the value" };
   if (row.status === FREE_IMPORT_STATUS.AMBIGUOUS) return { tone: "ambiguous", label: "Several products fit" };
   return { tone: "suggested", label: `Suggested · ${Math.round((row.confidence || 0) * 100)}%` };
@@ -84,16 +88,16 @@ function TargetSearch({ index, onPick, onClose, initial = "" }) {
 function PackContentForm({ row, onSave }) {
   const guess = row.conversion?.base || (row.unitInfo?.base) || "kg";
   const [quantity, setQuantity] = useState("");
-  const [base, setBase] = useState(guess === "each" ? "each" : guess);
+  const [base, setBase] = useState(row.unitMismatch || guess === "each" ? "each" : guess);
   return (
     <div className="stocktake-pack-content">
       <span>1 pack of {row.target.packSize || "this product"} =</span>
       <input aria-label="Content per pack" inputMode="decimal" min="0" step="any" type="number" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
-      <select aria-label="Pack content unit" value={base} onChange={(event) => setBase(event.target.value)}>
+      {row.unitMismatch ? <span>{row.unitInfo?.label || "items"}</span> : <select aria-label="Pack content unit" value={base} onChange={(event) => setBase(event.target.value)}>
         <option value="kg">kg</option>
         <option value="l">l</option>
         <option value="each">each</option>
-      </select>
+      </select>}
       <button className="ghost mini-button" disabled={!(Number(quantity) > 0)} onClick={() => onSave({ quantity: Number(quantity), base })} type="button"><Check size={14} />Use</button>
     </div>
   );
@@ -105,6 +109,7 @@ export default function StocktakeFreeImportReview({
   index,
   onApply,
   onCancel,
+  onConfirmBasis,
   onCreateProduct,
   onPrepEstimatesChange,
   onRowsChange,
@@ -180,14 +185,29 @@ export default function StocktakeFreeImportReview({
                 ) : <span className="stocktake-free-none">No product or recipe found</span>}
                 <span className={`match-status ${state.tone}`}>{state.label}</span>
                 {(row.warnings || []).map((warning) => <small className="stocktake-free-warning" key={warning}><AlertTriangle size={12} />{warning}</small>)}
-                {canImport && !row.ignored && row.needsConversion && row.target?.type === TARGET_TYPES.PRODUCT && (
+                {canImport && !row.ignored && row.basisPending && row.basisOptions && onConfirmBasis && (
+                  <div className="stocktake-free-candidates">
+                    {["case", "item"].filter((basis) => row.basisOptions[basis]).map((basis) => (
+                      <button className="ghost mini-button" key={basis} onClick={() => onConfirmBasis(row, basis)} type="button">
+                        Per {basis} · {short(row.basisOptions[basis].packs, 3)} packs · {money(row.basisOptions[basis].value)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {canImport && !row.ignored && row.target?.type === TARGET_TYPES.PRODUCT && !row.needsConversion && (
+                  <label className="stocktake-pack-content">Packs
+                    <input aria-label={`Packs for ${row.productText}`} inputMode="decimal" min="0" step="any" type="number" value={row.packsOverride ?? (row.packs ?? "")}
+                      onChange={(event) => onRowsChange(setFreeImportPacks(reviewRows, row.id, event.target.value, options))} />
+                  </label>
+                )}
+                {canImport && !row.ignored && (row.needsConversion || row.unitMismatch) && row.target?.type === TARGET_TYPES.PRODUCT && (
                   <PackContentForm row={row} onSave={(content) => onRowsChange(setFreeImportPackContent(reviewRows, row.id, content, options))} />
                 )}
                 {searchingId === row.id && <TargetSearch index={index} initial={row.cleanedName || row.productText} onClose={() => setSearchingId("")} onPick={(hit) => pick(row, hit)} />}
                 {!row.confirmed && !row.ignored && row.candidates?.length > 1 && searchingId !== row.id && (
                   <div className="stocktake-free-candidates">
                     {row.candidates.slice(0, 4).filter((candidate) => candidate.id !== row.target?.id).map((candidate) => (
-                      <button className="ghost mini-button" key={`${candidate.type}-${candidate.id}`} onClick={() => pick(row, candidate)} type="button">{candidate.name}{candidate.packSize ? ` · ${candidate.packSize}` : ""}</button>
+                      <button className="ghost mini-button" key={`${candidate.type}-${candidate.id}`} onClick={() => pick(row, candidate)} type="button">{candidate.name}{candidate.type === TARGET_TYPES.RECIPE ? " · recipe" : candidate.packSize ? ` · ${candidate.packSize}` : ""}</button>
                     ))}
                   </div>
                 )}
@@ -195,7 +215,7 @@ export default function StocktakeFreeImportReview({
               <div className="stocktake-free-value"><strong>{money(row.value)}</strong></div>
               {canImport && (
                 <div className="row-actions stocktake-free-actions">
-                  {!row.ignored && row.target && !row.confirmed && !row.needsConversion && <button className="ghost mini-button" onClick={() => onRowsChange(acceptFreeImportRow(reviewRows, row.id))} type="button"><Check size={14} />Confirm</button>}
+                  {!row.ignored && row.target && !row.confirmed && !row.needsConversion && !row.basisPending && <button className="ghost mini-button" onClick={() => onRowsChange(acceptFreeImportRow(reviewRows, row.id))} type="button"><Check size={14} />Confirm</button>}
                   {!row.ignored && row.status !== FREE_IMPORT_STATUS.INVALID && <button className="ghost mini-button" onClick={() => setSearchingId(row.id)} type="button"><Search size={14} />{row.target ? "Change" : "Link"}</button>}
                   {!row.ignored && !row.target && row.status !== FREE_IMPORT_STATUS.INVALID && <button className="ghost mini-button" onClick={() => onCreateProduct({ id: row.id, productName: row.cleanedName || row.productText })} type="button"><Plus size={14} />Create</button>}
                   {!row.ignored && <button className="ghost mini-button" onClick={() => onRowsChange(ignoreFreeImportRow(reviewRows, row.id))} type="button"><X size={14} />Ignore</button>}
