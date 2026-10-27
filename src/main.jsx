@@ -22,6 +22,7 @@ import WorkspaceNavigation from "./components/WorkspaceNavigation.jsx";
 import InteractiveChart from "./components/InteractiveChart.jsx";
 import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
+import BrowserDifferencesPanel from "./components/BrowserDifferencesPanel.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
@@ -280,6 +281,7 @@ import {
   stocktakeTemplateRows,
 } from "./domain/stocktakeImport.js";
 import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
+import { DIFFERENCE_KINDS, SETTINGS_MODULES, applyBrowserVersion, cloudFirstStorage, mergeDifferenceLists } from "./domain/cloudFirstLoad.js";
 import {
   chooseFreeImportTarget,
   createFreeImportIndex,
@@ -406,6 +408,9 @@ const cloudModuleDefinitions = [
 // signed-in workspace they live only in the cloud and are reloaded on every start.
 const cloudOnlyBrowserKeys = ["marginflow.products", "marginflow.invoiceLineCorrections", "marginflow.supplierProductMappings", "marginflow.labour"];
 const cloudWritableModuleDefinitions = cloudModuleDefinitions.filter((definition) => !["invoices", "sales"].includes(definition.key));
+// Merged the old way at opening: they come from the relational tables, with pending work kept.
+const cloudLoadMergedKeys = ["marginflow.invoices", "marginflow.sales"];
+const browserDifferencesKey = "marginflow.browserDifferences";
 
 function currentSearchParams() {
   try {
@@ -5254,6 +5259,11 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This week", financialSettings.weekStartsOn));
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createEmptyLabourData())));
   const [pendingLearning, setPendingLearningState] = useState(() => safeReadLocalStorageArray("marginflow.pendingLearning", []));
+  // What the browser held that differs from the cloud at opening, kept for the user to decide.
+  const [browserDifferences, setBrowserDifferencesState] = useState(() => safeReadLocalStorageArray(browserDifferencesKey, []));
+  const [browserDifferencesStored, setBrowserDifferencesStored] = useState(true);
+  const cloudAutoRetryRef = useRef(0);
+  const learningAutoRetryRef = useRef(false);
   const [learningError, setLearningError] = useState("");
   const [learningNotice, setLearningNotice] = useState("");
   const [draft, setDraft] = useState(() => (demoCaptureMode === "invoice-review" && demoInitialData?.invoiceReviewDraft ? demoInitialData.invoiceReviewDraft : emptyInvoiceDraft()));
@@ -5323,9 +5333,12 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const setSupplierProductMappings = demoMode ? makeStateUpdater(setSupplierProductMappingsState) : makeStateUpdater(setSupplierProductMappingsState, "marginflow.supplierProductMappings");
   const setInvoiceLineCorrections = demoMode ? makeStateUpdater(setInvoiceLineCorrectionsState) : makeStateUpdater(setInvoiceLineCorrectionsState, "marginflow.invoiceLineCorrections");
   const setInvoices = (value) => {
-    invoiceCommitGenerationRef.current += 1;
     setInvoicesState((current) => {
       const nextValue = typeof value === "function" ? value(current) : value;
+      // An update that changes nothing (a recovery check with nothing to recover) is not new
+      // invoice work; counting it made every cloud load stop before applying the cloud.
+      if (nextValue === current) return current;
+      invoiceCommitGenerationRef.current += 1;
       const next = normalizeInvoiceCollectionForRuntime(nextValue);
       // Confirmed history is authoritative in Supabase. Keep only work that is
       // genuinely not cloud-confirmed in a separate recovery key, never rewrite
@@ -5536,14 +5549,17 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     departmentSelection: department,
   }), [companySettings, financialSettings, departmentSettings, labourSettings, suppliers, supplierDeliverySchedules, supplierProductMappings, invoiceLineCorrections, products, invoices, invoiceDayStatusOverrides, creditNotes, sales, labourData, recipes, menus, stocktakes, wasteItems, menuSettings, invoiceSettings, aiSettings, department]);
 
-  const applyCloudSnapshot = (snapshot) => {
+  const applyCloudSnapshot = (snapshot, { keepInvoiceWork = false, preserveBrowserKeys = [] } = {}) => {
     if (Array.isArray(snapshot.confirmedInvoices)) {
       setConfirmedInvoices(snapshot.confirmedInvoices);
       setConfirmedInvoicesLoaded(true);
     }
     if (!demoMode && !readOnly) {
       try {
-        Object.entries(storageFromCloudSnapshot(snapshot)).forEach(([key, value]) => saveSerializedLocalStorage(key, value, "cloud_snapshot"));
+        // Browser copies that differ from the cloud are left as they are until the user decides.
+        Object.entries(storageFromCloudSnapshot(snapshot))
+          .filter(([key]) => !preserveBrowserKeys.includes(key))
+          .forEach(([key, value]) => saveSerializedLocalStorage(key, value, "cloud_snapshot"));
       } catch (error) {
         setLocalStorageError({ error: error?.name || "Storage error" });
       }
@@ -5557,7 +5573,18 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     setSupplierProductMappingsState(snapshot.supplierProductMappings || []);
     setInvoiceLineCorrectionsState(snapshot.invoiceLineCorrections || []);
     setProductsState(normalizeProductCollectionForRuntime(snapshot.products));
-    setInvoicesState(normalizeInvoiceCollectionForRuntime(snapshot.invoices));
+    if (keepInvoiceWork) {
+      // Invoice work arrived while the cloud was loading: keep it, joined with the cloud's records.
+      setInvoicesState((current) => normalizeInvoiceCollectionForRuntime(relationalOperationalInvoiceCollection({
+        localInvoices: [...(snapshot.invoices || []), ...current.filter((invoice) => !(snapshot.invoices || []).some((row) => row.id === invoice.id))],
+        relationalInvoices: snapshot.confirmedInvoices || [],
+        companyId: cloudScope.companyId,
+        locationId: cloudScope.locationId || "",
+        readOnly,
+      })));
+    } else {
+      setInvoicesState(normalizeInvoiceCollectionForRuntime(snapshot.invoices));
+    }
     setInvoiceDayStatusOverridesState(snapshot.invoiceDayStatusOverrides);
     setCreditNotesState(snapshot.creditNotes);
     salesRef.current = snapshot.sales;
@@ -5789,11 +5816,19 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           return value !== undefined && value !== null && value !== "";
         });
 
+        let foundDifferences = [];
         if (rows.length) {
           const cloudStorage = storageFromCloudSnapshot(cloudSnapshotFromRows(rows));
-          const merged = hasLocalMarginFlowData
-            ? mergeMarginFlowStorage(localStorageData, cloudStorage, false).nextStorage
-            : cloudStorage;
+          let merged = cloudStorage;
+          if (hasLocalMarginFlowData) {
+            // The cloud is the base; the browser never overwrites it. Invoices and sales keep their
+            // own merge (relational records plus pending work).
+            const previousMerge = mergeMarginFlowStorage(localStorageData, cloudStorage, false).nextStorage;
+            const cloudFirst = cloudFirstStorage(localStorageData, cloudStorage, { keepBrowserKeys: cloudLoadMergedKeys });
+            merged = { ...cloudFirst.nextStorage };
+            cloudLoadMergedKeys.forEach((key) => { if (previousMerge[key] !== undefined) merged[key] = previousMerge[key]; });
+            foundDifferences = cloudFirst.differences;
+          }
           const hasPersistedSetup = ["companySettings", "financialSettings", "departmentSettings"]
             .every((moduleKey) => rows.some((row) => row.module_key === moduleKey));
           const baseSnapshot = cloudSnapshotFromStorage(merged);
@@ -5803,8 +5838,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const invoiceSnapshot = await withRelationalInvoices(configuredSnapshot);
           const nextSnapshot = invoiceSnapshot;
           if (cancelled) return;
-          if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
-          applyCloudSnapshot(nextSnapshot);
+          if (foundDifferences.length) recordBrowserDifferences(foundDifferences);
+          const pendingKeys = [...new Set([...browserDifferences, ...foundDifferences].map((difference) => difference.storageKey))];
+          applyCloudSnapshot(nextSnapshot, { keepInvoiceWork: loadGeneration !== invoiceCommitGenerationRef.current, preserveBrowserKeys: pendingKeys });
           if (!readOnly) withRelationalLearning(nextSnapshot).then(learned => {
             if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
           });
@@ -5816,8 +5852,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           const invoiceSnapshot = await withRelationalInvoices(configuredSnapshot);
           const firstSnapshot = invoiceSnapshot;
           if (cancelled) return;
-          if (loadGeneration !== invoiceCommitGenerationRef.current) throw new Error("New invoice work arrived while loading. It has been retained. Retry cloud loading.");
-          applyCloudSnapshot(firstSnapshot);
+          applyCloudSnapshot(firstSnapshot, { keepInvoiceWork: loadGeneration !== invoiceCommitGenerationRef.current });
           if (!readOnly) withRelationalLearning(firstSnapshot).then(learned => {
             if (!cancelled) setSupplierProductMappings(learned.supplierProductMappings || []);
           });
@@ -5830,6 +5865,11 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         if (cancelled) return;
         setCloudStatus("error");
         setCloudError(error.message || "Could not load cloud data.");
+        // One automatic retry per opening; after that the banner shows the error and a Retry button.
+        if (cloudAutoRetryRef.current < 1) {
+          cloudAutoRetryRef.current += 1;
+          window.setTimeout(() => { if (!cancelled) setCloudLoadAttempt((current) => current + 1); }, 3000);
+        }
       })
       .finally(() => {
         if (!cancelled) setCloudLoading(false);
@@ -5924,6 +5964,59 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       // Local storage is best-effort in preview environments.
     }
   };
+
+  const storeBrowserDifferences = (next) => {
+    setBrowserDifferencesState(next);
+    if (!demoMode && !readOnly) setBrowserDifferencesStored(saveLocalStorage(browserDifferencesKey, next) !== false);
+  };
+  const recordBrowserDifferences = (found = []) => {
+    setBrowserDifferencesState((current) => {
+      const next = mergeDifferenceLists(current, found);
+      if (!demoMode && !readOnly) setBrowserDifferencesStored(saveLocalStorage(browserDifferencesKey, next) !== false);
+      return next;
+    });
+  };
+  // "Use the browser's version": the record or settings go into the app (and so to the cloud).
+  const useBrowserVersion = (difference) => {
+    const recordSetters = {
+      "marginflow.recipes": setRecipes,
+      "marginflow.menus": setMenus,
+      "marginflow.stocktakes": setStocktakes,
+      "marginflow.waste": setWasteItems,
+      "marginflow.suppliers": setSuppliers,
+      "marginflow.supplierDeliverySchedules": setSupplierDeliverySchedules,
+      "marginflow.creditNotes": setCreditNotes,
+      "marginflow.invoiceDayStatusOverrides": setInvoiceDayStatusOverrides,
+    };
+    const settings = {
+      "marginflow.companySettings": [companySettings, setCompanySettings],
+      "marginflow.financialSettings": [financialSettings, setFinancialSettings],
+      "marginflow.departmentSettings": [departmentSettings, setDepartmentSettings],
+      "marginflow.labourSettings": [labourSettings, setLabourSettings],
+      "marginflow.menuSettings": [menuSettings, setMenuSettings],
+      "marginflow.invoiceSettings": [invoiceSettings, setInvoiceSettings],
+      "marginflow.aiSettings": [aiSettings, setAiSettings],
+    };
+    if (difference.kind === DIFFERENCE_KINDS.SETTINGS) {
+      const entry = settings[difference.storageKey];
+      if (!entry) return;
+      entry[1](applyBrowserVersion(difference, entry[0]));
+    } else {
+      const setter = recordSetters[difference.storageKey];
+      if (!setter) return;
+      setter((current) => applyBrowserVersion(difference, current));
+    }
+    storeBrowserDifferences(browserDifferences.filter((item) => item.id !== difference.id));
+  };
+  const keepCloudVersion = (difference) => storeBrowserDifferences(browserDifferences.filter((item) => item.id !== difference.id));
+  const exportBrowserDifferences = () => downloadJsonFile(`marginflow-browser-differences-${today()}.json`, { format: "marginflow-browser-differences-v1", scope: cloudScope, exportedAt: new Date().toISOString(), differences: browserDifferences });
+
+  // Learning saved while the cloud never loaded: try once by itself when the cloud is ready.
+  useEffect(() => {
+    if (demoMode || readOnly || cloudStatus !== "synced" || !cloudReadyRef.current || learningAutoRetryRef.current || !pendingLearning.length) return;
+    learningAutoRetryRef.current = true;
+    persistConfirmedLearning(pendingLearning);
+  }, [cloudStatus, pendingLearning.length]);
 
   const retryCloudSync = () => {
     cloudReadyRef.current = false;
@@ -6954,13 +7047,14 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         onNavigate={page => {setUtilityPanel("");setActive(page);}} />
 
       <main className="workspace" id="workspace-content" tabIndex={-1}>
-        {!demoMode && (localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || !confirmedInvoicesLoaded || reportLoadState.loading || reportLoadState.error || pendingInvoiceCount > 0 || learningNotice) && <details className="invoice-safety-banner" open={Boolean(localStorageError || cloudError || reportLoadState.error || pendingInvoiceCount)}>
-          <summary>{localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || (!confirmedInvoicesLoaded && cloudError) || reportLoadState.error || pendingInvoiceCount > 0 ? "Sync attention needed" : learningNotice && confirmedInvoicesLoaded && !reportLoadState.loading ? "Saved" : "Syncing"}</summary>
+        {!demoMode && (localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || browserDifferences.length > 0 || !confirmedInvoicesLoaded || reportLoadState.loading || reportLoadState.error || pendingInvoiceCount > 0 || learningNotice) && <details className="invoice-safety-banner" open={Boolean(localStorageError || cloudError || reportLoadState.error || pendingInvoiceCount)}>
+          <summary>{localStorage.hasLegacyData() || localStorageError || pendingLearning.length > 0 || browserDifferences.length > 0 || (!confirmedInvoicesLoaded && cloudError) || reportLoadState.error || pendingInvoiceCount > 0 ? "Sync attention needed" : learningNotice && confirmedInvoicesLoaded && !reportLoadState.loading ? "Saved" : "Syncing"}</summary>
           {localStorage.hasLegacyData() && <p>Older browser data is preserved separately because its ownership has not been verified. It has not been imported.</p>}
           {localStorageError && <p>Recent browser work could not be stored. Export it before closing this page. <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export recovery file</button></p>}
           {pendingLearning.length > 0 && <p>{pendingLearning.length} reusable match or conversion update(s) await confirmation. {learningError || ""} <button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></p>}
           {learningNotice && <p>{learningNotice}</p>}
-          {!confirmedInvoicesLoaded && <p>{cloudError ? "Cloud records could not be verified; confirmed totals are unavailable." : "Loading confirmed cloud records."} <button type="button" onClick={retryCloudSync}>Retry</button></p>}
+          {browserDifferences.length > 0 && <p>{browserDifferences.length} item(s) in this browser differ from the cloud. The cloud version is in use; choose for each one. <button type="button" onClick={() => setActive("settings", "backup")}>Review differences</button></p>}
+          {!confirmedInvoicesLoaded && <p>{cloudError ? `Cloud data could not be loaded: ${cloudError}` : "Loading confirmed cloud records."} {cloudError && <button type="button" onClick={retryCloudSync}>Retry</button>}</p>}
           {reportLoadState.loading && <p>Loading the selected reporting period…</p>}
           {reportLoadState.error && <p>{reportLoadState.error} Invoice browsing remains available.</p>}
           {pendingInvoiceCount > 0 && <p>{pendingInvoiceCount} invoice(s) await cloud confirmation. Reports use the last confirmed version. <button type="button" onClick={() => setActive("invoices")}>View invoices</button></p>}
@@ -7110,6 +7204,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             suppliers={suppliers}
           />
         )}
+        {active === "settings" && settingsSection === "backup" && !readOnly && browserDifferences.length > 0 && <BrowserDifferencesPanel differences={browserDifferences} onExport={exportBrowserDifferences} onKeepCloud={keepCloudVersion} onUseBrowser={useBrowserVersion} stored={browserDifferencesStored} />}
         {active === "settings" && settingsSection === "backup" && cloudEnabled && !readOnly && permissionsByPage.invoices?.canEdit && <PendingRecoveryPanel client={supabase} scope={cloudScope} working={invoices} download={downloadJsonFile} onStage={rows => setInvoices(current => {
           const pendingIds = new Set(current.filter(r => ["pending_sync", "sync_failed", "local_only"].includes(r.syncStatus)).map(r => r.id));
           return rows.reduce((next, row) => pendingIds.has(row.id) ? next : upsertInvoiceInCollection(next, { ...row, syncRetryBlocked: true, nextSyncAttemptAt: "" }), current);

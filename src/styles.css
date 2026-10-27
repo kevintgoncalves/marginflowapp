@@ -8328,3 +8328,14 @@ button.icon {
   .stocktake-prep-add { grid-template-columns: 1fr; }
   .stocktake-summary-split { justify-content: flex-start; }
 }
+
+/* Browser and cloud differences (Settings > Backup & recovery) */
+.browser-differences-panel { display: grid; gap: 12px; }
+.browser-differences-panel .panel-head > div:first-child { display: grid; gap: 4px; }
+.browser-differences-list { display: grid; border: 1px solid var(--line); border-radius: 8px; }
+.browser-difference-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px; border-bottom: 1px solid var(--line); }
+.browser-difference-main { display: grid; gap: 4px; min-width: 0; }
+.browser-difference-main span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.browser-difference-fields { font-size: 12px; }
+.browser-difference-json { max-height: 240px; overflow: auto; font-size: 11px; white-space: pre-wrap; background: var(--card-soft); padding: 8px; border-radius: 6px; }
+@media (max-width: 720px) { .browser-difference-row { grid-template-columns: 1fr; } }
