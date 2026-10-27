@@ -26,12 +26,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import marginflowLogo from "./assets/marginflow-logo.png";
 import {
   AlertTriangle,
-  ArrowDownUp,
   Boxes,
   CalendarDays,
   ClipboardPaste,
@@ -48,7 +46,6 @@ import {
   FileSearch,
   Gauge,
   Home,
-  LogOut,
   PackageSearch,
   Plus,
   ReceiptText,
@@ -128,7 +125,6 @@ import {
   validateInvoiceExtraction,
 } from "./domain/invoiceValidation.js";
 import { supplierFormatFromLine } from "./domain/productPackaging.js";
-import { buildProductRows, cheapestOffer } from "./domain/productComparisonRows.js";
 import { tableRowsMatchingQuery } from "./domain/tableSearch.js";
 import {
   normalizeInvoiceCollectionForRuntime,
@@ -185,7 +181,7 @@ import { diagnoseLaptopLegacyRecovery } from "./lib/legacyRecoveryDiagnosticRepo
 import { recoveryDiagnosticExport } from "./domain/legacyRecoveryDiagnostics.js";
 import { saveRevisionedCloudModules } from "./lib/cloudStateRepository.js";
 import { deleteRelationalSalesEntry, loadRelationalSales, persistRelationalSalesEntry } from "./lib/salesRepository.js";
-import { buildSalesWeekGrid, changedSalesDays, dayTotals, gridColumns, pasteIntoGrid, weekDates as salesWeekDates, weekStartFor as salesWeekStartFor } from "./domain/salesWeekInput.js";
+import { buildSalesWeekGrid, changedSalesDays, dayTotals, pasteIntoGrid, weekDates as salesWeekDates, weekStartFor as salesWeekStartFor } from "./domain/salesWeekInput.js";
 import { canonicalJson, compareInvoiceLists, headlineRows } from "./domain/reportLoadComparison.js";
 import { OTHER_DEPARTMENT as POS_OTHER_DEPARTMENT, applyPastedDay, buildPastedDay, categoryMapUpdates, defaultDepartmentFor, parseSalesPaste } from "./domain/salesPasteImport.js";
 import { loadCustomerOnboardingState } from "./lib/onboardingRepository.js";
@@ -203,7 +199,6 @@ import {
   departmentAssignmentIsValid,
   lineUsesSplitDepartmentMode,
   normalizeDepartmentSplitRows,
-  validDepartmentSplitRows,
 } from "./domain/departmentAssignment.js";
 import {
   PRODUCT_RESOLUTION_MODES,
@@ -236,7 +231,6 @@ import {
   documentTypeBadgeLabel,
   documentTypeFor,
   documentTypeLabel,
-  getDocumentSign,
   inferCreditReasonFromText,
   inferDocumentTypeFromText,
   isCreditNoteDocument,
@@ -538,180 +532,6 @@ const supplierParserCatalog = [
   { name: "Real Patisserie", aliases: ["real patisserie"], status: "Supported" },
   { name: "Lady of the Cakes", aliases: ["lady of the cakes"], status: "Supported" },
   { name: "Brighton Sausage Co", aliases: ["brighton sausage"], status: "Supported" },
-];
-
-const initialSuppliers = [
-  { id: uid(), name: "Albion Fine Foods", category: "Dry / chilled", contact: "Orders", email: "orders@albion.example", phone: "020 7000 0101", active: true },
-  { id: uid(), name: "TG Fruits", category: "Produce", contact: "Sales", email: "sales@tgfruits.example", phone: "020 7000 0202", active: true },
-  { id: uid(), name: "Woods", category: "Wholesale", contact: "Account manager", email: "orders@woods.example", phone: "020 7000 0303", active: true },
-  { id: uid(), name: "BNFS", category: "Fish", contact: "Fish desk", email: "", phone: "020 7000 0404", active: true },
-  { id: uid(), name: "Cheese Man", category: "Dairy", contact: "", email: "", phone: "", active: true },
-  { id: uid(), name: "Coburn & Baker", category: "Bakery", contact: "", email: "", phone: "", active: true },
-];
-
-const initialProducts = [
-  {
-    id: uid(),
-    name: "Eggs Box x180 Large",
-    supplier: "Cheese Man",
-    packSize: "180 each",
-    quantity: 1,
-    unitCost: 45,
-    department: "Kitchen Made",
-    aliases: ["Large Eggs Box", "Eggs Large"],
-    supplierPrices: [{ supplier: "Cheese Man", price: 45, date: "2026-06-01" }],
-    priceHistory: [{ date: "2026-06-01", supplier: "Cheese Man", price: 45 }],
-  },
-  {
-    id: uid(),
-    name: "Chestnut Mushrooms",
-    supplier: "Woods",
-    packSize: "2.25kg",
-    quantity: 1,
-    unitCost: 9.4,
-    department: "Kitchen Made",
-    aliases: ["Chestnut Mushroom", "Mushroom Chestnut", "Chestnuts Mushrooms"],
-    supplierPrices: [
-      { supplier: "TG Fruits", price: 8.9, date: "2026-06-04" },
-      { supplier: "Woods", price: 9.4, date: "2026-06-10" },
-    ],
-    priceHistory: [
-      { date: "2026-06-04", supplier: "TG Fruits", price: 8.9 },
-      { date: "2026-06-10", supplier: "Woods", price: 9.4 },
-    ],
-  },
-  {
-    id: uid(),
-    name: "Squish Orange Juice",
-    supplier: "Albion Fine Foods",
-    packSize: "1ltr",
-    quantity: 1,
-    unitCost: 4.69,
-    department: "Bar",
-    aliases: ["Orange Juice Squish", "Squish OJ"],
-    supplierPrices: [{ supplier: "Albion Fine Foods", price: 4.69, date: "2026-06-07" }],
-    priceHistory: [{ date: "2026-06-07", supplier: "Albion Fine Foods", price: 4.69 }],
-  },
-  {
-    id: uid(),
-    name: "Croissant",
-    supplier: "Coburn & Baker",
-    packSize: "each",
-    quantity: 1,
-    unitCost: 1.16,
-    department: "Bought In",
-    aliases: ["Butter Croissant"],
-    supplierPrices: [{ supplier: "Coburn & Baker", price: 1.16, date: "2026-06-08" }],
-    priceHistory: [{ date: "2026-06-08", supplier: "Coburn & Baker", price: 1.16 }],
-  },
-  {
-    id: uid(),
-    name: "Cherry Tomatoes",
-    supplier: "TG Fruits",
-    packSize: "6x1kg",
-    quantity: 1,
-    unitCost: 11.8,
-    department: "Kitchen Made",
-    aliases: ["Tomatoes 6x1kg", "Tomato Box"],
-    supplierPrices: [{ supplier: "TG Fruits", price: 11.8, date: "2026-06-09" }],
-    priceHistory: [{ date: "2026-06-09", supplier: "TG Fruits", price: 11.8 }],
-  },
-];
-
-const initialInvoices = [
-  {
-    id: uid(),
-    invoiceNumber: "11676921",
-    supplier: "Albion Fine Foods",
-    date: "2026-06-07",
-    status: "Approved",
-    items: [
-      { id: uid(), productName: "Squish Orange Juice", packSize: "1ltr", quantity: 3, unitCost: 4.69, supplier: "Albion Fine Foods", department: "Bar" },
-      { id: uid(), productName: "Semi-Skimmed Milk", packSize: "2ltr", quantity: 2, unitCost: 1.29, supplier: "Albion Fine Foods", department: "Kitchen Made" },
-    ],
-  },
-  {
-    id: uid(),
-    invoiceNumber: "807893",
-    supplier: "TG Fruits",
-    date: "2026-06-08",
-    status: "Approved",
-    items: [
-      { id: uid(), productName: "Chestnut Mushrooms", packSize: "2.25kg", quantity: 4, unitCost: 8.9, supplier: "TG Fruits", department: "Kitchen Made" },
-      { id: uid(), productName: "Lemons", packSize: "per kg", quantity: 3, unitCost: 1.96, supplier: "TG Fruits", department: "Kitchen Made" },
-    ],
-  },
-];
-
-const initialSales = [
-  { id: uid(), day: "Mon", date: "2026-06-01", department: "Total", grossSales: 1585.86, vatRate: 20, sales: 1321.55 },
-  { id: uid(), day: "Tue", date: "2026-06-02", department: "Total", grossSales: 980.82, vatRate: 20, sales: 817.35 },
-  { id: uid(), day: "Wed", date: "2026-06-03", department: "Total", grossSales: 806.7, vatRate: 20, sales: 672.25 },
-  { id: uid(), day: "Thu", date: "2026-06-04", department: "Total", grossSales: 1776.42, vatRate: 20, sales: 1480.35 },
-  { id: uid(), day: "Fri", date: "2026-06-05", department: "Total", grossSales: 4018.2, vatRate: 20, sales: 3348.5 },
-  { id: uid(), day: "Sat", date: "2026-06-06", department: "Total", grossSales: 3854.7, vatRate: 20, sales: 3212.25 },
-  { id: uid(), day: "Sun", date: "2026-06-07", department: "Total", grossSales: 1242.95, vatRate: 20, sales: 1035.79 },
-];
-
-const initialStocktakes = [
-  {
-    id: uid(),
-    date: "2026-06-09",
-    department: "Kitchen Made",
-    openingStockMode: "Manual",
-    manualOpeningType: "Manual Total Value",
-    manualOpeningValue: 0,
-    openingStockValue: 0,
-    openingLines: [],
-    lines: [
-      { id: uid(), productName: "Chestnut Mushrooms", quantity: 6, unitCost: 8.9, stockValue: 53.4 },
-      { id: uid(), productName: "Eggs Box x180 Large", quantity: 2, unitCost: 45, stockValue: 90 },
-      { id: uid(), productName: "Cherry Tomatoes", quantity: 4, unitCost: 11.8, stockValue: 47.2 },
-    ],
-    totalValue: 4000,
-  },
-];
-
-const initialWaste = [
-  { id: uid(), date: "2026-06-08", department: "Kitchen Made", productName: "Hake garnish", quantity: 1, unitCost: 18.4, reason: "Overproduction", notes: "", cost: 18.4 },
-  { id: uid(), date: "2026-06-08", department: "Bar", productName: "Squish Orange Juice", quantity: 2, unitCost: 4.69, reason: "FOH mistake", notes: "", cost: 9.38 },
-  { id: uid(), date: "2026-06-07", department: "Bought In", productName: "Croissant", quantity: 6, unitCost: 1.16, reason: "Spoiled", notes: "", cost: 6.96 },
-];
-
-const initialRecipes = [
-  {
-    id: uid(),
-    name: "Mushrooms on Toast Base",
-    yieldQuantity: 4,
-    yieldUnit: "portions",
-    ingredients: [
-      { id: uid(), productId: "", productName: "Chestnut Mushrooms", supplier: "TG Fruits", quantity: 1, unitCost: 8.9 },
-      { id: uid(), productId: "", productName: "Croissant", supplier: "Coburn & Baker", quantity: 2, unitCost: 1.16 },
-    ],
-  },
-];
-
-const initialMenus = [
-  {
-    id: uid(),
-    name: "Summer Menu",
-    season: "Summer",
-    startDate: "2026-06-01",
-    endDate: "2026-08-31",
-    targetGp: 75,
-    status: "Active",
-    subcategories: [
-      {
-        id: uid(),
-        name: "Breakfast",
-        targetGp: 75,
-        dishes: [
-          { id: uid(), name: "Bacon & Egg Muffin", sellingPrice: 9.9, recipeIds: [], manualCost: 1.98, targetGp: 75, status: "Active" },
-          { id: uid(), name: "Mushrooms on Toast", sellingPrice: 11.5, recipeIds: [], manualCost: 1.72, targetGp: 75, status: "Draft" },
-        ],
-      },
-    ],
-  },
 ];
 
 const navItems = [
@@ -1151,16 +971,6 @@ function SupabaseSetupNotice() {
   );
 }
 
-function InternalStaffAccessNotice({ onSignOut }) {
-  return (
-    <AuthLayout>
-      <h1>Internal access</h1>
-      <p className="auth-copy">This account is managed through MarginFlow internal administration and does not enter customer onboarding.</p>
-      <div className="button-row left"><button className="ghost" onClick={onSignOut} type="button">Sign out</button></div>
-    </AuthLayout>
-  );
-}
-
 function AuthScreen({ initialError = "", initialMode = "login" }) {
   const [mode, setMode] = useState(authModes.includes(initialMode) ? initialMode : "login");
   const [name, setName] = useState("");
@@ -1239,50 +1049,6 @@ function AuthScreen({ initialError = "", initialMode = "login" }) {
         <button aria-busy={busy} disabled={busy} type="submit">
           {busy ? "Please wait..." : title}
         </button>
-      </form>
-    </AuthLayout>
-  );
-}
-
-function CreateCompanyScreen({ error, onCreated, onSignOut, user }) {
-  const [companyName, setCompanyName] = useState("");
-  const [locationName, setLocationName] = useState("Main Location");
-  const [status, setStatus] = useState(error || "");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => setStatus(error || ""), [error]);
-
-  const createCompany = async (event) => {
-    event.preventDefault();
-    if (!supabase || !companyName.trim()) return;
-    setBusy(true);
-    setStatus("");
-    try {
-      const { error: rpcError } = await supabase.rpc("create_company_with_owner", {
-        company_name: companyName.trim(),
-        location_name: locationName.trim() || "Main Location",
-      });
-      if (rpcError) throw rpcError;
-      await onCreated();
-    } catch (rpcError) {
-      setStatus(rpcError.message || "Could not create company.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <AuthLayout>
-      <form className="auth-form" onSubmit={createCompany}>
-        <h1>Create Company</h1>
-        <p className="auth-copy">{user?.email} will be added as Owner.</p>
-        <Field label="Company name" value={companyName} onChange={setCompanyName} />
-        <Field label="Location name" value={locationName} onChange={setLocationName} />
-        {status && <div className="auth-status error">{status}</div>}
-        <div className="button-row left">
-          <button disabled={busy || !companyName.trim()} type="submit">{busy ? "Creating..." : "Create Company"}</button>
-          <button className="ghost" onClick={onSignOut} type="button">Sign out</button>
-        </div>
       </form>
     </AuthLayout>
   );
@@ -1392,10 +1158,6 @@ function netFromGross(gross, vatRate = 20) {
   return divisor ? Number((numberValue(gross, 0) / divisor).toFixed(2)) : numberValue(gross, 0);
 }
 
-function vatAmountFromGross(gross, vatRate = 20) {
-  return Number((numberValue(gross, 0) - netFromGross(gross, vatRate)).toFixed(2));
-}
-
 function vatAmountFromGrossNet(gross, net) {
   return Number((numberValue(gross) - numberValue(net)).toFixed(2));
 }
@@ -1403,23 +1165,6 @@ function vatAmountFromGrossNet(gross, net) {
 function effectiveVatRate(gross, net) {
   const netValue = numberValue(net);
   return netValue ? (vatAmountFromGrossNet(gross, netValue) / netValue) * 100 : 0;
-}
-
-function netSalesForRow(row) {
-  return row?.grossSales !== undefined
-    ? numberValue(row.sales)
-    : numberValue(row?.sales);
-}
-
-function salesBaseForRow(row, gpCalculationBase = "Net Sales") {
-  return gpCalculationBase === "Gross Sales" ? numberValue(row?.grossSales) : netSalesForRow(row);
-}
-
-function hasDepartmentSpecificSalesRows(salesRows) {
-  return salesRows.some((row) => {
-    const department = canonicalSalesDepartmentName(row.department);
-    return department && department !== "Total";
-  });
 }
 
 function grossLineTotal(item) {
@@ -1508,22 +1253,8 @@ function signedDocumentAmount(amount, invoice = {}) {
   return toSignedPurchasingAmount(amount, documentTypeFor(invoice));
 }
 
-function signedLineTotal(item, invoice = {}) {
-  return signedDocumentAmount(netLineTotal(item, invoice.items ? invoice : { items: [item], discountAmount: 0, discountPercent: 0 }), invoice);
-}
-
 function normalizeInvoiceItemsForDocument(items = [], documentType = PURCHASING_DOCUMENT_TYPES.INVOICE) {
   return items.map((item) => normalizeInvoiceLineForEditor(normalizePurchasingLineForDocument(item, documentType)));
-}
-
-function creditReasonLabel(value = "") {
-  const normalized = normalizeCreditReason(value);
-  return creditReasonOptions.find((option) => option.value === normalized)?.label || "Price adjustment";
-}
-
-function inventoryEffectLabel(value = "") {
-  const normalized = normalizeInventoryEffect(value, INVENTORY_EFFECTS.FINANCIAL_ONLY);
-  return inventoryEffectOptions.find((option) => option.value === normalized)?.label || "Financial adjustment only - do not change stock";
 }
 
 function amountsAlmostEqual(a, b) {
@@ -1825,10 +1556,6 @@ function normalizeDepartmentSplits(item, fallbackDepartment = "Kitchen Made") {
     department: split.department || fallbackDepartment,
     percentage: numberValue(split.percentage, 0),
   }));
-}
-
-function departmentSplitTotal(item) {
-  return normalizeDepartmentSplits(item, item.department).reduce((sum, split) => sum + numberValue(split.percentage), 0);
 }
 
 function splitIsValid(item) {
@@ -2578,10 +2305,6 @@ async function imageFileToInvoiceInput(file) {
   };
 }
 
-async function invoiceImagesFromFiles(files) {
-  return Promise.all(Array.from(files || []).filter(isImageInvoiceFile).map(imageFileToInvoiceInput));
-}
-
 async function fallbackInvoiceSourcePageFromFile(file, index = 0, error = null) {
   return {
     sourceFileId: `${index}:${invoiceUploadFileKey(file, index)}`,
@@ -2918,42 +2641,6 @@ function findHeaderIndexByPriority(headers, names) {
   return -1;
 }
 
-function salesCsvTemplateKey(name) {
-  return `marginflow.salesCsvTemplate.${normalizeHeader(name || "manual")}`;
-}
-
-function defaultSalesCsvMapping(headers = []) {
-  return {
-    date: findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]),
-    department: findHeaderIndex(headers, ["department", "salestype", "type", "category", "itemcategory", "reportingcategory"]),
-    grossSales: findHeaderIndex(headers, ["grosssales", "gross", "totalsales", "totalgross", "grossamount"]),
-    netSales: findHeaderIndex(headers, ["netsales", "net", "netrevenue", "netamount", "nettotal"]),
-    vatAmount: findHeaderIndex(headers, ["vat", "vatamount", "tax", "taxamount", "taxes"]),
-    vatRate: findHeaderIndex(headers, ["vatrate", "vatpercent", "taxrate", "taxpercent"]),
-    serviceCharge: findHeaderIndex(headers, ["servicecharge", "servicecharges", "gratuity", "tips"]),
-    discounts: findHeaderIndex(headers, ["discounts", "discount"]),
-    refunds: findHeaderIndex(headers, ["refunds", "refund", "returns"]),
-  };
-}
-
-function loadSalesCsvTemplate(name, headers, temporary, localStorage) {
-  if (temporary) return defaultSalesCsvMapping(headers);
-  try {
-    const stored = localStorage.getItem(salesCsvTemplateKey(name));
-    return stored ? { ...defaultSalesCsvMapping(headers), ...JSON.parse(stored) } : defaultSalesCsvMapping(headers);
-  } catch {
-    return defaultSalesCsvMapping(headers);
-  }
-}
-
-function saveSalesCsvTemplate(name, mapping, localStorage) {
-  try {
-    localStorage.setItem(salesCsvTemplateKey(name), JSON.stringify(mapping));
-  } catch {
-    // best effort only
-  }
-}
-
 function normalizeImportDate(value) {
   const raw = String(value || "").trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
@@ -2964,199 +2651,6 @@ function normalizeImportDate(value) {
   }
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? "" : toIsoDate(parsed);
-}
-
-function salesRowsFromCsvMapping(rawRows, mapping, defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
-  const errors = [];
-  const rows = rawRows.map((cells, index) => {
-    const at = (field) => Number(mapping[field]) >= 0 ? cells[Number(mapping[field])] : "";
-    const date = normalizeImportDate(at("date"));
-    const department = canonicalSalesDepartmentName(at("department") || "Total");
-    const grossSales = parseCurrencyCell(at("grossSales"));
-    const vatRate = numberValue(at("vatRate"), defaultVatRate);
-    const importedNet = parseCurrencyCell(at("netSales"));
-    const vatAmount = parseCurrencyCell(at("vatAmount"));
-    const sales = importedNet || (vatAmount ? grossSales - vatAmount : (salesInputMethod === "Auto-calculate Net Sales from VAT %" ? netFromGross(grossSales, vatRate) : 0));
-    const rowErrors = [];
-    if (!date) rowErrors.push("missing date");
-    if (!grossSales) rowErrors.push("missing gross sales");
-    if (!sales) rowErrors.push("missing net sales");
-    if (rowErrors.length) errors.push(`Row ${index + 2}: ${rowErrors.join(", ")}`);
-    return {
-      id: uid(),
-      date,
-      day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
-      department,
-      grossSales,
-      sales,
-      vatRate,
-      vatAmount: sales ? vatAmountFromGrossNet(grossSales, sales) : vatAmount,
-      effectiveVatRate: effectiveVatRate(grossSales, sales),
-      discounts: parseCurrencyCell(at("discounts")),
-      refunds: parseCurrencyCell(at("refunds")),
-      serviceCharge: parseCurrencyCell(at("serviceCharge")),
-      importStatus: rowErrors.length ? `Needs review: ${rowErrors.join(", ")}` : "Ready",
-    };
-  });
-  return { rows, validRows: rows.filter((row) => row.date && row.grossSales > 0), errors };
-}
-
-function parseSalesCsv(text, departmentNames = [], defaultVatRate = 20, salesInputMethod = "Manual Gross + Net Sales") {
-  const rows = parseCsvText(text);
-  if (!rows.length) return [];
-  const header = rows[0];
-  const mapping = defaultSalesCsvMapping(header);
-  const hasHeader = Object.values(mapping).some((index) => index >= 0);
-  const dataRows = hasHeader ? rows.slice(1) : rows;
-  const fallbackMapping = hasHeader ? mapping : {
-    date: 0,
-    department: rows[0]?.length >= 4 ? 1 : -1,
-    grossSales: rows[0]?.length >= 4 ? 2 : 1,
-    netSales: rows[0]?.length >= 4 ? 3 : 2,
-    vatRate: rows[0]?.length >= 5 ? 4 : -1,
-    vatAmount: -1,
-    serviceCharge: -1,
-    discounts: -1,
-    refunds: -1,
-  };
-  return salesRowsFromCsvMapping(dataRows, fallbackMapping, defaultVatRate, salesInputMethod).validRows;
-}
-
-function filenameDateInfo(fileName) {
-  const dates = [...String(fileName || "").matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)].map((match) => match[1]);
-  if (dates.length >= 2 && dates[0] !== dates[1]) return { date: "", dateRange: { start: dates[0], end: dates[1] } };
-  if (dates.length) return { date: dates[0], dateRange: null };
-  return { date: "", dateRange: null };
-}
-
-function smartImportDateLabel(importPreview) {
-  if (importPreview?.dateRange?.start && importPreview?.dateRange?.end) {
-    return `${formatRangeDate(importPreview.dateRange.start)} - ${formatRangeDate(importPreview.dateRange.end)}`;
-  }
-  return importPreview?.date ? formatRangeDate(importPreview.date) : "Not detected";
-}
-
-function displayReportType(value) {
-  const raw = String(value || "Generic CSV").replace(/[_-]+/g, " ").trim();
-  return raw ? raw.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Generic CSV";
-}
-
-function squareCategoryDepartment(category) {
-  const key = normalizeHeader(category);
-  if (key.includes("drink") || key.includes("bar") || key.includes("beverage")) return "Bar";
-  if (key.includes("boughtin") || key.includes("buyin") || key.includes("resale") || key.includes("retail")) return "Bought In";
-  if (key.includes("makein") || key.includes("madein") || key.includes("kitchen") || key.includes("foodmake")) return "Kitchen Made";
-  if (key.includes("other") || key.includes("excluded") || key.includes("nonfood")) return "Non-food";
-  return canonicalSalesDepartmentName(category);
-}
-
-function salesImportRow({
-  date,
-  department,
-  sourceCategory = "",
-  grossSales,
-  netSales,
-  vatAmount,
-  discounts = 0,
-  refunds = 0,
-  serviceCharge = 0,
-  importStatus = "Ready",
-}, defaultVatRate = 20) {
-  const gross = Number(numberValue(grossSales, 0).toFixed(2));
-  const net = Number(numberValue(netSales, 0).toFixed(2));
-  const vat = Number(numberValue(vatAmount, gross - net).toFixed(2));
-  const vatRate = net ? Number(((vat / net) * 100).toFixed(2)) : defaultVatRate;
-  return {
-    id: uid(),
-    date,
-    day: date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }) : "",
-    department: canonicalSalesDepartmentName(department),
-    sourceCategory,
-    grossSales: gross,
-    sales: net,
-    vatRate,
-    vatAmount: vat,
-    effectiveVatRate: effectiveVatRate(gross, net),
-    discounts: Number(Math.abs(numberValue(discounts, 0)).toFixed(2)),
-    refunds: Number(Math.abs(numberValue(refunds, 0)).toFixed(2)),
-    serviceCharge: Number(numberValue(serviceCharge, 0).toFixed(2)),
-    importStatus,
-  };
-}
-
-function squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate = 20) {
-  const headers = csvRowsRaw[0] || [];
-  const dataRows = csvRowsRaw.slice(1);
-  const categoryIndex = findHeaderIndex(headers, ["categoryrollup"]);
-  const netIndex = findHeaderIndex(headers, ["netsales"]);
-  const grossIndex = findHeaderIndex(headers, ["grosssales"]);
-  const taxesIndex = findHeaderIndex(headers, ["taxes", "tax", "vat", "vatamount"]);
-  const discountsIndex = findHeaderIndex(headers, ["discountsandcomps", "discountscomps", "discounts", "discount"]);
-  const refundsIndex = findHeaderIndex(headers, ["refunds", "refund"]);
-  const dateIndex = findHeaderIndex(headers, ["date", "businessdate", "tradingdate", "day"]);
-  const requiredFields = [categoryIndex, netIndex, grossIndex];
-  if (requiredFields.some((index) => index < 0)) return null;
-
-  const dateInfo = filenameDateInfo(fileName);
-  const warnings = [];
-  if (dateIndex < 0 && !dateInfo.date && !dateInfo.dateRange) {
-    warnings.push("No date was detected in the CSV or filename. Review the import date before confirming.");
-  }
-  if (dateInfo.dateRange) {
-    warnings.push(`This file covers ${dateInfo.dateRange.start} to ${dateInfo.dateRange.end}. Rows will be posted against the range start date for dashboard filtering.`);
-  }
-
-  const fallbackDate = dateInfo.date || dateInfo.dateRange?.start || today();
-  const rows = dataRows
-    .map((cells) => {
-      const sourceCategory = cells[categoryIndex] || "Uncategorised";
-      const rowDate = dateIndex >= 0 ? normalizeImportDate(cells[dateIndex]) : fallbackDate;
-      return salesImportRow({
-        date: rowDate || fallbackDate,
-        department: squareCategoryDepartment(sourceCategory),
-        sourceCategory,
-        grossSales: parseCurrencyCell(cells[grossIndex]),
-        netSales: parseCurrencyCell(cells[netIndex]),
-        vatAmount: taxesIndex >= 0 ? parseCurrencyCell(cells[taxesIndex]) : undefined,
-        discounts: discountsIndex >= 0 ? parseCurrencyCell(cells[discountsIndex]) : 0,
-        refunds: refundsIndex >= 0 ? parseCurrencyCell(cells[refundsIndex]) : 0,
-      }, defaultVatRate);
-    })
-    .filter((row) => row.department !== "Total" && (row.grossSales || row.sales || row.vatAmount));
-
-  if (!rows.length) return null;
-
-  const optionalHits = [taxesIndex, discountsIndex, refundsIndex].filter((index) => index >= 0).length;
-  const confidence = Math.min(0.98, 0.9 + (optionalHits * 0.025));
-  return {
-    fileName,
-    source: "Square",
-    reportType: "Category roll-up",
-    reportTypeCode: "category_rollup",
-    confidence,
-    date: dateInfo.date || (dateInfo.dateRange ? "" : fallbackDate),
-    dateRange: dateInfo.dateRange,
-    departments: [...new Set(rows.map((row) => row.department))],
-    categories: [...new Set(rows.map((row) => row.sourceCategory).filter(Boolean))],
-    grossSalesTotal: rows.reduce((sum, row) => sum + row.grossSales, 0),
-    netSalesTotal: rows.reduce((sum, row) => sum + row.sales, 0),
-    vatTotal: rows.reduce((sum, row) => sum + row.vatAmount, 0),
-    rows,
-    warnings,
-    headers,
-    rawRows: dataRows,
-    csvRowsRaw,
-  };
-}
-
-function analyzeSalesCsvLocally(fileName, text, defaultVatRate = 20) {
-  const csvRowsRaw = parseCsvText(text);
-  if (!csvRowsRaw.length) return { csvRowsRaw, preview: null };
-  const headers = csvRowsRaw[0] || [];
-  const normalizedHeaders = headers.map(normalizeHeader);
-  const hasSquareCategoryRollup = ["categoryrollup", "netsales", "grosssales"].every((header) => normalizedHeaders.includes(header));
-  if (hasSquareCategoryRollup) return { csvRowsRaw, preview: squareCategoryRollupPreview(fileName, csvRowsRaw, defaultVatRate) };
-  return { csvRowsRaw, preview: null };
 }
 
 function csvRows(text) {
@@ -3793,12 +3287,6 @@ function purchasesForDepartment(invoices, selectedDepartment) {
     .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
 }
 
-function wasteForDepartment(wasteItems, selectedDepartment) {
-  return wasteItems
-    .filter((item) => departmentMatches(item.department, selectedDepartment))
-    .reduce((sum, item) => sum + wasteCost(item), 0);
-}
-
 function metricsForPeriod(invoices, sales, selectedDepartment, stocktakes, wasteItems, dateRange, departmentNames, financialSettings = defaultFinancialSettings, labourData = null) {
   const salesRows = normalizeSalesRows(sales.filter((row) => dateInRange(row.date, dateRange)));
   const filteredInvoices = invoices.filter((invoice) => dateInRange(invoice.date, dateRange));
@@ -4374,18 +3862,8 @@ function shiftDate(date, days) {
   return toIsoDate(addDays(parseDate(date), days));
 }
 
-function shiftDateByYears(date, years) {
-  const next = parseDate(date);
-  next.setFullYear(next.getFullYear() + years);
-  return toIsoDate(next);
-}
-
 function shiftRangeByDays(range, days) {
   return { start: shiftDate(range.start, days), end: shiftDate(range.end, days) };
-}
-
-function shiftRangeByYears(range, years) {
-  return { start: shiftDateByYears(range.start, years), end: shiftDateByYears(range.end, years) };
 }
 
 function rangeFromStartAndLength(startDate, lengthDays) {
@@ -4572,11 +4050,6 @@ const labourBasisLabels = {
   totalSales: "Total sales",
   serviceCharge: "Service charge",
 };
-
-function stableLabourId(prefix, value) {
-  const token = normalizeHeader(value).slice(0, 70);
-  return token ? `${prefix}-${token}` : uid();
-}
 
 function labourDaysBetween(startDate, endDate) {
   if (!startDate || !endDate) return 0;
@@ -7828,25 +7301,6 @@ function targetForRow(departmentSettings, department, fallback) {
   return targetForDepartment(departmentSettings, department, fallback);
 }
 
-function CloudStatusBanner({ enabled, error, loading, onRetry, status }) {
-  const label = enabled ? cloudStatusText[status] || cloudStatusText.local : cloudStatusText.local;
-  const tone = status === "error" ? "error" : status === "synced" ? "success" : "info";
-  return (
-    <div className={`cloud-status-banner ${tone}`}>
-      <div>
-        <strong>{loading ? "Syncing cloud data..." : label}</strong>
-        <span>{error || (enabled ? "Company data is scoped to the current Supabase account and company." : "Using local fallback until cloud access is available.")}</span>
-      </div>
-      {enabled && status === "error" && (
-        <button className="ghost" disabled={loading} onClick={() => Promise.resolve(onRetry?.()).catch(() => {})} type="button">
-          <RefreshCw size={16} />
-          Retry cloud sync
-        </button>
-      )}
-    </div>
-  );
-}
-
 function weekdayNameForDate(date) {
   const index = (parseDate(date).getDay() + 6) % 7;
   return weekdays[index] || "Monday";
@@ -7894,11 +7348,6 @@ function supplierOverrideFor(supplier, date, overrides = []) {
   return overrides.find((override) => (override.supplierId === supplier.id || sameSupplier(override.supplierName, supplier.name)) && override.date === date);
 }
 
-function supplierAverageInvoiceAmount(supplier, invoices = []) {
-  const rows = invoices.filter((invoice) => sameSupplier(invoice.supplier, supplier.name) && isInvoiceDocument(documentTypeFor(invoice))).slice(0, 12);
-  return rows.length ? rows.reduce((sum, invoice) => sum + invoiceTotal(invoice), 0) / rows.length : 0;
-}
-
 function invoiceControlCellState({ date, invoices, overrides, schedule, supplier }) {
   const invoiceGroup = invoiceGroupForSupplierDate(supplier, date, invoices, { totalForInvoice: invoiceTotal });
   if (invoiceGroup.invoiceCount) {
@@ -7920,37 +7369,6 @@ function departmentPurchaseTotalForDate(invoices, date, selectedDepartment) {
   return invoices
     .filter((invoice) => invoice.date === date)
     .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
-}
-
-function invoiceControlDailySummaries({ invoices, sales, weekDates, trackerRows = [], scope = "Visible suppliers" }) {
-  return weekDates.map((date) => {
-    const visibleCells = trackerRows.flatMap((row) => row.cells || []).filter((cell) => cell.date === date);
-    const visibleInvoices = visibleCells.flatMap((cell) => cell.invoices?.length ? cell.invoices : [cell.invoice].filter(Boolean));
-    const relevantInvoices = scope === "Visible suppliers" && trackerRows.length
-      ? [...new Map(visibleInvoices.map((invoice) => [invoice.id || `${invoice.supplier}-${invoice.invoiceNumber}-${invoice.date}`, invoice])).values()]
-      : invoices.filter((invoice) => invoice.date === date);
-    const purchaseTotalForDepartment = (selectedDepartment) => relevantInvoices
-      .reduce((sum, invoice) => sum + (invoice.items || []).reduce((lineSum, item) => lineSum + lineTotalForDepartment(item, selectedDepartment, invoice), 0), 0);
-    const purchases = purchaseTotalForDepartment("All departments");
-    const makeIn = purchaseTotalForDepartment("Kitchen Made");
-    const boughtIn = purchaseTotalForDepartment("Bought In");
-    const salesTotals = salesTotalsForRange(sales, { start: date, end: date }, "All departments");
-    const gp = salesTotals.netSales ? ((salesTotals.netSales - purchases) / salesTotals.netSales) * 100 : 0;
-    return {
-      date,
-      purchases,
-      makeIn,
-      boughtIn,
-      sales: salesTotals.netSales,
-      gp,
-      includedInvoiceCount: relevantInvoices.length,
-      supplierCount: new Set(relevantInvoices.map((invoice) => invoice.supplier)).size,
-      receivedCount: scope === "Visible suppliers" ? visibleCells.filter((cell) => cell.state === "received").length : relevantInvoices.length,
-      expectedCount: visibleCells.filter((cell) => cell.state === "expected").length,
-      missingCount: visibleCells.filter((cell) => cell.state === "missing").length,
-      notOrderedCount: visibleCells.filter((cell) => cell.state === "not_ordered").length,
-    };
-  });
 }
 
 function updateOverrideRows(rows, supplier, date, statusOverride) {
@@ -7997,50 +7415,6 @@ function enrichPerformanceRows(metrics, departmentSettings, gpTarget) {
 function changePercent(current, previous) {
   if (!numberValue(previous)) return numberValue(current) ? 100 : 0;
   return ((numberValue(current) - numberValue(previous)) / Math.abs(numberValue(previous))) * 100;
-}
-
-function totalSalesRows(rows, range) {
-  const filteredRows = normalizeSalesRows(rows.filter((row) => dateInRange(row.date, range)));
-  const totals = filteredRows.reduce((sum, row) => ({
-    grossSales: sum.grossSales + numberValue(row.grossSales),
-    netSales: sum.netSales + netSalesForRow(row),
-    vat: sum.vat + vatAmountFromGrossNet(row.grossSales, row.sales),
-    discounts: sum.discounts + numberValue(row.discounts),
-    refunds: sum.refunds + numberValue(row.refunds),
-    serviceCharge: sum.serviceCharge + numberValue(row.serviceCharge),
-  }), { grossSales: 0, netSales: 0, vat: 0, discounts: 0, refunds: 0, serviceCharge: 0 });
-  return {
-    ...totals,
-    rows: filteredRows,
-    averageDailySales: totals.netSales / dateRangeLength(range),
-  };
-}
-
-function salesComparisonRanges(mode, currentCustom, previousCustom, weekStartsOn) {
-  if (mode === "Today vs Yesterday") {
-    return {
-      current: resolveDateRange({ preset: "Today" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Yesterday" }, weekStartsOn),
-    };
-  }
-  if (mode === "Today vs Last Week") {
-    const current = resolveDateRange({ preset: "Today" }, weekStartsOn);
-    const previousDate = toIsoDate(addDays(parseDate(current.start), -7));
-    return { current, previous: { start: previousDate, end: previousDate } };
-  }
-  if (mode === "This Week vs Last Week") {
-    return {
-      current: resolveDateRange({ preset: "This Week" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Last Week" }, weekStartsOn),
-    };
-  }
-  if (mode === "This Month vs Last Month") {
-    return {
-      current: resolveDateRange({ preset: "This Month" }, weekStartsOn),
-      previous: resolveDateRange({ preset: "Last Month" }, weekStartsOn),
-    };
-  }
-  return { current: currentCustom, previous: previousCustom };
 }
 
 function PerformanceSummaryCards({ dashboardMode = false, metrics, dateRangeState, dateRange, department, gpTarget, weekStartsOn = "Monday" }) {
@@ -8281,7 +7655,7 @@ function chartMoney(value,compact=false) {
   return compact?new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP",notation:"compact",maximumFractionDigits:1}).format(value):money(value);
 }
 
-function PerformanceSections({ filterBar, dashboardMode = false, purchasesState = "ready", dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, showSalesManager = false, financialSettings, permissions, requestDelete, setSales }) {
+function PerformanceSections({ filterBar, dashboardMode = false, purchasesState = "ready", dateRange, dateRangeState, demoMode = false, department, departmentNames, departmentSettings, gpTarget, invoices, metrics, sales, setDateRangeState, stocktakes, suppliers, supplierSpend, wasteItems, financialSettings, permissions, requestDelete, setSales }) {
   const [comparisonMode, setComparisonMode] = useState("Previous period");
   const { dailyRows, departmentRows } = enrichPerformanceRows(metrics, departmentSettings, gpTarget);
   const compareRange = comparisonDateRange(dateRange, comparisonMode);
@@ -8290,7 +7664,7 @@ function PerformanceSections({ filterBar, dashboardMode = false, purchasesState 
   return (
     <>
       {!dashboardMode && (
-        <Panel className="dashboard-range-panel" title={showSalesManager ? "GP date range" : "Dashboard date range"} action={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)}>
+        <Panel className="dashboard-range-panel" title="Dashboard date range" action={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)}>
           <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
         </Panel>
       )}
@@ -8301,7 +7675,6 @@ function PerformanceSections({ filterBar, dashboardMode = false, purchasesState 
       {dashboardMode ? (
         <details className="dashboard-comparison"><summary>Compare performance</summary><ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} /></details>
       ) : <ComparisonCards comparisonMode={comparisonMode} setComparisonMode={setComparisonMode} comparisonMetrics={comparisonMetrics} comparisonRange={compareRange} dateRange={dateRange} metrics={metrics} />}
-      {showSalesManager && <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />}
     </>
   );
 }
@@ -15362,517 +14735,6 @@ function Waste({ dateRange, department, departmentNames, metrics, permissions = 
   );
 }
 
-function SalesManager({ demoMode = false, financialSettings, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "gp"), requestDelete, sales, setSales }) {
-  const { localStorage } = React.useContext(WorkspaceStorageContext);
-
-  const defaultVatRate = financialSettings.defaultVat;
-  const empty = { date: today(), department: "Total", grossSales: 0, sales: 0, vatRate: defaultVatRate, discounts: 0, refunds: 0, serviceCharge: 0 };
-  const [form, setForm] = useState(empty);
-  const [salesMode, setSalesMode] = useState(financialSettings.salesInputMethod === "Auto-calculate Net Sales from VAT %" ? "Calculate Net from VAT" : "Gross + Net");
-  const [editingId, setEditingId] = useState("");
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [addModalOpen, setAddModalOpen] = useState(false);
-  const [status, setStatus] = useState("");
-  const [pendingImport, setPendingImport] = useState([]);
-  const [importFileKey, setImportFileKey] = useState(0);
-  const [csvWizard, setCsvWizard] = useState(null);
-  const [smartSalesImport, setSmartSalesImport] = useState(null);
-  const departmentOptions = ["Total", ...departmentNames];
-  const formVatAmount = vatAmountFromGrossNet(form.grossSales, form.sales);
-  const formEffectiveVat = effectiveVatRate(form.grossSales, form.sales);
-
-  const updateGross = (value) => {
-    const grossSales = numberValue(value);
-    setForm((current) => ({
-      ...current,
-      grossSales,
-      sales: salesMode === "Calculate Net from VAT" ? netFromGross(grossSales, current.vatRate) : current.sales,
-    }));
-  };
-
-  const updateVatRate = (value) => {
-    const vatRate = numberValue(value, defaultVatRate);
-    setForm((current) => ({
-      ...current,
-      vatRate,
-      sales: salesMode === "Calculate Net from VAT" ? netFromGross(current.grossSales, vatRate) : current.sales,
-    }));
-  };
-
-  const saveSale = () => {
-    if (!form.date || !numberValue(form.grossSales) || !numberValue(form.sales)) {
-      setStatus("Gross Sales and Net Sales are required.");
-      return;
-    }
-    const grossSales = numberValue(form.grossSales);
-    const netSales = numberValue(form.sales);
-    const vatRate = numberValue(form.vatRate, defaultVatRate);
-    const payload = {
-      ...form,
-      id: editingId || uid(),
-      day: new Date(`${form.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" }),
-      department: canonicalSalesDepartmentName(form.department),
-      grossSales,
-      sales: netSales,
-      vatRate,
-      vatAmount: vatAmountFromGrossNet(grossSales, netSales),
-      effectiveVatRate: effectiveVatRate(grossSales, netSales),
-      discounts: numberValue(form.discounts),
-      refunds: numberValue(form.refunds),
-      serviceCharge: numberValue(form.serviceCharge),
-    };
-    setSales((current) => editingId ? current.map((row) => (row.id === editingId ? payload : row)) : [payload, ...current]);
-    setForm(empty);
-    setEditingId("");
-    setEditModalOpen(false);
-    setAddModalOpen(false);
-    setStatus("Sales saved");
-  };
-
-  const openCsvWizardFromRows = (fileName, csvRowsRaw, statusPrefix = "CSV") => {
-    if (!csvRowsRaw.length) {
-      setStatus("CSV import found no readable rows.");
-      return;
-    }
-    const headers = csvRowsRaw[0] || [];
-    const mapping = loadSalesCsvTemplate("Manual CSV", headers, demoMode, localStorage);
-    const dataRows = csvRowsRaw.slice(1);
-    const preview = salesRowsFromCsvMapping(dataRows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-    setCsvWizard({
-      fileName,
-      headers,
-      rows: dataRows,
-      mapping,
-      templateName: "Manual CSV",
-      previewRows: preview.rows,
-      errors: preview.errors,
-      saveTemplate: false,
-    });
-    setStatus(preview.validRows.length
-      ? `${preview.validRows.length} ${statusPrefix} row(s) detected. Review mapping before import.`
-      : `CSV headers detected: ${headers.join(", ") || "No headers"}. Map the columns manually.`);
-  };
-
-  const importSales = async (file) => {
-    if (!file) return;
-    setCsvWizard(null);
-    setSmartSalesImport(null);
-    setStatus("Analysing sales CSV...");
-    const text = await file.text();
-    const { csvRowsRaw, preview } = analyzeSalesCsvLocally(file.name, text, defaultVatRate);
-    if (!csvRowsRaw.length) {
-      setStatus("CSV import found no readable rows.");
-      return;
-    }
-
-    if (preview?.confidence >= 0.85 && preview.rows.length) {
-      setSmartSalesImport(preview);
-      setStatus(`${preview.source} ${preview.reportType.toLowerCase()} detected. Review the clean preview before confirming.`);
-      return;
-    }
-
-    openCsvWizardFromRows(file.name, csvRowsRaw, "CSV");
-  };
-
-  const updateCsvMapping = (field, value) => {
-    setCsvWizard((current) => {
-      if (!current) return current;
-      const mapping = { ...current.mapping, [field]: Number(value) };
-      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-      return { ...current, mapping, previewRows: preview.rows, errors: preview.errors };
-    });
-  };
-
-  const updateCsvTemplate = (templateName) => {
-    setCsvWizard((current) => {
-      if (!current) return current;
-      const mapping = loadSalesCsvTemplate(templateName, current.headers, demoMode, localStorage);
-      const preview = salesRowsFromCsvMapping(current.rows, mapping, defaultVatRate, financialSettings.salesInputMethod);
-      return { ...current, templateName, mapping, previewRows: preview.rows, errors: preview.errors };
-    });
-  };
-
-  const confirmCsvWizard = () => {
-    if (!csvWizard) return;
-    const preview = salesRowsFromCsvMapping(csvWizard.rows, csvWizard.mapping, defaultVatRate, financialSettings.salesInputMethod);
-    if (!preview.validRows.length) {
-      setStatus("No valid sales rows yet. Check the column mapping.");
-      return;
-    }
-    if (csvWizard.saveTemplate && !demoMode) saveSalesCsvTemplate(csvWizard.templateName || "Manual CSV", csvWizard.mapping, localStorage);
-    setPendingImport(preview.validRows);
-    setCsvWizard(null);
-    const invalidCount = preview.rows.length - preview.validRows.length;
-    setStatus(invalidCount
-      ? `${preview.validRows.length} sales row(s) ready. ${invalidCount} row(s) were skipped because date/gross sales were missing.`
-      : `${preview.validRows.length} sales row(s) ready for review.`);
-  };
-
-  const openAdvancedOptions = () => {
-    if (!smartSalesImport) return;
-    openCsvWizardFromRows(smartSalesImport.fileName, smartSalesImport.csvRowsRaw || [smartSalesImport.headers, ...smartSalesImport.rawRows], "CSV");
-    setSmartSalesImport(null);
-  };
-
-  const confirmSmartSalesImport = () => {
-    if (!smartSalesImport?.rows?.length) {
-      setStatus("No smart import rows are ready yet.");
-      return;
-    }
-    const rowsToImport = smartSalesImport.rows.map((row) => ({ ...row, id: uid() }));
-    setSales((current) => [...rowsToImport, ...current]);
-    setSmartSalesImport(null);
-    setImportFileKey((current) => current + 1);
-    setStatus(`${rowsToImport.length} sales row(s) imported from ${smartSalesImport.source}.`);
-  };
-
-  const cancelSmartSalesImport = () => {
-    setSmartSalesImport(null);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import cancelled.");
-  };
-
-  const confirmImport = () => {
-    setSales((current) => [...pendingImport, ...current]);
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import confirmed.");
-  };
-
-  const cancelImport = () => {
-    setPendingImport([]);
-    setImportFileKey((current) => current + 1);
-    setStatus("Sales import cancelled.");
-  };
-
-  return (
-    <Panel title="Sales input" action="Manual or CSV">
-      <div className="button-row left">
-        {permissions.canAdd && <button onClick={() => { setForm(empty); setEditingId(""); setAddModalOpen(true); }} type="button"><Plus size={16} />Add Sales</button>}
-        {permissions.canImport && <label className="file-button secondary">Smart CSV Import<input accept=".csv,text/csv" key={importFileKey} onChange={(event) => importSales(event.target.files?.[0])} type="file" /></label>}
-      </div>
-      {status && <div className="invoice-status info">{status}</div>}
-      {smartSalesImport && (
-        <SmartSalesImportPreview
-          onAdvanced={openAdvancedOptions}
-          onCancel={cancelSmartSalesImport}
-          onConfirm={confirmSmartSalesImport}
-          preview={smartSalesImport}
-        />
-      )}
-      {csvWizard && (
-        <SalesCsvImportWizard
-          defaultVatRate={defaultVatRate}
-          financialSettings={financialSettings}
-          onCancel={() => { setCsvWizard(null); setImportFileKey((current) => current + 1); setStatus("CSV import cancelled."); }}
-          onConfirm={confirmCsvWizard}
-          updateCsvMapping={updateCsvMapping}
-          updateCsvTemplate={updateCsvTemplate}
-          wizard={csvWizard}
-          setWizard={setCsvWizard}
-        />
-      )}
-      {pendingImport.length > 0 && (
-        <div className="import-review">
-          <div className="panel-head"><h2>Review sales import</h2><span>{pendingImport.length} row(s)</span></div>
-          <DataTable
-            columns={[
-              { key: "date", label: "Date" },
-              { key: "department", label: "Sales type" },
-              { key: "grossSales", label: "Gross", render: money },
-              { key: "sales", label: "Net", render: money },
-              { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-            ]}
-            rows={pendingImport}
-          />
-          <div className="button-row left">
-            {permissions.canImport && <button onClick={confirmImport} type="button"><Save size={16} />Confirm Import</button>}
-            <button className="ghost danger" onClick={cancelImport} type="button"><X size={16} />Cancel Import</button>
-          </div>
-        </div>
-      )}
-      <DataTable
-        columns={[
-          { key: "date", label: "Date" },
-          { key: "department", label: "Sales type" },
-          { key: "grossSales", label: "Gross Sales", render: (value) => money(value) },
-          { key: "sales", label: "Net Sales", render: (_, row) => money(netSalesForRow(row)) },
-          { key: "vatAmount", label: "VAT Amount", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-          { key: "effectiveVatRate", label: "Effective VAT %", render: (_, row) => percent(effectiveVatRate(row.grossSales, row.sales)) },
-          { key: "serviceCharge", label: "Service Charge", render: (value) => money(value) },
-          { key: "discounts", label: "Discounts", render: (value) => money(value) },
-          { key: "refunds", label: "Refunds", render: (value) => money(value) },
-        ]}
-        onDelete={permissions.canDelete ? (id) => requestDelete({ title: "Delete sales record", message: "Are you sure you want to delete this sales record?", onConfirm: () => setSales((current) => current.filter((row) => row.id !== id)) }) : null}
-        onEdit={permissions.canEdit ? (row) => {
-          setForm({ date: row.date, department: row.department || "Total", grossSales: row.grossSales ?? row.sales, sales: row.sales ?? 0, vatRate: row.vatRate ?? defaultVatRate, discounts: row.discounts ?? 0, refunds: row.refunds ?? 0, serviceCharge: row.serviceCharge ?? 0 });
-          setEditingId(row.id);
-          setEditModalOpen(true);
-        } : null}
-        rows={sales}
-      />
-      {addModalOpen && permissions.canAdd && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setAddModalOpen(false); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Add sales" updateGross={updateGross} updateVatRate={updateVatRate} />
-      )}
-      {editModalOpen && permissions.canEdit && (
-        <SalesEditModal departmentOptions={departmentOptions} form={form} formEffectiveVat={formEffectiveVat} formVatAmount={formVatAmount} onCancel={() => { setEditModalOpen(false); setEditingId(""); setForm(empty); }} onSave={saveSale} salesMode={salesMode} setForm={setForm} setSalesMode={setSalesMode} title="Edit sales record" updateGross={updateGross} updateVatRate={updateVatRate} />
-      )}
-    </Panel>
-  );
-}
-
-function GpAnalysis({ dateRange, dateRangeState, demoMode = false, departmentNames, financialSettings, permissions, requestDelete, sales, setDateRangeState, setSales }) {
-  const salesTotals = totalSalesRows(sales, dateRange);
-
-  return (
-    <>
-      <Panel title="Sales date range" action={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)}>
-        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
-      </Panel>
-      <div className="metric-grid compact">
-        <Metric label="Gross Sales" value={money(salesTotals.grossSales)} delta={rangeLabel(dateRangeState, dateRange, financialSettings.weekStartsOn)} />
-        <Metric label="Net Sales" value={money(salesTotals.netSales)} delta="Stored from POS/manual entry" />
-        <Metric label="VAT Amount" value={money(salesTotals.vat)} delta={percent(effectiveVatRate(salesTotals.grossSales, salesTotals.netSales))} />
-        <Metric label="Average daily sales" value={money(salesTotals.averageDailySales)} delta={`${dateRangeLength(dateRange)} day(s)`} />
-      </div>
-      <SalesManager demoMode={demoMode} financialSettings={financialSettings} departmentNames={departmentNames} permissions={permissions} requestDelete={requestDelete} sales={sales} setSales={setSales} />
-      <SalesComparison financialSettings={financialSettings} sales={sales} />
-    </>
-  );
-}
-
-function SalesComparison({ financialSettings, sales }) {
-  const [mode, setMode] = useState("Today vs Yesterday");
-  const [currentCustom, setCurrentCustom] = useState(resolveDateRange({ preset: "This Week" }, financialSettings.weekStartsOn));
-  const [previousCustom, setPreviousCustom] = useState(resolveDateRange({ preset: "Last Week" }, financialSettings.weekStartsOn));
-  const { current, previous } = salesComparisonRanges(mode, currentCustom, previousCustom, financialSettings.weekStartsOn);
-  const currentTotals = totalSalesRows(sales, current);
-  const previousTotals = totalSalesRows(sales, previous);
-  const hasData = currentTotals.rows.length || previousTotals.rows.length;
-  const currentRangeLabel = formatComparisonRange(current);
-  const previousRangeLabel = formatComparisonRange(previous);
-
-  return (
-    <Panel title="Sales comparison" action={`${currentRangeLabel} vs ${previousRangeLabel}`}>
-      <div className="form-grid six compact-form">
-        <label>Compare<select value={mode} onChange={(event) => setMode(event.target.value)}>
-          <option>Today vs Yesterday</option>
-          <option>Today vs Last Week</option>
-          <option>This Week vs Last Week</option>
-          <option>This Month vs Last Month</option>
-          <option>Custom Period vs Custom Period</option>
-        </select></label>
-        {mode === "Custom Period vs Custom Period" && (
-          <>
-            <Field label="Current from" type="date" value={currentCustom.start} onChange={(value) => setCurrentCustom((range) => ({ ...range, start: value }))} />
-            <Field label="Current to" type="date" value={currentCustom.end} onChange={(value) => setCurrentCustom((range) => ({ ...range, end: value }))} />
-            <Field label="Compare from" type="date" value={previousCustom.start} onChange={(value) => setPreviousCustom((range) => ({ ...range, start: value }))} />
-            <Field label="Compare to" type="date" value={previousCustom.end} onChange={(value) => setPreviousCustom((range) => ({ ...range, end: value }))} />
-          </>
-        )}
-      </div>
-      {!hasData ? (
-        <EmptyState />
-      ) : (
-        <>
-          <div className="comparison-period-summary">
-            <div>
-              <span>Selected period</span>
-              <strong>{currentRangeLabel}</strong>
-            </div>
-            <div>
-              <span>Compared with</span>
-              <strong>{previousRangeLabel}</strong>
-            </div>
-          </div>
-          <div className="metric-grid compact">
-            <Metric label="Gross Sales difference" value={percent(changePercent(currentTotals.grossSales, previousTotals.grossSales))} delta={`${currentRangeLabel}: ${money(currentTotals.grossSales)} vs ${previousRangeLabel}: ${money(previousTotals.grossSales)}`} tone={currentTotals.grossSales >= previousTotals.grossSales ? "good" : "warn"} />
-            <Metric label="Net Sales difference" value={percent(changePercent(currentTotals.netSales, previousTotals.netSales))} delta={`${currentRangeLabel}: ${money(currentTotals.netSales)} vs ${previousRangeLabel}: ${money(previousTotals.netSales)}`} tone={currentTotals.netSales >= previousTotals.netSales ? "good" : "warn"} />
-            <Metric label="Average daily sales" value={money(currentTotals.averageDailySales)} delta={`${previousRangeLabel}: ${money(previousTotals.averageDailySales)}`} tone={currentTotals.averageDailySales >= previousTotals.averageDailySales ? "good" : "warn"} />
-            <Metric label="VAT difference" value={percent(changePercent(currentTotals.vat, previousTotals.vat))} delta={`${currentRangeLabel}: ${money(currentTotals.vat)} vs ${previousRangeLabel}: ${money(previousTotals.vat)}`} tone={currentTotals.vat <= previousTotals.vat ? "good" : "warn"} />
-          </div>
-          <div className="dashboard-layout secondary">
-            <SalesComparisonBars title="Gross Sales comparison" current={currentTotals.grossSales} previous={previousTotals.grossSales} currentRange={current} previousRange={previous} />
-            <SalesComparisonBars title="Net Sales comparison" current={currentTotals.netSales} previous={previousTotals.netSales} currentRange={current} previousRange={previous} />
-          </div>
-        </>
-      )}
-    </Panel>
-  );
-}
-
-function formatComparisonRange(range) {
-  if (!range?.start || !range?.end) return "Selected dates";
-  return `${formatRangeDate(range.start)} - ${formatRangeDate(range.end)}`;
-}
-
-function SalesComparisonBars({ title, current, previous, currentRange, previousRange }) {
-  const max = Math.max(numberValue(current), numberValue(previous), 1);
-  const currentRangeLabel = formatComparisonRange(currentRange);
-  const previousRangeLabel = formatComparisonRange(previousRange);
-  return (
-    <div className="comparison-chart" aria-label={title}>
-      <div className="comparison-title">{title}</div>
-      <div className="comparison-bars">
-        <div className="comparison-bar">
-          <span style={{ height: `${(numberValue(previous) / max) * 100}%` }} title={`${previousRangeLabel}: ${money(previous)}`} />
-          <small className="comparison-period">Compared period</small>
-          <small className="comparison-date">{previousRangeLabel}</small>
-          <strong>{money(previous)}</strong>
-        </div>
-        <div className="comparison-bar current">
-          <span style={{ height: `${(numberValue(current) / max) * 100}%` }} title={`${currentRangeLabel}: ${money(current)}`} />
-          <small className="comparison-period">Selected period</small>
-          <small className="comparison-date">{currentRangeLabel}</small>
-          <strong>{money(current)}</strong>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SmartSalesImportPreview({ onAdvanced, onCancel, onConfirm, preview }) {
-  const confidence = Math.round(numberValue(preview.confidence, 0) * 100);
-  return (
-    <div className="import-review smart-import-preview">
-      <div className="panel-head">
-        <h2>Smart sales import preview</h2>
-        <span>{confidence}% confidence</span>
-      </div>
-      <div className="wizard-summary">
-        <div><span>Detected source</span><strong>{preview.source}</strong></div>
-        <div><span>Report type</span><strong>{displayReportType(preview.reportType)}</strong></div>
-        <div><span>Date / range</span><strong>{smartImportDateLabel(preview)}</strong></div>
-        <div><span>Rows ready</span><strong>{preview.rows.length}</strong></div>
-        <div><span>Gross sales</span><strong>{money(preview.grossSalesTotal)}</strong></div>
-        <div><span>Net sales</span><strong>{money(preview.netSalesTotal)}</strong></div>
-        <div><span>VAT / tax</span><strong>{money(preview.vatTotal)}</strong></div>
-        <div><span>Departments</span><strong>{preview.departments.join(", ") || "None"}</strong></div>
-      </div>
-      {preview.categories?.length > 0 && (
-        <div className="stocktake-summary">
-          <span>Categories detected</span>
-          <strong>{preview.categories.join(", ")}</strong>
-        </div>
-      )}
-      {preview.warnings?.length > 0 && <div className="invoice-status warn">{preview.warnings.join(" ")}</div>}
-      <DataTable
-        columns={[
-          { key: "date", label: "Date" },
-          { key: "department", label: "Department" },
-          { key: "sourceCategory", label: "Source category" },
-          { key: "grossSales", label: "Gross", render: money },
-          { key: "sales", label: "Net", render: money },
-          { key: "vatAmount", label: "VAT", render: money },
-          { key: "discounts", label: "Discounts", render: money },
-          { key: "refunds", label: "Refunds", render: money },
-        ]}
-        rows={preview.rows.slice(0, 50)}
-      />
-      <div className="button-row left">
-        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Import</button>
-        <button className="secondary" onClick={onAdvanced} type="button"><Settings size={16} />Advanced options</button>
-        <button className="ghost danger" onClick={onCancel} type="button"><X size={16} />Cancel</button>
-      </div>
-    </div>
-  );
-}
-
-function SalesCsvImportWizard({ financialSettings, onCancel, onConfirm, setWizard, updateCsvMapping, updateCsvTemplate, wizard }) {
-  const mappingFields = [
-    ["date", "Date"],
-    ["department", "Department / sales type"],
-    ["grossSales", "Gross sales"],
-    ["netSales", "Net sales"],
-    ["vatAmount", "VAT amount"],
-    ["vatRate", "VAT %"],
-    ["serviceCharge", "Service charge"],
-    ["discounts", "Discounts"],
-    ["refunds", "Refunds"],
-  ];
-  const validRows = wizard.previewRows.filter((row) => row.date && row.grossSales > 0);
-  const templates = ["Manual CSV", "Square", "Lightspeed", "EPOS Now", "Toast", "Zettle"];
-  return (
-    <EditModal title="CSV Import Wizard" onCancel={onCancel} onSave={onConfirm} saveLabel="Use these mapped rows">
-      <div className="wizard-summary">
-        <div><span>File</span><strong>{wizard.fileName}</strong></div>
-        <div><span>Headers detected</span><strong>{wizard.headers.length}</strong></div>
-        <div><span>Rows ready</span><strong>{validRows.length}</strong></div>
-        <div><span>Rows needing review</span><strong>{Math.max(0, wizard.previewRows.length - validRows.length)}</strong></div>
-      </div>
-      <div className="form-grid six compact-form">
-        <label>Template
-          <select value={wizard.templateName} onChange={(event) => updateCsvTemplate(event.target.value)}>
-            {templates.map((template) => <option key={template}>{template}</option>)}
-          </select>
-        </label>
-        <CheckboxField checked={wizard.saveTemplate} label="Save this mapping for next time" onChange={(value) => setWizard((current) => ({ ...current, saveTemplate: value }))} />
-      </div>
-      <Panel title="Map CSV columns" action="Change any wrong matches before importing">
-        <div className="form-grid six compact-form">
-          {mappingFields.map(([field, label]) => (
-            <label key={field}>{label}
-              <select value={wizard.mapping[field] ?? -1} onChange={(event) => updateCsvMapping(field, event.target.value)}>
-                <option value={-1}>Not used</option>
-                {wizard.headers.map((header, index) => <option key={`${field}-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
-              </select>
-            </label>
-          ))}
-        </div>
-      </Panel>
-      {wizard.errors.length > 0 && (
-        <div className="invoice-status warn">
-          {wizard.errors.slice(0, 5).join(" · ")}{wizard.errors.length > 5 ? ` · ${wizard.errors.length - 5} more` : ""}
-        </div>
-      )}
-      <Panel title="Import preview" action={`${validRows.length} ready`}>
-        <DataTable
-          columns={[
-            { key: "date", label: "Date" },
-            { key: "department", label: "Sales type" },
-            { key: "grossSales", label: "Gross", render: money },
-            { key: "sales", label: "Net", render: money },
-            { key: "vatAmount", label: "VAT", render: (_, row) => money(vatAmountFromGrossNet(row.grossSales, row.sales)) },
-            { key: "importStatus", label: "Status" },
-          ]}
-          rows={wizard.previewRows.slice(0, 50)}
-        />
-      </Panel>
-      <div className="button-row left tight">
-        <button className="ghost" onClick={onCancel} type="button">Cancel</button>
-        <button onClick={onConfirm} type="button"><Save size={16} />Confirm Mapping</button>
-      </div>
-    </EditModal>
-  );
-}
-
-function SalesEditModal({ departmentOptions, form, formEffectiveVat, formVatAmount, onCancel, onSave, salesMode, setForm, setSalesMode, title, updateGross, updateVatRate }) {
-  const changeMode = (mode) => {
-    setSalesMode(mode);
-    if (mode === "Calculate Net from VAT") {
-      setForm((current) => ({ ...current, sales: netFromGross(current.grossSales, current.vatRate) }));
-    }
-  };
-
-  return (
-    <EditModal title={title} onCancel={onCancel} onSave={onSave} saveLabel="Save Sales">
-      <div className="form-grid six">
-        <label>Mode<select value={salesMode} onChange={(event) => changeMode(event.target.value)}><option>Gross + Net</option><option>Calculate Net from VAT</option><option>Manual Net</option></select></label>
-        <Field label="Date" type="date" value={form.date} onChange={(value) => setForm({ ...form, date: value })} />
-        <label>Sales type<select value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })}>{departmentOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-        <Field label="Gross sales" type="number" value={form.grossSales} onChange={updateGross} />
-        <Field label="VAT %" type="number" value={form.vatRate} onChange={updateVatRate} />
-        <Field label="Net sales" type="number" value={form.sales} onChange={(value) => setForm({ ...form, sales: value })} readOnly={salesMode === "Calculate Net from VAT"} />
-        <Field label="VAT amount" type="number" readOnly value={formVatAmount} />
-        <Field label="Effective VAT %" type="number" readOnly value={formEffectiveVat.toFixed(2)} />
-        <Field label="Service charge" type="number" value={form.serviceCharge} onChange={(value) => setForm({ ...form, serviceCharge: value })} />
-        <Field label="Discounts" type="number" value={form.discounts} onChange={(value) => setForm({ ...form, discounts: value })} />
-        <Field label="Refunds" type="number" value={form.refunds} onChange={(value) => setForm({ ...form, refunds: value })} />
-      </div>
-    </EditModal>
-  );
-}
-
 function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
@@ -18632,36 +17494,6 @@ function BarSeries({ rows, valueKey }) {
   );
 }
 
-function LineSeries({ rows, valueKey }) {
-  const visibleRows = rows.filter((row) => Number(row[valueKey]) || row.grossSales || row.netSales);
-  if (!visibleRows.length) return <EmptyState />;
-  const max = Math.max(...visibleRows.map((row) => Number(row[valueKey]) || 0), 1);
-  const points = visibleRows.map((row, index) => `${(index / Math.max(visibleRows.length - 1, 1)) * 100},${100 - ((Number(row[valueKey]) || 0) / max) * 88}`).join(" ");
-  return (
-    <div className="line-chart">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-        <polyline points={points} />
-      </svg>
-      <div className="chart-labels dynamic" style={{ gridTemplateColumns: `repeat(${visibleRows.length}, 1fr)` }}>{visibleRows.map((row) => <span key={row.id || row.date}>{row.label || row.day || formatRangeDate(row.date)}</span>)}</div>
-    </div>
-  );
-}
-
-function DonutBars({ rows }) {
-  const max = Math.max(...rows.map((row) => Math.abs(row.spend)), 1);
-  return <div className="donut-list">{rows.map((row) => <div key={row.id || row.name}><span>{row.name}</span><strong>{money(row.spend)}</strong><i style={{ width: `${(Math.abs(row.spend) / max) * 100}%` }} /></div>)}</div>;
-}
-
-function InsightList({ metrics }) {
-  return (
-    <div className="stack-list">
-      <Opportunity title="Invoice GP" body={`Invoice GP is ${percent(metrics.invoiceGp)}. Review high-value invoices before the next order.`} />
-      <Opportunity title="Stocktake cost" body={metrics.stockAvailable ? `Opening + purchases - closing gives ${money(metrics.stocktakeCost)} real cost used, waste included.` : `${metrics.stockUnavailableReason}: stock cost not calculated.`} />
-      <Opportunity title="Waste pressure" body={`Waste is ${money(metrics.waste)} or ${percent(metrics.wastePercent)} of current sales.`} />
-    </div>
-  );
-}
-
 function dashboardInsightsForMetrics(metrics = {}) {
   const hasSales = numberValue(metrics.netSales, 0) > 0;
   const hasLabour = Boolean(metrics.labourRecords?.length);
@@ -18722,10 +17554,6 @@ function AiInsightsPage({ metrics, onNavigate, runId = 0 }) {
       ))}
     </div>
   );
-}
-
-function Opportunity({ title, body }) {
-  return <div className="opportunity"><div><AlertTriangle size={18} /></div><article><strong>{title}</strong><p>{body}</p></article></div>;
 }
 
 function Badge({ children, tone }) {
