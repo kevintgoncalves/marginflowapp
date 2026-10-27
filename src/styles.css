@@ -8276,3 +8276,55 @@ button.icon {
 .recipe-book-copy small { color: var(--muted); }
 .recipe-book-copy button svg, .table-toolbar button.ghost svg { vertical-align: -2px; margin-right: 6px; }
 .ingredient-line-controls .ingredient-recipe-name { grid-column: 1 / -1; }
+
+/* Stocktake: free-text import review and prep lines */
+.stocktake-free-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stocktake-free-totals > div { display: grid; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card-soft); }
+.stocktake-free-totals span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.stocktake-free-filters { flex-wrap: wrap; }
+.stocktake-free-filters small { color: var(--muted); margin-left: 4px; }
+.stocktake-free-bulk { align-items: center; }
+.stocktake-free-minimum { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.stocktake-free-minimum input { width: 64px; }
+.stocktake-free-list { display: grid; max-height: 520px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.stocktake-free-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 90px auto; gap: 10px; align-items: start; padding: 10px; border-bottom: 1px solid var(--line); }
+.stocktake-free-row.muted { opacity: 0.55; }
+.stocktake-free-source, .stocktake-free-target { display: grid; gap: 3px; min-width: 0; }
+.stocktake-free-source span, .stocktake-free-target span, .stocktake-free-source small, .stocktake-free-target small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.stocktake-free-none { color: #fda4af !important; }
+.stocktake-free-warning { display: flex; gap: 4px; align-items: center; color: #fcd34d !important; }
+.stocktake-free-value { text-align: right; }
+.stocktake-free-actions { flex-wrap: wrap; justify-content: flex-end; }
+.stocktake-free-candidates { display: flex; flex-wrap: wrap; gap: 4px; }
+.stocktake-target-search .ingredient-suggestions { position: static; }
+.stocktake-pack-content { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.stocktake-pack-content input { width: 90px; }
+.stocktake-free-unmatched { display: grid; gap: 4px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; font-size: 13px; }
+.stocktake-free-unmatched span { color: var(--muted); }
+.stocktake-free-prep, .stocktake-prep { display: grid; gap: 8px; }
+.stocktake-prep { margin: 0 18px 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.stocktake-prep .panel-head, .stocktake-free-prep .panel-head { padding: 0; }
+.stocktake-prep .panel-head > div:first-child, .stocktake-free-prep .panel-head > div:first-child { display: grid; gap: 2px; }
+.stocktake-prep h3, .stocktake-free-prep h3 { margin: 0; font-size: 15px; }
+.stocktake-prep-row { display: grid; grid-template-columns: minmax(0, 1fr) 100px 90px 90px auto; gap: 8px; align-items: center; }
+.stocktake-free-prep .stocktake-prep-row { grid-template-columns: minmax(0, 1fr) 120px auto; }
+.stocktake-prep-name { display: grid; min-width: 0; }
+.stocktake-prep-name small, .stocktake-prep-tag { color: var(--muted); font-size: 12px; }
+.stocktake-prep-value { text-align: right; }
+.stocktake-prep-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.stocktake-summary-split { justify-content: flex-end; }
+.stocktake-summary-split strong { margin-left: 4px; }
+@media (max-width: 720px) {
+  .stocktake-free-totals { gap: 6px; }
+  .stocktake-free-totals > div { padding: 6px 8px; }
+  .stocktake-free-totals strong { font-size: 13px; }
+  .stocktake-free-list { max-height: none; }
+  .stocktake-free-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .stocktake-free-target { grid-column: 1 / -1; }
+  .stocktake-free-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .stocktake-prep { margin: 0 0 12px; }
+  .stocktake-prep-row { grid-template-columns: minmax(0, 1fr) 80px 70px; }
+  .stocktake-prep-row .stocktake-prep-value { grid-column: 1 / 3; text-align: left; }
+  .stocktake-prep-add { grid-template-columns: 1fr; }
+  .stocktake-summary-split { justify-content: flex-start; }
+}

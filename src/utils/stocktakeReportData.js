@@ -116,8 +116,23 @@ function normalizeReportLine(line = {}, stocktake = {}, index = 0) {
     department: line.department || stocktake.department || "Unassigned",
     productId: lineProductId(line),
     isPreparation: isPreparationStockLine({ ...line, productName }),
+    fromPrep: Boolean(line.fromPrep),
     sortIndex: index,
   };
+}
+
+// Prep counted with the stocktake (recipes and estimates by zone) as preparation lines.
+function prepReportLines(prepLines = []) {
+  return (Array.isArray(prepLines) ? prepLines : []).map((line) => {
+    if (line.type === "recipe") {
+      const quantity = numberValue(line.quantity);
+      return {
+        id: line.id, productName: `Prep: ${line.recipeName || "Recipe"}`, quantity, packSize: line.unit || "",
+        unitCost: quantity ? numberValue(line.value) / quantity : 0, department: line.department || "", productId: "", fromPrep: true,
+      };
+    }
+    return { id: line.id, productName: `Prep: ${line.zone || "Zone"} (estimate)`, quantity: 1, packSize: "estimate", unitCost: numberValue(line.value), department: line.department || "", productId: "", fromPrep: true };
+  });
 }
 
 function sortReportLines(left, right) {
@@ -152,7 +167,7 @@ export function buildStocktakeReportData(stocktake, options = {}) {
     : (stocktake.openingLines || []);
   assertStocktakeScope(stocktake, sourceLines, options.companyScope || options);
 
-  const allLines = sourceLines
+  const allLines = [...sourceLines, ...prepReportLines(stocktake.prepLines)]
     .filter((line) => {
       const productName = line.productName || line.product || line.name || line.description || "";
       return String(productName).trim() && hasValue(line.quantity);
@@ -179,7 +194,7 @@ export function buildStocktakeReportData(stocktake, options = {}) {
     currency: options.currency || "GBP",
     productCount: allLines.length,
     zeroQuantityCount: allLines.filter((line) => line.quantity === 0).length,
-    newProductCount: allLines.filter((line) => !line.productId).length,
+    newProductCount: allLines.filter((line) => !line.productId && !line.fromPrep).length,
     productStockTotal,
     preparationTotal,
     grandTotal,

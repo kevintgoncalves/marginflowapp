@@ -252,6 +252,8 @@ import WorkforceModule from "./workforce/WorkforceModule.jsx";
 import LiveStocktakeEntry from "./components/stocktake/LiveStocktakeEntry.jsx";
 import StocktakeDownloadMenu from "./components/stocktake/StocktakeDownloadMenu.jsx";
 import StocktakeImportReview from "./components/stocktake/StocktakeImportReview.jsx";
+import StocktakeFreeImportReview from "./components/stocktake/StocktakeFreeImportReview.jsx";
+import StocktakePrepLines from "./components/stocktake/StocktakePrepLines.jsx";
 import FinalRecoveryPanel, { InvoiceVersionPreview } from "./components/FinalRecoveryPanel.jsx";
 import {
   applySafeFinancialHeaderRepairs,
@@ -278,11 +280,23 @@ import { propagateInvoiceSupplierToLines, validateInvoiceLinesForApproval } from
 import {
   applyStocktakeEntries,
   confirmedStocktakeImportEntries,
+  detectStocktakeImportMode,
   parseStocktakeImportRows,
   resolveStocktakeImportReviewRow,
   stocktakeTemplateRows,
 } from "./domain/stocktakeImport.js";
 import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
+import {
+  chooseFreeImportTarget,
+  createFreeImportIndex,
+  freeImportResult,
+  learnedAliases,
+  mergeImportedCounts,
+  mergePrepLines,
+  parseFreeStocktakeImport,
+  prepTotals,
+  productsWithLearnedAliases,
+} from "./domain/stocktakeFreeImport.js";
 import { departmentStockPosition, periodStockResult, stockUnavailableReason } from "./domain/stockPeriod.js";
 import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
 import { downloadProductsExcel } from "./utils/exportProductsExcel.js";
@@ -7654,6 +7668,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             departmentNames={allowedDepartmentNames}
             permissions={permissionsByPage.stocktake}
             products={products}
+            recipes={recipes}
             requestDelete={requestDelete}
             setProducts={setProducts}
             setStocktakes={setStocktakes}
@@ -14005,7 +14020,7 @@ function stocktakeProductsCsv(products = []) {
   return csvTextFromRows(stocktakeTemplateRows(products));
 }
 
-function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "GBP", department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, requestDelete, setProducts, stocktakes, setStocktakes, suppliers = [] }) {
+function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "GBP", department, departmentNames, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "stocktake"), products, recipes = [], requestDelete, setProducts, stocktakes, setStocktakes, suppliers = [] }) {
   const defaultDepartment = department === "All departments" ? departmentNames[0] || "Kitchen Made" : department;
   const visibleSuppliers = activeSupplierRows(suppliers);
   const blankModal = (type = "Stocktake") => ({
@@ -14017,8 +14032,11 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     entryMode: "Live Count",
     manualValue: 0,
     lines: [],
+    prepLines: [],
     pendingImport: [],
+    prepEstimates: [],
     importSummary: null,
+    importBatch: "",
     status: "",
     importFileKey: 0,
     reviewing: false,
@@ -14028,6 +14046,9 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
   const [reportStocktake, setReportStocktake] = useState(null);
   const [productCreation, setProductCreation] = useState(null);
   const productIndex = useMemo(() => createStocktakeProductIndex(products, { organisationId: companyScope.companyId || "" }), [companyScope.companyId, products]);
+  // Prep and imported counts are valued at the latest prices, like the product lines.
+  const costingContext = useMemo(() => createCostingContext(products, recipes, { priceBasis: PRICE_BASIS.LATEST, asOf: today() }), [products, recipes]);
+  const freeImportIndex = useMemo(() => createFreeImportIndex(products, recipes, { costingContext }), [costingContext, products, recipes]);
   const visibleStocktakes = stocktakes.filter((stocktake) => departmentMatches(stocktake.department, department));
   const latestStocktake = [...visibleStocktakes].sort((left, right) => String(right.date).localeCompare(String(left.date)))[0];
   const latestLines = latestStocktake?.lines || latestStocktake?.openingLines || [];
@@ -14074,6 +14095,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       entryMode: stocktake.manualOpeningType === "Manual Value" || stocktake.entryMode === "Manual Value" ? "Manual Value" : "Live Count",
       manualValue: isOpening ? stocktake.openingStockValue : stocktake.totalValue,
       lines: ((isOpening ? stocktake.openingLines : stocktake.lines) || []).map((line) => ({ ...line, id: line.id || uid(), stockValue: numberValue(line.quantity) * numberValue(line.unitCost) })),
+      prepLines: (stocktake.prepLines || []).map((line) => ({ ...line })),
       pendingImport: [],
       importSummary: null,
       status: "",
@@ -14090,6 +14112,12 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       const rows = /\.xlsx?$/i.test(file.name)
         ? await rowsFromStocktakeExcelFile(file)
         : parseCsvText(await file.text());
+      const firstHeaders = (rows[0] || []).map((cell) => String(cell ?? ""));
+      if (detectStocktakeImportMode(firstHeaders) === "external_list") {
+        const free = parseFreeStocktakeImport(rows, { suppliers, department: modal.department, date: modal.date, costingContext, index: freeImportIndex });
+        setModal((current) => ({ ...current, pendingImport: free.reviewRows, prepEstimates: free.prepEstimates, importSummary: free, importBatch: uid(), status: free.reviewRows.length || free.prepEstimates.length ? "" : "No counted rows were found in the file. No stock values were changed.", reviewing: false }));
+        return;
+      }
       const summary = parseStocktakeImportRows(rows, products, { department: modal.department, organisationId: companyScope.companyId || "", productIndex });
       const status = summary.missingCountColumn
         ? "The import needs a Count column. No stock values were changed."
@@ -14100,8 +14128,30 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     }
   };
 
+  const applyFreeImport = () => {
+    const { entries, prepLines } = freeImportResult(modal.pendingImport, { products, department: modal.department, prepEstimates: modal.prepEstimates });
+    const additions = learnedAliases(modal.pendingImport, products);
+    if (additions.size) setProducts((current) => productsWithLearnedAliases(current, additions));
+    const remaining = modal.pendingImport.filter((row) => !row.confirmed && !row.ignored);
+    const learned = [...additions.values()].reduce((sum, names) => sum + names.length, 0);
+    setModal((current) => ({
+      ...current,
+      lines: mergeImportedCounts(current.lines, entries, current.importBatch),
+      prepLines: mergePrepLines(current.prepLines || [], prepLines),
+      pendingImport: remaining,
+      prepEstimates: [],
+      importSummary: remaining.length ? current.importSummary : null,
+      importFileKey: remaining.length ? current.importFileKey : current.importFileKey + 1,
+      status: `Import applied: ${entries.length} product count(s), ${prepLines.length} prep line(s)${learned ? `, ${learned} name(s) learned for next time` : ""}.${remaining.length ? ` ${remaining.length} row(s) still need a decision below.` : ""}`,
+    }));
+  };
+
   const applyPendingImport = () => {
     if (!modal?.importSummary) return;
+    if (modal.importSummary.kind === "free") {
+      applyFreeImport();
+      return;
+    }
     const entries = confirmedStocktakeImportEntries(modal.pendingImport, products, { department: modal.department });
     setModal((current) => ({
       ...current,
@@ -14113,7 +14163,10 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     }));
   };
 
-  const cancelImport = () => setModal((current) => ({ ...current, pendingImport: [], importSummary: null, importFileKey: current.importFileKey + 1, status: "Import cancelled." }));
+  const cancelImport = () => setModal((current) => ({ ...current, pendingImport: [], prepEstimates: [], importSummary: null, importFileKey: current.importFileKey + 1, status: "Import cancelled." }));
+  const resolveImportRow = (current, rowId, product) => (current.importSummary?.kind === "free"
+    ? chooseFreeImportTarget(current.pendingImport, rowId, { product }, { products: [product, ...products], recipes, costingContext })
+    : current.pendingImport.map((row) => row.id === rowId ? resolveStocktakeImportReviewRow(row, product) : row));
 
   const openProductCreation = (seed = {}, source = "live") => {
     if (!permissions.canAdd) return;
@@ -14136,7 +14189,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
 
   const useProductForCreation = (product) => {
     if (productCreation?.source === "import" && productCreation.rowId) {
-      setModal((current) => ({ ...current, pendingImport: current.pendingImport.map((row) => row.id === productCreation.rowId ? resolveStocktakeImportReviewRow(row, product) : row) }));
+      setModal((current) => ({ ...current, pendingImport: resolveImportRow(current, productCreation.rowId, product) }));
     }
     setProductCreation(null);
   };
@@ -14156,7 +14209,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
     });
     setProducts((current) => [product, ...current]);
     if (productCreation.source === "import" && productCreation.rowId) {
-      setModal((current) => ({ ...current, pendingImport: current.pendingImport.map((row) => row.id === productCreation.rowId ? resolveStocktakeImportReviewRow(row, product) : row) }));
+      setModal((current) => ({ ...current, pendingImport: resolveImportRow(current, productCreation.rowId, product) }));
     }
     setProductCreation(null);
   };
@@ -14173,7 +14226,7 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       const unitCost = Number(line.unitCost);
       return !productExists || quantityBlank || !Number.isFinite(quantity) || quantity < 0 || !Number.isFinite(unitCost) || unitCost < 0;
     });
-    if (!isManual && ((finalise && !sourceLines.length) || incomplete)) {
+    if (!isManual && ((finalise && !sourceLines.length && !(modal.prepLines || []).length) || incomplete)) {
       setModal((current) => ({ ...current, status: "Every counted row needs an existing product, a zero or positive count, and a valid unit cost." }));
       return;
     }
@@ -14181,7 +14234,14 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       const product = products.find((candidate) => candidate.id === line.matchedProductId);
       return { ...line, productName: product?.name || line.productName, stockValue: Number(line.quantity) * Number(line.unitCost) };
     });
-    const value = isManual ? numberValue(modal.manualValue) : normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    const prepLines = isManual ? [] : (modal.prepLines || []).map((line) => ({ ...line, quantity: line.quantity === undefined ? undefined : numberValue(line.quantity), value: numberValue(line.value) }));
+    if (prepLines.some((line) => !Number.isFinite(line.value) || line.value < 0)) {
+      setModal((current) => ({ ...current, status: "Every prep line needs a zero or positive value." }));
+      return;
+    }
+    const productValue = normalizedLines.reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+    const prep = prepTotals(prepLines);
+    const value = isManual ? numberValue(modal.manualValue) : productValue + prep.recipe + prep.estimate;
     const isOpening = modal.type === "Opening Stock";
     const existing = stocktakes.find((stocktake) => stocktake.id === modal.id) || {};
     const stocktake = {
@@ -14197,6 +14257,12 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       openingLines: isOpening ? normalizedLines : [],
       openingStockValue: isOpening ? value : 0,
       lines: isOpening ? [] : normalizedLines,
+      ...(prepLines.length || existing.prepLines ? {
+        prepLines,
+        productStockValue: isManual ? 0 : productValue,
+        recipePrepValue: prep.recipe,
+        estimatedPrepValue: prep.estimate,
+      } : {}),
       totalValue: isOpening ? 0 : value,
       status: finalise || modal.originalStatus === "Saved" ? "Saved" : "In progress",
     };
@@ -14209,11 +14275,20 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
       saveModal(true);
       return;
     }
-    if (!modal.lines.length) {
+    if (!modal.lines.length && !(modal.prepLines || []).length) {
       setModal((current) => ({ ...current, status: "Count at least one product before finalising." }));
       return;
     }
     setModal((current) => ({ ...current, reviewing: true, status: "" }));
+  };
+
+  const modalProductValue = (current) => (current.lines || []).reduce((sum, line) => sum + numberValue(line.stockValue), 0);
+  // The department's previous finished count, when it was saved without prep.
+  const previousCountWithoutPrep = (current) => {
+    const previous = stocktakes
+      .filter((stocktake) => stocktake.id !== current.id && stocktake.department === current.department && stocktake.date < current.date && (stocktake.status || "Saved") === "Saved")
+      .sort((left, right) => String(right.date).localeCompare(String(left.date)))[0];
+    return previous && !(previous.prepLines || []).length ? previous : null;
   };
 
   const updateReviewQuantity = (productId, value) => setModal((current) => ({
@@ -14313,7 +14388,21 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
                 <div className="button-row left tight">
                   {permissions.canImport && <label className="file-button secondary"><Upload size={16} />Import XLSX or CSV<input accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" key={modal.importFileKey} onChange={(event) => importStocktakeFile(event.target.files?.[0])} type="file" /></label>}
                 </div>
-                {modal.importSummary && <StocktakeImportReview
+                {modal.importSummary?.kind === "free" && <StocktakeFreeImportReview
+                  canImport={permissions.canImport}
+                  costingContext={costingContext}
+                  index={freeImportIndex}
+                  onApply={applyPendingImport}
+                  onCancel={cancelImport}
+                  onCreateProduct={(row) => openProductCreation(row, "import")}
+                  onPrepEstimatesChange={(prepEstimates) => setModal((current) => ({ ...current, prepEstimates }))}
+                  onRowsChange={(pendingImport) => setModal((current) => ({ ...current, pendingImport }))}
+                  prepEstimates={modal.prepEstimates || []}
+                  products={products}
+                  recipes={recipes}
+                  reviewRows={modal.pendingImport}
+                />}
+                {modal.importSummary && modal.importSummary.kind !== "free" && <StocktakeImportReview
                   blankRows={modal.importSummary.blankRows}
                   canImport={permissions.canImport}
                   mode={modal.importSummary.mode}
@@ -14337,8 +14426,24 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
               productIndex={productIndex}
               products={products}
             />}
+            {modal.entryMode !== "Manual Value" && <StocktakePrepLines
+              canEdit={modal.id ? permissions.canEdit : permissions.canAdd}
+              costingContext={costingContext}
+              department={modal.department}
+              index={freeImportIndex}
+              lines={modal.prepLines || []}
+              onChange={(prepLines) => setModal((current) => ({ ...current, prepLines }))}
+            />}
+            {modal.entryMode !== "Manual Value" && (modal.prepLines || []).length > 0 && previousCountWithoutPrep(modal) && <div className="invoice-status warn">The previous {previousCountWithoutPrep(modal).department} count ({previousCountWithoutPrep(modal).date}) has no prep. Comparing it with this one will make the GP for that period look better than it was.</div>}
             {modal.status && <div className="invoice-status info">{modal.status}</div>}
-            <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.entryMode === "Manual Value" ? modal.manualValue : modal.lines.reduce((sum, line) => sum + numberValue(line.stockValue), 0))}</strong></div>
+            {modal.entryMode === "Manual Value"
+              ? <div className="stocktake-summary slim"><span>Total</span><strong>{money(modal.manualValue)}</strong></div>
+              : <div className="stocktake-summary slim stocktake-summary-split">
+                <span>Products <strong>{money(modalProductValue(modal))}</strong></span>
+                <span>Prep (recipes) <strong>{money(prepTotals(modal.prepLines).recipe)}</strong></span>
+                <span>Prep (estimated) <strong>{money(prepTotals(modal.prepLines).estimate)}</strong></span>
+                <span>Total <strong>{money(modalProductValue(modal) + prepTotals(modal.prepLines).recipe + prepTotals(modal.prepLines).estimate)}</strong></span>
+              </div>}
             <div className="button-row left">
               <button className="ghost" onClick={() => setModal(null)} type="button">Close</button>
               {(modal.id ? permissions.canEdit : permissions.canAdd) && <button className="ghost" onClick={() => saveModal(false)} type="button"><Save size={16} />{modal.originalStatus === "Saved" ? "Save Changes" : "Save Progress"}</button>}
@@ -14358,6 +14463,9 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
             </div>
             {[...(viewingStocktake.openingLines || []), ...(viewingStocktake.lines || [])].map((line) => (
               <div className="compact-row" key={line.id}><span>{line.productName}</span><span>{line.quantity} x {money(line.unitCost)}</span><strong>{money(line.stockValue)}</strong></div>
+            ))}
+            {(viewingStocktake.prepLines || []).map((line) => (
+              <div className="compact-row" key={line.id}><span>Prep: {line.type === "recipe" ? line.recipeName : `${line.zone} (estimate)`}</span><span>{line.type === "recipe" ? `${line.quantity} ${line.unit}` : "Estimate"}</span><strong>{money(line.value)}</strong></div>
             ))}
             <div className="button-row left">
               <button className="ghost" onClick={() => setReportStocktake(viewingStocktake)} type="button"><Download size={16} />Download Report</button>

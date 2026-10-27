@@ -65,3 +65,22 @@ test("rejects selected stocktakes with no counted lines", () => {
     /no counted lines/,
   );
 });
+
+test("prep lines of a stocktake appear in the report as preparation, apart from products", () => {
+  const report = buildStocktakeReportData({
+    id: "stocktake-prep",
+    date: "2026-10-27",
+    department: "Kitchen",
+    totalValue: 170,
+    lines: [{ id: "l1", productName: "Caster Sugar", quantity: 2, unitCost: 10, matchedProductId: "p1", department: "Kitchen" }],
+    prepLines: [
+      { id: "r1", type: "recipe", recipeName: "Dukkah", quantity: 0.5, unit: "kg", value: 5, department: "Kitchen" },
+      { id: "e1", type: "estimate", zone: "Big freezer", value: 145, department: "Kitchen" },
+    ],
+  });
+  assert.equal(report.productStockTotal, 20);
+  assert.equal(report.preparationTotal, 150);
+  assert.equal(report.preparationItems.length, 2);
+  assert.equal(report.newProductCount, 0);
+  assert.equal(report.grandTotal, 170);
+});
