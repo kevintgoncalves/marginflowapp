@@ -49,3 +49,24 @@ test("without a skip list the error still throws (other callers unchanged)", asy
   };
   await assert.rejects(resolveLearningCatalogue(client, [{ id: "m1", companyId: "c1", supplierName: "W", productName: "X", productId: "dead" }], { companyId: "c1" }));
 });
+
+// "31 reusable match or conversion update(s) await confirmation … Select an active company
+// department for this line" (28/10/2026): one line without a valid department blocked them all.
+test("a line whose department is gone uses the product's department, or waits for a choice without blocking", async () => {
+  const departments = [{ id: "d1", name: "Kitchen Made", company_id: "c1", active: true }, { id: "d2", name: "Bar", company_id: "c1", active: true }];
+  const client = {
+    from: () => ({ select: () => ({ eq: () => ({ eq: async () => ({ data: departments, error: null }) }) }) }),
+    rpc: async (name, payload) => ({ data: { supplierId: "s1", items: [{ matchedProductId: payload.p_invoice.items[0].matchedProductId, departmentId: payload.p_invoice.items[0].departmentId }] }, error: null }),
+  };
+  const skipped = [];
+  const resolved = await resolveLearningCatalogue(client, [
+    { id: "gone", companyId: "c1", supplierName: "W", productName: "A", productId: "p1", department: "Old Kitchen", departmentId: "old-local-id", fallbackDepartment: "Bar" },
+    { id: "none", companyId: "c1", supplierName: "W", productName: "B", productId: "p2", department: "", departmentId: "" },
+    { id: "ok", companyId: "c1", supplierName: "W", productName: "C", productId: "p3", department: "Kitchen Made" },
+  ], { companyId: "c1" }, { skipped });
+  assert.deepEqual(resolved.map((row) => [row.id, row.departmentId]), [["gone", "d2"], ["ok", "d1"]]);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].mappingId, "none");
+  assert.equal(skipped[0].needsDepartment, true);
+  assert.notEqual(skipped[0].permanent, true);
+});

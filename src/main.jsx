@@ -4038,7 +4038,8 @@ function contextualPageSubtitle(active, {
     return `${activeRecipeCount} active recipe${activeRecipeCount === 1 ? "" : "s"}`;
   }
   if (active === "waste") return `${month} - ${wasteItems.filter((item) => dateInRange(item.date, dateRange)).length} records`;
-  if (["gp", "labour"].includes(active)) return month;
+  if (active === "labour") return period;
+  if (active === "gp") return month;
   if (active === "ai") return "3 insights to review";
   if (active === "settings") return "Account, company and cloud sync";
   return "";
@@ -5184,6 +5185,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const [invoicePageState, setInvoicePageState] = useState({ nextOffset: 0, total: 0, filters: {}, hasMore: false, loading: false, error: "" });
   const [reportInvoices, setReportInvoices] = useState([]);
   const [reportLoadState, setReportLoadState] = useState({ loading: false, error: "", purchasesFailed: false });
+  const reportCacheRef = useRef(new Map());
   const [cloudStatus, setCloudStatus] = useState("local");
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
@@ -5295,7 +5297,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     const stored = demoMode ? fallback : safeReadLocalStorage("marginflow.dashboardDateRange", fallback);
     return normalizeDateRangeState(demoInitialData?.dateRangeState || stored, financialSettings.weekStartsOn);
   });
-  const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This week", financialSettings.weekStartsOn));
+  const [labourDateRangeState, setLabourDateRangeState] = useState(() => dateRangeStateForPreset("This month", financialSettings.weekStartsOn));
   const [labourData, setLabourDataState] = useState(() => demoInitialData?.labourData || normalizeLabourData(safeReadLocalStorage("marginflow.labour", createEmptyLabourData())));
   const [pendingLearning, setPendingLearningState] = useState(() => safeReadLocalStorageArray("marginflow.pendingLearning", []));
   // What the browser held that differs from the cloud at opening, kept for the user to decide.
@@ -5463,7 +5465,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     setInvoiceSettingsState(next.invoiceSettings);
     setAiSettingsState(next.aiSettings);
     setDateRangeState(dateRangeStateForPreset("This month", next.financialSettings.weekStartsOn));
-    setLabourDateRangeState(dateRangeStateForPreset("This week", next.financialSettings.weekStartsOn));
+    setLabourDateRangeState(dateRangeStateForPreset("This month", next.financialSettings.weekStartsOn));
     setLabourDataState(next.labourData);
     setDraft(demoCaptureMode === "invoice-review" && next.invoiceReviewDraft ? next.invoiceReviewDraft : emptyInvoiceDraft());
     setDeleteConfirmation(null);
@@ -5491,8 +5493,17 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     let cancelled = false;
     // A newer period or scope supersedes this read: stop downloading it instead of discarding it later.
     const controller = typeof AbortController === "function" ? new AbortController() : null;
-    setReportLoadState({ loading: true, error: "", purchasesFailed: false });
     const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
+    // The last complete read of this period is shown at once (going back to the Dashboard or another
+    // report page) while it is read again; a failed re-read keeps it.
+    const cacheKey = `${scope.companyId}|${scope.locationId}|${dateRange.start}|${dateRange.end}`;
+    const cached = reportCacheRef.current.get(cacheKey);
+    if (cached) {
+      setReportInvoices(cached);
+      setReportLoadState({ loading: false, error: "", purchasesFailed: false });
+    } else {
+      setReportLoadState({ loading: true, error: "", purchasesFailed: false });
+    }
     const invoiceRead = loadRelationalInvoiceReportRange(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end, signal: controller?.signal });
     const salesRead = loadRelationalSales(supabase, scope, { startDate: dateRange.start, endDate: dateRange.end });
     // Sales are small: show them as soon as they arrive while the purchases are still loading.
@@ -5504,11 +5515,14 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     Promise.allSettled([invoiceRead, salesRead]).then(([invoiceResult, salesResult]) => {
       if (cancelled) return;
       const errors = [];
-      const purchasesFailed = invoiceResult.status !== "fulfilled";
+      const readFailed = invoiceResult.status !== "fulfilled";
+      const purchasesFailed = readFailed && !cached;
       // A failed read leaves no purchases for this period: GP is shown as unavailable, never
-      // worked out from purchases of £0 (or from another period's purchases).
-      setReportInvoices(purchasesFailed ? [] : invoiceResult.value);
-      if (purchasesFailed) errors.push(`Purchasing report: ${invoiceResult.reason?.message || "query failed"}`);
+      // worked out from purchases of £0 (or from another period's purchases). With an earlier
+      // complete read of the same period, that one stays.
+      if (!readFailed) reportCacheRef.current.set(cacheKey, invoiceResult.value);
+      setReportInvoices(readFailed ? (cached || []) : invoiceResult.value);
+      if (readFailed) errors.push(`Purchasing report: ${invoiceResult.reason?.message || "query failed"}${cached ? " (showing the last complete read)" : ""}`);
       if (salesResult.status !== "fulfilled") errors.push(`Sales report: ${salesResult.reason?.message || "query failed"}`);
       setReportLoadState({ loading: false, error: errors.join(" "), purchasesFailed });
     });
@@ -5546,7 +5560,8 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
   const gpTarget = targetForDepartment(departmentSettings, effectiveDepartment, financialSettings.targetGp);
   const stocktakeCompanyName = companySettings.tradingName || companySettings.companyName || effectiveAuthMembership?.companies?.trading_name || effectiveAuthMembership?.companies?.name || "MarginFlow";
   const pageSubtitle = useMemo(() => contextualPageSubtitle(active, {
-    dateRange,
+    // Labour has its own period (this month by default), shown in its header.
+    dateRange: active === "labour" ? labourDateRange : dateRange,
     dateRangeState,
     department: effectiveDepartment,
     invoices: operationalInvoices,
@@ -5556,7 +5571,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     wasteItems,
     recipes,
     invoiceControlWeekRange,
-  }), [active, dateRange, dateRangeState, effectiveDepartment, invoiceControlWeekRange, operationalInvoices, products, recipes, suppliers, stocktakes, wasteItems]);
+  }), [active, dateRange, labourDateRange, dateRangeState, effectiveDepartment, invoiceControlWeekRange, operationalInvoices, products, recipes, suppliers, stocktakes, wasteItems]);
   const ActiveIcon = visibleNavItems.find((item) => item.id === active)?.icon || Home;
   const hasDepartmentContext = departmentContextPages.includes(active);
   const permissionsByPage = useMemo(
@@ -5757,16 +5772,26 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     try {
       const scope = { companyId: cloudScope.companyId, locationId: cloudScope.locationId || "" };
       const unsavable = [];
-      const resolvedMappings = await resolveLearningCatalogue(supabase, learnedMappings, scope, { skipped: unsavable });
+      // The product's own department is tried when the line's department is gone or ambiguous.
+      const withFallback = learnedMappings.map((mapping) => {
+        const product = products.find((item) => item.id === mapping.productId);
+        return product?.department ? { ...mapping, fallbackDepartment: product.department } : mapping;
+      });
+      const resolvedMappings = await resolveLearningCatalogue(supabase, withFallback, scope, { skipped: unsavable });
       const result = await persistRelationalSupplierProductMappings(supabase, resolvedMappings, {
         companyId: cloudScope.companyId,
         locationId: cloudScope.locationId || "",
       });
-      if (unsavable.length) {
+      // Lines whose department needs a choice stay pending, listed in the sync banner.
+      const departmentIds = new Set(unsavable.filter(row => row.needsDepartment).map(row => row.mappingId));
+      setPendingLearning(current => current.map(row => (departmentIds.has(row.id) ? { ...row, needsDepartment: true } : row.needsDepartment && learnedMappings.some(next => next.id === row.id) ? { ...row, needsDepartment: false } : row)));
+      result.skipped = [...result.skipped, ...unsavable.filter(row => row.needsDepartment)];
+      const permanentUnsavable = unsavable.filter(row => !row.needsDepartment);
+      if (permanentUnsavable.length) {
         // Matches to inactive/merged products cannot be saved; stop retrying them.
-        const unsavableIds = new Set(unsavable.map(row => row.mappingId));
+        const unsavableIds = new Set(permanentUnsavable.map(row => row.mappingId));
         setPendingLearning(current => current.filter(row => !unsavableIds.has(row.id)));
-        result.skipped = [...result.skipped, ...unsavable];
+        result.skipped = [...result.skipped, ...permanentUnsavable];
       }
       if (result.persisted.length) {
         const resolvedById = new Map(resolvedMappings.map(mapping => [mapping.id, mapping]));
@@ -5783,8 +5808,9 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
       const savedIds = new Set(result.persisted.map(row => row.mappingId));
       setPendingLearning(current => current.filter(row => !savedIds.has(row.id)));
       const retryable = result.skipped.filter(row => !row.permanent);
-      setLearningError(retryable.length ? retryable[0].reason : "");
-      if (!retryable.length && result.persisted.length) setLearningNotice(`Reusable matches/conversions saved (${result.persisted.length}).${unsavable.length ? ` ${unsavable.length} match(es) to inactive products were not saved.` : ""}`);
+      const otherRetryable = retryable.filter(row => !row.needsDepartment);
+      setLearningError(otherRetryable.length ? otherRetryable[0].reason : departmentIds.size ? `${departmentIds.size} line(s) need a department: choose it below, then Retry learning.` : "");
+      if (result.persisted.length) setLearningNotice(`Reusable matches/conversions saved (${result.persisted.length}).${permanentUnsavable.length ? ` ${permanentUnsavable.length} match(es) to inactive products were not saved.` : ""}`);
       invoiceLearningDebug("relational-mappings-saved", { persisted: result.persisted.length, skipped: result.skipped.length });
       return result;
     } catch (error) {
@@ -7091,6 +7117,23 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
           {localStorage.hasLegacyData() && <p>Older browser data is preserved separately because its ownership has not been verified. It has not been imported.</p>}
           {localStorageError && <p>Recent browser work could not be stored. Export it before closing this page. <button onClick={() => downloadJsonFile("marginflow-live-work-recovery.json", { format: "marginflow-live-work-v1", scope: cloudScope, currentSnapshot: cloudSnapshot, volatileWrites: exportVolatileWrites(), diagnostics: persistenceDiagnostics() })}>Export recovery file</button></p>}
           {pendingLearning.length > 0 && <p>{pendingLearning.length} reusable match or conversion update(s) await confirmation. {learningError || ""} <button type="button" onClick={() => persistConfirmedLearning(pendingLearning)}>Retry learning</button></p>}
+          {pendingLearning.some(row => row.needsDepartment) && (
+            <div className="learning-departments">
+              <span>Lines waiting for a department (the product's own department was tried first):</span>
+              <label className="learning-departments-all">Set all to<select value="" onChange={(event) => event.target.value && setPendingLearning(current => current.map(row => (row.needsDepartment ? { ...row, department: event.target.value, departmentId: "" } : row)))}><option value="">Choose…</option>{activeDepartmentNames(departmentSettings).map(name => <option key={name}>{name}</option>)}</select></label>
+              <ul>
+                {pendingLearning.filter(row => row.needsDepartment).map(row => (
+                  <li key={row.id}>
+                    <span>{[row.supplierName, row.productName, row.packSize].filter(Boolean).join(" · ")}</span>
+                    <select aria-label={`Department for ${row.productName || "line"}`} value={activeDepartmentNames(departmentSettings).includes(row.department) ? row.department : ""} onChange={(event) => setPendingLearning(current => current.map(item => (item.id === row.id ? { ...item, department: event.target.value, departmentId: "" } : item)))}>
+                      <option value="">{row.department ? `${row.department} (not found)` : "Choose…"}</option>
+                      {activeDepartmentNames(departmentSettings).map(name => <option key={name}>{name}</option>)}
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {learningNotice && <p>{learningNotice}</p>}
           {browserDifferences.length > 0 && <p>{browserDifferences.length} item(s) in this browser differ from the cloud. The cloud version is in use; choose for each one. <button type="button" onClick={() => setActive("settings", "backup")}>Review differences</button></p>}
           {!confirmedInvoicesLoaded && <p>{cloudError ? `Cloud data could not be loaded: ${cloudError}` : "Loading confirmed cloud records."} {cloudError && <button type="button" onClick={retryCloudSync}>Retry</button>}</p>}
@@ -14039,9 +14082,18 @@ const RECIPE_YIELD_UNITS = ["portions", "kg", "g", "l", "ml", "each"];
 const formatWeight = (value) => String(Number(numberValue(value).toFixed(3)));
 // Recipe costs use the latest invoice unless another basis is chosen in Settings. The earlier
 // "recipePriceBasis" choice is kept but no longer read: its 4-week average had a pack conversion bug.
-const RECIPE_PRICE_BASIS_OPTIONS = [PRICE_BASIS.LATEST];
+const RECIPE_PRICE_BASIS_OPTIONS = [PRICE_BASIS.LATEST, PRICE_BASIS.AVERAGE, PRICE_BASIS.CHEAPEST];
+const RECIPE_PRICE_BASIS_HINTS = { [PRICE_BASIS.AVERAGE]: " (paid ÷ content bought, confirmed packs only)", [PRICE_BASIS.CHEAPEST]: " (linked suppliers, last 12 weeks)" };
 const recipePriceBasis = (menuSettings = {}) => (RECIPE_PRICE_BASIS_OPTIONS.includes(menuSettings?.recipePriceBasisChoice) ? menuSettings.recipePriceBasisChoice : PRICE_BASIS.LATEST);
 const NEW_MENU_CATEGORY = "__new__";
+
+// Cost of one yield unit for display: per kg or litre when the cost per g or ml is under 1p.
+function yieldUnitCostDisplay(unitCost, yieldUnit = "unit") {
+  const unit = String(yieldUnit || "unit").replace(/s$/, "");
+  const scaled = { g: "kg", gram: "kg", ml: "l" }[unit.toLowerCase()];
+  if (scaled && Math.abs(numberValue(unitCost)) < 0.01) return { label: scaled, value: numberValue(unitCost) * 1000 };
+  return { label: unit, value: numberValue(unitCost) };
+}
 
 function costingUnitLabel(unit, recipe = null) {
   if (unit === PORTION_UNIT) return recipe?.yieldUnit && !["kg", "g", "l", "ml"].includes(recipe.yieldUnit) ? recipe.yieldUnit.replace(/s$/, "") : "portion";
@@ -14203,8 +14255,8 @@ function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, 
               )}
               {costed.basisPending && costed.status === LINE_STATUS.OK && line.type === LINE_TYPES.PRODUCT && costed.reading && (
                 <div className="ingredient-line-alert conversion">
-                  <Badge tone="amber">Case or item?</Badge>
-                  <span>Is {money(costed.packPrice)} for the whole case ({costed.packSize}) or for one item? Answered once for this supplier article.</span>
+                  <Badge tone="amber">{costed.basisAssumed && costed.assumedFrom ? `Assumed per ${costed.basisAssumed}` : "Case or item?"}</Badge>
+                  <span>Is {money(costed.packPrice)} for the whole case ({costed.packSize}) or for one item? {costed.basisAssumed && costed.assumedFrom ? `Costed per ${costed.basisAssumed} for now, from ${costed.assumedFrom}.` : `Costed per case for now, not confirmed.`} Answered once for this supplier article.</span>
                   {canEdit && onConfirmConversion && (
                     <span className="ingredient-conversion-fields">
                       <button className="ghost mini-button" onClick={() => onConfirmConversion(costed.productId, { packSize: costed.packSize || "", baseQuantity: costed.reading.caseQuantity, baseUnit: costed.reading.unit })} type="button">Per case · {money(costed.casePrice)}/{costed.reading.unit}</button>
@@ -14212,6 +14264,28 @@ function IngredientLinesEditor({ canEdit, context, excludeRecipeId = "", lines, 
                     </span>
                   )}
                 </div>
+              )}
+              {line.type === LINE_TYPES.PRODUCT && costed.purchases?.length > 0 && (
+                <details className="ingredient-purchases">
+                  <summary>{costed.purchases.filter((item) => item.used).length} of {costed.purchases.length} purchase(s) used</summary>
+                  <table>
+                    <thead><tr><th>Date</th><th>Supplier</th><th>Pack</th><th>Qty</th><th>Pack price</th><th>Content</th><th>Price</th><th /></tr></thead>
+                    <tbody>
+                      {costed.purchases.map((item, index) => (
+                        <tr className={item.used ? "" : "left-out"} key={`${item.date}-${item.supplier}-${index}`}>
+                          <td>{formatRangeDate(item.date)}</td>
+                          <td>{item.supplier || "—"}</td>
+                          <td>{item.packSize || "—"}</td>
+                          <td>{numberValue(item.quantity)}</td>
+                          <td>{money(item.packPrice)}</td>
+                          <td>{item.content ? `${Number(item.content.toFixed(3))} ${item.unit}` : "—"}</td>
+                          <td>{item.unitPrice ? `${money(item.unitPrice)}/${item.unit}` : "—"}</td>
+                          <td>{item.used ? "used" : `left out: ${item.reason}`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
               )}
               {costed.status === LINE_STATUS.NEEDS_CONVERSION && line.type === LINE_TYPES.RECIPE && <div className="ingredient-line-alert"><Badge tone="amber">Check</Badge><span>This recipe has ingredients without a cost. Open it to finish them.</span></div>}
               {costed.status === LINE_STATUS.UNIT_MISMATCH && <div className="ingredient-line-alert"><Badge tone="amber">Unit</Badge><span>Priced per {costed.priceUnit || "pack"}. Choose a matching unit or count in packs.</span></div>}
@@ -14344,7 +14418,7 @@ function Recipes({ companyName = "", menuSettings = defaultMenuSettings, permiss
                 </span>
                 <span role="cell" data-label="Makes">{row.yieldLabel}</span>
                 <span role="cell" data-label="Batch cost">{money(row.batchCost)}</span>
-                <span role="cell" data-label="Cost per unit">{money(row.unitCost)} / {row.unitLabel}</span>
+                <span role="cell" data-label="Cost per unit">{(() => { const shown = yieldUnitCostDisplay(row.unitCost, row.unitLabel); return `${money(shown.value)} / ${shown.label}`; })()}</span>
                 <span className="menu-dish-actions" role="cell">
                   <button aria-label={`Copy ${row.name} for recipe book`} className="icon" onClick={() => copyForBook(recipes.find((recipe) => recipe.id === row.id))} title="Copy for recipe book" type="button"><Copy size={15} /></button>
                   {permissions.canEdit && <button aria-label={`Edit ${row.name}`} className="icon" onClick={() => openRecipe(row)} type="button"><Edit3 size={15} /></button>}
@@ -14370,7 +14444,7 @@ function Recipes({ companyName = "", menuSettings = defaultMenuSettings, permiss
           <IngredientLinesEditor canEdit={canWrite} context={context} excludeRecipeId={editing.form.id || "__draft__"} lines={editing.form.ingredients} onChange={(ingredients) => setForm({ ingredients })} onConfirmConversion={onConfirmConversion} products={products} recipes={recipes} showRecipeName />
           <div className="costing-summary">
             <div><span>Batch cost</span><strong>{money(draftCost?.batchCost || 0)}</strong></div>
-            <div><span>Per {String(editing.form.yieldUnit || "unit").replace(/s$/, "")}</span><strong>{money(draftCost?.unitCost || 0)}</strong></div>
+            {(() => { const shown = yieldUnitCostDisplay(draftCost?.unitCost || 0, editing.form.yieldUnit); return <div><span>Per {shown.label}</span><strong>{money(shown.value)}</strong></div>; })()}
             {draftCost?.issues > 0 && <div className="warn"><span>To check</span><strong>{draftCost.issues} line{draftCost.issues === 1 ? "" : "s"}</strong></div>}
           </div>
           {editing.form.ingredients.length > 0 && (
@@ -15590,10 +15664,14 @@ function LabourPage({ companyName = "", dateRange, dateRangeState, financialSett
         </div>
       </AppModal>
 
+      <div className="labour-period">
+        <DateRangeControls dateRangeState={dateRangeState} setDateRangeState={setDateRangeState} weekStartsOn={financialSettings.weekStartsOn} />
+        <small className="helper-text">{formatRangeDate(dateRange.start)} – {formatRangeDate(dateRange.end)} · hours and pay from Labour (Weekly hours and imports) · {salesSourceLabel.toLowerCase()} for sales. The Dashboard uses its own period.</small>
+      </div>
       <div className="metric-grid labour-primary-metrics">
         <Metric label="Labour cost" value={money(labourSummary.wages)} delta={`${numberValue(labourSummary.hours).toFixed(1)} hours`} />
         <Metric label="Labour %" value={percent(labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales))} delta="Cost / sales" tone={labourRatio(labourSummary.wages, salesTotals.totalSales || salesTotals.netSales) > 32 ? "warn" : "good"} />
-        <Metric label="Total hours" value={numberValue(labourSummary.hours).toFixed(1)} delta="This month" />
+        <Metric label="Total hours" value={numberValue(labourSummary.hours).toFixed(1)} delta="In this period" />
         <Metric label="Avg hourly cost" value={money(labourSummary.hours ? labourSummary.wages / labourSummary.hours : 0)} delta="Base pay" />
       </div>
 
@@ -17140,7 +17218,7 @@ function SettingsPanel({
           <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
 
           <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
-          <label>Price for recipe costs<select value={recipePriceBasis(menuSettings)} onChange={(event) => updateMenu("recipePriceBasisChoice", event.target.value)}>{RECIPE_PRICE_BASIS_OPTIONS.map((value) => <option key={value} value={value}>{PRICE_BASIS_LABELS[value]}</option>)}</select></label>
+          <label>Price for recipe costs<select value={recipePriceBasis(menuSettings)} onChange={(event) => updateMenu("recipePriceBasisChoice", event.target.value)}>{RECIPE_PRICE_BASIS_OPTIONS.map((value) => <option key={value} value={value}>{PRICE_BASIS_LABELS[value]}{RECIPE_PRICE_BASIS_HINTS[value] || ""}</option>)}</select></label>
           <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowSubcategoryTargetOverride} label="Allow subcategory target override" onChange={(value) => updateMenu("allowSubcategoryTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowDishTargetOverride} label="Allow dish target override" onChange={(value) => updateMenu("allowDishTargetOverride", value)} />

@@ -8,7 +8,7 @@
 
 import { normalisedCostForPrice } from "./productPackaging.js";
 import { normalizeProductName, rankProductCandidates } from "./productMatching.js";
-import { articleAnswer, basisPrices, multipackReading } from "./packPriceBasis.js";
+import { articleAnswer, basisPrices, multipackReading, supplierBasisAnswers, supplierSuggestion } from "./packPriceBasis.js";
 
 export const RECIPE_SCHEMA_VERSION = 2;
 export const LINE_TYPES = Object.freeze({ PRODUCT: "Product", RECIPE: "Recipe", MANUAL: "Manual" });
@@ -145,57 +145,148 @@ function purchaseUnitPrice(purchase) {
   return packUnitPrice(purchase.owner, { packPrice: purchase.packPrice, packSize: purchase.packSize, supplier: purchase.supplier });
 }
 
+// One invoice purchase as used by the average: its value and its own pack content. A purchase whose
+// pack content is not confirmed (unknown pack, or "N x size" with no case/item answer) is left out
+// with the reason, never counted with a guessed content.
+export function describePurchase(purchase = {}) {
+  const unitPrice = purchaseUnitPrice(purchase);
+  const usable = Boolean(unitPrice.confirmed && unitPrice.price > 0 && !unitPrice.basisPending);
+  return {
+    date: purchase.date,
+    supplier: purchase.supplier,
+    packSize: purchase.packSize,
+    packPrice: purchase.packPrice,
+    quantity: purchase.quantity,
+    value: purchase.quantity * purchase.packPrice,
+    unit: unitPrice.unit || "",
+    unitPrice: usable ? unitPrice.price : null,
+    content: usable ? purchase.packPrice / unitPrice.price : null,
+    usable,
+    reason: usable ? "" : unitPrice.basisPending ? "case or item not confirmed" : "pack content unknown",
+  };
+}
+
 function supplierNames(purchases) {
   const names = [...new Set(purchases.map((purchase) => purchase.supplier).filter(Boolean))];
   return names.length === 1 ? names[0] : names.length ? `${names.length} suppliers` : "";
 }
 
+function median(values = []) {
+  const sorted = values.filter((value) => value > 0).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+const supplierAnswersCache = new WeakMap();
+function cachedSupplierAnswers(products) {
+  if (!supplierAnswersCache.has(products)) supplierAnswersCache.set(products, supplierBasisAnswers(products));
+  return supplierAnswersCache.get(products);
+}
+
+const categoryPricesCache = new WeakMap();
+function categoryMedian(products, category, unit) {
+  if (!category) return null;
+  if (!categoryPricesCache.has(products)) {
+    const byCategory = new Map();
+    products.forEach((product) => {
+      if (!product || product.mergedIntoProductId || !product.category) return;
+      const price = productUnitPrice(product);
+      if (!price.confirmed || price.basisPending || !(price.price > 0)) return;
+      const key = `${String(product.category).trim().toLowerCase()}|${price.unit}`;
+      if (!byCategory.has(key)) byCategory.set(key, []);
+      byCategory.get(key).push(price.price);
+    });
+    categoryPricesCache.set(products, new Map([...byCategory.entries()].filter(([, values]) => values.length >= 3).map(([key, values]) => [key, median(values)])));
+  }
+  return categoryPricesCache.get(products).get(`${String(category).trim().toLowerCase()}|${unit}`) ?? null;
+}
+
+const closerTo = (reference, both) => (Math.abs(Math.log(both.itemPrice / reference)) < Math.abs(Math.log(both.casePrice / reference)) ? "item" : "case");
+
+// While nobody has said whether an "N x size" price is per case or per item, the most plausible
+// reading is used and marked as an assumption (the line still asks): first the product's other
+// confirmed purchases, then this supplier's earlier answers, then the prices of products in the
+// same category. With none of these the case reading stays, marked "not confirmed".
+export function assumeBasis(price = {}, product = {}, products = []) {
+  if (!price.basisPending || !price.reading || !(price.casePrice > 0) || !(price.itemPrice > 0)) return price;
+  const both = { casePrice: price.casePrice, itemPrice: price.itemPrice };
+  const own = median(productPurchases(product, products).map(describePurchase).filter((item) => item.usable && item.unit === price.unit).map((item) => item.unitPrice));
+  let basis = null;
+  let from = "";
+  if (own) {
+    basis = closerTo(own, both);
+    from = "other invoices of this product";
+  } else {
+    const suggestion = supplierSuggestion(cachedSupplierAnswers(products), price.supplier || product.supplier);
+    if (suggestion) {
+      basis = suggestion.basis;
+      from = `${suggestion.count} earlier answers for this supplier`;
+    } else {
+      const reference = categoryMedian(products, product.category, price.unit);
+      if (reference) {
+        basis = closerTo(reference, both);
+        from = `prices of other ${product.category} products`;
+      }
+    }
+  }
+  if (!basis) return { ...price, basisAssumed: "case", assumedFrom: "" };
+  return { ...price, price: basis === "item" ? both.itemPrice : both.casePrice, basisAssumed: basis, assumedFrom: from };
+}
+
 // Price per kg, litre or each used for recipe costs, with the basis it comes from:
 //  - latest invoice (default);
-//  - average of the last 4 weeks: what was paid, weighted by the quantity bought;
+//  - average of the last 4 weeks: value paid / content bought, each purchase with its own pack
+//    content; purchases without a confirmed content are listed but left out;
 //  - cheapest supplier: the latest price of each supplier linked to the product (last 12 weeks).
 // Without purchases for the chosen basis it falls back to the latest invoice and says so.
 export function recipeProductPrice(product = {}, { basis = PRICE_BASIS.LATEST, asOf = "", products = [] } = {}) {
-  const latest = productUnitPrice(product);
-  const latestResult = (note = "") => ({ ...latest, basis: PRICE_BASIS.LATEST, basisLabel: note ? `latest invoice · ${note}` : "latest invoice" });
+  const latest = assumeBasis(productUnitPrice(product), product, products);
+  const latestResult = (note = "", purchases = []) => ({ ...latest, basis: PRICE_BASIS.LATEST, basisLabel: note ? `latest invoice · ${note}` : "latest invoice", purchases });
   if (basis === PRICE_BASIS.LATEST) return latestResult();
   const today = asOf || new Date().toISOString().slice(0, 10);
-  const purchases = productPurchases(product, products).filter((purchase) => purchase.date <= today);
-  const priced = purchases.map((purchase) => ({ ...purchase, unitPrice: purchaseUnitPrice(purchase) })).filter((purchase) => purchase.unitPrice.confirmed && purchase.unitPrice.price > 0);
+  const described = productPurchases(product, products).filter((purchase) => purchase.date <= today).map(describePurchase);
   const counts = new Map();
-  priced.forEach((purchase) => counts.set(purchase.unitPrice.unit, (counts.get(purchase.unitPrice.unit) || 0) + 1));
+  described.filter((purchase) => purchase.usable).forEach((purchase) => counts.set(purchase.unit, (counts.get(purchase.unit) || 0) + 1));
   const unit = latest.confirmed ? latest.unit : [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
-  const sameUnit = priced.filter((purchase) => purchase.unitPrice.unit === unit);
+  const mark = (purchase) => (purchase.usable && purchase.unit !== unit ? { ...purchase, usable: false, reason: `priced per ${purchase.unit}` } : purchase);
   if (basis === PRICE_BASIS.CHEAPEST) {
     const from = isoDaysBefore(today, CHEAPEST_DAYS);
+    const window = described.filter((purchase) => purchase.date >= from).map(mark);
     const latestBySupplier = new Map();
-    sameUnit.filter((purchase) => purchase.date >= from && purchase.supplier).forEach((purchase) => {
+    window.filter((purchase) => purchase.usable && purchase.supplier).forEach((purchase) => {
       const key = purchase.supplier.trim().toLowerCase();
       const current = latestBySupplier.get(key);
       if (!current || purchase.date > current.date) latestBySupplier.set(key, purchase);
     });
     const offers = [...latestBySupplier.values()];
-    if (offers.length < 2) return latestResult("one supplier");
-    const cheapest = offers.sort((a, b) => a.unitPrice.price - b.unitPrice.price)[0];
-    return { ...latest, ...cheapest.unitPrice, confirmed: true, unit, price: cheapest.unitPrice.price, supplier: cheapest.supplier, date: cheapest.date,
-      basis: PRICE_BASIS.CHEAPEST, basisLabel: `cheapest of ${offers.length} suppliers` };
+    if (offers.length < 2) return latestResult("one supplier", window);
+    const cheapest = offers.sort((a, b) => a.unitPrice - b.unitPrice)[0];
+    return { ...latest, confirmed: true, unit, price: cheapest.unitPrice, supplier: cheapest.supplier, date: cheapest.date, packSize: cheapest.packSize, packPrice: cheapest.packPrice,
+      basisPending: false, basis: PRICE_BASIS.CHEAPEST, basisLabel: `cheapest of ${offers.length} suppliers`,
+      purchases: window.map((purchase) => ({ ...purchase, used: purchase === cheapest })) };
   }
   const from = isoDaysBefore(today, AVERAGE_DAYS - 1);
-  const recent = sameUnit.filter((purchase) => purchase.date >= from);
+  const recent = described.filter((purchase) => purchase.date >= from).map(mark);
+  const used = recent.filter((purchase) => purchase.usable);
+  const purchases = recent.map((purchase) => ({ ...purchase, used: purchase.usable }));
   if (!recent.length) return latestResult("no purchase in 4 weeks");
-  const spend = recent.reduce((sum, purchase) => sum + purchase.quantity * purchase.packPrice, 0);
-  const volume = recent.reduce((sum, purchase) => sum + (purchase.quantity * purchase.packPrice) / purchase.unitPrice.price, 0);
-  const pending = recent.find((purchase) => purchase.unitPrice.basisPending);
+  if (!used.length) return latestResult("4-week purchases to confirm", purchases);
+  const spend = used.reduce((sum, purchase) => sum + purchase.value, 0);
+  const content = used.reduce((sum, purchase) => sum + purchase.quantity * purchase.content, 0);
+  const left = recent.length - used.length;
   return {
     ...latest,
     confirmed: true,
     unit,
-    price: spend / volume,
-    supplier: supplierNames(recent),
-    date: recent.map((purchase) => purchase.date).sort().at(-1),
+    price: spend / content,
+    supplier: supplierNames(used),
+    date: used.map((purchase) => purchase.date).sort().at(-1),
     basis: PRICE_BASIS.AVERAGE,
-    basisLabel: `4-week average${recent.length > 1 ? ` of ${recent.length} purchases` : ""}`,
-    basisPending: Boolean(latest.basisPending || pending),
+    basisLabel: `4-week average${used.length > 1 ? ` of ${used.length} purchases` : ""}${left ? ` (${left} left out)` : ""}`,
+    basisPending: false,
+    basisAssumed: "",
+    purchases,
   };
 }
 
@@ -382,7 +473,8 @@ export function costLine(line = {}, context, trail = []) {
   if (!product) return { id: line.id, status: LINE_STATUS.MISSING, cost: null };
   const price = recipeProductPrice(product, { basis: context.priceBasis, asOf: context.asOf, products: context.products });
   const details = { id: line.id, name: product.name, supplier: price.supplier, packSize: price.packSize, packPrice: price.packPrice, priceDate: price.date, productId: product.id,
-    basisLabel: price.basisLabel, basisPending: Boolean(price.basisPending), casePrice: price.casePrice, itemPrice: price.itemPrice, reading: price.reading };
+    basisLabel: price.basisLabel, basisPending: Boolean(price.basisPending), casePrice: price.casePrice, itemPrice: price.itemPrice, reading: price.reading,
+    basisAssumed: price.basisAssumed || "", assumedFrom: price.assumedFrom || "", purchases: price.purchases || [] };
   if (unit === PACK_UNIT) {
     if (!(price.packPrice > 0)) return { ...details, status: LINE_STATUS.NO_PRICE, cost: null };
     return { ...details, status: LINE_STATUS.OK, cost: round(quantity * price.packPrice * factor), unitPrice: price.packPrice, priceUnit: PACK_UNIT };

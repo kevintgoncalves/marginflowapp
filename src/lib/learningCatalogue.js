@@ -12,10 +12,25 @@ export async function resolveLearningCatalogue(client, mappings, scope, { skippe
     // Quantity and unit cost are zero, not missing: the server's invoice normalisation refuses a
     // line without them (invoice_subtotal_requires_complete_financial_data), and the catalogue
     // resolution already treated a missing unit cost as 0. This is a lookup, not a purchase.
-    const invoice = invoiceWithVerifiedDepartments({ supplier: mapping.supplierName, supplierId: mapping.supplierId,
+    const lookup = (department, departmentId) => invoiceWithVerifiedDepartments({ supplier: mapping.supplierName, supplierId: mapping.supplierId,
       items: [{ productName: mapping.productName, matchedProductId: mapping.productId,
-        department: mapping.department, departmentId: mapping.departmentId,
+        department, departmentId,
         packSize: mapping.packSize, unitOfMeasure: mapping.unitOfMeasure, quantity: 0, unitCost: 0 }] }, departments, scope.companyId);
+    let invoice;
+    try {
+      invoice = lookup(mapping.department, mapping.departmentId);
+    } catch (departmentError) {
+      // The line's department is gone or ambiguous: try the product's own department, then leave
+      // this line waiting for the user's choice without blocking the others.
+      try {
+        if (!mapping.fallbackDepartment) throw departmentError;
+        invoice = lookup(mapping.fallbackDepartment, '');
+      } catch {
+        if (!skipped) throw departmentError;
+        skipped.push({ mappingId: mapping.id || '', reason: departmentError.message, needsDepartment: true });
+        continue;
+      }
+    }
     const { data, error: resolveError } = await client.rpc('resolve_invoice_catalogue_v1', {
       p_company_id: scope.companyId, p_location_id: scope.locationId || null, p_invoice: invoice,
     });

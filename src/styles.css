@@ -8408,3 +8408,15 @@ button.icon {
 .tronc-labour input { width: 90px; }
 .tronc-labour .warn { color: #b45309; }
 .tronc-month { display: flex; align-items: center; gap: 6px; }
+.ingredient-purchases { font-size: 12px; margin-top: 4px; }
+.ingredient-purchases summary { cursor: pointer; color: var(--muted); }
+.ingredient-purchases table { width: 100%; margin-top: 4px; display: block; overflow-x: auto; }
+.ingredient-purchases td, .ingredient-purchases th { padding: 3px 6px; white-space: nowrap; text-align: left; }
+.ingredient-purchases tr.left-out td { color: var(--muted); text-decoration: line-through; }
+.ingredient-purchases tr.left-out td:last-child { text-decoration: none; }
+.learning-departments { display: grid; gap: 6px; margin: 6px 0; }
+.learning-departments ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; max-height: 240px; overflow: auto; }
+.learning-departments li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, 200px); gap: 8px; align-items: center; }
+.learning-departments-all { display: flex; gap: 6px; align-items: center; }
+@media (max-width: 720px) { .learning-departments li { grid-template-columns: 1fr; } }
+.labour-period { display: grid; gap: 6px; margin: 8px 0 4px; }
