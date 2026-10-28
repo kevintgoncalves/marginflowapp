@@ -8396,3 +8396,15 @@ button.icon {
 .tronc-conflicts { display: grid; gap: 6px; }
 .tronc-conflicts label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 240px); gap: 8px; align-items: center; }
 @media (max-width: 720px) { .tronc-pot-head, .tronc-conflicts label { grid-template-columns: 1fr; } }
+.tronc-report { display: grid; gap: 12px; }
+.tronc-report-pot { display: grid; gap: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+.tronc-report-pot h3 { margin: 0; font-size: 15px; }
+.tronc-report-pot h3 small { color: var(--muted); font-weight: 500; margin-left: 6px; }
+.tronc-report-pot td, .tronc-report-pot th { white-space: nowrap; }
+.tronc-total-row td { font-weight: 700; background: var(--surface-subtle, rgba(148, 163, 184, 0.12)); }
+.tronc-report-detail ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+.tronc-labour { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; max-width: 760px; }
+.tronc-labour > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.tronc-labour input { width: 90px; }
+.tronc-labour .warn { color: #b45309; }
+.tronc-month { display: flex; align-items: center; gap: 6px; }

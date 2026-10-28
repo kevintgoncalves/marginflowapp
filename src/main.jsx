@@ -26,6 +26,8 @@ import BrowserDifferencesPanel from "./components/BrowserDifferencesPanel.jsx";
 import LabourWeekGrid from "./components/LabourWeekGrid.jsx";
 import TroncSettings from "./components/TroncSettings.jsx";
 import TroncWeek from "./components/TroncWeek.jsx";
+import TroncReport from "./components/TroncReport.jsx";
+import { troncWeekReport } from "./domain/troncReport.js";
 import { potEntriesForRange, potEntriesFromSales, schemeForDate, shareTronc, troncSchemes } from "./domain/troncSchemes.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
@@ -7313,6 +7315,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
         />
         {active === "labour" && (
           <LabourPage
+            companyName={stocktakeCompanyName}
             dateRange={labourDateRange}
             dateRangeState={labourDateRangeState}
             financialSettings={financialSettings}
@@ -14869,7 +14872,7 @@ function Waste({ dateRange, department, departmentNames, metrics, permissions = 
   );
 }
 
-function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, labourSettings = defaultLabourSettings, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
+function LabourPage({ companyName = "", dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, labourSettings = defaultLabourSettings, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
   const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
@@ -14924,6 +14927,23 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
   const [labourControlOpen, setLabourControlOpen] = useState(false);
   const [weekGridOpen, setWeekGridOpen] = useState(false);
   const [troncOpen, setTroncOpen] = useState(false);
+  const [troncReportOpen, setTroncReportOpen] = useState(false);
+  const buildTroncWeekReport = (weekStart) => {
+    const range = { start: weekStart, end: shiftDate(weekStart, 6) };
+    const tronc = labourTroncForRange(data, sales, labourSettings, range, labourRowsInRange(data, range), financialSettings.weekStartsOn);
+    const salesTotals = salesTotalsForRange(sales || [], range, "All departments");
+    const takings = salesTotals.rows.length ? salesTotals.netSales : labourSalesTotals(labourSalesInRange(data, range)).netSales;
+    return troncWeekReport({
+      tronc,
+      schemes: troncSchemes(labourSettings),
+      weekStart,
+      takings,
+      wagesFor: (member) => labourBasePayForRows(data, member.rows),
+      scheduledHours: data.troncScheduledHours || {},
+      targetLabourPercent: labourSettings.targetLabourPercent,
+      includeServiceCharge: Boolean(labourSettings.includeServiceChargeInLabourCost),
+    });
+  };
   const [salesImportKey, setSalesImportKey] = useState(0);
   const [labourImportKey, setLabourImportKey] = useState(0);
   const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
@@ -15502,8 +15522,21 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
         <PrimaryAction className="labour-controls" onClick={() => setWeekGridOpen(true)}>Weekly hours</PrimaryAction>
         {permissions.canAdd && <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add person</button>}
         <button className="ghost" onClick={() => setTroncOpen(true)} type="button">Service charge</button>
+        <button className="ghost" onClick={() => setTroncReportOpen(true)} type="button">Tronc report</button>
         <button className="ghost" onClick={() => setLabourControlOpen(true)} type="button">Import Labour</button>
       </div>
+      {troncReportOpen && (
+        <AppModal title="Tronc report" open onClose={() => setTroncReportOpen(false)} wide>
+          <TroncReport
+            buildWeekReport={buildTroncWeekReport}
+            canEdit={permissions.canEdit || permissions.canAdd}
+            companyName={companyName}
+            initialWeek={toIsoDate(startOfWeek(parseDate(dateRange.start || today()), financialSettings.weekStartsOn))}
+            onChange={saveData}
+            weekStartsOn={financialSettings.weekStartsOn}
+          />
+        </AppModal>
+      )}
       {troncOpen && (
         <AppModal title="Service charge (tronc)" open onClose={() => setTroncOpen(false)} wide>
           <TroncWeek

@@ -224,7 +224,7 @@ export function applyPotImport(existing = [], preview = { rows: [] }, choices = 
 
 // --- Sharing ------------------------------------------------------------------------------------
 
-function isFreelance(employee = {}) {
+export function isFreelance(employee = {}) {
   const type = normalizeKey(`${employee.payType || ""} ${employee.employmentType || ""} ${employee.employeeType || ""}`);
   return type.includes("freelance") || type.includes("agency");
 }
@@ -280,7 +280,7 @@ function bucketKeysFor(scheme, date, weekStartsOn) {
 }
 
 function emptyResult() {
-  return { total: 0, paid: 0, external: 0, unallocated: 0, byKey: new Map(), pots: [], buckets: [], warnings: [] };
+  return { total: 0, paid: 0, external: 0, unallocated: 0, byKey: new Map(), members: new Map(), pots: [], buckets: [], warnings: [] };
 }
 
 // labourRows: the labour rows in the period (any order). potEntries: [{date, service, amount}].
@@ -350,6 +350,14 @@ export function shareTronc({
     const weightPerHour = scheme.method === "pointsHours" ? points(employee || row) : 1;
     const key = keyForRow(row, employee);
     const { date } = bucketKeysFor(scheme, row.date, weekStartsOn);
+    // Everyone who worked in each pot, with their hours, for reports.
+    const memberKey = `${scheme.id}|${pot.id}`;
+    if (!result.members.has(memberKey)) result.members.set(memberKey, new Map());
+    const member = result.members.get(memberKey).get(key) || { key, employeeId: employee?.id || row.employeeId || "", employeeName: name, points: weightPerHour, hours: 0, weighted: 0, rows: [] };
+    member.hours += hours;
+    member.weighted += hours * weightPerHour;
+    member.rows.push(row);
+    result.members.get(memberKey).set(key, member);
     let services = ["all"];
     if (scheme.period === "service") {
       const covered = shiftServices(row, scheme);
