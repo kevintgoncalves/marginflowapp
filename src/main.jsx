@@ -23,6 +23,7 @@ import InteractiveChart from "./components/InteractiveChart.jsx";
 import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import BrowserDifferencesPanel from "./components/BrowserDifferencesPanel.jsx";
+import LabourWeekGrid from "./components/LabourWeekGrid.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
@@ -281,6 +282,7 @@ import {
   stocktakeTemplateRows,
 } from "./domain/stocktakeImport.js";
 import { createStocktakeProductIndex } from "./domain/stocktakeProductMatching.js";
+import { isActiveLabourRow } from "./domain/labourWeek.js";
 import { DIFFERENCE_KINDS, SETTINGS_MODULES, applyBrowserVersion, cloudFirstStorage, mergeDifferenceLists } from "./domain/cloudFirstLoad.js";
 import {
   chooseFreeImportTarget,
@@ -4801,7 +4803,7 @@ function labourDepartmentName(data, departmentId, fallback = "") {
 function labourEmployeeAverageWeeklyHours(data, employee) {
   if (!employee) return 0;
   if (numberValue(employee.manualAverageWeeklyHours, 0)) return numberValue(employee.manualAverageWeeklyHours, 0);
-  const rows = data.labour.filter((row) => labourSameText(row.employeeName, employee.name));
+  const rows = data.labour.filter((row) => isActiveLabourRow(row) && labourSameText(row.employeeName, employee.name));
   const hours = labourSum(rows, "hours");
   return hours / labourWeeksBetween(employee.startDate || labourFiscalYearStart, today());
 }
@@ -4821,7 +4823,7 @@ function labourSalesInRange(data, range) {
 }
 
 function labourRowsInRange(data, range) {
-  return data.labour.filter((row) => labourEntryInRange(row.date, row.dateTo || row.date, range));
+  return data.labour.filter((row) => isActiveLabourRow(row) && labourEntryInRange(row.date, row.dateTo || row.date, range));
 }
 
 function labourSalesTotals(rows) {
@@ -4952,7 +4954,7 @@ function labourDepartmentBreakdownRows(data, labourRows, salesTotals) {
 }
 
 function labourHolidayRow(data, employee) {
-  const rows = data.labour.filter((row) => labourSameText(row.employeeName, employee.name));
+  const rows = data.labour.filter((row) => isActiveLabourRow(row) && labourSameText(row.employeeName, employee.name));
   const hours = labourSum(rows, "hours");
   const wages = labourBasePayForRows(data, rows);
   const avgWeekly = labourEmployeeAverageWeeklyHours(data, employee);
@@ -14883,6 +14885,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
   const [weeklyModal, setWeeklyModal] = useState(null);
   const [activeLabourModal, setActiveLabourModal] = useState(null);
   const [labourControlOpen, setLabourControlOpen] = useState(false);
+  const [weekGridOpen, setWeekGridOpen] = useState(false);
   const [salesImportKey, setSalesImportKey] = useState(0);
   const [labourImportKey, setLabourImportKey] = useState(0);
   const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
@@ -15470,7 +15473,26 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
 
   return (
     <div className="labour-page">
-      <PrimaryAction className="labour-controls" onClick={() => setLabourControlOpen(true)}>Import Labour</PrimaryAction>
+      <div className="button-row left labour-top-actions">
+        <PrimaryAction className="labour-controls" onClick={() => setWeekGridOpen(true)}>Weekly hours</PrimaryAction>
+        {permissions.canAdd && <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add person</button>}
+        <button className="ghost" onClick={() => setLabourControlOpen(true)} type="button">Import Labour</button>
+      </div>
+      {weekGridOpen && (
+        <AppModal title="Weekly hours" open onClose={() => setWeekGridOpen(false)} wide>
+          <LabourWeekGrid
+            canEdit={permissions.canEdit || permissions.canAdd}
+            canImport={permissions.canImport}
+            data={data}
+            initialWeekStart={dateRange.start || today()}
+            onAddEmployee={permissions.canAdd ? () => setEmployeeModal(blankEmployee()) : undefined}
+            onChange={saveData}
+            onEditEmployee={permissions.canEdit ? (employee) => setEmployeeModal(employee) : undefined}
+            readRows={async (file) => (/\.xlsx$/i.test(file.name) ? rowsFromStocktakeExcelFile(file) : parseCsvText(await file.text()))}
+            weekStartFor={(date) => toIsoDate(startOfWeek(parseDate(date || today()), financialSettings.weekStartsOn))}
+          />
+        </AppModal>
+      )}
       <AppModal title="Import labour" open={labourControlOpen} onClose={() => setLabourControlOpen(false)} wide>
         <div className="modal-stack">
         <Panel title="Weekly labour control" action={`${formatRangeDate(dateRange.start)} - ${formatRangeDate(dateRange.end)}`}>
@@ -15687,6 +15709,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
         <EditModal title={employeeModal.id ? "Edit Employee" : "Add Employee"} onCancel={() => setEmployeeModal(null)} onSave={saveEmployee} saveLabel="Save Employee">
           <div className="form-grid six">
             <Field label="Name" value={employeeModal.name} onChange={(value) => setEmployeeModal({ ...employeeModal, name: value })} />
+            <Field label="Job title / role" value={employeeModal.jobTitle || ""} onChange={(value) => setEmployeeModal({ ...employeeModal, jobTitle: value })} />
             <label>Department<select value={employeeModal.departmentId} onChange={(event) => setEmployeeModal({ ...employeeModal, departmentId: event.target.value })}>{data.departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
             <label>Type<select value={labourCanonicalPayType(employeeModal)} onChange={(event) => setEmployeeModal({ ...employeeModal, payType: event.target.value, employmentType: labourPayTypeLabel({ payType: event.target.value }) })}><option value="hourly">Hourly</option><option value="salaried">Salaried</option><option value="freelance">Freelance</option><option value="agency">Agency</option></select></label>
             <Field label={labourIsSalaried(employeeModal) ? "Annual salary" : "Hourly rate"} type="number" value={employeeModal.rate} onChange={(value) => setEmployeeModal({ ...employeeModal, rate: value, annualSalary: labourIsSalaried(employeeModal) ? value : employeeModal.annualSalary })} />

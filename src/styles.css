@@ -8339,3 +8339,35 @@ button.icon {
 .browser-difference-fields { font-size: 12px; }
 .browser-difference-json { max-height: 240px; overflow: auto; font-size: 11px; white-space: pre-wrap; background: var(--card-soft); padding: 8px; border-radius: 6px; }
 @media (max-width: 720px) { .browser-difference-row { grid-template-columns: 1fr; } }
+
+/* Labour: weekly hours grid */
+.labour-top-actions { gap: 8px; flex-wrap: wrap; }
+.labour-week-grid { display: grid; gap: 12px; }
+.labour-grid-toolbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; }
+.labour-grid-week { display: flex; align-items: center; gap: 6px; }
+.labour-grid-search { min-width: 160px; }
+.labour-grid-table { max-height: 62vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.labour-grid-table table { min-width: 860px; }
+.labour-grid-table thead th { position: sticky; top: 0; z-index: 2; background: var(--card); white-space: nowrap; }
+.labour-grid-table thead th small { display: block; color: var(--muted); font-weight: 600; }
+.labour-grid-person { position: sticky; left: 0; z-index: 1; background: var(--card); text-align: left; min-width: 150px; }
+.labour-grid-person small { display: block; color: var(--muted); font-size: 11px; font-weight: 500; }
+.labour-grid-name { background: none; border: 0; padding: 0; color: var(--text); font-weight: 700; text-align: left; cursor: pointer; }
+.labour-grid-cell { vertical-align: top; min-width: 84px; }
+.labour-grid-cell input { width: 72px; }
+.labour-grid-cell select { width: 100%; margin-top: 4px; font-size: 11px; }
+.labour-grid-cell.moved { background: rgba(245, 158, 11, 0.12); }
+.labour-grid-dept { display: block; margin-top: 3px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; cursor: pointer; text-align: left; }
+.labour-grid-cell.moved .labour-grid-dept { color: #b45309; font-weight: 700; }
+.labour-grid-tag { display: block; color: var(--muted); font-size: 10px; }
+.labour-grid-total { vertical-align: top; }
+.labour-grid-total small { display: block; color: var(--muted); font-size: 11px; }
+.labour-import-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.labour-import-panel .panel-head { padding: 0; }
+.labour-import-panel .panel-head > div:first-child { display: grid; gap: 2px; }
+.labour-import-panel h3 { margin: 0; font-size: 15px; }
+.labour-import-preview, .labour-import-roles { display: grid; gap: 8px; }
+.labour-import-roles label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); gap: 8px; align-items: center; }
+.labour-import-people { display: flex; gap: 8px; align-items: flex-start; }
+.link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+@media (max-width: 720px) { .labour-import-roles label { grid-template-columns: 1fr; } }
