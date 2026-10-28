@@ -14037,7 +14037,10 @@ function Stocktake({ companyName = "MarginFlow", companyScope = {}, currency = "
 
 const RECIPE_YIELD_UNITS = ["portions", "kg", "g", "l", "ml", "each"];
 const formatWeight = (value) => String(Number(numberValue(value).toFixed(3)));
-const recipePriceBasis = (menuSettings = {}) => (PRICE_BASIS_LABELS[menuSettings?.recipePriceBasis] ? menuSettings.recipePriceBasis : PRICE_BASIS.AVERAGE);
+// Recipe costs use the latest invoice unless another basis is chosen in Settings. The earlier
+// "recipePriceBasis" choice is kept but no longer read: its 4-week average had a pack conversion bug.
+const RECIPE_PRICE_BASIS_OPTIONS = [PRICE_BASIS.LATEST];
+const recipePriceBasis = (menuSettings = {}) => (RECIPE_PRICE_BASIS_OPTIONS.includes(menuSettings?.recipePriceBasisChoice) ? menuSettings.recipePriceBasisChoice : PRICE_BASIS.LATEST);
 const NEW_MENU_CATEGORY = "__new__";
 
 function costingUnitLabel(unit, recipe = null) {
@@ -17137,7 +17140,7 @@ function SettingsPanel({
           <Field label="Default target GP %" type="number" value={financialSettings.targetGp} onChange={(value) => updateFinancial("targetGp", numberValue(value))} />
 
           <Field label="Default menu target GP %" type="number" value={menuSettings.defaultMenuTargetGp} onChange={(value) => updateMenu("defaultMenuTargetGp", numberValue(value))} />
-          <label>Price for recipe costs<select value={recipePriceBasis(menuSettings)} onChange={(event) => updateMenu("recipePriceBasis", event.target.value)}>{Object.entries(PRICE_BASIS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}{value === PRICE_BASIS.AVERAGE ? " (paid, weighted by quantity)" : value === PRICE_BASIS.CHEAPEST ? " (linked suppliers)" : ""}</option>)}</select></label>
+          <label>Price for recipe costs<select value={recipePriceBasis(menuSettings)} onChange={(event) => updateMenu("recipePriceBasisChoice", event.target.value)}>{RECIPE_PRICE_BASIS_OPTIONS.map((value) => <option key={value} value={value}>{PRICE_BASIS_LABELS[value]}</option>)}</select></label>
           <CheckboxField checked={menuSettings.allowMenuTargetOverride} label="Allow menu target override" onChange={(value) => updateMenu("allowMenuTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowSubcategoryTargetOverride} label="Allow subcategory target override" onChange={(value) => updateMenu("allowSubcategoryTargetOverride", value)} />
           <CheckboxField checked={menuSettings.allowDishTargetOverride} label="Allow dish target override" onChange={(value) => updateMenu("allowDishTargetOverride", value)} />

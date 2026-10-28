@@ -151,11 +151,11 @@ function supplierNames(purchases) {
 }
 
 // Price per kg, litre or each used for recipe costs, with the basis it comes from:
-//  - average of the last 4 weeks (default): what was paid, weighted by the quantity bought;
-//  - latest invoice;
+//  - latest invoice (default);
+//  - average of the last 4 weeks: what was paid, weighted by the quantity bought;
 //  - cheapest supplier: the latest price of each supplier linked to the product (last 12 weeks).
 // Without purchases for the chosen basis it falls back to the latest invoice and says so.
-export function recipeProductPrice(product = {}, { basis = PRICE_BASIS.AVERAGE, asOf = "", products = [] } = {}) {
+export function recipeProductPrice(product = {}, { basis = PRICE_BASIS.LATEST, asOf = "", products = [] } = {}) {
   const latest = productUnitPrice(product);
   const latestResult = (note = "") => ({ ...latest, basis: PRICE_BASIS.LATEST, basisLabel: note ? `latest invoice · ${note}` : "latest invoice" });
   if (basis === PRICE_BASIS.LATEST) return latestResult();
@@ -292,7 +292,7 @@ export function recordForSave(previous = null, next = {}) {
 
 // ---------- Costing ----------
 
-export function createCostingContext(products = [], recipes = [], { priceBasis = PRICE_BASIS.AVERAGE, asOf = "" } = {}) {
+export function createCostingContext(products = [], recipes = [], { priceBasis = PRICE_BASIS.LATEST, asOf = "" } = {}) {
   return {
     products,
     priceBasis,
