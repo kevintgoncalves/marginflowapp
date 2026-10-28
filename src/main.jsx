@@ -24,6 +24,9 @@ import InvoiceOriginals from "./components/InvoiceOriginals.jsx";
 import PendingRecoveryPanel from "./components/PendingRecoveryPanel.jsx";
 import BrowserDifferencesPanel from "./components/BrowserDifferencesPanel.jsx";
 import LabourWeekGrid from "./components/LabourWeekGrid.jsx";
+import TroncSettings from "./components/TroncSettings.jsx";
+import TroncWeek from "./components/TroncWeek.jsx";
+import { potEntriesForRange, potEntriesFromSales, schemeForDate, shareTronc, troncSchemes } from "./domain/troncSchemes.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createScopedStorage, createWorkspacePersistence, legacyBrowserExport, legacyBrowserKeys, removeExportedLegacyBrowserData } from "./lib/workspaceStorage.js";
 import * as pdfjsLib from "pdfjs-dist";
@@ -298,7 +301,7 @@ import {
   revalueProductRows,
 } from "./domain/stocktakeFreeImport.js";
 import { departmentStockPosition, periodStockResult, stockUnavailableReason } from "./domain/stockPeriod.js";
-import { downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
+import { downloadRowsExcel, downloadStocktakeTemplateExcel, rowsFromStocktakeExcelFile } from "./utils/stocktakeTemplateFile.js";
 import { downloadProductsExcel } from "./utils/exportProductsExcel.js";
 import { mondaySundayWeekDates, mondayWeekStart, shiftMondayWeek } from "./domain/weekNavigation.js";
 import "./styles.css";
@@ -4195,6 +4198,7 @@ function normalizeLabourData(data = {}) {
     holidays: Array.isArray(data.holidays) ? data.holidays : [],
     rateHistory: Array.isArray(data.rateHistory) ? data.rateHistory : fallback.rateHistory,
     foodCategories: Array.isArray(data.foodCategories) ? data.foodCategories : fallback.foodCategories,
+    troncPots: Array.isArray(data.troncPots) ? data.troncPots : [],
   };
 }
 
@@ -4861,7 +4865,31 @@ function labourSummaryForPeriod(labourData, dateRange, selectedDepartment = "All
   return { ...labourTotals(data, rows), rows };
 }
 
-function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) {
+function labourTroncKey(data) {
+  return (row, employee) => row.employeeId || (employee?.id ? employee.id : labourEmployeeForRow(data, row).id) || normalizeHeader(row.employeeName);
+}
+
+function labourTroncSalesEntries(data, sales, range) {
+  const salesRows = salesTotalsForRange(sales || [], range, "All departments").rows;
+  if (salesRows.length) return potEntriesFromSales(salesRows);
+  return potEntriesFromSales(labourSalesInRange(data, range).map((row) => ({ date: row.dateFrom, serviceCharge: row.serviceCharge })));
+}
+
+function labourTroncForRange(data, sales, labourSettings, range, rows, weekStartsOn) {
+  const schemes = troncSchemes(labourSettings);
+  return shareTronc({
+    labourRows: rows,
+    employees: data.employees,
+    departments: data.departments,
+    schemes,
+    potEntries: potEntriesForRange({ schemes, salesEntries: labourTroncSalesEntries(data, sales, range), manualEntries: data.troncPots || [], range }),
+    weekStartsOn,
+    keyForRow: labourTroncKey(data),
+    employeeForRow: (row) => labourEmployeeForRow(data, row),
+  });
+}
+
+function aggregateLabourByEmployee(data, rows, tronc = null) {
   const map = new Map();
   rows.forEach((row) => {
     const employee = labourEmployeeForRow(data, row);
@@ -4904,21 +4932,28 @@ function aggregateLabourByEmployee(data, rows, salesTotalsForAllocation = null) 
   });
   const grouped = [...map.values()];
   const hasAllocatedServiceCharge = grouped.some((row) => numberValue(row.serviceCharge, 0));
-  const pool = numberValue(salesTotalsForAllocation?.serviceCharge, 0);
-  if (!hasAllocatedServiceCharge && pool > 0) {
-    const poolForGroup = (groupName) => {
-      if (groupName === "BOH") return numberValue(salesTotalsForAllocation?.bohServiceCharge, pool * 0.4);
-      if (groupName === "FOH") return numberValue(salesTotalsForAllocation?.fohServiceCharge, pool * 0.6);
-      return 0;
-    };
-    const rowGroup = (row) => ["BOH", "KP"].includes(row.departmentName) ? "BOH" : "FOH";
-    ["BOH", "FOH"].forEach((groupName) => {
-      const groupRows = grouped.filter((row) => rowGroup(row) === groupName && numberValue(row.serviceChargeHours, 0) > 0);
-      const totalScHours = labourSum(groupRows, "serviceChargeHours");
-      const groupPool = poolForGroup(groupName);
-      groupRows.forEach((row) => {
-        row.serviceCharge = totalScHours ? groupPool * numberValue(row.serviceChargeHours, 0) / totalScHours : 0;
-      });
+  // Service charge shared by the restaurant's tronc system (Settings → Labour settings).
+  if (!hasAllocatedServiceCharge && tronc?.byKey?.size) {
+    tronc.byKey.forEach((entry, key) => {
+      let row = grouped.find((item) => item.id === key);
+      if (!row) {
+        const employee = data.employees.find((item) => item.id === entry.employeeId) || {};
+        row = {
+          id: key,
+          employeeId: entry.employeeId,
+          employeeName: entry.employeeName,
+          employeeType: labourPayTypeLabel(employee),
+          departmentName: labourDepartmentName(data, employee.departmentId, "-"),
+          hours: 0,
+          wages: 0,
+          basePay: 0,
+          serviceCharge: 0,
+          serviceChargePoints: labourServiceChargePoints(employee),
+          serviceChargeHours: 0,
+        };
+        grouped.push(row);
+      }
+      row.serviceCharge = entry.serviceCharge;
     });
   }
   return grouped.map((row) => ({
@@ -7282,6 +7317,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             dateRangeState={labourDateRangeState}
             financialSettings={financialSettings}
             labourData={labourData}
+            labourSettings={labourSettings}
             permissions={permissionsByPage.labour}
             requestDelete={requestDelete}
             sales={sales}
@@ -7305,6 +7341,7 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
             demoMode={demoMode}
             financialSettings={financialSettings}
             invoiceSettings={invoiceSettings}
+            labourData={labourData}
             labourSettings={labourSettings}
             menuSettings={menuSettings}
             onImportBackupToCloud={importBackupToCloud}
@@ -14832,7 +14869,7 @@ function Waste({ dateRange, department, departmentNames, metrics, permissions = 
   );
 }
 
-function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
+function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFinancialSettings, labourData, labourSettings = defaultLabourSettings, permissions = permissionsForPage(rolePermissionTemplate("Owner", defaultDepartmentSettings), "labour"), requestDelete, sales = [], setDateRangeState, setLabourData }) {
   const data = normalizeLabourData(labourData);
   const labourRows = useMemo(() => labourRowsInRange(data, dateRange), [data, dateRange]);
   const salesRows = useMemo(() => labourSalesInRange(data, dateRange), [data, dateRange]);
@@ -14886,6 +14923,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
   const [activeLabourModal, setActiveLabourModal] = useState(null);
   const [labourControlOpen, setLabourControlOpen] = useState(false);
   const [weekGridOpen, setWeekGridOpen] = useState(false);
+  const [troncOpen, setTroncOpen] = useState(false);
   const [salesImportKey, setSalesImportKey] = useState(0);
   const [labourImportKey, setLabourImportKey] = useState(0);
   const [weeklyFilters, setWeeklyFilters] = useState({ search: "", department: "All", showInactive: false });
@@ -15226,14 +15264,6 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
     });
   };
 
-  const allocateServiceCharge = (rows, pool) => {
-    const weightedHours = rows.reduce((sum, row) => sum + numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1), 0);
-    return new Map(rows.map((row) => [
-      row.employeeId,
-      weightedHours ? (pool * numberValue(row.hours, 0) * numberValue(row.serviceChargePoints, 1)) / weightedHours : 0,
-    ]));
-  };
-
   const saveWeeklyInput = () => {
     if (!permissions.canAdd) return;
     const isDailyMode = weeklyModal.mode === "daily";
@@ -15241,17 +15271,21 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
     const labourEndDate = isDailyMode ? labourStartDate : shiftDate(labourStartDate, 6);
     const rows = weeklyModal.rows.filter((row) => row.include && numberValue(row.hours, 0) > 0);
     const serviceCharge = numberValue(weeklyModal.serviceCharge, 0);
-    const bohRows = rows.filter((row) => ["BOH", "KP"].includes(labourDepartmentName(data, row.departmentId, row.departmentName)));
-    const fohRows = rows.filter((row) => labourDepartmentName(data, row.departmentId, row.departmentName) === "FOH");
-    const bohPool = serviceCharge * 0.4;
-    const fohPool = serviceCharge * 0.6;
-    const bohAllocation = allocateServiceCharge(bohRows, bohPool);
-    const fohAllocation = allocateServiceCharge(fohRows, fohPool);
+    // One amount for the whole entry: shared once, with the pots of the tronc system for that date.
+    const weeklyTronc = shareTronc({
+      labourRows: rows.map((row) => ({ ...row, date: labourStartDate, dateTo: labourEndDate })),
+      employees: data.employees,
+      departments: data.departments,
+      schemes: troncSchemes(labourSettings).map((scheme) => ({ ...scheme, period: "week" })),
+      potEntries: serviceCharge ? [{ date: labourStartDate, amount: serviceCharge }] : [],
+      weekStartsOn: financialSettings.weekStartsOn,
+      keyForRow: (row) => row.employeeId,
+    });
     const labour = rows.map((row) => {
       const employee = data.employees.find((item) => item.id === row.employeeId) || {};
       const hours = numberValue(row.hours, 0);
       const serviceChargePoints = labourServiceChargePoints(employee);
-      const serviceCharge = numberValue(bohAllocation.get(row.employeeId) || fohAllocation.get(row.employeeId), 0);
+      const serviceCharge = numberValue(weeklyTronc.byKey.get(row.employeeId)?.serviceCharge, 0);
       return {
         id: uid(),
         source: "manual-week",
@@ -15429,17 +15463,8 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
     return { start: earningsFilters.weekStart || dateRange.start || today(), end: shiftDate(earningsFilters.weekStart || dateRange.start || today(), 6) };
   })();
   const earningsRowsRaw = labourRowsInRange(data, earningsRange);
-  const earningsSalesRows = labourSalesInRange(data, earningsRange);
-  const earningsImportedSalesTotals = labourSalesTotals(earningsSalesRows);
-  const earningsMarginFlowSalesTotals = salesTotalsForRange(sales || [], earningsRange, "All departments");
-  const earningsServiceCharge = earningsMarginFlowSalesTotals.rows.length
-    ? earningsMarginFlowSalesTotals.rows.reduce((sum, row) => sum + numberValue(row.serviceCharge, 0), 0)
-    : earningsImportedSalesTotals.serviceCharge;
-  const earningsRows = filterEmployeeRows(aggregateLabourByEmployee(data, earningsRowsRaw, {
-    serviceCharge: earningsServiceCharge,
-    bohServiceCharge: earningsServiceCharge * 0.4,
-    fohServiceCharge: earningsServiceCharge * 0.6,
-  }), { ...earningsFilters, active: "all" });
+  const earningsTronc = labourTroncForRange(data, sales, labourSettings, earningsRange, earningsRowsRaw, financialSettings.weekStartsOn);
+  const earningsRows = filterEmployeeRows(aggregateLabourByEmployee(data, earningsRowsRaw, earningsTronc), { ...earningsFilters, active: "all" });
   const activeHolidayRows = holidaySummary.rows.filter((row) => matchesActive(row, labourFilters.active || "active") && matchesText(row.name, labourFilters.search) && matchesDepartment(row, labourFilters.department));
   const activeHolidayBookings = data.holidays.filter((row) => matchesText(row.employeeName, labourFilters.search) && matchesDepartment(row, labourFilters.department) && matchesActive(row, labourFilters.active || "active"));
   const filteredEmployees = filterEmployeeRows(employeeRows, labourFilters);
@@ -15476,8 +15501,26 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
       <div className="button-row left labour-top-actions">
         <PrimaryAction className="labour-controls" onClick={() => setWeekGridOpen(true)}>Weekly hours</PrimaryAction>
         {permissions.canAdd && <button className="ghost" onClick={() => setEmployeeModal(blankEmployee())} type="button"><Plus size={16} />Add person</button>}
+        <button className="ghost" onClick={() => setTroncOpen(true)} type="button">Service charge</button>
         <button className="ghost" onClick={() => setLabourControlOpen(true)} type="button">Import Labour</button>
       </div>
+      {troncOpen && (
+        <AppModal title="Service charge (tronc)" open onClose={() => setTroncOpen(false)} wide>
+          <TroncWeek
+            canEdit={permissions.canEdit || permissions.canAdd}
+            data={data}
+            downloadTemplate={(rows, filename) => downloadRowsExcel(rows, filename, "Service charge")}
+            employeeForRow={(row) => labourEmployeeForRow(data, row)}
+            initialWeek={toIsoDate(startOfWeek(parseDate(dateRange.start || today()), financialSettings.weekStartsOn))}
+            keyForRow={labourTroncKey(data)}
+            onChange={saveData}
+            readRows={async (file) => (/\.xlsx$/i.test(file.name) ? rowsFromStocktakeExcelFile(file) : parseCsvText(await file.text()))}
+            salesEntriesFor={(range) => labourTroncSalesEntries(data, sales, range)}
+            schemes={troncSchemes(labourSettings)}
+            weekStartsOn={financialSettings.weekStartsOn}
+          />
+        </AppModal>
+      )}
       {weekGridOpen && (
         <AppModal title="Weekly hours" open onClose={() => setWeekGridOpen(false)} wide>
           <LabourWeekGrid
@@ -15560,7 +15603,7 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
               <Field label="Search employee" value={earningsFilters.search} onChange={(value) => setEarningsFilters({ ...earningsFilters, search: value })} />
               <label>Department<select value={earningsFilters.department} onChange={(event) => setEarningsFilters({ ...earningsFilters, department: event.target.value })}>{departmentFilterOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
             </div>
-            <div className="helper-text">Showing {formatRangeDate(earningsRange.start)} - {formatRangeDate(earningsRange.end)}. Base Pay uses locked employee salary/rate settings. Service charge is allocated by hours × service charge points.</div>
+            <div className="helper-text">Showing {formatRangeDate(earningsRange.start)} - {formatRangeDate(earningsRange.end)}. Base Pay uses locked employee salary/rate settings. Service charge is shared with your tronc system (Settings → Labour settings).</div>
             <DataTable
               columns={[
                 { key: "employeeName", label: "Employee" },
@@ -15879,8 +15922,9 @@ function LabourPage({ dateRange, dateRangeState, financialSettings = defaultFina
               <Metric label="Hours" value={weeklyTotals.hours.toFixed(1)} delta="Selected employees" />
               <Metric label="SC hours" value={weeklyTotals.serviceChargeHours.toFixed(1)} delta="Hours × points" />
               <Metric label="Base Pay" value={money(weeklyTotals.wages)} delta="Before service charge" />
-              <Metric label="BOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.4)} delta="40% pool" />
-              <Metric label="FOH service charge" value={money(numberValue(weeklyModal.serviceCharge) * 0.6)} delta="60% pool" />
+              {(schemeForDate(troncSchemes(labourSettings), weeklyModal.weekStart || weeklyModal.date || today())?.pots || []).map((pot) => (
+                <Metric key={pot.id} label={`${pot.name} service charge`} value={money(numberValue(weeklyModal.serviceCharge) * numberValue(pot.percent, 0) / 100)} delta={`${pot.percent}% pot`} />
+              ))}
             </div>
           </div>
         </AppModal>
@@ -16313,6 +16357,7 @@ function SettingsPanel({
   departmentSettings,
   financialSettings,
   invoiceSettings,
+  labourData = null,
   labourSettings = defaultLabourSettings,
   menuSettings,
   onCompareDeviceWithCloud,
@@ -16980,14 +17025,16 @@ function SettingsPanel({
         <div className="form-grid six">
           <Field label="Target labour %" type="number" value={labourSettings.targetLabourPercent} onChange={(value) => updateLabourSettings("targetLabourPercent", numberValue(value))} />
           <CheckboxField checked={labourSettings.weeklyView} label="Use weekly labour control by default" onChange={(value) => updateLabourSettings("weeklyView", value)} />
-          <Field label="BOH service charge %" type="number" value={labourSettings.bohServiceChargePercent} onChange={(value) => updateLabourSettings("bohServiceChargePercent", numberValue(value))} />
-          <Field label="FOH service charge %" type="number" value={labourSettings.fohServiceChargePercent} onChange={(value) => updateLabourSettings("fohServiceChargePercent", numberValue(value))} />
           <CheckboxField checked={labourSettings.includeServiceChargeInLabourCost} label="Include service charge in labour cost" onChange={(value) => updateLabourSettings("includeServiceChargeInLabourCost", value)} />
           <CheckboxField checked={labourSettings.excludeFreelanceFromTronc} label="Exclude freelance/agency from tronc" onChange={(value) => updateLabourSettings("excludeFreelanceFromTronc", value)} />
           <Field label="Default holiday entitlement days" type="number" value={labourSettings.defaultHolidayEntitlementDays} onChange={(value) => updateLabourSettings("defaultHolidayEntitlementDays", numberValue(value))} />
           <label>Holiday year starts<select value={labourSettings.holidayYearStartMonth} onChange={(event) => updateLabourSettings("holidayYearStartMonth", event.target.value)}>{["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((month) => <option key={month}>{month}</option>)}</select></label>
         </div>
         <p className="helper-text">Labour is controlled weekly. Sales and service charge should normally come from the Sales page, while Labour keeps staff hours, departments, rates and holiday rules.</p>
+      </Panel>
+
+      <Panel className="settings-tronc-section" title="Tronc / service charge">
+        <TroncSettings canEdit={canChangeSettings} labourData={labourData || {}} labourSettings={labourSettings} onChange={(next) => updateLabourSettings("troncSchemes", next)} />
       </Panel>
 
       <Panel className="settings-pos-section" title="POS & Sales Setup">

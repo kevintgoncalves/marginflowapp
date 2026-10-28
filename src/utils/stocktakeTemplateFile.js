@@ -51,3 +51,18 @@ export async function downloadStocktakeTemplateExcel(rows, filename) {
   const buffer = await workbook.xlsx.writeBuffer();
   downloadBlob(filename, new Blob([buffer], { type: excelMimeType }));
 }
+
+export async function downloadRowsExcel(rows, filename, sheetName = "Sheet1") {
+  const excelModule = await import("exceljs");
+  const ExcelJS = excelModule.default || excelModule;
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "MarginFlow";
+  const worksheet = workbook.addWorksheet(sheetName, { views: [{ state: "frozen", ySplit: 1 }] });
+  rows.forEach((row) => worksheet.addRow(row));
+  worksheet.getRow(1).font = { bold: true };
+  (rows[0] || []).forEach((_, index) => {
+    worksheet.getColumn(index + 1).width = 18;
+  });
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadBlob(filename, new Blob([buffer], { type: excelMimeType }));
+}

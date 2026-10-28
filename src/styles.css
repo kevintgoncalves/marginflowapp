@@ -8075,6 +8075,7 @@ button.icon {
 .settings-section-locations > .settings-categories-section,
 .settings-section-targets > .settings-targets-section,
 .settings-section-labour > .settings-labour-section,
+.settings-section-labour > .settings-tronc-section,
 .settings-section-ai > .settings-ai-section,
 .settings-section-parsers > .settings-parsers-section,
 .settings-section-pos > .settings-pos-section,
@@ -8371,3 +8372,27 @@ button.icon {
 .labour-import-people { display: flex; gap: 8px; align-items: flex-start; }
 .link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 @media (max-width: 720px) { .labour-import-roles label { grid-template-columns: 1fr; } }
+
+/* Tronc / service charge systems */
+.tronc-settings, .tronc-list, .tronc-week, .tronc-result, .tronc-pots, .tronc-editor { display: grid; gap: 10px; }
+.tronc-card { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: flex-start; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.tronc-card > div:first-child { display: grid; gap: 2px; min-width: 0; }
+.tronc-card small, .tronc-note { color: var(--muted); }
+.tronc-card .tronc-editor { flex: 1 1 100%; }
+.tronc-pot { display: grid; gap: 8px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+.tronc-pot-head { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto; gap: 8px; align-items: end; }
+.tronc-pot-who { display: grid; gap: 4px; font-size: 13px; }
+.tronc-pot-who > span { color: var(--muted); }
+.tronc-chips { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.tronc-chips label { display: inline-flex; gap: 4px; align-items: center; }
+.tronc-chips small { color: var(--muted); }
+.tronc-chip { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); font-size: 12px; }
+.tronc-amounts table { min-width: 760px; }
+.tronc-amounts input { width: 84px; }
+.tronc-check { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.tronc-check .warn { color: #b45309; }
+.tronc-check .ok { color: #15803d; }
+.tronc-result h3 { margin: 0; font-size: 15px; }
+.tronc-conflicts { display: grid; gap: 6px; }
+.tronc-conflicts label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 240px); gap: 8px; align-items: center; }
+@media (max-width: 720px) { .tronc-pot-head, .tronc-conflicts label { grid-template-columns: 1fr; } }
