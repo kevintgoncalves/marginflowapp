@@ -28,7 +28,8 @@ export function supplierScopeId(supplier = {}) {
 // the same supplier, so lookups accept either; new references use supplierScopeId.
 export function supplierIdCandidates(supplier = {}) {
   if (!supplier || typeof supplier !== "object") return [];
-  return [...new Set([supplier.relationalId, supplier.relational_id, supplier.id].filter(Boolean).map(String))];
+  const legacyIds = Array.isArray(supplier.legacyIds) ? supplier.legacyIds : [];
+  return [...new Set([supplier.relationalId, supplier.relational_id, supplier.id, ...legacyIds].filter(Boolean).map(String))];
 }
 
 export function supplierMatchesId(supplier = {}, id = "") {

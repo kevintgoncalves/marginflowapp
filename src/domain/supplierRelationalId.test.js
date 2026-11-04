@@ -41,3 +41,12 @@ test("diagnostic lists only suppliers whose app id differs from the database id"
   ]);
   assert.deepEqual(suppliersWithMismatchedIds(undefined), []);
 });
+
+test("after the data fix, references to the old id still match through legacyIds", () => {
+  const fixed = { id: "db-id-seafood", relationalId: "db-id-seafood", legacyIds: ["app-id-seafood"], name: "Seafood Supplier" };
+  assert.equal(supplierScopeId(fixed), "db-id-seafood");
+  assert.ok(supplierMatchesId(fixed, "app-id-seafood"));
+  assert.deepEqual(suppliersWithMismatchedIds([fixed]), []);
+  const invoices = [{ id: "old", supplierId: "app-id-seafood", supplier: "Renamed", date: "2026-11-03" }];
+  assert.equal(invoicesForSupplierDate(fixed, "2026-11-03", invoices).length, 1);
+});
