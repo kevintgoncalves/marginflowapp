@@ -23,6 +23,26 @@ export function supplierScopeId(supplier = {}) {
   return supplier?.relationalId || supplier?.relational_id || supplier?.id || "";
 }
 
+// A supplier saved before its database row existed can keep an older app id while
+// invoices, lines and mappings point at the database id (relationalId). Both refer to
+// the same supplier, so lookups accept either; new references use supplierScopeId.
+export function supplierIdCandidates(supplier = {}) {
+  if (!supplier || typeof supplier !== "object") return [];
+  return [...new Set([supplier.relationalId, supplier.relational_id, supplier.id].filter(Boolean).map(String))];
+}
+
+export function supplierMatchesId(supplier = {}, id = "") {
+  return Boolean(id) && supplierIdCandidates(supplier).includes(String(id));
+}
+
+// Diagnostic only: suppliers whose app id differs from their database id. Never changes data.
+export function suppliersWithMismatchedIds(suppliers = []) {
+  return (Array.isArray(suppliers) ? suppliers : [])
+    .filter((supplier) => supplier?.id && (supplier.relationalId || supplier.relational_id)
+      && String(supplier.id) !== String(supplier.relationalId || supplier.relational_id))
+    .map((supplier) => ({ name: supplier.name || "", id: supplier.id, relationalId: supplier.relationalId || supplier.relational_id }));
+}
+
 export function sameSupplierIdentity(left = "", right = "") {
   const leftKey = supplierIdentityKey(left);
   const rightKey = supplierIdentityKey(right);

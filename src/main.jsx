@@ -276,6 +276,8 @@ import {
   supplierExistsByIdentity,
   supplierIdentityKey,
   supplierScopeId,
+  supplierMatchesId,
+  suppliersWithMismatchedIds,
   supplierSortKey,
 } from "./domain/supplierIdentity.js";
 import { propagateInvoiceSupplierToLines, validateInvoiceLinesForApproval } from "./domain/invoiceWorkflow.js";
@@ -5434,6 +5436,15 @@ function WorkspaceApp({ authMembership, authUser, demoMode = false, entitlementF
     });
   };
 
+  const supplierIdMismatchLogRef = useRef("");
+  useEffect(() => {
+    // Diagnostic only (no data change): a supplier whose app id differs from its database id.
+    const mismatched = suppliersWithMismatchedIds(suppliers);
+    const signature = JSON.stringify(mismatched);
+    if (!mismatched.length || signature === supplierIdMismatchLogRef.current) return;
+    supplierIdMismatchLogRef.current = signature;
+    console.warn("marginflow_supplier_id_mismatch", mismatched);
+  }, [suppliers]);
   useEffect(() => {
     salesRef.current = sales;
   }, [sales]);
@@ -7492,11 +7503,11 @@ function sameSupplier(left = "", right = "") {
 }
 
 function supplierScheduleFor(supplier, schedules = [], invoices = []) {
-  const existing = schedules.find((schedule) => schedule.supplierId === supplier.id || sameSupplier(schedule.supplierName, supplier.name));
+  const existing = schedules.find((schedule) => supplierMatchesId(supplier, schedule.supplierId) || sameSupplier(schedule.supplierName, supplier.name));
   if (existing) {
     return {
       ...existing,
-      supplierId: supplier.id,
+      supplierId: supplierScopeId(supplier),
       supplierName: supplier.name,
       deliveryDays: Array.isArray(existing.deliveryDays) ? existing.deliveryDays : [],
       scheduleMode: existing.scheduleMode || "manual",
@@ -7505,7 +7516,7 @@ function supplierScheduleFor(supplier, schedules = [], invoices = []) {
   }
   return {
     id: "",
-    supplierId: supplier.id,
+    supplierId: supplierScopeId(supplier),
     supplierName: supplier.name,
     deliveryDays: Array.isArray(supplier.deliveryDays) ? supplier.deliveryDays : [],
     scheduleMode: supplier.scheduleMode || "manual",
@@ -7526,7 +7537,7 @@ function suggestedDeliveryDaysForSupplier(supplier, invoices = []) {
 }
 
 function supplierOverrideFor(supplier, date, overrides = []) {
-  return overrides.find((override) => (override.supplierId === supplier.id || sameSupplier(override.supplierName, supplier.name)) && override.date === date);
+  return overrides.find((override) => (supplierMatchesId(supplier, override.supplierId) || sameSupplier(override.supplierName, supplier.name)) && override.date === date);
 }
 
 function invoiceControlCellState({ date, invoices, overrides, schedule, supplier }) {
@@ -7553,11 +7564,11 @@ function departmentPurchaseTotalForDate(invoices, date, selectedDepartment) {
 }
 
 function updateOverrideRows(rows, supplier, date, statusOverride) {
-  const withoutCurrent = rows.filter((row) => !(row.date === date && (row.supplierId === supplier.id || sameSupplier(row.supplierName, supplier.name))));
+  const withoutCurrent = rows.filter((row) => !(row.date === date && (supplierMatchesId(supplier, row.supplierId) || sameSupplier(row.supplierName, supplier.name))));
   if (!statusOverride) return withoutCurrent;
   return [{
     id: uid(),
-    supplierId: supplier.id,
+    supplierId: supplierScopeId(supplier),
     supplierName: supplier.name,
     date,
     statusOverride,
@@ -7571,11 +7582,11 @@ function upsertSupplierSchedule(rows, supplier, patch) {
   const next = {
     ...current,
     id: current.id || uid(),
-    supplierId: supplier.id,
+    supplierId: supplierScopeId(supplier),
     supplierName: supplier.name,
     ...patch,
   };
-  const withoutCurrent = rows.filter((row) => !(row.supplierId === supplier.id || sameSupplier(row.supplierName, supplier.name)));
+  const withoutCurrent = rows.filter((row) => !(supplierMatchesId(supplier, row.supplierId) || sameSupplier(row.supplierName, supplier.name)));
   return [next, ...withoutCurrent];
 }
 
@@ -11307,7 +11318,7 @@ function InvoiceControlCentre({
     return () => { cancelled = true; };
   }, [client, companyId, locationId, weekKey, summariesOpen, weekAttempt]);
   const financialInvoices = client ? (weekFinancials.key === weekKey ? weekFinancials.invoices : []) : listInvoices;
-  const browserRequest = useMemo(() => ({ supplierId: suppliers.find(row => row.name === browseSupplier)?.id || "", startDate: browseFrom, endDate: browseTo, status: browseStatus, type: browseType }), [suppliers, browseSupplier, browseFrom, browseTo, browseStatus, browseType]);
+  const browserRequest = useMemo(() => ({ supplierId: supplierScopeId(suppliers.find(row => row.name === browseSupplier)), startDate: browseFrom, endDate: browseTo, status: browseStatus, type: browseType }), [suppliers, browseSupplier, browseFrom, browseTo, browseStatus, browseType]);
   useEffect(() => {
     onWeekRangeChange?.(weekRange);
   }, [onWeekRangeChange, weekRange.end, weekRange.start]);

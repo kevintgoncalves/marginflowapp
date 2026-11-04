@@ -1,13 +1,15 @@
 import { numberValue, roundMoney } from "./numberUtils.js";
 import { documentNumberFor } from "./purchasingDocuments.js";
-import { sameSupplierIdentity } from "./supplierIdentity.js";
+import { sameSupplierIdentity, supplierIdCandidates } from "./supplierIdentity.js";
 
 function supplierNameFor(supplier = {}) {
   return typeof supplier === "string" ? supplier : supplier.name || supplier.supplierName || "";
 }
 
-function supplierIdFor(supplier = {}) {
-  return typeof supplier === "string" ? "" : supplier.id || supplier.supplierId || "";
+function supplierIdsFor(supplier = {}) {
+  if (typeof supplier === "string") return [];
+  const ids = supplierIdCandidates(supplier);
+  return ids.length ? ids : [supplier.supplierId].filter(Boolean);
 }
 
 function invoiceSupplierName(invoice = {}) {
@@ -36,13 +38,13 @@ function compareDocumentsByNumber(left = {}, right = {}) {
 
 export function invoicesForSupplierDate(supplier, date, invoices = []) {
   const supplierName = supplierNameFor(supplier);
-  const supplierId = supplierIdFor(supplier);
+  const supplierIds = supplierIdsFor(supplier);
   return invoices
     .filter((invoice) => (
       invoice.date === date
       && (
-        supplierId && invoiceSupplierId(invoice)
-          ? invoiceSupplierId(invoice) === supplierId
+        supplierIds.length && invoiceSupplierId(invoice)
+          ? supplierIds.includes(String(invoiceSupplierId(invoice)))
           : sameSupplierIdentity(invoiceSupplierName(invoice), supplierName)
       )
     ))
