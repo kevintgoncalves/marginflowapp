@@ -141,6 +141,7 @@ import {
 import { displayValueForDataAvailability } from "./domain/valuePresentation.js";
 import { confirmedInvoicesForScope, rememberConfirmedInvoice } from "./domain/confirmedInvoices.js";
 import { documentsForInvoiceBrowser, invoicesForSupplierDate, invoiceGroupForSupplierDate } from "./domain/invoiceControlTracker.js";
+import { invoiceAiRequestBody, supplierMappingsForAiRequest } from "./domain/invoiceAiRequest.js";
 import {
   BATCH_INVOICE_ITEM_STATUSES,
   batchItemStatusAfterPersistence,
@@ -8630,7 +8631,7 @@ function Invoices({
     const response = await fetch("/api/read-invoice-ai", {
       method: "POST",
       headers: await invoiceAiRequestHeaders(),
-      body: JSON.stringify({
+      body: invoiceAiRequestBody({
         invoiceText,
         files: aiFiles,
         companyId,
@@ -8644,7 +8645,7 @@ function Invoices({
           unit: product.unit || product.unitOfMeasure || "",
           aliases: product.aliases || [],
         })),
-        supplierMappings: supplierProductMappings,
+        supplierMappings: supplierMappingsForAiRequest(supplierProductMappings, { supplier: canonicalSupplierForName(suppliers, baseDraft.supplier || ""), supplierName: baseDraft.supplier || "", companyId, locationId }),
       }),
     });
     const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
@@ -8841,7 +8842,7 @@ function Invoices({
       const response = await fetch("/api/read-invoice-ai", {
         method: "POST",
         headers: await invoiceAiRequestHeaders(),
-        body: JSON.stringify({
+        body: invoiceAiRequestBody({
           invoiceText,
           files: aiFiles,
           companyId,
@@ -8855,7 +8856,7 @@ function Invoices({
             unit: product.unit || product.unitOfMeasure || "",
             aliases: product.aliases || [],
           })),
-          supplierMappings: supplierProductMappings,
+          supplierMappings: supplierMappingsForAiRequest(supplierProductMappings, { supplier: canonicalSupplierForName(suppliers, draft.supplier || ""), supplierName: draft.supplier || "", companyId, locationId }),
         }),
       });
       const payload = await response.json().catch(() => ({ error: "AI returned an invalid response" }));
